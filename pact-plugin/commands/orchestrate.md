@@ -276,7 +276,10 @@ If PREPARE ran and ARCHITECT was marked "Skip," compare PREPARE's recommended ap
 
 **Invoke `pact-architect` with**:
 - Task description
-- PREPARE phase outputs
+- PREPARE phase outputs:
+  - Tell `pact-architect` where to find them (e.g., "Read `docs/preparation/{feature}.md` for research context")
+  - Do not read the files yourself or paste their content into the prompt
+  - If PREPARE was skipped: pass the plan's Preparation Phase section instead
 - Plan sections above (if any)
 - "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 
@@ -354,7 +357,10 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Invoke coder(s) with**:
 - Task description
-- ARCHITECT phase outputs (or plan's Architecture Phase if ARCHITECT was skipped)
+- ARCHITECT phase outputs:
+  - Tell the coder(s) where to find them (e.g., "Read `docs/architecture/{feature}.md` for design context")
+  - Do not read the files yourself or paste their content into the prompt
+  - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead
 - Plan sections above (if any)
 - "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
@@ -398,7 +404,7 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 
 **Invoke `pact-test-engineer` with**:
 - Task description
-- CODE phase handoff(s): Pass the handoff summaries from coders for context on what was built
+- CODE phase handoff(s): Pass coder handoff summaries (agent response text, not files on disk)
 - Plan sections above (if any)
 - "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 - "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
