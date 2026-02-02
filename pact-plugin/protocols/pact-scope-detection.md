@@ -10,11 +10,10 @@ The orchestrator evaluates PREPARE output against these heuristic signals to det
 
 | Signal | Strength | Description |
 |--------|----------|-------------|
-| **Multiple distinct domains** | Strong (2 pts) | Task touches 2+ independent service boundaries or technology domains (e.g., backend API + frontend UI + database migration) |
-| **Independent file clusters** | Strong (2 pts) | File changes cluster into groups with no shared files between them — each cluster maps to a separate specialist domain |
+| **Distinct domain boundaries** | Strong (2 pts) | Task touches 2+ independent domains, evidenced by separate service boundaries, technology stacks, or specialist areas identified in PREPARE output (e.g., backend API + frontend UI, or changes spanning `services/auth/` and `services/billing/`) |
+| **Non-overlapping work areas** | Strong (2 pts) | PREPARE output describes work areas with no shared files or components between them — each area maps to a separate specialist domain |
 | **High specialist count** | Supporting (1 pt) | Task would require 4+ specialists across different domains to implement |
 | **Prior complexity flags** | Supporting (1 pt) | pact-memory retrieval shows previous multi-scope flags or complexity warnings for this area |
-| **Plan references different services** | Supporting (1 pt) | Architecture or plan calls for changes in separate service directories (e.g., `services/auth/` and `services/billing/`) |
 
 ### Counter-Signals
 
@@ -42,9 +41,11 @@ The threshold and point values are tunable. Adjust based on observed false-posit
 
 | Scenario | Signals | Counter-Signals | Score | Result |
 |----------|---------|-----------------|-------|--------|
-| Backend + frontend task | Multiple distinct domains (2) + High specialist count (1) | — | 3 | Threshold met — propose decomposition |
-| Backend + frontend + DB migration, no shared models | Multiple distinct domains (2) + Independent file clusters (2) + High specialist count (1) | — | 5 | All strong signals fire — autonomous tier eligible |
-| API change + UI tweak, shared types | Multiple distinct domains (2) | Small total scope (-1) + Shared data models (-1) | 0 | Below threshold — single scope |
+| Backend + frontend task | Distinct domain boundaries (2) + High specialist count (1) | — | 3 | Threshold met — propose decomposition |
+| Backend + frontend + DB migration, no shared models | Distinct domain boundaries (2) + Non-overlapping work areas (2) + High specialist count (1) | — | 5 | All strong signals fire — autonomous tier eligible |
+| API change + UI tweak, shared types | Distinct domain boundaries (2) | Small total scope (-1) + Shared data models (-1) | 0 | Below threshold — single scope |
+
+A score of 0 means counter-signals outweighed detection signals, not that no signals were observed. The orchestrator still noted the signals — they were simply insufficient to warrant decomposition.
 
 ### Activation Tiers
 
@@ -52,7 +53,7 @@ The threshold and point values are tunable. Adjust based on observed false-posit
 |------|---------|----------|
 | **Manual** | User invokes `/rePACT` explicitly | Always available — bypasses detection entirely |
 | **Confirmed** (default) | Score >= threshold | Orchestrator proposes decomposition via S5 decision framing; user confirms, rejects, or adjusts boundaries |
-| **Autonomous** | ALL strong signals fire AND no counter-signals AND autonomous mode enabled | Orchestrator auto-decomposes without user confirmation |
+| **Autonomous** | ALL strong signals fire (Distinct domain boundaries + Non-overlapping work areas) AND no counter-signals AND autonomous mode enabled | Orchestrator auto-decomposes without user confirmation |
 
 **Autonomous mode** is opt-in. Enable by adding to `CLAUDE.md`:
 
@@ -65,9 +66,10 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 ### Evaluation Timing
 
 1. **PREPARE** phase runs in single scope (always — research output is needed to evaluate signals)
-2. Orchestrator evaluates PREPARE output against heuristics
-3. Score **below threshold** → proceed with single-scope execution (today's default behavior)
-4. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
+2. If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation section content against the same heuristics. If neither PREPARE output nor plan content is available, skip detection entirely (proceed single-scope).
+3. Orchestrator evaluates PREPARE output (or plan content) against heuristics
+4. Score **below threshold** → proceed with single-scope execution (today's default behavior)
+5. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
 
 ### Bypass Rules
 
