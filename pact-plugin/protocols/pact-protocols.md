@@ -1372,6 +1372,70 @@ Contract Fulfillment:
 
 The integration phase uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
 
+### Executor Interface
+
+The executor interface defines the contract between the parent orchestrator and whatever mechanism fulfills a sub-scope. It is the "how" side of the scope contract: while the contract format above defines WHAT a scope delivers, the executor interface defines the input/output shape that any execution backend must implement.
+
+#### Interface Shape
+
+```
+Input:
+  scope_contract: {the scope contract for this sub-scope}
+  feature_context: {parent feature description, branch, relevant docs}
+  branch: {current feature branch name}
+  nesting_depth: {current nesting level, 0-based}
+
+Output:
+  handoff: {standard 5-item handoff + contract fulfillment section}
+  commits: {code committed to branch}
+  status: completed | blocked | stalled
+```
+
+#### Current Executor: rePACT
+
+rePACT implements the executor interface as follows:
+
+| Interface Element | rePACT Implementation |
+|-------------------|-----------------------|
+| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
+| **Input: branch** | Uses the current feature branch (no new branch created) |
+| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 2-level maximum |
+| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
+| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
+| **Output: status** | Reported via task metadata (`completed`, or `blocked`/`stalled` with reason) |
+| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
+
+See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
+
+#### Future Executor: TeammateTool
+
+When Anthropic officially releases TeammateTool, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
+
+| Interface Element | Potential TeammateTool Mapping |
+|-------------------|-------------------------------|
+| **Input: scope_contract** | Sent via `write` operation to the spawned teammate |
+| **Input: feature_context** | Passed as initial context when spawning the teammate |
+| **Input: branch** | Set via teammate's working directory configuration |
+| **Input: nesting_depth** | Communicated in the initial `write` message |
+| **Output: handoff** | Teammate writes structured handoff to orchestrator's inbox |
+| **Output: commits** | Teammate commits to the shared feature branch |
+| **Output: status** | Communicated via `write` or inferred from teammate lifecycle |
+| **Delivery mechanism** | Asynchronous — teammate writes to inbox files; orchestrator polls for completion |
+
+**Environment variable alignment** (community-documented, not officially stable):
+
+- `CLAUDE_CODE_TEAM_NAME` maps naturally to `scope_id` (team per scope)
+- `CLAUDE_CODE_AGENT_TYPE` maps to the specialist domain within the scope
+
+These mappings are noted for future reference. C5 does not depend on TeammateTool availability or API stability.
+
+#### Design Constraints
+
+- **Backend-agnostic**: The parent orchestrator's logic (contract generation, integration phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Same output shape**: Both rePACT and a future TeammateTool executor produce the same structured output (5-item handoff + contract fulfillment). The integration phase consumes this output identically regardless of source.
+- **No premature binding**: The executor interface is a protocol-level abstraction. It does not reference specific TeammateTool operation names or API signatures, which may change before official release.
+
 ---
 
 ## Related

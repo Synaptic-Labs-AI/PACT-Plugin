@@ -69,7 +69,7 @@ verify "pact-documentation.md" "Documentation (lines 1076-1100)" "1076,1100"
 verify "pact-agent-stall.md" "Agent Stall Detection (lines 1101-1130)" "1101,1130"
 verify "pact-completeness.md" "Completeness Signals (lines 1132-1166)" "1132,1166"
 verify "pact-scope-detection.md" "Scope Detection (lines 1168-1297)" "1168,1297"
-verify "pact-scope-contract.md" "Scope Contract (lines 1299-1375)" "1299,1375"
+verify "pact-scope-contract.md" "Scope Contract (lines 1299-1439)" "1299,1439"
 
 echo ""
 echo "=== Summary ==="
