@@ -109,13 +109,13 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "Detection"
 echo ""
 
-# --- 4. Flow Ordering: Detection → Contract → rePACT → Integration ---
+# --- 4. Flow Ordering: Detection → Contract → rePACT → Consolidate ---
 # Verify the expected flow ordering is documented in the scope contract lifecycle.
-echo "4. Flow ordering (detection → contract → rePACT → integration):"
+echo "4. Flow ordering (detection → contract → rePACT → consolidate):"
 contract_lifecycle=$(sed -n '/^## Scope Contract/,/^## /p' "$SSOT" | sed '$d')
 # Check that the lifecycle section mentions the expected flow stages in order
 flow_ok=true
-for stage in "Detection" "Contracts generated" "rePACT" "Integration phase"; do
+for stage in "Detection" "Contracts generated" "rePACT" "Consolidate phase"; do
     if ! echo "$contract_lifecycle" | grep -q "$stage"; then
         echo "  ✗ Flow ordering: '$stage' not found in scope contract lifecycle"
         FAIL=$((FAIL + 1))
@@ -155,39 +155,49 @@ check_pattern "$COMMANDS_DIR/rePACT.md" \
     '\[scope:'
 echo ""
 
-# --- 7. Integration Phase in orchestrate.md ---
-# orchestrate.md must document the integration phase after sub-scopes complete,
-# including delegation to architect and test engineer.
-echo "7. Integration phase in orchestrate.md:"
+# --- 7. ATOMIZE and CONSOLIDATE phases in orchestrate.md ---
+# orchestrate.md must document both scoped phases: ATOMIZE (dispatch sub-scopes)
+# and CONSOLIDATE (cross-scope verification), including delegation patterns.
+echo "7. ATOMIZE and CONSOLIDATE phases in orchestrate.md:"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "Integration phase section exists" \
-    "Phase 4: INTEGRATION"
+    "ATOMIZE phase section exists" \
+    "Phase 4: ATOMIZE"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "Integration delegates to architect" \
+    "CONSOLIDATE phase section exists" \
+    "Phase 5: CONSOLIDATE"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Consolidate delegates to architect" \
     "pact-architect.*contract"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "Integration delegates to test engineer" \
-    "pact-test-engineer.*Comprehensive"
+    "Consolidate delegates to test engineer" \
+    "pact-test-engineer.*cross-scope"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "Integration failure routes through imPACT" \
+    "Consolidation failure routes through imPACT" \
     "imPACT"
 echo ""
 
-# --- 8. Integration Phase Task Hierarchy ---
-# The task hierarchy in orchestrate.md must include the INTEGRATION phase task.
-echo "8. Integration phase task hierarchy:"
+# --- 8. Scoped phase task hierarchy ---
+# The task hierarchy in orchestrate.md must include ATOMIZE and CONSOLIDATE phase tasks.
+echo "8. Scoped phase task hierarchy:"
 task_hierarchy_orchestrate=$(sed -n '/^## Task Hierarchy/,/^## /p' "$COMMANDS_DIR/orchestrate.md" | sed '$d')
-if echo "$task_hierarchy_orchestrate" | grep -q "INTEGRATION"; then
-    echo "  ✓ orchestrate.md task hierarchy includes INTEGRATION phase"
+if echo "$task_hierarchy_orchestrate" | grep -q "ATOMIZE"; then
+    echo "  ✓ orchestrate.md task hierarchy includes ATOMIZE phase"
     PASS=$((PASS + 1))
 else
-    echo "  ✗ orchestrate.md task hierarchy missing INTEGRATION phase"
+    echo "  ✗ orchestrate.md task hierarchy missing ATOMIZE phase"
     FAIL=$((FAIL + 1))
 fi
-# TEST must be Phase 5 (renumbered from Phase 4)
+if echo "$task_hierarchy_orchestrate" | grep -q "CONSOLIDATE"; then
+    echo "  ✓ orchestrate.md task hierarchy includes CONSOLIDATE phase"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ orchestrate.md task hierarchy missing CONSOLIDATE phase"
+    FAIL=$((FAIL + 1))
+fi
+# TEST must be Phase 6 (after ATOMIZE and CONSOLIDATE)
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "TEST is Phase 5 (renumbered)" \
-    "Phase 5: TEST"
+    "TEST is Phase 6" \
+    "Phase 6: TEST"
 echo ""
 
 # --- Summary ---

@@ -177,12 +177,20 @@ if [ -f "$PROTOCOLS_FILE" ]; then
         FAIL=$((FAIL + 1))
     fi
 
-    # Check 3: Scoped hierarchy diagram present
-    if echo "$section" | grep -q "Integration Phase Task"; then
-        echo "  ✓ SSOT scoped hierarchy: Integration Phase Task in diagram"
+    # Check 3: Scoped hierarchy diagram present (ATOMIZE and CONSOLIDATE)
+    atomize_ok=false
+    consolidate_ok=false
+    if echo "$section" | grep -q "ATOMIZE Phase Task"; then
+        atomize_ok=true
+    fi
+    if echo "$section" | grep -q "CONSOLIDATE Phase Task"; then
+        consolidate_ok=true
+    fi
+    if [ "$atomize_ok" = true ] && [ "$consolidate_ok" = true ]; then
+        echo "  ✓ SSOT scoped hierarchy: ATOMIZE and CONSOLIDATE Phase Tasks in diagram"
         PASS=$((PASS + 1))
     else
-        echo "  ✗ SSOT scoped hierarchy: Integration Phase Task not found in hierarchy diagram"
+        echo "  ✗ SSOT scoped hierarchy: missing ATOMIZE/CONSOLIDATE Phase Tasks in hierarchy diagram"
         FAIL=$((FAIL + 1))
     fi
 else

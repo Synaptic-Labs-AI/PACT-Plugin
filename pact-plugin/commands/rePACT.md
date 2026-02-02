@@ -153,7 +153,7 @@ If you hit the nesting limit:
 | "Starting mini-PREPARE phase for the nested cycle..." | (just do it) |
 | "The nested cycle has completed successfully..." | `rePACT complete. Continuing parent.` |
 
-**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's handoff feeds into parent-level aggregation. The sub-scope should keep its handoff self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the integration phase.
+**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's handoff feeds into parent-level aggregation. The sub-scope should keep its handoff self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the consolidate phase.
 
 ---
 
@@ -353,6 +353,6 @@ Contract Fulfillment:
   Deviations: {any departures from the contract, with rationale}
 ```
 
-The parent orchestrator uses fulfillment sections from all sub-scopes to drive the integration phase. Keep the fulfillment section factual and concise — the parent only needs to know what matched, what didn't, and why.
+The parent orchestrator uses fulfillment sections from all sub-scopes to drive the consolidate phase. Keep the fulfillment section factual and concise — the parent only needs to know what matched, what didn't, and why.
 
 The parent orchestration resumes with the sub-task complete.

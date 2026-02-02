@@ -33,7 +33,7 @@ Constraints:
 
 ### Design Principles
 
-- **Minimal contracts** (~5-10 lines per scope): The integration phase catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
+- **Minimal contracts** (~5-10 lines per scope): The consolidate phase catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
 - **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is rePACT (today) or TeammateTool (future).
 - **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
 
@@ -44,7 +44,7 @@ Constraints:
    a. Assign `scope_id` from domain keywords (e.g., "backend-api", "frontend-ui", "database-migration")
    b. List expected deliverables from PREPARE output file references
    c. Identify interface exports/imports by analyzing cross-scope references in PREPARE output
-   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the integration phase.
+   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the consolidate phase.
    e. Propagate parent conventions (from plan or ARCHITECT output if available)
 3. Present contracts in the rePACT invocation prompt for each sub-scope
 
@@ -54,7 +54,7 @@ Constraints:
 Detection fires → User confirms boundaries → Contracts generated
     → Passed to rePACT per sub-scope → Sub-scope executes against contract
     → Sub-scope handoff includes contract fulfillment section
-    → Integration phase verifies contracts across sub-scopes
+    → Consolidate phase verifies contracts across sub-scopes
 ```
 
 ### Contract Fulfillment in Handoff
@@ -72,7 +72,7 @@ Contract Fulfillment:
   Deviations: {any departures from the contract, with rationale}
 ```
 
-The integration phase uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
+The consolidate phase uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
 
 ### Executor Interface
 
@@ -134,8 +134,8 @@ These mappings are noted for future reference. C5 does not depend on TeammateToo
 
 #### Design Constraints
 
-- **Backend-agnostic**: The parent orchestrator's logic (contract generation, integration phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future TeammateTool executor produce the same structured output (5-item handoff + contract fulfillment). The integration phase consumes this output identically regardless of source.
+- **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Same output shape**: Both rePACT and a future TeammateTool executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
 - **No premature binding**: The executor interface is a protocol-level abstraction. It does not reference specific TeammateTool operation names or API signatures, which may change before official release.
 
 ---

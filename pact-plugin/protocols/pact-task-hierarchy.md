@@ -93,15 +93,17 @@ When decomposition occurs, the hierarchy extends with scope-level tasks:
 ```
 Feature Task (root orchestrator)
 ├── PREPARE Phase Task (single scope, always)
-├── Scope Tasks (one per sub-scope)
-│   ├── [scope:backend-api] Phase Tasks
-│   │   └── [scope:backend-api] Agent Tasks
-│   └── [scope:frontend-ui] Phase Tasks
-│       └── [scope:frontend-ui] Agent Tasks
-└── Integration Phase Task (post-scope verification)
+├── ATOMIZE Phase Task (dispatches sub-scopes)
+│   └── Scope Tasks (one per sub-scope)
+│       ├── [scope:backend-api] Phase Tasks
+│       │   └── [scope:backend-api] Agent Tasks
+│       └── [scope:frontend-ui] Phase Tasks
+│           └── [scope:frontend-ui] Agent Tasks
+├── CONSOLIDATE Phase Task (cross-scope verification)
+└── TEST Phase Task (comprehensive feature testing)
 ```
 
-Scope tasks are blocked by PREPARE completion. The integration phase task is blocked by all scope task completions.
+Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is blocked by all scope task completions. TEST is blocked by CONSOLIDATE completion.
 
 ### Integration with PACT Signals
 
