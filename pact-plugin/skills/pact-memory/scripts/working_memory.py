@@ -10,13 +10,13 @@ unbounded growth of memory sections.
 
 Used by:
 - memory_api.py: Calls sync_to_claude_md() after saving memories
-- session_init.py: Calls check_pinned_staleness() during session start
 - Test files: test_working_memory.py tests all functions in this module
 """
 
 import logging
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,15 +38,19 @@ MAX_RETRIEVED_MEMORIES = 3
 # Approximation: 1 token ~ 0.75 words, so word_count * 1.3 ~ token count.
 WORKING_MEMORY_TOKEN_BUDGET = 800
 RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
-PINNED_CONTEXT_TOKEN_BUDGET = 1200
+# Note: PINNED_CONTEXT_TOKEN_BUDGET is defined solely in hooks/staleness.py
 
 
 def _get_claude_md_path() -> Optional[Path]:
     """
     Get the path to CLAUDE.md in the project root.
 
-    Uses CLAUDE_PROJECT_DIR environment variable if set,
-    otherwise falls back to current working directory.
+    Uses CLAUDE_PROJECT_DIR environment variable if set, then falls back
+    to git worktree/repo root detection, then to current working directory.
+
+    Note: This mirrors the resolution strategy in hooks/staleness.py
+    (_get_project_claude_md_path). Kept as a local copy because this
+    module lives in skills/ and cannot import from hooks/.
 
     Returns:
         Path to CLAUDE.md if it exists, None otherwise.
@@ -54,11 +58,30 @@ def _get_claude_md_path() -> Optional[Path]:
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
         claude_md = Path(project_dir) / "CLAUDE.md"
-    else:
-        claude_md = Path.cwd() / "CLAUDE.md"
+        if claude_md.exists():
+            return claude_md
 
+    # Fallback: detect git root (handles worktrees correctly)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            git_root = result.stdout.strip()
+            claude_md = Path(git_root) / "CLAUDE.md"
+            if claude_md.exists():
+                return claude_md
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Last resort: current working directory
+    claude_md = Path.cwd() / "CLAUDE.md"
     if claude_md.exists():
         return claude_md
+
     return None
 
 
@@ -538,7 +561,8 @@ def sync_retrieved_to_claude_md(
         all_entries = new_entries + existing_entries
         trimmed_entries = all_entries[:MAX_RETRIEVED_MEMORIES]
 
-        # Apply token budget: reduce entry count if over budget
+        # Apply token budget: reduce entry count if over budget.
+        # Retrieved entries are already compact (~200 chars each), drop oldest rather than compress.
         total_tokens = sum(_estimate_tokens(e) for e in trimmed_entries)
         while len(trimmed_entries) > 1 and total_tokens > RETRIEVED_CONTEXT_TOKEN_BUDGET:
             trimmed_entries.pop()
