@@ -265,6 +265,41 @@ If PREPARE ran and ARCHITECT was marked "Skip," compare PREPARE's recommended ap
 
 ---
 
+### Post-PREPARE Scope Detection
+
+> See [pact-scope-detection.md](../protocols/pact-scope-detection.md) for heuristic definitions, confidence matrix, and activation tiers.
+
+**When detection runs**:
+- After PREPARE completes (evaluate PREPARE output in `docs/preparation/`)
+- If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation and Architecture sections for signals
+- If neither PREPARE output nor plan content is available, skip detection
+
+**What to evaluate**:
+1. Read the PREPARE output or plan content for detection signals S1-S5 (see protocol)
+2. Check for counter-signals C1-C3
+3. Determine base confidence from the confidence matrix
+4. Apply counter-signal demotion (each counter-signal reduces confidence by one level)
+
+**C3 bypass**: If the user invoked `/comPACT`, skip detection entirely — the user is signaling lightweight, single-domain handling.
+
+**Actions by confidence level**:
+
+| Confidence | Recommendation | Action |
+|------------|----------------|--------|
+| — (no strong signals) | Single-scope | Continue to ARCHITECT (no output) |
+| Low | Single-scope | Log observation silently, continue to ARCHITECT |
+| Medium | Multi-scope | Propose decomposition to user (see S5 Confirmation below) |
+| High | Multi-scope | Auto-decompose if Autonomous tier enabled; else propose to user |
+
+**Detection output**: Record the `ScopeAssessment` (see protocol) for handoff tracking. Include `signals_fired`, `counter_signals_fired`, `confidence`, and `recommendation`.
+
+**Interim behavior (Phase B)**: Phase C sub-scope execution infrastructure does not exist yet. When detection fires with medium+ confidence:
+- If the user confirms decomposition, use manual `/rePACT` invocations for each proposed scope as a bridge
+- If the user rejects, continue single-scope as normal
+- Log the detection result for future tuning data regardless of outcome
+
+---
+
 ### Phase 2: ARCHITECT → `pact-architect`
 
 **Skip criteria met (including completeness check, after re-assessment)?** → Proceed to Phase 3.
