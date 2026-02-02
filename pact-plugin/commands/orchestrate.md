@@ -16,11 +16,13 @@ Create the full Task hierarchy upfront for workflow visibility:
    - "PREPARE: {feature-slug}"
    - "ARCHITECT: {feature-slug}"
    - "CODE: {feature-slug}"
+   - "INTEGRATION: {feature-slug}" (only if decomposition occurred)
    - "TEST: {feature-slug}"
 3. TaskUpdate: Set phase-to-phase blockedBy chain:
    - ARCHITECT blockedBy PREPARE
    - CODE blockedBy ARCHITECT
-   - TEST blockedBy CODE
+   - INTEGRATION blockedBy CODE (only if decomposition occurred)
+   - TEST blockedBy CODE (single scope) or INTEGRATION (multi-scope)
 4. TaskUpdate: Feature task status = "in_progress"
 ```
 
@@ -422,7 +424,49 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 
 ---
 
-### Phase 4: TEST → `pact-test-engineer`
+### Phase 4: INTEGRATION (Scoped Orchestration Only)
+
+**Skip criteria**: No decomposition occurred (no scope contracts generated) → Proceed to Phase 5.
+
+This phase only activates when scope detection triggered decomposition into sub-scopes. It verifies that independently-developed sub-scopes are compatible before comprehensive testing.
+
+**Task hierarchy**: Create integration phase task blocked by all scope task completions:
+```
+TaskCreate: "INTEGRATION: {feature-slug}"
+TaskUpdate: blockedBy = [all scope task IDs]
+```
+
+**Delegate in parallel**:
+- **`pact-architect`**: Verify cross-scope contract compatibility
+  - Compare contract fulfillment sections from all sub-scope handoffs
+  - Check that exports from each scope match imports expected by siblings
+  - Flag interface mismatches, type conflicts, or undelivered contract items
+- **`pact-test-engineer`**: Run cross-scope integration tests
+  - Verify cross-scope interfaces work together (API calls, shared types, data flow)
+  - Test integration points identified in scope contracts
+  - Confirm no shared file constraint violations occurred
+
+**Invoke each with**:
+- Feature description and scope contract summaries
+- All sub-scope handoffs (contract fulfillment sections)
+- "This is cross-scope integration verification. Focus on compatibility between scopes, not internal scope correctness."
+
+**On failure**: Route through `/PACT:imPACT` for triage. Possible outcomes:
+- Interface mismatch → re-invoke affected scope's coder to fix
+- Contract deviation → architect reviews whether deviation is acceptable
+- Test failure → test engineer provides details, coder fixes
+
+**Before next phase**:
+- [ ] Cross-scope contract compatibility verified
+- [ ] Integration tests passing
+- [ ] Specialist handoff(s) received
+- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] **Create atomic commit(s)** of INTEGRATION phase work
+- [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
+
+---
+
+### Phase 5: TEST → `pact-test-engineer`
 
 **Skip criteria met?** → Proceed to "After All Phases Complete."
 

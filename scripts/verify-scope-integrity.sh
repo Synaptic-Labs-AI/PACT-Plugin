@@ -155,6 +155,41 @@ check_pattern "$COMMANDS_DIR/rePACT.md" \
     '\[scope:'
 echo ""
 
+# --- 7. Integration Phase in orchestrate.md ---
+# orchestrate.md must document the integration phase between CODE and TEST,
+# including delegation to architect and test engineer.
+echo "7. Integration phase in orchestrate.md:"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Integration phase section exists" \
+    "Phase 4: INTEGRATION"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Integration delegates to architect" \
+    "pact-architect.*contract"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Integration delegates to test engineer" \
+    "pact-test-engineer.*cross-scope"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Integration failure routes through imPACT" \
+    "imPACT"
+echo ""
+
+# --- 8. Integration Phase Task Hierarchy ---
+# The task hierarchy in orchestrate.md must include the INTEGRATION phase task.
+echo "8. Integration phase task hierarchy:"
+task_hierarchy_orchestrate=$(sed -n '/^## Task Hierarchy/,/^## /p' "$COMMANDS_DIR/orchestrate.md" | sed '$d')
+if echo "$task_hierarchy_orchestrate" | grep -q "INTEGRATION"; then
+    echo "  ✓ orchestrate.md task hierarchy includes INTEGRATION phase"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ orchestrate.md task hierarchy missing INTEGRATION phase"
+    FAIL=$((FAIL + 1))
+fi
+# TEST must be Phase 5 (renumbered from Phase 4)
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "TEST is Phase 5 (renumbered)" \
+    "Phase 5: TEST"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"
