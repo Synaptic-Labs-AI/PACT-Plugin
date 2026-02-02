@@ -27,7 +27,7 @@ Create a nested Task hierarchy as a child of the current context:
 6. On completion: Parent task unblocked
 ```
 
-**Example structure:**
+**Example structure (standard):**
 ```
 [Feature] "Implement user auth" (parent, blockedBy: sub-feature)
 └── [Sub-Feature] "Implement OAuth2 token refresh"
@@ -36,6 +36,21 @@ Create a nested Task hierarchy as a child of the current context:
     ├── [Phase] "CODE: oauth2-token-refresh"
     └── [Phase] "TEST: oauth2-token-refresh"
 ```
+
+**Scope-aware naming** (when scope contract is provided):
+
+When a scope contract provides a `scope_id`, prefix all tasks with `[scope:{scope_id}]`:
+
+```
+[Feature] "Implement user auth" (parent, blockedBy: sub-feature)
+└── [Sub-Feature] "[scope:backend-api] Implement backend API"
+    ├── [Phase] "[scope:backend-api] PREPARE: backend-api"
+    ├── [Phase] "[scope:backend-api] ARCHITECT: backend-api"
+    ├── [Phase] "[scope:backend-api] CODE: backend-api"
+    └── [Phase] "[scope:backend-api] TEST: backend-api"
+```
+
+Include `scope_id` in task metadata: `{ "scope_id": "backend-api" }`. This enables the parent orchestrator to filter tasks by scope when aggregating results.
 
 ---
 
@@ -138,6 +153,8 @@ If you hit the nesting limit:
 | "Starting mini-PREPARE phase for the nested cycle..." | (just do it) |
 | "The nested cycle has completed successfully..." | `rePACT complete. Continuing parent.` |
 
+**Multi-scope aggregation**: When the parent orchestrator runs multiple rePACT sub-scopes, each sub-scope's handoff feeds into parent-level aggregation. The sub-scope should keep its handoff self-contained (no references to sibling state). The parent orchestrator is responsible for comparing fulfillment sections across sub-scopes during the integration phase.
+
 ---
 
 ### Branch Behavior
@@ -206,6 +223,25 @@ Nested cycles inherit from parent:
 Nested cycles produce:
 - Code committed to current branch
 - Handoff summary for parent orchestration
+
+---
+
+## Scope Contract Reception
+
+When the parent orchestrator invokes rePACT with a **scope contract** (from scope detection and decomposition), the nested cycle operates scope-aware. Without a contract, rePACT behaves as described above. Contract presence is the mode switch — there are no explicit "modes" to select.
+
+**When a scope contract is provided:**
+
+1. **Identity**: Use the contract's `scope_id` as the scope identifier for all task naming and metadata (see Task Hierarchy below)
+2. **Deliverables**: Treat contracted deliverables as the success criteria for Mini-Code and Mini-Test
+3. **Interfaces**: Use `imports` to understand what sibling scopes provide; use `exports` to ensure this scope exposes what siblings expect
+4. **Shared files constraint**: Do NOT modify files listed in the contract's `shared_files` — these are owned by sibling scopes. Communicate this constraint to all dispatched specialists.
+5. **Conventions**: Apply any `conventions` from the contract in addition to inherited parent conventions
+6. **Handoff**: Include a Contract Fulfillment section in the completion handoff (see After Completion below)
+
+**When no scope contract is provided:** Standard rePACT behavior. No scope-aware naming, no contract fulfillment tracking, no shared file constraints.
+
+See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contract format specification.
 
 ---
 
@@ -303,5 +339,20 @@ When nested cycle completes:
 4. **Continue** with parent orchestration (parent task now unblocked)
 
 **Handoff format**: Use the standard 5-item structure (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions).
+
+**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard 5-item handoff:
+
+```
+Contract Fulfillment:
+  Deliverables:
+    - ✅ {delivered item} → {actual file/artifact}
+    - ❌ {undelivered item} → {reason}
+  Interfaces:
+    exports: {what was actually exposed}
+    imports: {what was actually consumed from siblings}
+  Deviations: {any departures from the contract, with rationale}
+```
+
+The parent orchestrator uses fulfillment sections from all sub-scopes to drive the integration phase. Keep the fulfillment section factual and concise — the parent only needs to know what matched, what didn't, and why.
 
 The parent orchestration resumes with the sub-task complete.
