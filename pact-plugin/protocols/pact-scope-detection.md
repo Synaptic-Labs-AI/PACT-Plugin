@@ -70,4 +70,37 @@ ScopeAssessment:
 
 **Interim behavior (Phase B)**: When detection fires but Phase C execution infrastructure does not exist yet, the orchestrator notes the recommendation and falls back to single-scope execution. If the user confirms decomposition, the orchestrator uses manual `/rePACT` invocations for each proposed scope as a bridge.
 
+### Autonomous Tier
+
+The Autonomous tier allows the orchestrator to decompose without user confirmation when conditions are unambiguous. It is **disabled by default** and must be explicitly enabled.
+
+**Configuration**: Add the following to the project's `CLAUDE.md`:
+
+```markdown
+### Scope Detection
+- Autonomous decomposition: enabled
+```
+
+The orchestrator checks for this setting during scope detection. If absent or set to any other value, the Autonomous tier is inactive and all multi-scope recommendations route through the Confirmed tier (user approval required).
+
+**Activation conditions** (ALL must be true):
+1. Autonomous decomposition is enabled in `CLAUDE.md`
+2. All strong signals (S1 and S2) have fired
+3. Base confidence is High (2+ strong signals with 1+ supporting)
+4. Zero counter-signals are present
+5. comPACT was not invoked (C3 not active)
+
+**Behavior when activated**: The orchestrator proceeds directly to decomposition without presenting the S5 Decision Framing template. It logs the auto-decomposition decision for auditability:
+
+```
+Scope Detection: Auto-decomposed into {N} scopes (Autonomous tier).
+Signals: {signals fired}. Confidence: High. Counter-signals: none.
+Scopes: {scope list}
+```
+
+**Safeguards**:
+- If ANY counter-signal is present, fall back to Confirmed tier regardless of autonomous setting
+- The user can always override by responding to any subsequent coordination step
+- Autonomous decisions are logged identically to confirmed decisions for traceability
+
 ---

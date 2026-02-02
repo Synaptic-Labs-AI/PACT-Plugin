@@ -293,6 +293,8 @@ If PREPARE ran and ARCHITECT was marked "Skip," compare PREPARE's recommended ap
 
 **Detection output**: Record the `ScopeAssessment` (see protocol) for handoff tracking. Include `signals_fired`, `counter_signals_fired`, `confidence`, and `recommendation`.
 
+**Autonomous tier check**: If confidence is High, check whether autonomous decomposition is enabled (see [pact-scope-detection.md](../protocols/pact-scope-detection.md) > Autonomous Tier for configuration and activation conditions). If ALL activation conditions are met (autonomous enabled, S1+S2 fired, high confidence, zero counter-signals, no comPACT), proceed directly to decomposition without user confirmation. Log the auto-decomposition decision. If any condition fails, fall back to the S5 Confirmation flow below.
+
 **Interim behavior (Phase B)**: Phase C sub-scope execution infrastructure does not exist yet. When detection fires with medium+ confidence:
 - If the user confirms decomposition, use manual `/rePACT` invocations for each proposed scope as a bridge
 - If the user rejects, continue single-scope as normal
