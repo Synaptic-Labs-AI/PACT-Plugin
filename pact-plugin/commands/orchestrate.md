@@ -41,13 +41,14 @@ i. TaskUpdate: phase status = "completed"
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "{reason}"})`
-Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, or custom.
+Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, `"decomposition_active"`, or custom.
 <!-- Skip reason semantics:
   - "approved_plan_exists": Plan exists but completeness not verified (legacy/weak)
   - "plan_section_complete": Plan exists AND section passed completeness check (preferred)
   - "requirements_explicit": Task description contains all needed context
   - "existing_docs_cover_scope": docs/preparation/ or docs/architecture/ already complete
   - "trivial_change": Change too small to warrant this phase
+  - "decomposition_active": Scope detection triggered decomposition; sub-scopes handle this phase via rePACT
 -->
 
 ---
