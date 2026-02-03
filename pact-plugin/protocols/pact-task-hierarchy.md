@@ -56,6 +56,55 @@ Agent tasks include metadata for context:
 }
 ```
 
+### Scope-Aware Task Conventions
+
+When decomposition creates sub-scopes, tasks use naming and metadata conventions to maintain scope ownership.
+
+#### Naming Convention
+
+Prefix task subjects with `[scope:{scope_id}]` to make TaskList output scannable:
+
+```
+[scope:backend-api] ARCHITECT: backend-api
+[scope:backend-api] CODE: backend-api
+[scope:frontend-ui] CODE: frontend-ui
+```
+
+Tasks without a scope prefix belong to the root (parent) orchestrator scope.
+
+#### Scope Metadata
+
+Include `scope_id` in task metadata to enable structured filtering:
+
+```json
+{
+  "scope_id": "backend-api",
+  "phase": "CODE",
+  "domain": "backend"
+}
+```
+
+The parent orchestrator iterates all tasks and filters by `scope_id` metadata to track per-scope progress. Claude Code's Task API does not support native scope filtering, so this convention-based approach is required.
+
+#### Scoped Hierarchy
+
+When decomposition occurs, the hierarchy extends with scope-level tasks:
+
+```
+Feature Task (root orchestrator)
+├── PREPARE Phase Task (single scope, always)
+├── ATOMIZE Phase Task (dispatches sub-scopes)
+│   └── Scope Tasks (one per sub-scope)
+│       ├── [scope:backend-api] Phase Tasks
+│       │   └── [scope:backend-api] Agent Tasks
+│       └── [scope:frontend-ui] Phase Tasks
+│           └── [scope:frontend-ui] Agent Tasks
+├── CONSOLIDATE Phase Task (cross-scope verification)
+└── TEST Phase Task (comprehensive feature testing)
+```
+
+Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is blocked by all scope task completions. TEST is blocked by CONSOLIDATE completion.
+
 ### Integration with PACT Signals
 
 - **Algedonic signals**: Emit via task metadata or direct escalation

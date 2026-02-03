@@ -34,7 +34,7 @@ verify() {
 
     # Extract SSOT content using sed ranges to a temp file
     local tmpfile=$(mktemp)
-    trap "rm -f $tmpfile" RETURN
+    trap 'rm -f "$tmpfile"' RETURN
 
     for range in $ranges; do
         sed -n "${range}p" "$SOURCE" >> "$tmpfile"
@@ -61,14 +61,16 @@ verify "pact-s1-autonomy.md" "S1 Autonomy (lines 526-599)" "526,599"
 verify "pact-variety.md" "Variety (lines 644-705)" "644,705"
 
 # Combined-range extracts
-verify "pact-s2-coordination.md" "S2 Coordination (lines 365-525 + 936-950)" "365,525" "936,950"
+verify "pact-s2-coordination.md" "S2 Coordination (lines 365-525 + 985-999)" "365,525" "985,999"
 verify "pact-workflows.md" "Workflows (lines 706-848)" "706,848"
-verify "pact-task-hierarchy.md" "Task Hierarchy (lines 860-933)" "860,933"
-verify "pact-phase-transitions.md" "Phase Transitions (lines 849-859 + 951-1028)" "849,859" "951,1028"
-verify "pact-documentation.md" "Documentation (lines 1029-1053)" "1029,1053"
-verify "pact-agent-stall.md" "Agent Stall Detection (lines 1054-1083)" "1054,1083"
-verify "pact-completeness.md" "Completeness Signals (lines 1085-1119)" "1085,1119"
-verify "pact-scope-detection.md" "Scope Detection (lines 1121-1200)" "1121,1200"
+verify "pact-task-hierarchy.md" "Task Hierarchy (lines 860-982)" "860,982"
+verify "pact-phase-transitions.md" "Phase Transitions (lines 849-859 + 1000-1077)" "849,859" "1000,1077"
+verify "pact-documentation.md" "Documentation (lines 1078-1102)" "1078,1102"
+verify "pact-agent-stall.md" "Agent Stall Detection (lines 1103-1132)" "1103,1132"
+verify "pact-completeness.md" "Completeness Signals (lines 1134-1168)" "1134,1168"
+verify "pact-scope-detection.md" "Scope Detection (lines 1170-1301)" "1170,1301"
+verify "pact-scope-contract.md" "Scope Contract (lines 1303-1443)" "1303,1443"
+verify "pact-scope-phases.md" "Scoped Phases (lines 1445-1511)" "1445,1511"
 
 echo ""
 echo "=== Summary ==="

@@ -915,6 +915,55 @@ Agent tasks include metadata for context:
 }
 ```
 
+### Scope-Aware Task Conventions
+
+When decomposition creates sub-scopes, tasks use naming and metadata conventions to maintain scope ownership.
+
+#### Naming Convention
+
+Prefix task subjects with `[scope:{scope_id}]` to make TaskList output scannable:
+
+```
+[scope:backend-api] ARCHITECT: backend-api
+[scope:backend-api] CODE: backend-api
+[scope:frontend-ui] CODE: frontend-ui
+```
+
+Tasks without a scope prefix belong to the root (parent) orchestrator scope.
+
+#### Scope Metadata
+
+Include `scope_id` in task metadata to enable structured filtering:
+
+```json
+{
+  "scope_id": "backend-api",
+  "phase": "CODE",
+  "domain": "backend"
+}
+```
+
+The parent orchestrator iterates all tasks and filters by `scope_id` metadata to track per-scope progress. Claude Code's Task API does not support native scope filtering, so this convention-based approach is required.
+
+#### Scoped Hierarchy
+
+When decomposition occurs, the hierarchy extends with scope-level tasks:
+
+```
+Feature Task (root orchestrator)
+├── PREPARE Phase Task (single scope, always)
+├── ATOMIZE Phase Task (dispatches sub-scopes)
+│   └── Scope Tasks (one per sub-scope)
+│       ├── [scope:backend-api] Phase Tasks
+│       │   └── [scope:backend-api] Agent Tasks
+│       └── [scope:frontend-ui] Phase Tasks
+│           └── [scope:frontend-ui] Agent Tasks
+├── CONSOLIDATE Phase Task (cross-scope verification)
+└── TEST Phase Task (comprehensive feature testing)
+```
+
+Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is blocked by all scope task completions. TEST is blocked by CONSOLIDATE completion.
+
 ### Integration with PACT Signals
 
 - **Algedonic signals**: Emit via task metadata or direct escalation
@@ -1157,6 +1206,8 @@ Score = sum(detected heuristic points) - count(counter-signals present)
 
 The threshold and point values are tunable. Adjust based on observed false-positive and false-negative rates during canary workflows.
 
+**Single sub-scope guard**: If detection fires but only identifies 1 sub-scope, fall back to single scope. Decomposition with 1 scope adds overhead with no benefit.
+
 ### Scoring Examples
 
 | Scenario | Signals | Counter-Signals | Score | Result |
@@ -1195,7 +1246,267 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 - **comPACT** bypasses scope detection entirely — it is inherently single-domain
 - **Manual `/rePACT`** bypasses detection — user has already decided to decompose
-- **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes)
+- **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes). Scoped sub-scopes cannot themselves trigger scope detection -- recursive detection is prevented by the 2-level nesting limit (see S1 Autonomy & Recursion constraints) and this bypass rule.
+
+### Evaluation Response
+
+When detection fires (score >= threshold), the orchestrator must present the result to the user using S5 Decision Framing.
+
+#### S5 Confirmation Flow
+
+Use this framing template to propose decomposition:
+
+```
+📐 Scope Change: Multi-scope task detected
+
+Context: [What signals fired and why — e.g., "3 distinct domains identified
+(backend API, frontend UI, database migration) with no shared files"]
+
+Options:
+A) Decompose into sub-scopes: [proposed scope boundaries]
+   - Trade-off: Better isolation, parallel execution; overhead of scope coordination
+
+B) Continue as single scope
+   - Trade-off: Simpler coordination; risk of context overflow with large task
+
+C) Adjust boundaries (specify)
+
+Recommendation: [A or B with brief rationale]
+```
+
+#### User Response Mapping
+
+| Response | Action |
+|----------|--------|
+| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Rejected (B) | Continue single scope (today's behavior) |
+| Adjusted (C) | Generate scope contracts with user's modified boundaries, then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+
+#### Autonomous Tier
+
+When **all** of the following conditions are true, skip user confirmation and proceed directly to decomposition:
+
+1. ALL strong signals fire (not merely meeting the threshold)
+2. NO counter-signals present
+3. CLAUDE.md contains `autonomous-scope-detection: enabled`
+
+**Output format**: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
+
+> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it in CLAUDE.md after trusting the heuristics through repeated Confirmed-tier usage.
+
+### Post-Detection: Scope Contract Generation
+
+When decomposition is confirmed (by user or autonomous tier), the orchestrator generates a scope contract for each identified sub-scope before invoking rePACT. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format and generation process.
+
+---
+
+## Scope Contract
+
+> **Purpose**: Define what a sub-scope promises to deliver to its parent orchestrator.
+> Scope contracts are generated at decomposition time using PREPARE output and serve as
+> the authoritative agreement between parent and sub-scope for deliverables and interfaces.
+
+### Contract Format
+
+Each sub-scope receives a scope contract with the following structure:
+
+```
+Scope Contract: {scope-name}
+
+Identity:
+  scope_id: {kebab-case identifier, e.g., "backend-api"}
+  parent_scope: {parent scope_id or "root"}
+  executor: {assigned at dispatch — currently rePACT}
+
+Deliverables:
+  - {Expected file paths or patterns this scope produces}
+  - {Non-file artifacts: API endpoints, schemas, migrations, etc.}
+
+Interfaces:
+  exports:
+    - {Types, endpoints, APIs this scope exposes to siblings}
+  imports:
+    - {What this scope expects from sibling scopes}
+
+Constraints:
+  shared_files: []  # Files this scope must NOT modify (owned by siblings)
+  conventions: []   # Coding conventions to follow (from parent or prior scopes)
+```
+
+### Design Principles
+
+- **Minimal contracts** (~5-10 lines per scope): The consolidate phase catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
+- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is rePACT (today) or TeammateTool (future).
+- **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
+
+### Generation Process
+
+1. Identify sub-scope boundaries from detection analysis (confirmed or adjusted by user)
+2. For each sub-scope:
+   a. Assign `scope_id` from domain keywords (e.g., "backend-api", "frontend-ui", "database-migration")
+   b. List expected deliverables from PREPARE output file references
+   c. Identify interface exports/imports by analyzing cross-scope references in PREPARE output
+   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the consolidate phase.
+   e. Propagate parent conventions (from plan or ARCHITECT output if available)
+3. Present contracts in the rePACT invocation prompt for each sub-scope
+
+### Contract Lifecycle
+
+```
+Detection fires → User confirms boundaries → Contracts generated
+    → Passed to rePACT per sub-scope → Sub-scope executes against contract
+    → Sub-scope handoff includes contract fulfillment section
+    → Consolidate phase verifies contracts across sub-scopes
+```
+
+### Contract Fulfillment in Handoff
+
+When a sub-scope completes, its handoff includes a contract fulfillment section mapping actual outputs to contracted items:
+
+```
+Contract Fulfillment:
+  Deliverables:
+    - ✅ {delivered item} → {actual file/artifact}
+    - ❌ {undelivered item} → {reason}
+  Interfaces:
+    exports: {what was actually exposed}
+    imports: {what was actually consumed from siblings}
+  Deviations: {any departures from the contract, with rationale}
+```
+
+The consolidate phase uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
+
+### Executor Interface
+
+The executor interface defines the contract between the parent orchestrator and whatever mechanism fulfills a sub-scope. It is the "how" side of the scope contract: while the contract format above defines WHAT a scope delivers, the executor interface defines the input/output shape that any execution backend must implement.
+
+#### Interface Shape
+
+```
+Input:
+  scope_contract: {the scope contract for this sub-scope}
+  feature_context: {parent feature description, branch, relevant docs}
+  branch: {current feature branch name}
+  nesting_depth: {current nesting level, 0-based}
+
+Output:
+  handoff: {standard 5-item handoff + contract fulfillment section}
+  commits: {code committed to branch}
+  status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
+```
+
+#### Current Executor: rePACT
+
+rePACT implements the executor interface as follows:
+
+| Interface Element | rePACT Implementation |
+|-------------------|-----------------------|
+| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
+| **Input: branch** | Uses the current feature branch (no new branch created) |
+| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 2-level maximum |
+| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
+| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
+| **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
+| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
+
+See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
+
+#### Future Executor: TeammateTool
+
+When Anthropic officially releases TeammateTool, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
+
+| Interface Element | Potential TeammateTool Mapping |
+|-------------------|-------------------------------|
+| **Input: scope_contract** | Sent via `write` operation to the spawned teammate |
+| **Input: feature_context** | Passed as initial context when spawning the teammate |
+| **Input: branch** | Set via teammate's working directory configuration |
+| **Input: nesting_depth** | Communicated in the initial `write` message |
+| **Output: handoff** | Teammate writes structured handoff to orchestrator's inbox |
+| **Output: commits** | Teammate commits to the shared feature branch |
+| **Output: status** | Communicated via `write` or inferred from teammate lifecycle |
+| **Delivery mechanism** | Asynchronous — teammate writes to inbox files; orchestrator polls for completion |
+
+**Environment variable alignment** (community-documented, not officially stable):
+
+- `CLAUDE_CODE_TEAM_NAME` maps naturally to `scope_id` (team per scope)
+- `CLAUDE_CODE_AGENT_TYPE` maps to the specialist domain within the scope
+
+These mappings are noted for future reference. C5 does not depend on TeammateTool availability or API stability.
+
+#### Design Constraints
+
+- **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Same output shape**: Both rePACT and a future TeammateTool executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
+- **No premature binding**: The executor interface is a protocol-level abstraction. It does not reference specific TeammateTool operation names or API signatures, which may change before official release.
+
+---
+
+## Scoped Phases (ATOMIZE and CONSOLIDATE)
+
+> **Purpose**: Define the scoped orchestration phases used when decomposition creates sub-scopes.
+> These phases replace the standard ARCHITECT and CODE phases when scope detection fires.
+> For single-scope workflows, these phases are skipped entirely.
+
+### ATOMIZE Phase
+
+**Skip criteria**: No decomposition occurred (no scope contracts generated) → Proceed to CONSOLIDATE phase.
+
+This phase dispatches sub-scopes for independent execution. Each sub-scope runs a full PACT cycle (Prepare → Architect → Code → Test) via rePACT.
+
+**Dispatch**: Invoke `/PACT:rePACT` for each sub-scope with its scope contract. Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
+
+**Sub-scope failure policy**: Sub-scope failure is isolated — sibling scopes continue independently. Individual scope failures route through `/PACT:imPACT` to the affected scope only. However, when a sub-scope emits HALT, the parent orchestrator stops ALL sub-scopes (consistent with algedonic protocol: "Stop ALL agents"). Preserve work-in-progress for all scopes. After HALT resolution, review interrupted scopes before resuming.
+
+**Before next phase**:
+- [ ] All sub-scope rePACT cycles complete
+- [ ] Contract fulfillment sections received from all sub-scopes
+- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] **S4 Checkpoint**: All scopes delivered? Any scope stalled?
+
+---
+
+### CONSOLIDATE Phase
+
+**Skip criteria**: No decomposition occurred → Proceed to TEST phase.
+
+This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
+
+**Delegate in parallel**:
+- **`pact-architect`**: Verify cross-scope contract compatibility
+  - Compare contract fulfillment sections from all sub-scope handoffs
+  - Check that exports from each scope match imports expected by siblings
+  - Flag interface mismatches, type conflicts, or undelivered contract items
+- **`pact-test-engineer`**: Run cross-scope integration tests
+  - Verify cross-scope interfaces work together (API calls, shared types, data flow)
+  - Test integration points identified in scope contracts
+  - Confirm no shared file constraint violations occurred
+
+**Invoke each with**:
+- Feature description and scope contract summaries
+- All sub-scope handoffs (contract fulfillment sections)
+- "This is cross-scope integration verification. Focus on compatibility between scopes, not internal scope correctness."
+
+**On consolidation failure**: Route through `/PACT:imPACT` for triage. Possible outcomes:
+- Interface mismatch → re-invoke affected scope's coder to fix
+- Contract deviation → architect reviews whether deviation is acceptable
+- Test failure → test engineer provides details, coder fixes
+
+**Before next phase**:
+- [ ] Cross-scope contract compatibility verified
+- [ ] Integration tests passing
+- [ ] Specialist handoff(s) received
+- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] **Create atomic commit(s)** of CONSOLIDATE phase work
+- [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
+
+---
+
+### Related Protocols
+
+- [pact-scope-detection.md](pact-scope-detection.md) — Heuristics for detecting multi-scope tasks
+- [pact-scope-contract.md](pact-scope-contract.md) — Contract format and lifecycle
+- [rePACT.md](../commands/rePACT.md) — Recursive PACT command for sub-scope execution
 
 ---
 

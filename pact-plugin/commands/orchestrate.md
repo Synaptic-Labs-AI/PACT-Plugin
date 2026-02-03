@@ -24,6 +24,13 @@ Create the full Task hierarchy upfront for workflow visibility:
 4. TaskUpdate: Feature task status = "in_progress"
 ```
 
+**Scoped PACT phases**: When decomposition fires after PREPARE, the standard ARCHITECT and CODE phases are skipped (`decomposition_active`) and replaced by scoped phases. Create retroactively (detection occurs after PREPARE):
+- `"ATOMIZE: {feature-slug}"` with `blockedBy = [PREPARE task ID]`
+- `"CONSOLIDATE: {feature-slug}"` with `blockedBy = [all scope task IDs]`
+- Add CONSOLIDATE to TEST's `blockedBy` via `addBlockedBy = [CONSOLIDATE task ID]` (the original CODE dependency auto-resolves when CODE is marked completed/skipped)
+
+The scoped flow is: **P**repare → **A**tomize → **C**onsolidate → **T**est (same PACT acronym, scoped meanings).
+
 For each phase execution:
 ```
 a. TaskUpdate: phase status = "in_progress"
@@ -39,13 +46,14 @@ i. TaskUpdate: phase status = "completed"
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "{reason}"})`
-Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, or custom.
+Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, `"decomposition_active"`, or custom.
 <!-- Skip reason semantics:
   - "approved_plan_exists": Plan exists but completeness not verified (legacy/weak)
   - "plan_section_complete": Plan exists AND section passed completeness check (preferred)
   - "requirements_explicit": Task description contains all needed context
   - "existing_docs_cover_scope": docs/preparation/ or docs/architecture/ already complete
   - "trivial_change": Change too small to warrant this phase
+  - "decomposition_active": Scope detection triggered decomposition; sub-scopes handle this phase via rePACT
 -->
 
 ---
@@ -230,9 +238,9 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 ---
 
-### Phase 1: PREPARE → `pact-preparer`
+### PREPARE Phase → `pact-preparer`
 
-**Skip criteria met (including completeness check)?** → Proceed to Phase 2.
+**Skip criteria met (including completeness check)?** → Proceed to ARCHITECT phase.
 
 **Plan sections to pass** (if plan exists):
 - "Preparation Phase"
@@ -281,58 +289,22 @@ After PREPARE completes (or is skipped with plan context), evaluate whether the 
 | Result | Action |
 |--------|--------|
 | Score below threshold | Single scope — continue with today's behavior |
-| Score at/above threshold | Propose decomposition (see S5 Confirmation below) |
-| All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Autonomous Tier below) |
+| Score at/above threshold | Propose decomposition (see Evaluation Response below) |
+| All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Evaluation Response below) |
 
 **Output format**: `Scope detection: Single scope (score 2/3 threshold)` or `Scope detection: Multi-scope detected (score 4/3 threshold) — proposing decomposition`
 
-#### S5 Confirmation Flow
+#### Evaluation Response
 
-When detection fires (score >= threshold), use S5 Decision Framing to propose decomposition:
+When detection fires (score >= threshold), follow the evaluation response protocol in [pact-scope-detection.md](../protocols/pact-scope-detection.md) — S5 confirmation flow, user response mapping, and autonomous tier.
 
-```
-📐 Scope Change: Multi-scope task detected
-
-Context: [What signals fired and why — e.g., "3 distinct domains identified
-(backend API, frontend UI, database migration) with no shared files"]
-
-Options:
-A) Decompose into sub-scopes: [proposed scope boundaries]
-   - Trade-off: Better isolation, parallel execution; overhead of scope coordination
-
-B) Continue as single scope
-   - Trade-off: Simpler coordination; risk of context overflow with large task
-
-C) Adjust boundaries (specify)
-
-Recommendation: [A or B with brief rationale]
-```
-
-**User response mapping**:
-
-| Response | Action |
-|----------|--------|
-| Confirmed (A) | Invoke `/PACT:rePACT` for each identified sub-scope |
-| Rejected (B) | Continue single scope (today's behavior) |
-| Adjusted (C) | Invoke `/PACT:rePACT` with user's modified boundaries |
-
-#### Autonomous Tier
-
-When **all** of the following conditions are true, skip user confirmation and proceed directly to decomposition:
-
-1. ALL strong signals fire (not merely meeting the threshold)
-2. NO counter-signals present
-3. CLAUDE.md contains `autonomous-scope-detection: enabled`
-
-**Output format**: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
-
-> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it in CLAUDE.md after trusting the heuristics through repeated Confirmed-tier usage.
+**On confirmed decomposition**: Generate a scope contract for each sub-scope before invoking rePACT. See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contract format and generation process. Skip top-level ARCHITECT and CODE — mark both `completed` with `{"skipped": true, "skip_reason": "decomposition_active"}`. The workflow switches to scoped PACT phases: ATOMIZE (dispatch sub-scopes) → CONSOLIDATE (verify contracts) → TEST (comprehensive feature testing). See ATOMIZE Phase and CONSOLIDATE Phase below.
 
 ---
 
-### Phase 2: ARCHITECT → `pact-architect`
+### ARCHITECT Phase → `pact-architect`
 
-**Skip criteria met (including completeness check, after re-assessment)?** → Proceed to Phase 3.
+**Skip criteria met (including completeness check, after re-assessment)?** → Proceed to CODE phase.
 
 **Plan sections to pass** (if plan exists):
 - "Architecture Phase"
@@ -358,7 +330,7 @@ When **all** of the following conditions are true, skip user confirmation and pr
 
 ---
 
-### Phase 3: CODE → `pact-*-coder(s)`
+### CODE Phase → `pact-*-coder(s)`
 
 **Always runs.** This is the core work.
 
@@ -458,7 +430,19 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 
 ---
 
-### Phase 4: TEST → `pact-test-engineer`
+### ATOMIZE Phase (Scoped Orchestration Only)
+
+Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-phase).
+
+---
+
+### CONSOLIDATE Phase (Scoped Orchestration Only)
+
+Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#consolidate-phase).
+
+---
+
+### TEST Phase → `pact-test-engineer`
 
 **Skip criteria met?** → Proceed to "After All Phases Complete."
 
