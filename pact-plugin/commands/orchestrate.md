@@ -473,6 +473,9 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 
 If worktree active: Execute the [Merge-Back Protocol](../protocols/pact-worktree.md#merge-back-protocol) before proceeding.
 
+- **Single worktree** (standard orchestrate): Merge the `--work` branch.
+- **Multiple worktrees** (scoped orchestration): Follow sequential merge in protocol.
+
 ---
 
 ## Agent Stall Detection

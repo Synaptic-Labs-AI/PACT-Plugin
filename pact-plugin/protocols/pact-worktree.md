@@ -15,6 +15,7 @@
 |---------|--------|---------|-------------|
 | `worktree-mode` | `tiered`, `always`, `never` | `tiered` | When to create worktrees |
 | `worktree-directory` | path | `.worktrees` | Directory for worktrees |
+| `worktree-baseline-tests` | `always`, `on-divergence`, `never` | `always` | When to run baseline tests in new worktrees |
 
 **Mode Behaviors**:
 
@@ -54,6 +55,7 @@ The `--` separator distinguishes worktree branches from intentional sub-branches
 
 3. **Run baseline tests** in worktree to verify clean starting state
    - On failure: Report to user, ask whether to proceed or investigate
+   - If user aborts: Execute Cleanup Protocol to remove the partially-created worktree
 
 4. **Pass worktree path to agents** in dispatch prompt:
    ```
@@ -80,6 +82,8 @@ The `--` separator distinguishes worktree branches from intentional sub-branches
 2. For each subsequent sub-scope: attempt merge, stop on conflict
 3. After all merges: run integration tests
 
+**Merge Order**: Consider merging smaller or more independent scopes first to reduce conflict likelihood.
+
 **Conflict Handling**: Stop and present options to user:
 - A) Resolve manually — pause here
 - B) Abort merge, review sub-scope outputs first
@@ -93,8 +97,9 @@ Orchestrator does not auto-resolve merge conflicts.
 
 1. Remove worktree: `git worktree remove .worktrees/{feature}--{suffix}`
 2. Delete branch: `git branch -d feature/{name}--{suffix}`
+   - If branch delete fails (not fully merged due to discarded changes), log warning; user can manually clean orphaned branches with `git branch -D` later.
 
-On cleanup failure: Log warning, continue. Clean later with `git worktree prune`.
+On cleanup failure: Log warning, continue. Clean up later with `git worktree prune`.
 
 ---
 
@@ -116,7 +121,7 @@ Operational failures don't invalidate sibling work. Let independent work complet
 2. **Do not merge any worktree branches** — preserve isolation
 3. **Escalate to user** — await decision before resuming or aborting
 
-HALT indicates viability threats. Prevent cross-contamination until assessed.
+A HALT signal indicates viability threats. Prevent cross-contamination until assessed.
 
 #### Abort/Crash Recovery
 
@@ -150,7 +155,7 @@ Orphaned worktrees detected. Run `git worktree prune` to clean up.
 2. On heuristic trigger (tiered mode): Propose worktree if task is non-trivial
 3. On conversational override: Honor user's inline request
 
-**Heuristic** (tiered mode): Propose worktree when task touches 3+ files across 2+ directories.
+**Heuristic** (tiered mode): Propose worktree when task touches 3+ files across 2+ directories with non-trivial changes. This threshold may be tuned via `worktree-heuristic-threshold` configuration if needed.
 
 ---
 
@@ -167,6 +172,6 @@ Aligned with `superpowers:using-git-worktrees` for user consistency:
 
 **Independent implementation**: PACT implements worktree logic independently. The superpowers skill is not required.
 
-**Alignment tracking**: Issue #142 tracks convention alignment for periodic review.
+**Alignment tracking**: Issue #142 tracks convention alignment with `superpowers:using-git-worktrees` for periodic review. Key areas: directory naming, .gitignore patterns, baseline test behavior.
 
 ---

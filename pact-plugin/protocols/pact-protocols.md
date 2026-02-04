@@ -1317,6 +1317,7 @@ Identity:
   scope_id: {kebab-case identifier, e.g., "backend-api"}
   parent_scope: {parent scope_id or "root"}
   executor: {assigned at dispatch — currently rePACT}
+  worktree_path: {optional — assigned at dispatch when worktrees enabled}
 
 Deliverables:
   - {Expected file paths or patterns this scope produces}
