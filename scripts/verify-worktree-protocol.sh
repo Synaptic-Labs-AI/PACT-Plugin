@@ -143,6 +143,48 @@ check_pattern "$COMMANDS_DIR/rePACT.md" \
     "isolated worktree"
 echo ""
 
+# --- 10. orchestrate.md contains worktree path propagation instruction ---
+echo "10. orchestrate.md contains worktree path propagation instruction:"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate.md references worktree path propagation" \
+    "worktree_path"
+echo ""
+
+# --- 11. comPACT.md agent prompt templates include worktree path ---
+echo "11. comPACT.md agent prompt templates include worktree path:"
+check_pattern "$COMMANDS_DIR/comPACT.md" \
+    "comPACT.md references worktree_path in agent prompts" \
+    "worktree_path"
+echo ""
+
+# --- 12. rePACT.md documents receiving worktree path ---
+echo "12. rePACT.md documents receiving worktree path:"
+check_pattern "$COMMANDS_DIR/rePACT.md" \
+    "rePACT.md references worktree path" \
+    "worktree path"
+echo ""
+
+# --- 13. plan-mode.md does not reference worktree skills ---
+echo "13. plan-mode.md does not reference worktree skills:"
+if grep -qE "worktree-setup|worktree-cleanup" "$COMMANDS_DIR/plan-mode.md" 2>/dev/null; then
+  echo "  ✗ plan-mode.md should NOT reference worktree skills"
+  FAIL=$((FAIL + 1))
+else
+  echo "  ✓ plan-mode.md correctly excludes worktree references"
+  PASS=$((PASS + 1))
+fi
+echo ""
+
+# --- 14. Skill files contain Edge Cases sections ---
+echo "14. Skill files contain Edge Cases sections:"
+check_pattern "$SKILLS_DIR/worktree-setup/SKILL.md" \
+    "worktree-setup SKILL.md has Edge Cases section" \
+    "## Edge Cases"
+check_pattern "$SKILLS_DIR/worktree-cleanup/SKILL.md" \
+    "worktree-cleanup SKILL.md has Edge Cases section" \
+    "## Edge Cases"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"
