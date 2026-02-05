@@ -111,11 +111,3 @@ Cleaned up worktree for {branch}
 | No worktrees exist | Report "No worktrees found" |
 | Multiple worktrees for related branches | List all, let user choose which to remove |
 
-## Safety
-
-This skill intentionally does NOT:
-- Force-remove worktrees with uncommitted changes
-- Force-delete unmerged branches
-- Remove multiple worktrees without user confirmation
-
-Git's built-in safety checks protect against accidental data loss. The skill surfaces those protections clearly rather than bypassing them.
