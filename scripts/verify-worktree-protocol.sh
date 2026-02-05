@@ -6,6 +6,12 @@
 
 set -e
 
+# Validate running from repo root
+if [ ! -d "pact-plugin" ]; then
+    echo "ERROR: Must run from repo root (pact-plugin/ directory not found)"
+    exit 1
+fi
+
 echo "=== Worktree Protocol Verification ==="
 echo ""
 
@@ -243,6 +249,33 @@ if echo "$consolidate_orchestrate" | grep -q "worktree-cleanup"; then
     PASS=$((PASS + 1))
 else
     echo "  ✗ orchestrate.md CONSOLIDATE phase references worktree-cleanup: pattern not found in CONSOLIDATE section"
+    FAIL=$((FAIL + 1))
+fi
+echo ""
+
+# --- 17. worktree-setup edge cases mention stale worktree handling ---
+echo "17. worktree-setup edge cases mention stale worktree handling:"
+check_pattern "$SKILLS_DIR/worktree-setup/SKILL.md" \
+    "worktree-setup edge cases mention git worktree prune" \
+    "git worktree prune"
+echo ""
+
+# --- 18. worktree-cleanup edge cases mention uncommitted changes safety ---
+echo "18. worktree-cleanup edge cases mention uncommitted changes safety:"
+check_pattern "$SKILLS_DIR/worktree-cleanup/SKILL.md" \
+    "worktree-cleanup edge cases mention uncommitted changes" \
+    "uncommitted"
+echo ""
+
+# --- 19. worktree-cleanup Safety section mentions force ---
+echo "19. worktree-cleanup Safety section mentions force:"
+# Extract the Safety section and check for 'force' within it
+safety_section=$(sed -n '/^## Safety/,/^## /p' "$SKILLS_DIR/worktree-cleanup/SKILL.md" | sed '$d')
+if echo "$safety_section" | grep -qi "force"; then
+    echo "  ✓ worktree-cleanup Safety section mentions force"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ worktree-cleanup Safety section mentions force: pattern not found in Safety section"
     FAIL=$((FAIL + 1))
 fi
 echo ""
