@@ -38,8 +38,6 @@ git worktree list
 
 All worktrees live in `.worktrees/` relative to the repo root.
 
-Use `--git-common-dir` instead of `--show-toplevel` because the latter returns the worktree root when run inside a worktree (e.g., when ATOMIZE creates sub-scope worktrees from the feature worktree).
-
 ```bash
 # Get main repo root (from a worktree, returns absolute path; from main repo, returns relative .git — the cd && pwd wrapper normalizes both to absolute)
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
@@ -61,8 +59,6 @@ grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null
 If `.worktrees` is NOT in `.gitignore`:
 1. Append `.worktrees/` to `.gitignore`
 2. Commit the change: `git add .gitignore && git commit -m "chore: add .worktrees/ to .gitignore"`
-
-Note: This commit lands on the current base branch, which is correct -- `.gitignore` is shared project configuration, not feature-specific.
 
 ### Step 4: Create the Worktree
 
@@ -86,14 +82,6 @@ Branch: {branch}
 ```
 
 **Return the worktree path** so it can be passed to subsequent phases and agents.
-
-## Output
-
-The orchestrator captures the worktree path from the Step 5 report line:
-
-> Worktree ready at `{absolute_path}`
-
-Store this as `worktree_path` for the current workflow. Pass it to all specialist agent prompts and to rePACT for sub-scope work.
 
 ## Edge Cases
 

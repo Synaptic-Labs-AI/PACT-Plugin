@@ -37,8 +37,6 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 2. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
 3. Proceed to contract verification and integration tests (below) on the merged feature branch
 
-If a merge conflict arises during sub-scope branch merging, pause and report the conflict to the orchestrator. The orchestrator triages via `/PACT:imPACT` — typically the conflicting sub-scopes need manual resolution by the relevant domain specialist(s).
-
 **Delegate in parallel**:
 - **`pact-architect`**: Verify cross-scope contract compatibility
   - Compare contract fulfillment sections from all sub-scope handoffs
