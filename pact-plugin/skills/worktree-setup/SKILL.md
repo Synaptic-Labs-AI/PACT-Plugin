@@ -87,7 +87,7 @@ Check for and run the **first matching** dependency installer:
 |-------------|---------|
 | `package.json` | `npm install` |
 | `Cargo.toml` | `cargo build` |
-| `requirements.txt` | `pip install -r requirements.txt` |
+| `requirements.txt` | `pip install -r requirements.txt` (ensure the project's virtual environment is activated first) |
 | `pyproject.toml` | `poetry install` |
 | `go.mod` | `go mod download` |
 

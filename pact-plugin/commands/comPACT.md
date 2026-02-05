@@ -226,7 +226,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - **Yes (Recommended)** → invoke `/PACT:peer-review`
-- **Not yet** → worktree persists; user resumes later
+- **Not yet** → worktree persists; user resumes later. Clean up manually with `/PACT:worktree-cleanup` when done.
 - **More work** → continue with comPACT or orchestrate
 
 **If blocker reported**:

@@ -164,7 +164,7 @@ Sequential execution is the exception requiring explicit justification. When ass
 
 ---
 
-1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent phases work in the worktree.
+1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. This creates both the feature branch and its worktree. All subsequent phases work in the worktree.
 2. **Check for plan** in `docs/plans/` matching this task
 
 ### Plan Status Handling
