@@ -251,6 +251,44 @@ check_pattern "$COMMANDS_DIR/orchestrate.md" \
     "### TEST Phase"
 echo ""
 
+# --- 13. Nesting Limit Value Assertions ---
+# The canonical nesting limit must be "1 level" (not "2 levels") across all key files.
+# This prevents a coordinated regression that changes the value back in all files.
+echo "13. Nesting limit value assertions:"
+AGENTS_DIR="pact-plugin/agents"
+
+# Positive checks: canonical files must contain "1 level" nesting limit
+check_pattern "$COMMANDS_DIR/rePACT.md" \
+    "rePACT has 1-level nesting limit" \
+    "Maximum nesting: 1 level"
+check_pattern "$PROTOCOLS_DIR/pact-s1-autonomy.md" \
+    "S1 autonomy has 1-level nesting limit" \
+    "Nesting limit.*1 level"
+check_pattern "$PROTOCOLS_DIR/pact-protocols.md" \
+    "SSOT S1 extract has 1-level nesting limit" \
+    "Nesting limit.*1 level"
+# All 8 agent files must have "Max nesting: 1 level"
+for agent_file in "$AGENTS_DIR"/*.md; do
+    agent_name=$(basename "$agent_file" .md)
+    check_pattern "$agent_file" \
+        "$agent_name has 1-level nesting limit" \
+        "Max nesting: 1 level"
+done
+
+# Negative checks: old 2-level nesting limit must not appear anywhere
+echo ""
+echo "13b. Nesting limit negative checks (old values absent):"
+check_absent "$COMMANDS_DIR/rePACT.md" \
+    "rePACT has no 2-level nesting reference" \
+    "Max nesting: 2"
+check_absent "$PROTOCOLS_DIR/pact-s1-autonomy.md" \
+    "S1 autonomy has no 2-level nesting reference" \
+    "2 levels maximum"
+check_absent "$PROTOCOLS_DIR/pact-protocols.md" \
+    "SSOT has no 2-level nesting reference" \
+    "2 levels maximum"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"
