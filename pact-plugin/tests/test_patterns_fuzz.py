@@ -24,6 +24,11 @@ from refresh.patterns import (
     PACT_AGENT_PATTERN,
     TASK_TOOL_PATTERN,
     SUBAGENT_TYPE_PATTERN,
+    TEAM_NAME_PATTERN,
+    TEAMMATE_NAME_PATTERN,
+    SEND_MESSAGE_PATTERN,
+    TEAM_CREATE_PATTERN,
+    TEAM_DELETE_PATTERN,
     is_termination_signal,
     extract_context_value,
 )
@@ -361,3 +366,75 @@ class TestUnicodeEdgeCases:
         for name, pattern in TRIGGER_PATTERNS.items():
             result = pattern.search(content)
             assert result is None or hasattr(result, 'group')
+
+
+class TestAgentTeamsPatternsEdgeCases:
+    """Edge case tests for Agent Teams v3 patterns."""
+
+    TEAM_PATTERNS = [
+        ("TEAM_NAME_PATTERN", TEAM_NAME_PATTERN),
+        ("TEAMMATE_NAME_PATTERN", TEAMMATE_NAME_PATTERN),
+        ("SEND_MESSAGE_PATTERN", SEND_MESSAGE_PATTERN),
+        ("TEAM_CREATE_PATTERN", TEAM_CREATE_PATTERN),
+        ("TEAM_DELETE_PATTERN", TEAM_DELETE_PATTERN),
+    ]
+
+    @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
+    def test_team_patterns_no_crash(self, content: str):
+        """Test Agent Teams patterns don't crash on edge case input."""
+        for name, pattern in self.TEAM_PATTERNS:
+            result = pattern.search(content)
+            assert result is None or hasattr(result, 'group'), \
+                f"{name} crashed on input: {content!r}"
+
+    @pytest.mark.parametrize("content", [
+        "a" * 10000,
+        '"name": "' + "x" * 10000 + '"',
+        '"team_name": "' + "a" * 10000 + '"',
+        "SendMessage " * 1000,
+        "TeamCreate TeamDelete " * 500,
+    ])
+    def test_team_patterns_no_redos(self, content: str):
+        """Test Agent Teams patterns don't exhibit ReDoS behavior."""
+        start_time = time.time()
+
+        for name, pattern in self.TEAM_PATTERNS:
+            pattern.search(content)
+
+        elapsed = time.time() - start_time
+        assert elapsed < 1.0, f"Team patterns took too long: {elapsed}s"
+
+    @pytest.mark.parametrize("content", [
+        '"team_name": "team-with-emoji-"',
+        '"name": "backend-1"',
+        '"name": "SendMessage"',
+        '"team_name": ""',
+        '"name": ""',
+    ])
+    def test_team_patterns_unicode_content(self, content: str):
+        """Test Agent Teams patterns handle unicode content."""
+        for name, pattern in self.TEAM_PATTERNS:
+            result = pattern.search(content)
+            assert result is None or hasattr(result, 'group')
+
+    def test_team_name_pattern_with_nested_quotes(self):
+        """Test TEAM_NAME_PATTERN handles nested/escaped quotes."""
+        # Pattern should stop at first closing quote
+        match = TEAM_NAME_PATTERN.search('"team_name": "valid-name"extra"')
+        assert match is not None
+        assert match.group(1) == "valid-name"
+
+    def test_send_message_pattern_in_realistic_json(self):
+        """Test SEND_MESSAGE_PATTERN in realistic JSONL content."""
+        json_content = '{"type":"tool_use","name":"SendMessage","input":{"recipient":"backend-1"}}'
+        assert SEND_MESSAGE_PATTERN.search(json_content) is not None
+
+    def test_team_create_pattern_in_realistic_json(self):
+        """Test TEAM_CREATE_PATTERN in realistic JSONL content."""
+        json_content = '{"type":"tool_use","name":"TeamCreate","input":{"team_name":"test"}}'
+        assert TEAM_CREATE_PATTERN.search(json_content) is not None
+
+    def test_team_delete_pattern_in_realistic_json(self):
+        """Test TEAM_DELETE_PATTERN in realistic JSONL content."""
+        json_content = '{"type":"tool_use","name":"TeamDelete","input":{"team_name":"test"}}'
+        assert TEAM_DELETE_PATTERN.search(json_content) is not None

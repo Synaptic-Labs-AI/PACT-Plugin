@@ -134,6 +134,56 @@ def make_task_call(
     )
 
 
+def make_send_message_call(
+    recipient: str,
+    content: str,
+    msg_type: str = "message",
+    tool_use_id: str = "sendmsg-123",
+) -> dict[str, Any]:
+    """
+    Create a SendMessage tool call block for Agent Teams communication.
+
+    Args:
+        recipient: Teammate name (e.g., "backend-1")
+        content: Message content
+        msg_type: Message type (message, broadcast, shutdown_request, etc.)
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing a SendMessage tool_use content block
+    """
+    return make_tool_use_block(
+        name="SendMessage",
+        input_data={
+            "type": msg_type,
+            "recipient": recipient,
+            "content": content,
+        },
+        tool_use_id=tool_use_id,
+    )
+
+
+def make_team_create_call(
+    team_name: str,
+    tool_use_id: str = "teamcreate-123",
+) -> dict[str, Any]:
+    """
+    Create a TeamCreate tool call block for Agent Teams.
+
+    Args:
+        team_name: Name for the team (e.g., "v3-agent-teams")
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing a TeamCreate tool_use content block
+    """
+    return make_tool_use_block(
+        name="TeamCreate",
+        input_data={"team_name": team_name},
+        tool_use_id=tool_use_id,
+    )
+
+
 # =============================================================================
 # Transcript Factories
 # =============================================================================

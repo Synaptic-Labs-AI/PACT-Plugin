@@ -20,6 +20,7 @@ from refresh.workflow_detector import (
     check_workflow_termination,
     find_workflow_id,
     count_pact_agent_calls,
+    count_team_interactions,
     calculate_detection_confidence,
     detect_active_workflow,
 )
@@ -323,6 +324,110 @@ class TestCountPactAgentCalls:
         assert count == 0
 
 
+class TestCountTeamInteractions:
+    """Tests for count_team_interactions function."""
+
+    def test_count_send_message_calls(self):
+        """Test counting SendMessage calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"type": "message", "recipient": "backend-1"}),
+                ],
+            ),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"type": "shutdown_request", "recipient": "test-1"}),
+                ],
+            ),
+        ]
+
+        count = count_team_interactions(turns)
+
+        assert count == 2
+
+    def test_count_team_create_calls(self):
+        """Test counting TeamCreate calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="TeamCreate", input_data={"team_name": "v3-agent-teams"}),
+                ],
+            ),
+        ]
+
+        count = count_team_interactions(turns)
+
+        assert count == 1
+
+    def test_count_mixed_team_interactions(self):
+        """Test counting mixed SendMessage and TeamCreate calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="TeamCreate", input_data={"team_name": "test-team"}),
+                ],
+            ),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"type": "message", "recipient": "backend-1"}),
+                ],
+            ),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="Task", input_data={"subagent_type": "pact-backend-coder"}),
+                ],
+            ),
+        ]
+
+        count = count_team_interactions(turns)
+
+        # TeamCreate turn + SendMessage turn = 2 (Task is not a team interaction)
+        assert count == 2
+
+    def test_count_after_index(self):
+        """Test counting only after specific index."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[ToolCall(name="SendMessage", input_data={"recipient": "old"})],
+            ),
+            Turn(turn_type="user", content="trigger"),  # index 1
+            Turn(
+                turn_type="assistant",
+                tool_calls=[ToolCall(name="SendMessage", input_data={"recipient": "new"})],
+            ),
+        ]
+
+        count = count_team_interactions(turns, after_index=1)
+
+        assert count == 1
+
+    def test_count_no_team_interactions(self):
+        """Test counting when no team interactions exist."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[ToolCall(name="Task", input_data={"subagent_type": "pact-architect"})],
+            ),
+            Turn(turn_type="user", content="hello"),
+        ]
+
+        count = count_team_interactions(turns)
+
+        assert count == 0
+
+    def test_count_empty_turns(self):
+        """Test counting with empty turns list."""
+        assert count_team_interactions([]) == 0
+
+
 class TestCalculateDetectionConfidence:
     """Tests for calculate_detection_confidence function."""
 
@@ -377,6 +482,56 @@ class TestCalculateDetectionConfidence:
         confidence, notes = calculate_detection_confidence("peer-review", trigger_turn, turns, 0)
 
         assert confidence <= 1.0
+
+    def test_confidence_includes_team_interactions(self):
+        """Test that team interactions contribute to confidence score."""
+        trigger_turn = Turn(turn_type="user", content="/PACT:orchestrate task", line_number=1)
+        turns = [
+            trigger_turn,
+            Turn(
+                turn_type="assistant",
+                content="variety-assess: Starting...",
+                tool_calls=[
+                    ToolCall(name="TeamCreate", input_data={"team_name": "test-team"}),
+                ],
+                line_number=2,
+            ),
+            Turn(
+                turn_type="assistant",
+                content="Spawning teammates...",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"type": "message", "recipient": "backend-1"}),
+                ],
+                line_number=3,
+            ),
+        ]
+
+        confidence, notes = calculate_detection_confidence("orchestrate", trigger_turn, turns, 0)
+
+        # Should get agent_invocation weight from team interactions
+        assert confidence >= 0.4  # At least clear_trigger
+        assert "team interaction" in notes
+
+    def test_confidence_combines_agent_calls_and_team_interactions(self):
+        """Test confidence notes include both agent calls and team interactions."""
+        trigger_turn = Turn(turn_type="user", content="/PACT:orchestrate task", line_number=1)
+        turns = [
+            trigger_turn,
+            Turn(
+                turn_type="assistant",
+                content="variety-assess: Starting...",
+                tool_calls=[
+                    ToolCall(name="Task", input_data={"subagent_type": "pact-preparer"}),
+                    ToolCall(name="SendMessage", input_data={"type": "message", "recipient": "preparer-1"}),
+                ],
+                line_number=2,
+            ),
+        ]
+
+        confidence, notes = calculate_detection_confidence("orchestrate", trigger_turn, turns, 0)
+
+        assert "agent call" in notes
+        assert "team interaction" in notes
 
 
 class TestDetectActiveWorkflow:

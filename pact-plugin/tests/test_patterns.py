@@ -29,6 +29,11 @@ from refresh.patterns import (
     PACT_AGENT_PATTERN,
     TASK_TOOL_PATTERN,
     SUBAGENT_TYPE_PATTERN,
+    TEAM_NAME_PATTERN,
+    TEAMMATE_NAME_PATTERN,
+    SEND_MESSAGE_PATTERN,
+    TEAM_CREATE_PATTERN,
+    TEAM_DELETE_PATTERN,
     WorkflowPattern,
     compile_workflow_patterns,
     is_termination_signal,
@@ -499,3 +504,131 @@ class TestConstants:
         """Test termination signals have expected workflow keys."""
         expected_keys = {"peer-review", "orchestrate", "plan-mode", "comPACT", "rePACT", "imPACT"}
         assert set(TERMINATION_SIGNALS.keys()) == expected_keys
+
+
+class TestAgentTeamsPatterns:
+    """Tests for Agent Teams v3 patterns."""
+
+    def test_team_name_pattern_extracts_name(self):
+        """Test TEAM_NAME_PATTERN extracts team name from JSON-like content."""
+        match = TEAM_NAME_PATTERN.search('"team_name": "v3-agent-teams"')
+        assert match is not None
+        assert match.group(1) == "v3-agent-teams"
+
+    def test_team_name_pattern_no_spaces(self):
+        """Test TEAM_NAME_PATTERN works without spaces around colon."""
+        match = TEAM_NAME_PATTERN.search('"team_name":"my-team"')
+        assert match is not None
+        assert match.group(1) == "my-team"
+
+    def test_team_name_pattern_with_extra_spaces(self):
+        """Test TEAM_NAME_PATTERN handles extra spaces."""
+        match = TEAM_NAME_PATTERN.search('"team_name":   "spaced-team"')
+        assert match is not None
+        assert match.group(1) == "spaced-team"
+
+    def test_team_name_pattern_no_match(self):
+        """Test TEAM_NAME_PATTERN does not match unrelated content."""
+        assert TEAM_NAME_PATTERN.search("no team here") is None
+        assert TEAM_NAME_PATTERN.search('"name": "something"') is None
+
+    def test_teammate_name_pattern_extracts_name(self):
+        """Test TEAMMATE_NAME_PATTERN extracts name from JSON-like content."""
+        match = TEAMMATE_NAME_PATTERN.search('"name": "backend-1"')
+        assert match is not None
+        assert match.group(1) == "backend-1"
+
+    def test_teammate_name_pattern_various_names(self):
+        """Test TEAMMATE_NAME_PATTERN with various teammate names."""
+        names = ["backend-1", "architect-2", "scope-auth-backend", "preparer-1"]
+        for name in names:
+            match = TEAMMATE_NAME_PATTERN.search(f'"name": "{name}"')
+            assert match is not None, f"Failed to match name: {name}"
+            assert match.group(1) == name
+
+    def test_send_message_pattern(self):
+        """Test SEND_MESSAGE_PATTERN matches SendMessage tool calls."""
+        assert SEND_MESSAGE_PATTERN.search('"name": "SendMessage"') is not None
+        assert SEND_MESSAGE_PATTERN.search('"name":"SendMessage"') is not None
+
+    def test_send_message_pattern_case_insensitive(self):
+        """Test SEND_MESSAGE_PATTERN is case insensitive."""
+        assert SEND_MESSAGE_PATTERN.search('"name": "sendmessage"') is not None
+        assert SEND_MESSAGE_PATTERN.search('"name": "SENDMESSAGE"') is not None
+
+    def test_send_message_pattern_no_match(self):
+        """Test SEND_MESSAGE_PATTERN does not match other tools."""
+        assert SEND_MESSAGE_PATTERN.search('"name": "Task"') is None
+        assert SEND_MESSAGE_PATTERN.search('"name": "Read"') is None
+
+    def test_team_create_pattern(self):
+        """Test TEAM_CREATE_PATTERN matches TeamCreate tool calls."""
+        assert TEAM_CREATE_PATTERN.search('"name": "TeamCreate"') is not None
+        assert TEAM_CREATE_PATTERN.search('"name":"TeamCreate"') is not None
+
+    def test_team_create_pattern_case_insensitive(self):
+        """Test TEAM_CREATE_PATTERN is case insensitive."""
+        assert TEAM_CREATE_PATTERN.search('"name": "teamcreate"') is not None
+
+    def test_team_create_pattern_no_match(self):
+        """Test TEAM_CREATE_PATTERN does not match other tools."""
+        assert TEAM_CREATE_PATTERN.search('"name": "TeamDelete"') is None
+
+    def test_team_delete_pattern(self):
+        """Test TEAM_DELETE_PATTERN matches TeamDelete tool calls."""
+        assert TEAM_DELETE_PATTERN.search('"name": "TeamDelete"') is not None
+        assert TEAM_DELETE_PATTERN.search('"name":"TeamDelete"') is not None
+
+    def test_team_delete_pattern_case_insensitive(self):
+        """Test TEAM_DELETE_PATTERN is case insensitive."""
+        assert TEAM_DELETE_PATTERN.search('"name": "teamdelete"') is not None
+
+    def test_team_delete_pattern_no_match(self):
+        """Test TEAM_DELETE_PATTERN does not match other tools."""
+        assert TEAM_DELETE_PATTERN.search('"name": "TeamCreate"') is None
+
+
+class TestAgentTeamsConstants:
+    """Tests for Agent Teams constants."""
+
+    def test_teammate_name_convention_pattern(self):
+        """Test TEAMMATE_NAME_CONVENTION regex validates teammate names."""
+        from refresh.constants import TEAMMATE_NAME_CONVENTION
+
+        pattern = re.compile(TEAMMATE_NAME_CONVENTION)
+
+        # Valid teammate names
+        valid_names = [
+            "backend-1", "frontend-2", "database-3", "test-1",
+            "architect-1", "preparer-1", "memory-1", "n8n-1",
+            "scope-auth-backend-1", "scope-my-scope-test-2",
+        ]
+        for name in valid_names:
+            assert pattern.match(name), f"Should match valid name: {name}"
+
+        # Invalid teammate names
+        invalid_names = [
+            "random-1", "user-1", "orchestrator-1",
+            "backend", "backend-", "1-backend",
+        ]
+        for name in invalid_names:
+            assert not pattern.match(name), f"Should not match invalid name: {name}"
+
+    def test_team_tool_names_frozenset(self):
+        """Test TEAM_TOOL_NAMES contains expected tool names."""
+        from refresh.constants import TEAM_TOOL_NAMES
+
+        assert isinstance(TEAM_TOOL_NAMES, frozenset)
+        assert "TeamCreate" in TEAM_TOOL_NAMES
+        assert "TeamDelete" in TEAM_TOOL_NAMES
+        assert "SendMessage" in TEAM_TOOL_NAMES
+        assert len(TEAM_TOOL_NAMES) == 3
+
+    def test_send_message_types_frozenset(self):
+        """Test SEND_MESSAGE_TYPES contains expected message types."""
+        from refresh.constants import SEND_MESSAGE_TYPES
+
+        assert isinstance(SEND_MESSAGE_TYPES, frozenset)
+        expected = {"message", "broadcast", "shutdown_request",
+                    "shutdown_response", "plan_approval_response"}
+        assert SEND_MESSAGE_TYPES == expected

@@ -74,7 +74,8 @@ class TestCheckPinnedStaleness:
         """Should return None when CLAUDE.md does not exist."""
         from session_init import check_pinned_staleness
 
-        with patch("session_init._get_project_claude_md_path", return_value=None):
+        with patch("session_init._get_project_claude_md_path", return_value=None), \
+             patch("staleness._get_project_claude_md_path", return_value=None):
             result = check_pinned_staleness()
 
         assert result is None
@@ -302,11 +303,14 @@ class TestGetProjectClaudeMdPath:
 
         assert result == claude_md
 
-    def test_returns_none_when_no_claude_md_found(self, clean_env_no_claude_project_dir):
+    def test_returns_none_when_no_claude_md_found(self, clean_env_no_claude_project_dir, tmp_path):
         """Should return None when CLAUDE.md does not exist anywhere."""
         from session_init import _get_project_claude_md_path
 
-        with patch("subprocess.run", side_effect=FileNotFoundError()):
+        # Mock subprocess (git fallback) and cwd (last-resort fallback) to
+        # prevent finding a real CLAUDE.md in the worktree/repo.
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("staleness.Path.cwd", return_value=tmp_path):
             result = _get_project_claude_md_path()
 
         assert result is None
