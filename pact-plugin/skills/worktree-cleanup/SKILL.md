@@ -36,23 +36,18 @@ git worktree list
 
 Present the list and ask: "Which worktree should I remove?"
 
-### Step 2: Navigate Out of the Worktree
+### Step 2: Navigate to Repo Root and Remove the Worktree
 
-Before removal, ensure the current working directory is NOT inside the worktree being removed. Switch to the main repo root.
+Before removal, the shell's working directory must NOT be inside the worktree being removed. Compute the repo root, `cd` to it, and remove the worktree — all in a single bash call. This is critical because if the shell CWD is inside the deleted worktree, all subsequent commands will fail.
 
 ```bash
-# From a worktree, returns absolute path; from main repo, returns relative .git — the cd && pwd wrapper normalizes both to absolute
+# Compute repo root, cd there, then remove the worktree — must be ONE bash call
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
 REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
+cd "$REPO_ROOT" && git worktree remove "$REPO_ROOT/.worktrees/{branch}"
 ```
 
-Ensure all subsequent commands use absolute paths via `$REPO_ROOT`. Claude Code's shell does not persist `cd` between calls, so do not rely on changing directories.
-
-### Step 3: Remove the Worktree
-
-```bash
-git worktree remove "$REPO_ROOT/.worktrees/{branch}"
-```
+Note: Claude Code's Bash tool persists the working directory between calls. After this command, subsequent calls will run from `$REPO_ROOT`.
 
 **If removal fails** (uncommitted changes):
 
@@ -69,7 +64,7 @@ Options:
 
 Do NOT force-remove automatically. The user must choose.
 
-### Step 4: Delete the Branch
+### Step 3: Delete the Branch
 
 After the worktree is removed, delete the local branch.
 
@@ -92,7 +87,7 @@ Options:
 
 Do NOT force-delete automatically. The user must choose.
 
-### Step 5: Report
+### Step 4: Report
 
 ```
 Cleaned up worktree for {branch}
