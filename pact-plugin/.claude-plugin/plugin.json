@@ -25,7 +25,6 @@
   "commands": [
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
-    "./commands/rePACT.md",
     "./commands/imPACT.md",
     "./commands/peer-review.md",
     "./commands/plan-mode.md",
