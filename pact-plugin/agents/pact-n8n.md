@@ -5,6 +5,7 @@ description: |
   database workflows, AI agent workflows, and scheduled tasks. Requires n8n-mcp MCP server.
 color: magenta
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---

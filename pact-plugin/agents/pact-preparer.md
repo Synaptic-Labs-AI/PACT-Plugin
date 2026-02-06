@@ -5,6 +5,7 @@ description: |
   code examples, and technical information for development. First phase of PACT.
 color: blue
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---

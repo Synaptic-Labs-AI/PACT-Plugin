@@ -292,7 +292,7 @@ The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`.
 <!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->
 
 ## Working Memory
-<!-- Auto-managed by pact-memory skill. Last 5 memories shown. Full history searchable via pact-memory skill. -->
+<!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->
 """
 
     try:

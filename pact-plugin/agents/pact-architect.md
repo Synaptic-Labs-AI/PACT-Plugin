@@ -5,6 +5,7 @@ description: |
   data flows, and implementation guidelines. Use after preparation/research is complete.
 color: green
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---

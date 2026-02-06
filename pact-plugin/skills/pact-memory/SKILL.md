@@ -277,6 +277,29 @@ Shows recent memories (default: 10).
 6. **Write Complete Sentences**: Context should be a full description, not a fragment
 7. **Be Specific in Lessons**: "X didn't work because Y" is better than "X didn't work"
 
+## Memory Layers: pact-memory vs Auto-Memory
+
+The PACT framework operates with multiple memory layers. Understanding their
+distinct roles prevents duplication and ensures the right tool is used for the
+right purpose.
+
+| Layer | Storage | Content | Who Writes | Auto-Loaded |
+|-------|---------|---------|------------|-------------|
+| **Auto-memory** (MEMORY.md) | `~/.claude/projects/{hash}/memory/` | Free-form session learnings, user preferences, general patterns | Platform (automatic) | Yes (first 200 lines) |
+| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge: context, goals, decisions, lessons, entities | Agents via this skill | Via Working Memory sync to CLAUDE.md |
+| **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Per-agent domain expertise accumulated across sessions | Individual agents (automatic) | Yes (first 200 lines, per agent) |
+
+**pact-memory's unique value**: Structured fields (context, goal, decisions,
+lessons_learned, entities) enable semantic search, graph-enhanced retrieval,
+and cross-agent knowledge sharing -- capabilities that auto-memory's free-form
+markdown does not provide.
+
+**Coexistence model**: Auto-memory captures broad session context automatically.
+pact-memory captures deliberate, structured knowledge at PACT phase boundaries.
+The Working Memory section in CLAUDE.md shows the 3 most recent pact-memory
+entries, providing structured context that complements auto-memory's general
+learnings.
+
 ## Integration with PACT
 
 The memory skill integrates with PACT phases:

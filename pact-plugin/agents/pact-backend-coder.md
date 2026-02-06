@@ -5,6 +5,7 @@ description: |
   and data processing. Use after architectural specifications are ready.
 color: yellow
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---

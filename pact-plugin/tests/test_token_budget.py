@@ -10,6 +10,7 @@ Tests cover:
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -228,7 +229,7 @@ class TestSyncToClaudeMdBudgetEnforcement:
         existing_content = (
             "# Project\n\n"
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
             f"### 2026-01-14 10:00\n**Context**: {long_text}\n**Goal**: Old goal\n\n"
             f"### 2026-01-13 10:00\n**Context**: {long_text}\n**Goal**: Older goal\n\n"
@@ -253,7 +254,7 @@ class TestSyncToClaudeMdBudgetEnforcement:
         content = (
             "# Project\n\n"
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
             "## Pinned Context\n\nSome pinned stuff\n"
         )
@@ -265,6 +266,60 @@ class TestSyncToClaudeMdBudgetEnforcement:
         new_content = claude_md.read_text(encoding="utf-8")
         assert "## Pinned Context" in new_content
         assert "Some pinned stuff" in new_content
+
+
+    def test_entry_count_trimmed_to_max_working_memories(self, tmp_path):
+        """sync_to_claude_md should trim entries to MAX_WORKING_MEMORIES (3)."""
+        from working_memory import sync_to_claude_md, MAX_WORKING_MEMORIES
+
+        existing_content = (
+            "# Project\n\n"
+            "## Working Memory\n"
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
+            "Full history searchable via pact-memory skill. -->\n\n"
+            "### 2026-01-15 10:00\n**Context**: Entry one\n\n"
+            "### 2026-01-14 09:00\n**Context**: Entry two\n\n"
+            "### 2026-01-13 08:00\n**Context**: Entry three\n\n"
+            "### 2026-01-12 07:00\n**Context**: Entry four\n\n"
+            "### 2026-01-11 06:00\n**Context**: Entry five\n\n"
+            "## Pinned Context\n\nPinned stuff\n"
+        )
+        claude_md = self._create_claude_md(tmp_path, existing_content)
+
+        with patch("working_memory._get_claude_md_path", return_value=claude_md):
+            result = sync_to_claude_md(
+                {"context": "Brand new entry"},
+                memory_id="new123"
+            )
+
+        assert result is True
+        new_content = claude_md.read_text(encoding="utf-8")
+
+        # Count ### YYYY-MM-DD entries in the Working Memory section.
+        # Extract text between "## Working Memory" and the next "## " heading.
+        wm_match = re.search(
+            r'## Working Memory\n.*?(?=\n## (?!Working Memory)|\Z)',
+            new_content,
+            re.DOTALL
+        )
+        assert wm_match is not None, "Working Memory section not found"
+        wm_section = wm_match.group()
+        entry_count = len(re.findall(r'^### \d{4}-\d{2}-\d{2}', wm_section, re.MULTILINE))
+
+        # Should be exactly MAX_WORKING_MEMORIES (3): the new entry + 2 most recent existing
+        assert entry_count == MAX_WORKING_MEMORIES, (
+            f"Expected {MAX_WORKING_MEMORIES} entries, found {entry_count}"
+        )
+
+        # The new entry should be present (newest first)
+        assert "Brand new entry" in new_content
+        # The oldest entries (four, five) should have been trimmed
+        assert "Entry four" not in new_content
+        assert "Entry five" not in new_content
+
+        # Pinned Context should be preserved
+        assert "## Pinned Context" in new_content
+        assert "Pinned stuff" in new_content
 
 
 class TestSyncRetrievedBudgetEnforcement:
@@ -287,7 +342,7 @@ class TestSyncRetrievedBudgetEnforcement:
             f"### 2026-01-14 10:00\n**Query**: \"old query\"\n**Context**: {long_text}\n\n"
             f"### 2026-01-13 10:00\n**Query**: \"older query\"\n**Context**: {long_text}\n\n"
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
         )
         claude_md = self._create_claude_md(tmp_path, existing_content)
@@ -487,7 +542,7 @@ class TestParseWorkingMemorySection:
         content = (
             "# Project\n\n"
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
             "### 2026-01-15 10:00\n"
             "**Context**: Some entry\n"
@@ -503,7 +558,7 @@ class TestParseWorkingMemorySection:
 
         content = (
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
             "### Not a date header\n"
             "Some content\n\n"
@@ -520,7 +575,7 @@ class TestParseWorkingMemorySection:
 
         content = (
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
             "## Pinned Context\n"
         )
@@ -535,7 +590,7 @@ class TestParseWorkingMemorySection:
 
         content = (
             "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. "
+            "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. "
             "Full history searchable via pact-memory skill. -->\n\n"
             "### 2026-01-15 10:00\n"
             "**Context**: First entry\n\n"

@@ -5,6 +5,7 @@ description: |
   indexes, and data integrity. Use after architectural specifications are ready.
 color: orange
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---

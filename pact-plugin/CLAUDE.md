@@ -106,6 +106,18 @@ Delegate to `pact-memory-agent` with a clear intent:
 
 See **Always Run Agents in Background** for the mandatory `run_in_background=true` requirement.
 
+#### Three-Layer Memory Architecture
+
+PACT uses three complementary memory layers:
+
+| Layer | Storage | Purpose | Who Writes | Auto-loaded |
+|-------|---------|---------|------------|-------------|
+| **Auto-memory** (`MEMORY.md`) | Per-project file | General session learnings, user preferences | Platform (automatic) | Yes (first 200 lines) |
+| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Agents via pact-memory skill | Via Working Memory in CLAUDE.md |
+| **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents | Yes (first 200 lines) |
+
+**Coexistence model**: Auto-memory captures broad session context automatically. pact-memory provides structured, searchable knowledge with semantic retrieval and graph-enhanced lookup. Agent persistent memory builds domain expertise per specialist. These layers complement each other — do not treat them as redundant.
+
 ### S3/S4 Operational Modes
 
 The orchestrator operates in two distinct modes. Being aware of which mode you're in improves decision-making.

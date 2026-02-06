@@ -5,6 +5,7 @@ description: |
   performance tests, and security tests. Use after code implementation is complete.
 color: red
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---

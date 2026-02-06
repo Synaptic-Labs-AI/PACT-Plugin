@@ -12,6 +12,9 @@ echo ""
 
 PROTOCOLS_DIR="pact-plugin/protocols"
 COMMANDS_DIR="pact-plugin/commands"
+SKILLS_DIR="pact-plugin/skills"
+HOOKS_DIR="pact-plugin/hooks"
+AGENTS_DIR="pact-plugin/agents"
 SSOT="$PROTOCOLS_DIR/pact-protocols.md"
 
 if [ ! -f "$SSOT" ]; then
@@ -255,7 +258,6 @@ echo ""
 # The canonical nesting limit must be "1 level" (not "2 levels") across all key files.
 # This prevents a coordinated regression that changes the value back in all files.
 echo "13. Nesting limit value assertions:"
-AGENTS_DIR="pact-plugin/agents"
 
 # Positive checks: canonical files must contain "1 level" nesting limit
 check_pattern "$COMMANDS_DIR/rePACT.md" \
@@ -287,6 +289,108 @@ check_absent "$PROTOCOLS_DIR/pact-s1-autonomy.md" \
 check_absent "$PROTOCOLS_DIR/pact-protocols.md" \
     "SSOT has no 2-level nesting reference" \
     "2 levels maximum"
+echo ""
+
+# --- 14. Worktree integration (Phase E) ---
+# Cross-cutting checks that worktree lifecycle is wired into workflow commands.
+# These complement the dedicated verify-worktree-protocol.sh with scope-integrity
+# perspective checks (structural cross-references, not behavioral verification).
+echo "14. Worktree integration (Phase E):"
+check_pattern "$SKILLS_DIR/worktree-setup/SKILL.md" \
+    "worktree-setup skill exists" \
+    "worktree-setup"
+check_pattern "$SKILLS_DIR/worktree-cleanup/SKILL.md" \
+    "worktree-cleanup skill exists" \
+    "worktree-cleanup"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate.md references worktree-setup" \
+    "worktree-setup"
+check_pattern "$COMMANDS_DIR/comPACT.md" \
+    "comPACT.md references worktree-setup" \
+    "worktree-setup"
+check_pattern "$COMMANDS_DIR/peer-review.md" \
+    "peer-review.md references worktree-cleanup" \
+    "worktree-cleanup"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate.md propagates worktree path to agents" \
+    "worktree_path"
+check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
+    "ATOMIZE phase references worktree isolation" \
+    "worktree"
+echo ""
+
+# --- 15. Memory hooks baseline ---
+# Verify that core memory hook files exist and contain expected entry points.
+# These hooks are critical infrastructure that D1 modifies; baseline checks
+# catch accidental deletion or function signature changes.
+echo "15. Memory hooks baseline:"
+check_pattern "$HOOKS_DIR/memory_enforce.py" \
+    "memory_enforce.py has main entry point" \
+    "def main()"
+check_pattern "$HOOKS_DIR/staleness.py" \
+    "staleness.py has detect_stale_entries function" \
+    "def detect_stale_entries"
+check_pattern "$HOOKS_DIR/staleness.py" \
+    "staleness.py has apply_staleness_markings function" \
+    "def apply_staleness_markings"
+echo ""
+
+# --- 16. Executor interface ---
+# Verify that the executor interface in pact-scope-contract.md documents
+# the Agent Teams mapping and maintains backend-agnostic design.
+echo "16. Executor interface:"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract has Agent Teams section" \
+    "Agent Teams"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract is backend-agnostic" \
+    "Backend-agnostic"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract documents TeamCreate tool" \
+    "TeamCreate"
+echo ""
+
+# --- 17. Agent persistent memory ---
+# All 8 agent definition files must have memory: user in their frontmatter.
+# This was added in D3 to enable cross-project domain expertise accumulation.
+echo "17. Agent persistent memory (memory: user in all agents):"
+for agent_file in "$AGENTS_DIR"/*.md; do
+    agent_name=$(basename "$agent_file" .md)
+    check_pattern "$agent_file" \
+        "$agent_name has memory: user" \
+        "memory: user"
+done
+echo ""
+
+# --- 18. Scope detection heuristics ---
+# Verify that the scope detection protocol contains the expected scoring
+# system: threshold value, point weights, and activation tiers.
+echo "18. Scope detection heuristics:"
+check_pattern "$PROTOCOLS_DIR/pact-scope-detection.md" \
+    "Detection threshold is 3" \
+    "Score >= 3"
+check_pattern "$PROTOCOLS_DIR/pact-scope-detection.md" \
+    "Strong signals worth 2 points" \
+    "Strong (2 pts)"
+check_pattern "$PROTOCOLS_DIR/pact-scope-detection.md" \
+    "Three activation tiers documented" \
+    "Autonomous"
+echo ""
+
+# --- 19. Completeness signals ---
+# Verify that the SSOT completeness section documents 6 incompleteness signals.
+echo "19. Completeness signals:"
+check_pattern "$SSOT" \
+    "SSOT documents 6 incompleteness signals" \
+    "6 incompleteness signals"
+echo ""
+
+# --- 20. Agent Teams documentation (post-D2) ---
+# Verify that the executor interface section documents the key Agent Teams tools.
+echo "20. Agent Teams documentation (post-D2):"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract documents SendMessage tool" \
+    "SendMessage"
 echo ""
 
 # --- Summary ---

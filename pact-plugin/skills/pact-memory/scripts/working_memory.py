@@ -24,10 +24,15 @@ from typing import Any, Dict, List, Optional, Tuple
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Constants for working memory section (saved memories)
+# Constants for working memory section (saved memories).
+# Working Memory provides structured, PACT-specific context (goals, decisions,
+# lessons) synced from the SQLite database. It coexists with the platform's
+# auto-memory (MEMORY.md), which captures free-form session learnings. Reduced
+# from 5 to 3 entries to limit token overlap between the two systems while
+# retaining the structured format that auto-memory does not provide.
 WORKING_MEMORY_HEADER = "## Working Memory"
-WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Last 5 memories shown. Full history searchable via pact-memory skill. -->"
-MAX_WORKING_MEMORIES = 5
+WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->"
+MAX_WORKING_MEMORIES = 3
 
 # Constants for retrieved context section (searched/retrieved memories)
 RETRIEVED_CONTEXT_HEADER = "## Retrieved Context"
@@ -344,7 +349,7 @@ def sync_to_claude_md(
     """
     Sync a memory entry to the Working Memory section of CLAUDE.md.
 
-    Maintains a rolling window of the last 5 memories. New entries are added
+    Maintains a rolling window of the last 3 memories. New entries are added
     at the top of the section, and entries beyond MAX_WORKING_MEMORIES are removed.
 
     This function is designed for graceful degradation - if CLAUDE.md doesn't
@@ -532,8 +537,9 @@ def sync_retrieved_to_claude_md(
     """
     Sync retrieved memories to the Retrieved Context section of CLAUDE.md.
 
-    Maintains a rolling window of the last 5 retrieved memories. New entries
-    are added at the top of the section, and entries beyond 5 are removed.
+    Maintains a rolling window of the last 3 retrieved memories. New entries
+    are added at the top of the section, and entries beyond MAX_RETRIEVED_MEMORIES
+    are removed.
 
     Args:
         memories: List of memory dictionaries that were retrieved.

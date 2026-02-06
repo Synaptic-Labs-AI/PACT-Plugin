@@ -5,6 +5,7 @@ description: |
   proper state management. Use after architectural specifications are ready.
 color: cyan
 permissionMode: acceptEdits
+memory: user
 skills:
   - pact-task-tracking
 ---
