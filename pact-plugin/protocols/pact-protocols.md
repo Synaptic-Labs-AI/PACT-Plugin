@@ -1336,7 +1336,7 @@ Constraints:
 ### Design Principles
 
 - **Minimal contracts** (~5-10 lines per scope): The consolidate phase catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
-- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is rePACT (today) or TeammateTool (future).
+- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is rePACT (today) or Agent Teams (future).
 - **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
 
 ### Generation Process
@@ -1412,33 +1412,49 @@ rePACT implements the executor interface as follows:
 
 See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
 
-#### Future Executor: TeammateTool
+#### Future Executor: Agent Teams
 
-When Anthropic officially releases TeammateTool, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
+> **Status**: Agent Teams is experimental, gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
+> The API has evolved from earlier community-documented versions (monolithic `TeammateTool` with 13 operations)
+> into separate purpose-built tools. The mappings below reflect the current API shape but may change
+> before official release. This section is documentation/future reference, not current behavior.
 
-| Interface Element | Potential TeammateTool Mapping |
-|-------------------|-------------------------------|
-| **Input: scope_contract** | Sent via `write` operation to the spawned teammate |
-| **Input: feature_context** | Passed as initial context when spawning the teammate |
-| **Input: branch** | Set via teammate's working directory configuration |
-| **Input: nesting_depth** | Communicated in the initial `write` message |
-| **Output: handoff** | Teammate writes structured handoff to orchestrator's inbox |
-| **Output: commits** | Teammate commits to the shared feature branch |
-| **Output: status** | Communicated via `write` or inferred from teammate lifecycle |
-| **Delivery mechanism** | Asynchronous — teammate writes to inbox files; orchestrator polls for completion |
+When Claude Code Agent Teams reaches stable release, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
 
-**Environment variable alignment** (community-documented, not officially stable):
+| Interface Element | Agent Teams Mapping |
+|-------------------|---------------------|
+| **Input: scope_contract** | Passed in the teammate spawn prompt via `Task` tool (with `team_name` and `name` parameters) |
+| **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
+| **Input: branch** | Worktree working directory (teammate operates in the assigned worktree) |
+| **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
+| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
+| **Output: commits** | Teammate commits directly to the feature branch |
+| **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
+| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
 
-- `CLAUDE_CODE_TEAM_NAME` maps naturally to `scope_id` (team per scope)
-- `CLAUDE_CODE_AGENT_TYPE` maps to the specialist domain within the scope
+**Key Agent Teams tools**:
 
-These mappings are noted for future reference. C5 does not depend on TeammateTool availability or API stability.
+| Tool | Purpose | PACT Mapping |
+|------|---------|--------------|
+| `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
+| `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
+| `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
+| `SendMessage` (type: `"broadcast"`) | Message to all teammates | Cross-scope coordination (used sparingly) |
+| `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
+| `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
+| `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
+
+**Architectural notes**:
+
+- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
+- No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
+- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
 
 #### Design Constraints
 
 - **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future TeammateTool executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
-- **No premature binding**: The executor interface is a protocol-level abstraction. It does not reference specific TeammateTool operation names or API signatures, which may change before official release.
+- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
+- **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
 
 ---
 
