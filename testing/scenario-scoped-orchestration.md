@@ -6,7 +6,7 @@
 
 ## Scenario Description
 
-Verify the scoped orchestration flow: scope detection fires after PREPARE, the orchestrator proposes decomposition, sub-scopes execute via rePACT in isolated worktrees, and CONSOLIDATE merges and verifies cross-scope compatibility. This tests the full PREPARE, ATOMIZE, CONSOLIDATE, TEST scoped pipeline.
+Verify the scoped orchestration flow: scope detection fires after PREPARE, the orchestrator proposes decomposition, sub-scopes execute via Agent Teams teammates in isolated worktrees, and CONSOLIDATE merges and verifies cross-scope compatibility. This tests the full PREPARE, ATOMIZE, CONSOLIDATE, TEST scoped pipeline.
 
 ## Prerequisites
 
@@ -33,9 +33,9 @@ This task has distinct domain boundaries (backend API, frontend UI, database mig
 **What happens**: PREPARE always runs in single scope. The preparer researches requirements across all domains.
 
 **Expected outcome**:
-- `pact-preparer` dispatched as a background agent
-- Research output produced in `docs/preparation/` within the worktree
-- HANDOFF returned with requirements spanning multiple domains
+- `pact-preparer` teammate spawned into the session team
+- After plan approval, research output produced in `docs/preparation/` within the worktree
+- HANDOFF sent via SendMessage with requirements spanning multiple domains
 
 ### Step 3: Observe Scope Detection
 
@@ -93,7 +93,7 @@ Select **Option A** (or let autonomous proceed) to continue the scenario.
 
 **What happens**: The orchestrator creates scoped phase tasks:
 - ATOMIZE task (blockedBy PREPARE)
-- Per-scope rePACT tasks as children of ATOMIZE
+- Per-scope teammate tasks as children of ATOMIZE
 - CONSOLIDATE task (blockedBy all scope tasks)
 - TEST task updated: addBlockedBy CONSOLIDATE
 
@@ -101,14 +101,14 @@ Standard ARCHITECT and CODE tasks are marked `completed` with `{"skipped": true,
 
 ### Step 6: Observe ATOMIZE Phase
 
-**What happens**: The orchestrator dispatches sub-scopes for execution. Each sub-scope gets:
+**What happens**: The orchestrator spawns sub-scope teammates for execution. Each sub-scope gets:
 1. Its own worktree via `/PACT:worktree-setup` (e.g., `feature/user-profile--backend`)
-2. A `/PACT:rePACT` invocation with the scope contract
+2. A teammate spawned with scope contract and worktree path in the spawn prompt
 3. Independent execution of a full P, A, C, T cycle within its scope
 
 **Expected outcome**:
 - 3 worktrees created (one per sub-scope)
-- 3 rePACT cycles running concurrently
+- 3 sub-scope teammates running concurrently
 - Each produces commits on its suffix branch
 
 **Verification**:
@@ -126,9 +126,9 @@ Should show 4 entries: main directory + 3 sub-scope worktrees:
 
 ### Step 7: Observe Sub-Scope Completion
 
-**What happens**: Each rePACT cycle completes independently and returns a HANDOFF with contract fulfillment details.
+**What happens**: Each sub-scope teammate completes independently and sends a HANDOFF via SendMessage with contract fulfillment details.
 
-**Expected outcome**: All 3 sub-scopes complete. Each reports:
+**Expected outcome**: All 3 sub-scopes complete. Each teammate reports:
 - Files produced (within its owned scope)
 - Contract items fulfilled
 - Any cross-scope dependencies discovered
@@ -137,12 +137,12 @@ Should show 4 entries: main directory + 3 sub-scope worktrees:
 
 ### Step 8: Observe CONSOLIDATE Phase
 
-**What happens**: After all sub-scopes complete, CONSOLIDATE runs:
+**What happens**: After all sub-scope teammates complete and are shut down, CONSOLIDATE runs:
 1. Merges each sub-scope's suffix branch back to the feature branch
 2. Cleans up sub-scope worktrees via `/PACT:worktree-cleanup`
-3. Dispatches two agents in parallel:
-   - `pact-architect`: Verifies cross-scope contract compatibility
-   - `pact-test-engineer`: Runs cross-scope integration tests
+3. Spawns two consolidation teammates in parallel:
+   - `pact-architect` (name: `"consolidate-architect"`): Verifies cross-scope contract compatibility
+   - `pact-test-engineer` (name: `"consolidate-tester"`): Runs cross-scope integration tests
 
 **Expected outcome**:
 - All 3 suffix branches merged to `feature/user-profile`
@@ -164,7 +164,7 @@ git worktree list  # Should show only main + feature worktree (not sub-scope wor
 **What happens**: After CONSOLIDATE, comprehensive testing runs on the merged feature branch.
 
 **Expected outcome**:
-- `pact-test-engineer` dispatched with full feature context
+- `pact-test-engineer` teammate spawned with full feature context
 - Integration tests, edge cases, and cross-scope behavior tested
 - Test signal emitted (GREEN/YELLOW/RED)
 
@@ -182,7 +182,7 @@ git worktree list  # Should show only main + feature worktree (not sub-scope wor
 | S5 framing | Orchestrator presents options | 3 options (decompose, single, adjust) with trade-offs |
 | Scope contracts generated | Orchestrator output during ATOMIZE | One contract per sub-scope with owned files and interfaces |
 | Sub-scope worktrees created | `git worktree list` during ATOMIZE | One worktree per sub-scope at `.worktrees/{feature}--{scope}` |
-| rePACT cycles complete | Agent HANDOFFs returned | All sub-scopes return contract fulfillment |
+| Sub-scope teammates complete | Teammate HANDOFFs via SendMessage | All sub-scopes return contract fulfillment |
 | ARCHITECT and CODE skipped | Task metadata | Both marked `completed` with `decomposition_active` skip reason |
 | Sub-scope branches merged | `git log` on feature branch | Commits from all scopes present |
 | Sub-scope worktrees cleaned | `git worktree list` after CONSOLIDATE | Sub-scope worktrees removed |
@@ -197,7 +197,7 @@ git worktree list  # Should show only main + feature worktree (not sub-scope wor
 | Counter-signals incorrectly suppress | Score below threshold despite clear domain separation | Counter-signal for "shared data models" may fire incorrectly if domains share a types file. Review PREPARE output for accuracy. |
 | Autonomous tier fires unexpectedly | Decomposition without user confirmation | Both strong signals fired, no counter-signals, and `autonomous-scope-detection: enabled` is in CLAUDE.md. Remove the config to require confirmation. |
 | Sub-scope conflict on shared files | Merge conflict during CONSOLIDATE | Scope contracts did not properly assign file ownership. Check `shared_files` constraints in contracts. |
-| rePACT nesting violation | Error about nesting depth | rePACT sub-scopes cannot themselves trigger scope detection (bypass rule). Max nesting is 1 level. |
+| Scope nesting violation | Error about nesting depth | Sub-scope teammates cannot themselves trigger scope detection (bypass rule). Max nesting is 1 level. |
 | CWD invalidation during cleanup | Bash commands fail after worktree removal | CONSOLIDATE cleanup must navigate to repo root before removing each sub-scope worktree. Same CWD issue as worktree lifecycle scenario. |
-| HALT during sub-scope | All work stops, partial sub-scopes | Expected behavior per algedonic protocol: parent orchestrator stops ALL sub-scopes on HALT. Preserve work-in-progress. After resolution, review interrupted scopes. |
+| HALT during sub-scope | All work stops, partial sub-scopes | Expected behavior per algedonic protocol: lead stops ALL sub-scope teammates on HALT (via shutdown_request). Preserve work-in-progress. After resolution, review interrupted scopes. |
 | Single sub-scope detected | Detection fires but only finds 1 scope | Single sub-scope guard should fall back to single scope. Decomposition with 1 scope adds overhead with no benefit. |

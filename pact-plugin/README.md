@@ -1,9 +1,14 @@
 # PACT Framework Plugin
 
-> **Version**: 2.0.0
+> **Version**: 3.0.0
 > **License**: MIT
 
-VSM-enhanced orchestration framework for AI-assisted software development with Claude Code.
+VSM-enhanced orchestration framework for AI-assisted software development with Claude Code. PACT uses Agent Teams for multi-agent orchestration, spawning specialist teammates that communicate via SendMessage for coordinated development workflows.
+
+## Prerequisites
+
+- **Claude Code** CLI installed and configured
+- **Agent Teams** enabled (experimental feature). Enable via Claude Code settings before using PACT.
 
 ## Installation
 
@@ -66,8 +71,8 @@ After restart, test with:
 
 | Component | Description |
 |-----------|-------------|
-| **8 Specialist Agents** | Preparer, Architect, Backend/Frontend/Database Coders, n8n, Test Engineer, Memory Agent |
-| **8 Commands** | orchestrate, comPACT, rePACT, plan-mode, imPACT, peer-review, pin-memory, wrap-up |
+| **8 Specialist Agents** | Preparer, Architect, Backend/Frontend/Database Coders, n8n, Test Engineer, Memory Agent (spawned as teammates) |
+| **7 Commands** | orchestrate, comPACT, plan-mode, imPACT, peer-review, pin-memory, wrap-up |
 | **13 Skills** | Domain knowledge for architecture, coding, testing, security, n8n workflows |
 | **Protocols** | VSM-based coordination, algedonic signals, variety management |
 
@@ -81,8 +86,9 @@ After installing this plugin, use these commands:
 /PACT:plan-mode <task>        # Strategic planning before implementation
 ```
 
-## Key Features (v2.0)
+## Key Features (v3.0)
 
+- **Agent Teams**: Specialists spawned as teammates via TeamCreate/SendMessage for real-time coordination
 - **Variety Management**: Tasks scored on complexity; ceremony scales accordingly
 - **Viability Sensing**: Agents emit HALT/ALERT signals for security, data, ethics issues
 - **Adaptive Workflow**: From quick fixes to full orchestration based on task complexity

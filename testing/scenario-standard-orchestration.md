@@ -13,7 +13,7 @@ Verify the full PACT orchestration lifecycle: PREPARE, ARCHITECT, CODE, TEST pha
 1. PACT plugin installed at `~/.claude/plugins/cache/pact-marketplace/PACT/`
 2. A git repository with `CLAUDE.md` containing the PACT orchestrator configuration
 3. No active worktrees for the test feature branch (run `git worktree list` to verify)
-4. All four verification scripts passing: `bash scripts/verify-scope-integrity.sh`, `bash scripts/verify-protocol-extracts.sh`, `bash scripts/verify-task-hierarchy.sh`, `bash scripts/verify-worktree-protocol.sh`
+4. All five verification scripts passing: `bash scripts/verify-scope-integrity.sh`, `bash scripts/verify-protocol-extracts.sh`, `bash scripts/verify-task-hierarchy.sh`, `bash scripts/verify-worktree-protocol.sh`, `bash scripts/verify-agent-teams.sh`
 5. `pact-memory` database accessible at `~/.claude/pact-memory/memory.db`
 
 ## Steps
@@ -76,13 +76,13 @@ Should show the new worktree alongside the main working directory. The `.worktre
 
 ### Step 6: Observe PREPARE Phase
 
-**What happens**: The orchestrator invokes `pact-preparer` as a background agent.
+**What happens**: The orchestrator spawns a `pact-preparer` teammate into the session team.
 
 **Expected outcome**:
-- Agent dispatched with task description
-- Agent produces output in `docs/preparation/` within the worktree
-- Agent returns a structured HANDOFF with all 5 items (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions)
-- Orchestrator runs S4 Checkpoint before proceeding
+- Teammate spawned with `mode="plan"` (plan approval required before implementation)
+- After plan approval, teammate produces output in `docs/preparation/` within the worktree
+- Teammate sends a structured HANDOFF via SendMessage with all 5 items (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions)
+- Orchestrator shuts down preparer teammate and runs S4 Checkpoint before proceeding
 
 **Verification**:
 ```bash
@@ -108,12 +108,12 @@ No decomposition proposed. Standard flow continues.
 
 ### Step 9: Observe ARCHITECT Phase (if not skipped)
 
-**What happens**: The orchestrator invokes `pact-architect` with PREPARE outputs.
+**What happens**: The orchestrator spawns a `pact-architect` teammate with PREPARE outputs.
 
 **Expected outcome**:
-- Agent dispatched with task description and pointer to preparation docs
-- Agent produces output in `docs/architecture/` within the worktree
-- Structured HANDOFF returned
+- Teammate spawned with `mode="plan"` and pointers to preparation docs
+- After plan approval, teammate produces output in `docs/architecture/` within the worktree
+- Teammate sends structured HANDOFF via SendMessage; orchestrator shuts down architect teammate
 
 ### Step 10: Observe CODE Phase
 
@@ -122,9 +122,9 @@ No decomposition proposed. Standard flow continues.
 **Expected outcome**:
 - S5 Policy Checkpoint passes (architecture aligns, delegation is happening)
 - Coder selected (likely `pact-backend-coder` for a utility function)
-- Coder dispatched with architecture context and smoke test instructions
-- Coder returns HANDOFF with implementation details and any flagged decisions
-- Orchestrator creates atomic commit(s) of CODE phase work
+- Coder teammate spawned with `mode="plan"`, architecture context, and smoke test instructions
+- After plan approval, coder implements and sends HANDOFF via SendMessage with implementation details and any flagged decisions
+- Orchestrator shuts down coder teammate and creates atomic commit(s) of CODE phase work
 
 **Verification**:
 ```bash
@@ -134,13 +134,13 @@ Should show commit(s) from the CODE phase.
 
 ### Step 11: Observe TEST Phase
 
-**What happens**: The orchestrator invokes `pact-test-engineer` with coder handoff summaries.
+**What happens**: The orchestrator spawns a `pact-test-engineer` teammate with coder handoff summaries.
 
 **Expected outcome**:
-- Test engineer dispatched with task description and CODE handoff
+- Test engineer teammate spawned with task description and CODE handoff
 - Test engineer creates comprehensive tests (unit, edge cases, integration as needed)
-- Structured HANDOFF with test signal (GREEN/YELLOW/RED)
-- Orchestrator creates atomic commit(s) of TEST phase work
+- Sends HANDOFF via SendMessage with test signal (GREEN/YELLOW/RED)
+- Orchestrator shuts down test engineer teammate and creates atomic commit(s) of TEST phase work
 
 **Verification**:
 ```bash
@@ -164,8 +164,8 @@ Should show both CODE and TEST phase commits.
 | Task hierarchy | Orchestrator output during setup | Feature + 4 phase tasks created with blockedBy chain |
 | Worktree created | `git worktree list` | New worktree appears at `.worktrees/{branch}` |
 | Phase ordering | Observe orchestrator output | P then A then C then T (or skipped phases noted) |
-| Agent delegation | Observe orchestrator output | Each phase dispatches the correct specialist type |
-| HANDOFF format | Agent responses | All 5 items present in each agent HANDOFF |
+| Teammate spawning | Observe orchestrator output | Each phase spawns the correct specialist teammate type |
+| HANDOFF format | Teammate SendMessage responses | All 5 items present in each teammate HANDOFF |
 | S4 Checkpoints | Orchestrator output between phases | Checkpoint runs (silently if all clear, visibly if issues) |
 | Commits exist | `git log` in worktree | At least one CODE commit and one TEST commit |
 | No orchestrator code edits | Observe tool usage | Orchestrator never uses Edit/Write on application code |
@@ -175,8 +175,8 @@ Should show both CODE and TEST phase commits.
 | Failure | Symptom | Diagnosis |
 |---------|---------|-----------|
 | Orchestrator writes code directly | Edit/Write tool used on `.py`/`.ts`/`.js` files | S5 delegation policy violated; orchestrator should delegate |
-| Agent stalls | No response after extended time | Check `pact-plugin/protocols/pact-agent-stall.md` for stall indicators |
+| Teammate stalls | No SendMessage received after spawning | Check `pact-plugin/protocols/pact-agent-stall.md` for stall indicators |
 | Phase skipped incorrectly | PREPARE skipped but requirements unclear | Completeness check in `pact-plugin/protocols/pact-completeness.md` may have been bypassed |
 | Worktree not created | Agent works in main repo directory | `/PACT:worktree-setup` was not invoked or failed silently |
-| HANDOFF missing items | Agent response lacks structured handoff | `validate_handoff` hook should warn; check `pact-plugin/hooks/validate_handoff.py` |
+| HANDOFF missing items | Teammate SendMessage lacks structured handoff | `validate_handoff` hook should warn; check `pact-plugin/hooks/validate_handoff.py` |
 | Scope detection false positive | Decomposition proposed for simple task | Counter-signals may not have been applied; verify scoring in output |
