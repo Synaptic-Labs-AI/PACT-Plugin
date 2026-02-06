@@ -121,14 +121,6 @@ verify_patterns "plan-mode.md" "Consultation task lifecycle" \
     "completed"
 echo ""
 
-# --- rePACT.md ---
-echo "rePACT.md:"
-verify_patterns "rePACT.md" "Sub-feature task lifecycle" \
-    "TaskCreate: Sub-feature task" \
-    "in_progress" \
-    "completed"
-echo ""
-
 # --- imPACT.md ---
 # imPACT uses different section names than other commands
 echo "imPACT.md:"
@@ -141,16 +133,6 @@ verify_patterns "imPACT.md" "Phase re-entry lifecycle" \
     "TaskCreate" \
     "in_progress" \
     "completed"
-echo ""
-
-# --- Scope-Aware Task Conventions ---
-echo "Scope-aware conventions (rePACT.md):"
-verify_patterns "rePACT.md" "Scope naming prefix" \
-    "\[scope:" \
-    "scope_id"
-verify_patterns "rePACT.md" "Scope metadata convention" \
-    "scope_id" \
-    "metadata"
 echo ""
 
 # --- Phase headings ---

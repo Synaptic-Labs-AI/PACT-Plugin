@@ -131,14 +131,14 @@ else
 fi
 echo ""
 
-# --- 9. rePACT.md documents suffix branch behavior for scoped execution ---
-echo "9. rePACT.md documents suffix branch behavior for scoped execution:"
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT.md documents suffix branch" \
+# --- 9. pact-scope-phases.md documents suffix branch behavior for scoped execution ---
+echo "9. pact-scope-phases.md documents suffix branch behavior for scoped execution:"
+check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
+    "pact-scope-phases.md documents suffix branch" \
     "suffix branch"
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT.md documents isolated worktree operation" \
-    "isolated worktree"
+check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
+    "pact-scope-phases.md documents worktree isolation" \
+    "Worktree isolation"
 echo ""
 
 # --- 10. orchestrate.md contains worktree path propagation instruction ---
@@ -151,9 +151,9 @@ echo "11. comPACT.md agent prompt templates include worktree path:"
 check_pattern "$COMMANDS_DIR/comPACT.md" "comPACT.md agent prompt templates include worktree path" "worktree_path"
 echo ""
 
-# --- 12. rePACT.md documents receiving worktree path ---
-echo "12. rePACT.md documents receiving worktree path:"
-check_pattern "$COMMANDS_DIR/rePACT.md" "rePACT.md documents receiving worktree path" "worktree path"
+# --- 12. pact-scope-phases.md documents worktree path in teammate spawn ---
+echo "12. pact-scope-phases.md documents worktree path in spawn prompt:"
+check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" "pact-scope-phases.md documents worktree path in spawn prompt" "worktree_path\|Worktree"
 echo ""
 
 # --- 13. plan-mode.md does not reference worktree skills ---
