@@ -56,19 +56,15 @@ Nested PACT: "Research and implement OAuth2 token refresh mechanism"
   - Mini-Test: Smoke test the refresh flow
 ```
 
-### Orchestrator-Initiated Recursion (/PACT:rePACT)
+### Orchestrator-Initiated Decomposition
 
-While specialists can invoke nested cycles autonomously, the orchestrator can also initiate them:
+While specialists can invoke nested cycles autonomously, the orchestrator can also initiate decomposition by spawning teammates for sub-scopes:
 
 | Initiator | Mechanism | When |
 |-----------|-----------|------|
 | Specialist | Autonomy Charter | Discovers complexity during work |
-| Orchestrator | `/PACT:rePACT` command | Identifies complex sub-task upfront |
+| Orchestrator | Scope detection + teammate spawning | Identifies complex sub-task upfront |
 
-**Usage:**
-- Single-domain: `/PACT:rePACT backend "implement rate limiting"`
-- Multi-domain: `/PACT:rePACT "implement audit logging sub-system"`
-
-See [rePACT.md](../commands/rePACT.md) for full command documentation.
+**Orchestrator usage**: When scope detection fires (see [pact-scope-detection.md](pact-scope-detection.md)), the orchestrator proceeds to the ATOMIZE phase and spawns teammates for each sub-scope using `Task(subagent_type="{specialist}", team_name="{team}", name="scope-{scope_id}-{role}", ...)`.
 
 ---

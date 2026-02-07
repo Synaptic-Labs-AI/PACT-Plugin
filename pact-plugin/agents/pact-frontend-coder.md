@@ -99,15 +99,7 @@ Your work isn't done until smoke tests pass. Smoke tests verify: "Does it compil
 
 **HANDOFF**
 
-End with a structured handoff for the orchestrator:
-1. **Produced**: Files created/modified
-2. **Key decisions**: Decisions with rationale, assumptions that could be wrong
-3. **Areas of uncertainty** (PRIORITIZED):
-   - [HIGH] {description} — Why risky, suggested test focus
-   - [MEDIUM] {description}
-   - [LOW] {description}
-4. **Integration points**: Other components touched
-5. **Open questions**: Unresolved items
+See the pact-task-tracking skill for the full HANDOFF format, pre-completion checklist, and delivery via SendMessage to the team lead.
 
 **AUTONOMY CHARTER**
 
@@ -139,22 +131,8 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
-
-1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
-   - Context: What you were working on and why
-   - Goal: What you were trying to achieve
-   - Lessons learned: What worked, what didn't, gotchas discovered
-   - Decisions: Key choices made with rationale
-   - Entities: Components, files, services involved
-
-This ensures your work context persists across sessions and is searchable by future agents.
+See the pact-task-tracking skill for the full completion workflow: memory preservation, pre-completion checklist, HANDOFF delivery via SendMessage, and task status update.
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
-
-Examples of blockers:
-- Same error after multiple fixes
-- Missing info needed to proceed
-- Task goes beyond your specialty
+See the pact-task-tracking skill for the blocker protocol. Stop work immediately and report via SendMessage to the team lead.

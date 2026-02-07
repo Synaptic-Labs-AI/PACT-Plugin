@@ -291,7 +291,7 @@ right purpose.
 
 **pact-memory's unique value**: Structured fields (context, goal, decisions,
 lessons_learned, entities) enable semantic search, graph-enhanced retrieval,
-and cross-agent knowledge sharing -- capabilities that auto-memory's free-form
+and cross-agent knowledge sharing — capabilities that auto-memory's free-form
 markdown does not provide.
 
 **Coexistence model**: Auto-memory captures broad session context automatically.

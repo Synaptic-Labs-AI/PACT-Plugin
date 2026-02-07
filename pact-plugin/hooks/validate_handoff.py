@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/validate_handoff.py
-Summary: SubagentStop hook that validates PACT agent handoff format.
+Summary: SubagentStop hook that validates PACT teammate handoff format.
 Used by: Claude Code settings.json SubagentStop hook
 
-Validates that PACT agents complete with proper handoff information
+Validates that PACT teammates complete with proper handoff information
 (produced, decisions, next steps) in their transcript text.
 
+This hook fires for both legacy subagents and Agent Teams teammates
+(SubagentStop fires for teammates -- empirically verified). It provides
+defense-in-depth validation alongside the pact-task-tracking skill's
+self-validation checklist that teammates run before completing.
+
 Note: Task protocol compliance (status, metadata) is NOT validated here.
-The orchestrator owns all TaskUpdate calls and processes agent output after
-this hook fires, so Task state cannot be reliably checked at SubagentStop time.
+Teammates manage their own Task updates, and this hook fires after the
+teammate's process ends, so Task state validation is not reliable here.
 
 Input: JSON from stdin with `transcript` and `agent_id`
 Output: JSON with `systemMessage` if handoff format is incomplete
@@ -94,10 +99,14 @@ def validate_handoff(transcript: str) -> tuple:
 
 def is_pact_agent(agent_id: str) -> bool:
     """
-    Check if the agent is a PACT framework agent.
+    Check if the agent is a PACT framework agent (teammate or legacy subagent).
+
+    Works for both Agent Teams teammates (identified by name like "backend-1")
+    and legacy subagents (identified by agent definition like "pact-backend-coder").
+    The SubagentStop hook fires for both models.
 
     Args:
-        agent_id: The identifier of the agent
+        agent_id: The identifier of the agent/teammate
 
     Returns:
         True if this is a PACT agent that should be validated
@@ -113,8 +122,10 @@ def main():
     """
     Main entry point for the SubagentStop hook.
 
-    Reads agent transcript from stdin and validates handoff format (prose)
-    for PACT agents. Outputs warning messages if validation fails.
+    Reads teammate/agent transcript from stdin and validates handoff format
+    (prose) for PACT agents. Outputs warning messages if validation fails.
+
+    Fires for both Agent Teams teammates and legacy subagents.
     """
     try:
         # Read input from stdin

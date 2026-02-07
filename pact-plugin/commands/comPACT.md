@@ -1,12 +1,12 @@
 ---
-description: Delegate within a single domain—concurrent agents for independent sub-tasks
+description: Delegate within a single domain—concurrent teammates for independent sub-tasks
 argument-hint: [backend|frontend|database|prepare|test|architect] <task>
 ---
 Delegate this focused task within a single PACT domain: $ARGUMENTS
 
 **MANDATORY: invoke concurrently for independent sub-tasks.** Sequential requires explicit file conflict or data dependency. If the task contains multiple independent items (bugs, endpoints, components), dispatch multiple specialists of the same type together unless they share files.
 
-> ⚠️ **Single domain ≠ single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. The domain is singular; the agents are not.
+> **Single domain does not equal single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. The domain is singular; the agents are not.
 
 ---
 
@@ -17,17 +17,19 @@ Create a simpler Task hierarchy than full orchestrate:
 ```
 1. TaskCreate: Feature task "{verb} {feature}" (single-domain work)
 2. TaskUpdate: Feature task status = "in_progress"
-3. Analyze: How many agents needed?
-4. TaskCreate: Agent task(s) — direct children of feature
+3. Analyze: How many teammates needed?
+4. TaskCreate: Agent task(s) —direct children of feature
 5. TaskUpdate: Agent tasks status = "in_progress"
 6. TaskUpdate: Feature task addBlockedBy = [all agent IDs]
-7. Dispatch agents concurrently with task IDs
-8. Monitor via TaskList until all agents complete
-9. TaskUpdate: Agent tasks status = "completed" (as each completes)
-10. TaskUpdate: Feature task status = "completed"
+7. Spawn teammates with task IDs in their prompts
+8. Review/approve teammate plans
+9. Monitor via TaskList and incoming SendMessage until all teammates complete
+10. Send shutdown_request to completed teammates
+11. TaskUpdate: Agent tasks status = "completed" (as each completes)
+12. TaskUpdate: Feature task status = "completed"
 ```
 
-> Steps 8-10 are detailed in the [After Specialist Completes](#after-specialist-completes) section below (includes test verification and commit steps).
+> Steps 8-12 are detailed in the [After Teammate Completes](#after-teammate-completes) section below (includes plan review, test verification, and commit steps).
 
 **Example structure:**
 ```
@@ -69,7 +71,7 @@ If the first word isn't a recognized shorthand, treat the entire argument as the
 - Generic verbs without domain context (fix, improve, update)
 - Feature-level scope that spans domains (login, user profile, dashboard)
 - Performance/optimization without specific layer
-- → Use `AskUserQuestion` tool:
+- Use `AskUserQuestion` tool:
   - Question: "Which specialist should handle this task?"
   - Options: List the 2-3 most likely specialists based on context (e.g., "Backend" / "Frontend" / "Database")
 
@@ -85,8 +87,8 @@ Invoke concurrently when:
 - Same patterns/conventions apply to all
 
 **Examples:**
-| Task | Agents Invoked |
-|------|----------------|
+| Task | Teammates Spawned |
+|------|-------------------|
 | "Fix 3 backend bugs" | 3 backend-coders at once |
 | "Add validation to 5 endpoints" | Multiple backend-coders simultaneously |
 | "Update styling on 3 components" | Multiple frontend-coders together |
@@ -100,7 +102,7 @@ Invoke concurrently when:
 
 ## S2 Light Coordination (Required Before Concurrent Dispatch)
 
-Before invoking multiple specialists concurrently, perform this coordination check:
+Before spawning multiple specialists concurrently, perform this coordination check:
 
 1. **Identify potential conflicts**
    - List files each sub-task will touch
@@ -108,7 +110,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 2. **Resolve conflicts (if any)**
    - **Same file**: Sequence those sub-tasks OR assign clear section boundaries
-   - **Style/convention**: First agent's choice becomes standard
+   - **Style/convention**: First teammate's choice becomes standard
 
 3. **Set boundaries**
    - Clearly state which sub-task handles which files/components
@@ -125,7 +127,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 | Internal (don't show) | External (show) |
 |----------------------|-----------------|
 | S2 coordination analysis, conflict checking | `Delegating to backend coder` |
-| Concurrency reasoning, file boundary decisions | `Invoking 3 frontend coders in parallel` |
+| Concurrency reasoning, file boundary decisions | `Spawning 3 frontend coders in parallel` |
 | Specialist selection logic | `Auto-selected: database (SQL keywords detected)` |
 
 **User can always ask** for details (e.g., "Why that specialist?" or "Show me the conflict analysis").
@@ -139,54 +141,65 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 ## Pre-Invocation (Required)
 
-1. **Set up worktree** — If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
-2. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
+1. **Set up worktree** —If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
+2. **S2 coordination** (if concurrent) —Check for file conflicts, assign boundaries
 
 ---
 
-## Invocation
+## Spawning Teammates
+
+Spawn teammates into the existing session team (created by the session-start hook). No `TeamCreate` needed.
+
+**Spawn tasks and teammates together in a single message** (parallel tool calls):
+```
+Single message (all parallel):
+├── TaskCreate("Fix auth bug", owner="backend-1")
+├── TaskCreate("Fix cache bug", owner="backend-2")
+├── Task(spawn backend-1 teammate)
+└── Task(spawn backend-2 teammate)
+```
 
 ### Multiple Specialists Concurrently (Default)
 
-When the task contains multiple independent items, invoke multiple specialists together with boundary context:
+When the task contains multiple independent items, spawn multiple teammates together with boundary context:
 
 ```
-comPACT mode (concurrent): You are one of [N] specialists working concurrently.
+comPACT mode (concurrent): You are one of [N] specialists working concurrently as teammates.
 You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree.
 
 YOUR SCOPE: [specific sub-task and files this agent owns]
-OTHER AGENTS' SCOPE: [what other agents are handling - do not touch]
+OTHER AGENTS' SCOPE: [what other agents are handling —do not touch]
 
 Work directly from this task description.
-Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context.
+Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist —reference relevant context.
 Do not create new documentation artifacts in docs/.
-Stay within your assigned scope—do not modify files outside your boundary.
+Stay within your assigned scope —do not modify files outside your boundary.
 
 Testing responsibilities:
 - New unit tests: Required for logic changes.
 - Existing tests: If your changes break existing tests, fix them.
 - Before handoff: Run the test suite for your scope.
 
-If you hit a blocker or need to modify files outside your scope, STOP and report it.
+If you hit a blocker or need to modify files outside your scope, STOP and report it via SendMessage to the lead.
 
 Task: [this agent's specific sub-task]
 ```
 
-**After all concurrent agents complete**: Verify no conflicts occurred, run full test suite.
+**After all concurrent teammates complete**: Verify no conflicts occurred, run full test suite.
 
-### Single Specialist Agent (When Required)
+### Single Specialist Teammate (When Required)
 
-Use a single specialist agent only when:
+Use a single specialist only when:
 - Task is atomic (one bug, one endpoint, one component)
 - Sub-tasks modify the same files
 - Sub-tasks have dependencies on each other
 - Conventions haven't been established yet (run one first to set patterns)
 
-**Invoke the specialist with**:
+**Spawn the specialist with**:
 ```
 comPACT mode: Work directly from this task description.
 You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree.
-Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context.
+Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist —reference relevant context.
 Do not create new documentation artifacts in docs/.
 Focus on the task at hand.
 Testing responsibilities:
@@ -194,52 +207,50 @@ Testing responsibilities:
 - Existing tests: If your changes break existing tests, fix them.
 - Before handoff: Run the test suite and ensure all tests pass.
 
-> **Smoke vs comprehensive tests**: These are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work handled by `pact-test-engineer`.
+> **Smoke vs comprehensive tests**: These are verification tests —enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work handled by `pact-test-engineer`.
 
-If you hit a blocker, STOP and report it so the orchestrator can run /PACT:imPACT.
+If you hit a blocker, STOP and report it via SendMessage to the lead.
 
 Task: [user's task description]
 ```
 
 ---
 
-## Signal Monitoring
+## Plan Approval
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch
-- When agent reports completion
-- On any unexpected agent stoppage
-
-On signal detected: Follow Signal Task Handling in CLAUDE.md.
-
-For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.md#agent-stall-detection).
+All teammates are spawned with `mode="plan"`. Review each plan for:
+- Does it align with the task scope?
+- Are file boundaries respected (for concurrent work)?
+- Is the approach reasonable?
 
 ---
 
-## After Specialist Completes
+## After Teammate Completes
 
-1. **Receive handoff** from specialist(s)
-2. **TaskUpdate**: Agent tasks status = "completed" (as each completes)
-3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
-4. **Create atomic commit(s)** — stage and commit before proceeding
+Teammates deliver their HANDOFF via `SendMessage` to the lead, then mark their task complete via `TaskUpdate`.
+
+1. **Receive HANDOFF** via SendMessage from teammate(s)
+2. **Run tests** —verify work passes. If tests fail, message the teammate with details for fixes.
+3. **Shutdown teammate** after successful completion
+4. **Create atomic commit(s)** —stage and commit before proceeding
 5. **TaskUpdate**: Feature task status = "completed"
 
-**Next steps** — After commit, ask: "Work committed. Create PR?"
-- **Yes (Recommended)** → invoke `/PACT:peer-review`
-- **Not yet** → worktree persists; user resumes later. Clean up manually with `/PACT:worktree-cleanup` when done.
-- **More work** → continue with comPACT or orchestrate
+**Next steps** —After commit, ask: "Work committed. Create PR?"
+- **Yes (Recommended)** —invoke `/PACT:peer-review` (reviewers spawn into the SAME existing team)
+- **Not yet** —worktree persists; user resumes later. Clean up manually with `/PACT:worktree-cleanup` when done.
+- **More work** —continue with comPACT or orchestrate
 
-**If blocker reported**:
+**If blocker reported** (teammate sends BLOCKER via SendMessage):
 
 Examples of blockers:
 - Task requires a different specialist's domain
 - Missing dependencies, access, or information
 - Same error persists after multiple fix attempts
 - Scope exceeds single-domain capability (needs cross-domain coordination)
-- Concurrent agents have unresolvable conflicts
+- Concurrent teammates have unresolvable conflicts
 
 When blocker is reported:
-1. Receive blocker report from specialist
+1. Receive blocker report from teammate via SendMessage
 2. Run `/PACT:imPACT` to triage
 3. May escalate to `/PACT:orchestrate` if task exceeds single-domain scope
 

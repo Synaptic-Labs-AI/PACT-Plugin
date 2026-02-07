@@ -104,7 +104,7 @@ When context has been compacted (lost to summarization):
 
 You do NOT need to manually edit CLAUDE.md. Just call `memory.save({...})` and the sync happens automatically.
 
-**Relationship to auto-memory**: The platform's auto-memory (MEMORY.md) captures free-form session learnings automatically. Working Memory provides a complementary structured view -- PACT-specific context (goals, decisions, lessons) sourced from the SQLite database. Both are loaded into the system prompt independently. The reduced entry count (3 instead of 5) limits token overlap while retaining the structured format that auto-memory does not provide.
+**Relationship to auto-memory**: The platform's auto-memory (MEMORY.md) captures free-form session learnings automatically. Working Memory provides a complementary structured view — PACT-specific context (goals, decisions, lessons) sourced from the SQLite database. Both are loaded into the system prompt independently. The reduced entry count (3 instead of 5) limits token overlap while retaining the structured format that auto-memory does not provide.
 
 ## 5. Memory Cleanup
 
@@ -154,18 +154,13 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
-
-Examples of blockers:
-- Same error after multiple fixes
-- Missing info needed to proceed
-- Task goes beyond your specialty
+See the pact-task-tracking skill for the blocker protocol. Stop work immediately and report via SendMessage to the team lead.
 
 **DOMAIN-SPECIFIC BLOCKERS**
 
 If you encounter issues with the memory system:
 1. Check memory status with `get_status()`
-2. Report specific error to orchestrator
+2. Report specific error to the team lead via SendMessage
 3. Suggest fallback (e.g., manual context capture in docs/)
 
 Common memory-specific issues:

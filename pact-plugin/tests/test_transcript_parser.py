@@ -23,6 +23,7 @@ from refresh.transcript_parser import (
     find_last_user_message,
     find_task_calls_to_agent,
     find_trigger_turn_index,
+    find_send_messages,
 )
 from refresh.constants import LARGE_FILE_THRESHOLD_BYTES
 
@@ -360,6 +361,134 @@ class TestFindFunctions:
         """Test finding Task calls with no matches."""
         results = find_task_calls_to_agent(sample_turns, "nonexistent-")
         assert results == []
+
+
+class TestAgentTeamsTurnMethods:
+    """Tests for Agent Teams methods on Turn dataclass."""
+
+    def test_has_send_message_true(self):
+        """Test has_send_message returns True when SendMessage call exists."""
+        send_call = ToolCall(
+            name="SendMessage",
+            input_data={"type": "message", "recipient": "backend-1", "content": "HANDOFF"},
+        )
+        turn = Turn(turn_type="assistant", tool_calls=[send_call])
+        assert turn.has_send_message() is True
+
+    def test_has_send_message_false(self):
+        """Test has_send_message returns False when no SendMessage call."""
+        task_call = ToolCall(
+            name="Task",
+            input_data={"subagent_type": "pact-backend-coder"},
+        )
+        turn = Turn(turn_type="assistant", tool_calls=[task_call])
+        assert turn.has_send_message() is False
+
+    def test_has_send_message_no_tools(self):
+        """Test has_send_message returns False for turn with no tool calls."""
+        turn = Turn(turn_type="assistant", content="No tools here")
+        assert turn.has_send_message() is False
+
+    def test_has_send_message_among_other_tools(self):
+        """Test has_send_message with mixed tool calls."""
+        calls = [
+            ToolCall(name="Read", input_data={"file_path": "/test"}),
+            ToolCall(name="SendMessage", input_data={"type": "message", "recipient": "test-1"}),
+            ToolCall(name="Write", input_data={"file_path": "/out"}),
+        ]
+        turn = Turn(turn_type="assistant", tool_calls=calls)
+        assert turn.has_send_message() is True
+
+    def test_has_team_create_true(self):
+        """Test has_team_create returns True when TeamCreate call exists."""
+        create_call = ToolCall(
+            name="TeamCreate",
+            input_data={"team_name": "v3-agent-teams"},
+        )
+        turn = Turn(turn_type="assistant", tool_calls=[create_call])
+        assert turn.has_team_create() is True
+
+    def test_has_team_create_false(self):
+        """Test has_team_create returns False when no TeamCreate call."""
+        turn = Turn(turn_type="assistant", content="No team create")
+        assert turn.has_team_create() is False
+
+    def test_has_team_create_among_other_tools(self):
+        """Test has_team_create with mixed tool calls."""
+        calls = [
+            ToolCall(name="SendMessage", input_data={"type": "message"}),
+            ToolCall(name="TeamCreate", input_data={"team_name": "test"}),
+        ]
+        turn = Turn(turn_type="assistant", tool_calls=calls)
+        assert turn.has_team_create() is True
+
+
+class TestFindSendMessages:
+    """Tests for find_send_messages function."""
+
+    def test_find_send_messages_basic(self):
+        """Test finding SendMessage calls in turns."""
+        send_call = ToolCall(
+            name="SendMessage",
+            input_data={"type": "message", "recipient": "backend-1", "content": "test"},
+        )
+        turns = [
+            Turn(turn_type="user", content="trigger"),
+            Turn(turn_type="assistant", tool_calls=[send_call], content="Sending..."),
+        ]
+
+        results = find_send_messages(turns)
+
+        assert len(results) == 1
+        turn, tc = results[0]
+        assert tc.name == "SendMessage"
+        assert tc.input_data["recipient"] == "backend-1"
+
+    def test_find_send_messages_multiple(self):
+        """Test finding multiple SendMessage calls across turns."""
+        send1 = ToolCall(name="SendMessage", input_data={"recipient": "backend-1"})
+        send2 = ToolCall(name="SendMessage", input_data={"recipient": "architect-1"})
+        turns = [
+            Turn(turn_type="assistant", tool_calls=[send1]),
+            Turn(turn_type="user", content="ok"),
+            Turn(turn_type="assistant", tool_calls=[send2]),
+        ]
+
+        results = find_send_messages(turns)
+
+        assert len(results) == 2
+        assert results[0][1].input_data["recipient"] == "backend-1"
+        assert results[1][1].input_data["recipient"] == "architect-1"
+
+    def test_find_send_messages_none(self):
+        """Test returns empty list when no SendMessage calls exist."""
+        turns = [
+            Turn(turn_type="user", content="Hello"),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[ToolCall(name="Task", input_data={"subagent_type": "pact-backend-coder"})],
+            ),
+        ]
+
+        results = find_send_messages(turns)
+
+        assert results == []
+
+    def test_find_send_messages_empty_turns(self):
+        """Test returns empty list for empty turns list."""
+        assert find_send_messages([]) == []
+
+    def test_find_send_messages_multiple_in_one_turn(self):
+        """Test finding multiple SendMessage calls within a single turn."""
+        send1 = ToolCall(name="SendMessage", input_data={"recipient": "backend-1"})
+        send2 = ToolCall(name="SendMessage", input_data={"recipient": "test-1"})
+        turns = [
+            Turn(turn_type="assistant", tool_calls=[send1, send2]),
+        ]
+
+        results = find_send_messages(turns)
+
+        assert len(results) == 2
 
 
 class TestEdgeCases:

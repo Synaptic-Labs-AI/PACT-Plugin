@@ -11,11 +11,16 @@ Performs:
 4. Ensures project CLAUDE.md exists with memory sections
 5. Checks for stale pinned context (delegated to staleness.py)
 6. Checks for in_progress Tasks (resumption context via Task integration)
+7. Generates Agent Teams instruction (tells orchestrator to ensure team exists)
 
 Note: Memory-related initialization (dependency installation, embedding
 migration, pending embedding catch-up) is now lazy-loaded on first memory
 operation via pact-memory/scripts/memory_init.py. This reduces startup
 cost for non-memory users.
+
+Note: This hook is type "command" (shell command) and CANNOT call Claude Code
+tools like TeamCreate directly. It outputs text instructions that the
+orchestrator reads and acts on.
 
 Input: JSON from stdin with session context
 Output: JSON with `hookSpecificOutput.additionalContext` for status
@@ -34,6 +39,9 @@ if str(_hooks_dir) not in sys.path:
 
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import get_task_list
+
+# Import shared Team utilities for Agent Teams integration
+from shared.team_utils import derive_team_name, get_current_branch, team_exists
 
 # Import staleness detection (extracted to staleness.py for maintainability).
 # Public names are get_project_claude_md_path / estimate_tokens in staleness.py.
@@ -370,6 +378,65 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _team_instruction(source: str) -> str | None:
+    """
+    Generate an Agent Teams instruction for the orchestrator.
+
+    On normal session start, instructs the orchestrator to create a team
+    via TeamCreate. On post-compaction start, the team already exists
+    (teammates survive compaction as independent processes), so the
+    instruction tells the orchestrator the team is already active.
+
+    This hook cannot call TeamCreate directly (type: "command" hooks
+    output text, not tool calls). The orchestrator reads this instruction
+    and acts on it.
+
+    Args:
+        source: Session start source ("compact" for post-compaction,
+                "resume" for resumed sessions, empty for new sessions)
+
+    Returns:
+        Instruction string, or None if team name cannot be derived
+    """
+    branch = get_current_branch()
+    if not branch:
+        return None
+
+    team_name = derive_team_name(branch)
+
+    # team_exists() checks ~/.claude/teams/{name}/config.json, which is an
+    # assumed path. If Agent Teams uses a different storage path, this check
+    # will always return False. The fallback is correct (idempotent TeamCreate).
+    if source == "compact":
+        # Team and teammates survive compaction (empirically verified).
+        # Just remind the orchestrator of the existing team name.
+        if team_exists(team_name):
+            return (
+                f"Agent Teams: Team '{team_name}' exists (survived compaction). "
+                "Teammates are independent processes and remain active. "
+                "Use SendMessage to check on teammates if needed."
+            )
+        # Team dir doesn't exist yet — may have been created in-memory only.
+        # Fall through to the creation instruction.
+
+    if source == "resume":
+        # /resume restores session but NOT teammate processes.
+        # Team config on disk may exist, but teammates are dead.
+        if team_exists(team_name):
+            return (
+                f"Agent Teams: Team '{team_name}' config exists but teammates "
+                "are NOT running (/resume does not restore teammate processes). "
+                "Re-spawn active teammates from Task state if needed."
+            )
+
+    # New session (or fallback): instruct orchestrator to create team
+    return (
+        f"Agent Teams: Create team via TeamCreate(team_name='{team_name}') "
+        "before spawning any teammates. If team already exists, TeamCreate "
+        "is idempotent."
+    )
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -381,6 +448,7 @@ def main():
     4. Ensures project CLAUDE.md exists with memory sections
     5. Checks for stale pinned context entries in project CLAUDE.md
     6. Checks for in_progress Tasks (resumption context via Task integration)
+    7. Generates Agent Teams instruction (team creation or recovery)
 
     Memory initialization (dependencies, migrations, embedding catch-up) is
     now lazy-loaded on first memory operation to reduce startup cost for
@@ -445,6 +513,12 @@ def main():
                     system_messages.append(resumption_msg)
                 else:
                     context_parts.append(resumption_msg)
+
+        # 7. Generate Agent Teams instruction (team creation or recovery)
+        source = input_data.get("source", "")
+        team_msg = _team_instruction(source)
+        if team_msg:
+            context_parts.append(team_msg)
 
         # Build output
         output = {}

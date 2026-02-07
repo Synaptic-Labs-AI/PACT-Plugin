@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "2.8.0",
+  "version": "3.0.0",
   "description": "PACT Framework - Prepare, Architect, Code, Test methodology with VSM-enhanced orchestration, specialist agents, and viability sensing for systematic AI-assisted development",
   "author": {
     "name": "ProfSynapse",
@@ -25,7 +25,6 @@
   "commands": [
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
-    "./commands/rePACT.md",
     "./commands/imPACT.md",
     "./commands/peer-review.md",
     "./commands/plan-mode.md",

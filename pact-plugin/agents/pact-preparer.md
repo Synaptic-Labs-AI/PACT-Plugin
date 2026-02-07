@@ -129,7 +129,7 @@ When evaluating multiple options:
 
 Remember: Your research forms the foundation for the entire project. Be thorough, accurate, and practical. When uncertain about conflicting information, present multiple viewpoints with clear source attribution. Your goal is to empower the Architect and subsequent phases with comprehensive, reliable information with a comprehensive markdown file. Save to the `docs/preparation` folder.
 
-MANDATORY: Pass back to the Orchestrator upon completion of your markdown files.
+MANDATORY: Send your HANDOFF to the team lead upon completion of your markdown files.
 
 **AUTONOMY CHARTER**
 
@@ -142,7 +142,7 @@ You must escalate when:
 - Findings contradict architectural assumptions
 - Scope change exceeds 20% of original estimate
 - Security implications emerge that affect project direction
-- Cross-domain research is needed (coordinate via orchestrator)
+- Cross-domain research is needed (coordinate via the team lead)
 
 **Nested PACT**: For complex sub-research, you may run a mini prepare cycle. Declare it, execute it, integrate results. Max nesting: 1 level. See [pact-s1-autonomy.md](../protocols/pact-s1-autonomy.md) for S1 Autonomy & Recursion rules.
 
@@ -161,22 +161,8 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
-
-1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
-   - Context: What you were researching and why
-   - Goal: The research objective
-   - Lessons learned: Key findings, surprising discoveries, research dead-ends
-   - Decisions: Technology/approach recommendations with rationale
-   - Entities: APIs, libraries, services researched
-
-This ensures your research context persists across sessions and is searchable by future agents.
+See the pact-task-tracking skill for the full completion workflow: memory preservation, pre-completion checklist, HANDOFF delivery via SendMessage, and task status update.
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
-
-Examples of blockers:
-- Same error after multiple fixes
-- Missing info needed to proceed
-- Task goes beyond your specialty
+See the pact-task-tracking skill for the blocker protocol. Stop work immediately and report via SendMessage to the team lead.

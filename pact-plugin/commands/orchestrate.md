@@ -6,6 +6,19 @@ Orchestrate specialist PACT agents through the PACT workflow to address: $ARGUME
 
 ---
 
+## Team Lifecycle
+
+The session team is created by the SessionStart hook at session initialization. Commands do not need to create teams.
+
+**Ensure team exists**: If the team was not created (e.g., hook failure, manual session), call `TeamCreate(team_name="{feature-slug}")` before proceeding.
+
+**Teammate lifecycle within orchestrate**:
+- Teammates are spawned per phase into the session team
+- Between phases, shut down current teammates before spawning next-phase teammates
+- The team itself persists for the entire session (shared across commands)
+
+---
+
 ## Task Hierarchy
 
 Create the full Task hierarchy upfront for workflow visibility:
@@ -35,12 +48,12 @@ For each phase execution:
 ```
 a. TaskUpdate: phase status = "in_progress"
 b. Analyze work needed (QDCL for CODE)
-c. TaskCreate: agent task(s) as children of phase
-d. TaskUpdate: agent tasks status = "in_progress"
-e. TaskUpdate: next phase addBlockedBy = [agent IDs]
-f. Dispatch agents with task IDs in their prompts
-g. Monitor via TaskList until agents complete
-h. TaskUpdate: agent tasks status = "completed" (as each completes)
+c. TaskCreate: agent task(s) with owner="{teammate-name}"
+d. Spawn teammates (Task with team_name/name/mode="plan")
+e. Review and approve teammate plans
+f. Monitor: teammates self-update tasks, send HANDOFFs via SendMessage
+g. Receive HANDOFFs, verify completeness
+h. Shut down phase teammates
 i. TaskUpdate: phase status = "completed"
 ```
 
@@ -53,20 +66,20 @@ Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requiremen
   - "requirements_explicit": Task description contains all needed context
   - "existing_docs_cover_scope": docs/preparation/ or docs/architecture/ already complete
   - "trivial_change": Change too small to warrant this phase
-  - "decomposition_active": Scope detection triggered decomposition; sub-scopes handle this phase via rePACT
+  - "decomposition_active": Scope detection triggered decomposition; sub-scopes handle this phase
 -->
 
 ---
 
 ## S3/S4 Mode Awareness
 
-This command primarily operates in **S3 mode** (operational control)—executing the plan and coordinating agents. However, mode transitions are important:
+This command primarily operates in **S3 mode** (operational control)—executing the plan and coordinating teammates. However, mode transitions are important:
 
 | Phase | Primary Mode | Mode Checks |
 |-------|--------------|-------------|
 | **Before Starting** | S4 | Understand task, assess complexity, check for plans |
 | **Context Assessment** | S4 | Should phases be skipped? What's the right approach? |
-| **Phase Execution** | S3 | Coordinate agents, track progress, clear blockers |
+| **Phase Execution** | S3 | Coordinate teammates, track progress, clear blockers |
 | **On Blocker** | S4 | Assess before responding—is this operational or strategic? |
 | **Between Phases** | S4 | Still on track? Adaptation needed? |
 | **After Completion** | S4 | Retrospective—what worked, what didn't? |
@@ -78,6 +91,12 @@ When transitioning to S4 mode, pause and ask: "Are we still building the right t
 ## Responding to Algedonic Signals
 
 For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinction), see [algedonic.md](../protocols/algedonic.md).
+
+**HALT signal handling with teammates**: When a teammate broadcasts a HALT signal, all teammates receive it via broadcast and should stop work. The lead must:
+1. Acknowledge the HALT
+2. Send shutdown requests to all active teammates
+3. Present the signal to the user
+4. Await user decision before resuming
 
 ---
 
@@ -102,7 +121,7 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 | Verbose (avoid) | Concise (prefer) |
 |-----------------|------------------|
 | "Let me assess variety and check for the approved plan" | (just do it, show result) |
-| "I'm now going to invoke the backend coder" | `Invoking backend coder` |
+| "I'm now going to spawn the backend coder teammate" | `Spawning backend-1` |
 | "S4 Mode — Task Assessment" | (implicit, don't announce) |
 
 ---
@@ -152,7 +171,7 @@ If comPACT selected, hand off to `/PACT:comPACT`.
 
 ## Execution Philosophy
 
-**MANDATORY: Invoke concurrently unless blocked.** The burden of proof is on sequential dispatch. If you cannot cite a specific file conflict or data dependency, you MUST invoke them concurrently.
+**MANDATORY: Spawn concurrently unless blocked.** The burden of proof is on sequential dispatch. If you cannot cite a specific file conflict or data dependency, you MUST spawn them concurrently.
 
 This applies across ALL phases, not just CODE:
 - PREPARE with multiple research areas → multiple preparers at once
@@ -160,7 +179,7 @@ This applies across ALL phases, not just CODE:
 - CODE with multiple domains or independent tasks → multiple coders together
 - TEST with independent test suites → multiple test engineers concurrently
 
-Sequential execution is the exception requiring explicit justification. When assessing any phase, ask: "Can specialists be invoked concurrently?" The answer is usually yes.
+Sequential execution is the exception requiring explicit justification. When assessing any phase, ask: "Can specialists be spawned concurrently?" The answer is usually yes.
 
 ---
 
@@ -238,6 +257,32 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 ---
 
+## Teammate Spawning Pattern
+
+### Spawning Teammates
+
+Spawn teammates using `Task` with team parameters. All teammates for a phase are spawned in a single message as parallel tool calls:
+
+```
+Lead: Single message (all parallel tool calls):
+├── TaskCreate("Research area A", owner="preparer-1")
+├── TaskCreate("Research area B", owner="preparer-2")
+├── Task(subagent_type="pact-preparer", team_name="{team}", name="preparer-1", mode="plan", prompt="...")
+└── Task(subagent_type="pact-preparer", team_name="{team}", name="preparer-2", mode="plan", prompt="...")
+```
+
+**Naming convention**: `{role}-{number}` (e.g., `"backend-1"`, `"architect-2"`, `"preparer-1"`). For scoped orchestration: `"scope-{scope}-{role}"` (e.g., `"scope-auth-backend"`, `"scope-billing-frontend"`).
+
+### Plan Approval
+
+All teammates are spawned with `mode="plan"`. **Review all plans for a phase before approving any** — this allows the lead to identify conflicts, overlaps, or gaps across the phase's work items before implementation begins.
+
+### Shutting Down Teammates Between Phases
+
+Shut down all current-phase teammates and wait for acknowledgment before spawning next-phase teammates. If a teammate rejects shutdown, check TaskList for its task status — it may still be completing work.
+
+---
+
 ### PREPARE Phase → `pact-preparer`
 
 **Skip criteria met (including completeness check)?** → Proceed to ARCHITECT phase.
@@ -246,18 +291,26 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Invoke `pact-preparer` with**:
+**Spawn `pact-preparer` teammate(s) with**:
 - Task description
 - Plan sections above (if any)
 - "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 
+**Example spawn**:
+```
+TaskCreate("Research auth patterns and API contracts", owner="preparer-1")
+Task(subagent_type="pact-preparer", team_name="{team}", name="preparer-1", mode="plan",
+  prompt="CONTEXT: ... MISSION: ... INSTRUCTIONS: ... GUIDELINES: ...")
+```
+
 **Before next phase**:
 - [ ] Outputs exist in `docs/preparation/`
-- [ ] Specialist handoff received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] HANDOFF received from each preparer (via SendMessage)
+- [ ] If blocker reported (via SendMessage) → `/PACT:imPACT`
+- [ ] Shut down all preparer teammates
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 
-**Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
+**Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), spawn multiple preparers together with clear scope boundaries.
 
 ---
 
@@ -288,7 +341,7 @@ After PREPARE completes (or is skipped with plan context), evaluate whether the 
 
 | Result | Action |
 |--------|--------|
-| Score below threshold | Single scope — continue with today's behavior |
+| Score below threshold | Single scope — continue with standard flow |
 | Score at/above threshold | Propose decomposition (see Evaluation Response below) |
 | All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Evaluation Response below) |
 
@@ -298,7 +351,7 @@ After PREPARE completes (or is skipped with plan context), evaluate whether the 
 
 When detection fires (score >= threshold), follow the evaluation response protocol in [pact-scope-detection.md](../protocols/pact-scope-detection.md) — S5 confirmation flow, user response mapping, and autonomous tier.
 
-**On confirmed decomposition**: Generate a scope contract for each sub-scope before invoking rePACT. See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contract format and generation process. Skip top-level ARCHITECT and CODE — mark both `completed` with `{"skipped": true, "skip_reason": "decomposition_active"}`. The workflow switches to scoped PACT phases: ATOMIZE (dispatch sub-scopes) → CONSOLIDATE (verify contracts) → TEST (comprehensive feature testing). See ATOMIZE Phase and CONSOLIDATE Phase below.
+**On confirmed decomposition**: Generate a scope contract for each sub-scope before spawning teammates. See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contract format and generation process. Skip top-level ARCHITECT and CODE — mark both `completed` with `{"skipped": true, "skip_reason": "decomposition_active"}`. The workflow switches to scoped PACT phases: ATOMIZE (dispatch sub-scopes) → CONSOLIDATE (verify contracts) → TEST (comprehensive feature testing). See ATOMIZE Phase and CONSOLIDATE Phase below.
 
 ---
 
@@ -311,7 +364,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Key Decisions"
 - "Interface Contracts"
 
-**Invoke `pact-architect` with**:
+**Spawn `pact-architect` teammate(s) with**:
 - Task description
 - PREPARE phase outputs:
   - Tell `pact-architect` where to find them (e.g., "Read `docs/preparation/{feature}.md` for research context")
@@ -320,13 +373,21 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - Plan sections above (if any)
 - "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 
+**Example spawn**:
+```
+TaskCreate("Design auth service architecture", owner="architect-1")
+Task(subagent_type="pact-architect", team_name="{team}", name="architect-1", mode="plan",
+  prompt="CONTEXT: ... MISSION: ... INSTRUCTIONS: ... GUIDELINES: ...")
+```
+
 **Before next phase**:
 - [ ] Outputs exist in `docs/architecture/`
-- [ ] Specialist handoff received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] HANDOFF received from each architect (via SendMessage)
+- [ ] If blocker reported (via SendMessage) → `/PACT:imPACT`
+- [ ] Shut down all architect teammates
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
-**Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
+**Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), spawn multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
 
 ---
 
@@ -334,7 +395,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 
 **Always runs.** This is the core work.
 
-> **S5 Policy Checkpoint (Pre-CODE)**: Before invoking coders, verify:
+> **S5 Policy Checkpoint (Pre-CODE)**: Before spawning coders, verify:
 > 1. "Does the architecture align with project principles?"
 > 2. "Am I delegating ALL code changes to specialists?" (orchestrator writes no application code)
 > 3. "Are there any S5 non-negotiables at risk?"
@@ -351,9 +412,9 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - `pact-frontend-coder` — UI, client-side
 - `pact-database-engineer` — schema, queries, migrations
 
-#### Invoke Concurrently by Default
+#### Spawn Concurrently by Default
 
-**Default stance**: Dispatch specialists together unless proven dependent. Sequential requires explicit justification.
+**Default stance**: Spawn specialists together unless proven dependent. Sequential requires explicit justification.
 
 **Required decision output** (no exceptions):
 - "**Concurrent**: [groupings]" — the expected outcome
@@ -366,7 +427,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 
 #### Execution Strategy Analysis
 
-**REQUIRED**: Complete the QDCL internally before invoking coders.
+**REQUIRED**: Complete the QDCL internally before spawning coders.
 
 **Quick Dependency Checklist (QDCL)** — run mentally, don't output:
 
@@ -376,7 +437,7 @@ For each pair of work units, check:
 - Shared interface undefined? → Define interface first, then concurrent
 - None of above? → Concurrent
 
-**Output format**: Decision only. Example: `Invoking backend + frontend coders in parallel` or `Sequential: database first, then backend (schema dependency)`
+**Output format**: Decision only. Example: `Spawning backend-1 + frontend-1 in parallel` or `Sequential: database-1 first, then backend-1 (schema dependency)`
 
 **If QDCL shows no dependencies**: Concurrent is your answer. Don't second-guess.
 
@@ -384,17 +445,17 @@ For each pair of work units, check:
 
 Before concurrent dispatch, check internally: shared files? shared interfaces? conventions established?
 
-- **Shared files**: Sequence those agents OR assign clear boundaries
-- **Conventions**: First agent's choice becomes standard; propagate to others
-- **Resolution authority**: Technical disagreements → Architect arbitrates; Style/convention → First agent's choice
+- **Shared files**: Sequence those teammates OR assign clear boundaries
+- **Conventions**: First teammate's choice becomes standard; propagate to others
+- **Resolution authority**: Technical disagreements → Architect arbitrates; Style/convention → First teammate's choice
 
-**Output**: Silent if no conflicts; only mention if conflicts found (e.g., `S2 check: types.ts shared — backend writes, frontend reads`).
+**Output**: Silent if no conflicts; only mention if conflicts found (e.g., `S2 check: types.ts shared — backend-1 writes, frontend-1 reads`).
 
 **Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
 
-**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
+**Include worktree path in all teammate prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
 
-**Invoke coder(s) with**:
+**Spawn coder teammate(s) with**:
 - Task description
 - ARCHITECT phase outputs:
   - Tell the coder(s) where to find them (e.g., "Read `docs/architecture/{feature}.md` for design context")
@@ -405,28 +466,36 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
 - "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
 
+**Example spawn (concurrent)**:
+```
+TaskCreate("Implement auth endpoint", owner="backend-1")
+TaskCreate("Implement billing endpoint", owner="backend-2")
+TaskCreate("Build dashboard UI", owner="frontend-1")
+Task(subagent_type="pact-backend-coder", team_name="{team}", name="backend-1", mode="plan",
+  prompt="CONTEXT: ... MISSION: Implement auth endpoint ... GUIDELINES: ...")
+Task(subagent_type="pact-backend-coder", team_name="{team}", name="backend-2", mode="plan",
+  prompt="CONTEXT: ... MISSION: Implement billing endpoint ... GUIDELINES: ...")
+Task(subagent_type="pact-frontend-coder", team_name="{team}", name="frontend-1", mode="plan",
+  prompt="CONTEXT: ... MISSION: Build dashboard UI ... GUIDELINES: ...")
+```
+
 **Before next phase**:
-- [ ] Implementation complete
+- [ ] Implementation complete (all coder HANDOFFs received via SendMessage)
 - [ ] All tests passing (full test suite; fix any tests your changes break)
-- [ ] Specialist handoff(s) received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] If blocker reported (via SendMessage) → `/PACT:imPACT`
+- [ ] Shut down all coder teammates
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE
 
-If a sub-task emerges that is too complex for a single specialist invocation:
+If a sub-task emerges that is too complex for a single specialist:
 
 | Sub-Task Complexity | Indicators | Use |
 |---------------------|------------|-----|
-| **Simple** | Code-only, clear requirements | Direct specialist invocation |
+| **Simple** | Code-only, clear requirements | Direct specialist teammate |
 | **Focused** | Single domain, no research needed | `/PACT:comPACT` |
-| **Complex** | Needs own P→A→C→T cycle | `/PACT:rePACT` |
-
-**When to use `/PACT:rePACT`:**
-- Sub-task needs its own research/preparation phase
-- Sub-task requires architectural decisions before coding
-- Sub-task spans multiple concerns within a domain
+| **Complex** | Needs own P→A→C→T cycle | `/PACT:orchestrate` (new orchestration) |
 
 **Phase re-entry** (via `/PACT:imPACT`): When imPACT decides to redo a prior phase, create a new retry phase task — do not reopen the completed one. See [imPACT.md Phase Re-Entry Task Protocol](imPACT.md#phase-re-entry-task-protocol) for details.
 
@@ -436,7 +505,22 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 
 Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-phase).
 
-**Worktree isolation**: Before dispatching each sub-scope's rePACT, invoke `/PACT:worktree-setup` with the suffix branch name (e.g., `feature-X--backend`). Pass the resulting worktree path to the rePACT invocation.
+**Teammate spawning for sub-scopes**: All sub-scope teammates join the flat session team. Use scoped naming (`"scope-{scope}-{role}"`) for clear identification. Each sub-scope teammate receives its scope contract in the prompt.
+
+**Worktree isolation**: Before spawning sub-scope teammates, invoke `/PACT:worktree-setup` with the suffix branch name (e.g., `feature-X--backend`). Pass the resulting worktree path to each sub-scope teammate's prompt.
+
+**Example spawn (ATOMIZE)**:
+```
+TaskCreate("Scope-auth: design + implement", owner="scope-auth-architect")
+TaskCreate("Scope-auth: implement backend", owner="scope-auth-backend")
+TaskCreate("Scope-billing: design + implement", owner="scope-billing-architect")
+Task(subagent_type="pact-architect", team_name="{team}", name="scope-auth-architect", mode="plan",
+  prompt="SCOPE CONTRACT: {auth scope contract} ... WORKTREE: {auth-worktree-path} ...")
+Task(subagent_type="pact-backend-coder", team_name="{team}", name="scope-auth-backend", mode="plan",
+  prompt="SCOPE CONTRACT: {auth scope contract} ... WORKTREE: {auth-worktree-path} ... BLOCKED UNTIL scope-auth-architect completes design")
+Task(subagent_type="pact-architect", team_name="{team}", name="scope-billing-architect", mode="plan",
+  prompt="SCOPE CONTRACT: {billing scope contract} ... WORKTREE: {billing-worktree-path} ...")
+```
 
 ---
 
@@ -457,20 +541,48 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - "Test Scenarios"
 - "Coverage Targets"
 
-**Invoke `pact-test-engineer` with**:
+**Spawn `pact-test-engineer` teammate(s) with**:
 - Task description
-- CODE phase handoff(s): Pass coder handoff summaries (agent response text, not files on disk)
+- CODE phase handoff(s): Pass coder handoff summaries (received via SendMessage)
 - Plan sections above (if any)
 - "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 - "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
 
+**Example spawn**:
+```
+TaskCreate("Unit and integration tests", owner="test-1")
+TaskCreate("E2E and performance tests", owner="test-2")
+Task(subagent_type="pact-test-engineer", team_name="{team}", name="test-1", mode="plan",
+  prompt="CONTEXT: ... MISSION: Write unit and integration tests ... GUIDELINES: ...")
+Task(subagent_type="pact-test-engineer", team_name="{team}", name="test-2", mode="plan",
+  prompt="CONTEXT: ... MISSION: Write E2E and performance tests ... GUIDELINES: ...")
+```
+
 **Before completing**:
 - [ ] All tests passing
-- [ ] Specialist handoff received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] HANDOFF received from each test engineer (via SendMessage)
+- [ ] If blocker reported (via SendMessage) → `/PACT:imPACT`
+- [ ] Shut down all test engineer teammates
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
 
-**Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
+**Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), spawn multiple test engineers at once with clear suite boundaries.
+
+---
+
+## Teammate Monitoring
+
+### Handling Teammate Messages
+
+| Message Type | Action |
+|--------------|--------|
+| Plan approval request | Review plan, approve or reject |
+| HANDOFF | Verify completeness (5 items), mark phase progress |
+| BLOCKER | Assess severity → `/PACT:imPACT` if needed |
+| ALGEDONIC HALT | Stop all work, present to user immediately |
+| ALGEDONIC ALERT | Pause, assess, present to user |
+| Peer coordination question | Typically no lead action needed (teammate-to-teammate) |
+
+**Check TaskList** after spawning teammates, on HANDOFF/BLOCKER receipt, and periodically during long-running phases.
 
 ---
 
@@ -478,14 +590,21 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 
 For stall detection indicators, recovery protocol, prevention, and non-happy-path task termination, see [pact-agent-stall.md](../protocols/pact-agent-stall.md).
 
+**Teammate-specific stall indicators**:
+- Teammate has not sent any message for an extended period
+- TaskList shows task stuck in `in_progress` with no recent updates
+- Teammate's plan approval was sent but no plan received
+
+**Recovery**: Send a message to the teammate asking for status. If no response, send a shutdown request and re-spawn a new teammate for the task.
+
 ---
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch
-- When agent reports completion
-- On any unexpected agent stoppage
+Check TaskList and inbox for blocker/algedonic signals:
+- After spawning each phase's teammates
+- When a teammate sends a message
+- On any unexpected teammate stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

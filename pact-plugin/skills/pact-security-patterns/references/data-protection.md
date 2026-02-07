@@ -555,12 +555,12 @@ class DataRetentionManager {
 
 ```
 Master Key (HSM/KMS)
-    |
-    +-- Data Encryption Key (DEK) for users
-    |
-    +-- Data Encryption Key (DEK) for payments
-    |
-    +-- Data Encryption Key (DEK) for documents
+    │
+    ├── Data Encryption Key (DEK) for users
+    │
+    ├── Data Encryption Key (DEK) for payments
+    │
+    └── Data Encryption Key (DEK) for documents
 ```
 
 ### AWS KMS Integration

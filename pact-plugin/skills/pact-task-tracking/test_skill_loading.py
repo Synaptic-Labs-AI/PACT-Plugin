@@ -70,9 +70,9 @@ class TestYamlFrontmatter:
 class TestKeyContentSections:
     """Test that the skill content includes required sections."""
 
-    def test_has_on_start_section(self, skill_content):
-        """Skill must include 'On Start' section."""
-        assert "## On Start" in skill_content, "SKILL.md must include '## On Start' section"
+    def test_has_task_self_management_section(self, skill_content):
+        """Skill must include 'Task Self-Management' section (v3 replacement for On Start)."""
+        assert "## Task Self-Management" in skill_content, "SKILL.md must include '## Task Self-Management' section"
 
     def test_has_on_blocker_section(self, skill_content):
         """Skill must include 'On Blocker' section."""

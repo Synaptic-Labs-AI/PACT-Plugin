@@ -4,7 +4,7 @@ argument-hint: [e.g., add user authentication with JWT]
 ---
 Create a comprehensive implementation plan for: $ARGUMENTS
 
-**This is PLANNING ONLY** — no code changes, no git branches, no implementation.
+**This is PLANNING ONLY** —no code changes, no git branches, no implementation.
 
 ---
 
@@ -16,14 +16,15 @@ Create a planning Task hierarchy:
 1. TaskCreate: Planning task "Plan: {feature}"
 2. TaskUpdate: Planning task status = "in_progress"
 3. Analyze: Which specialists to consult?
-4. TaskCreate: Consultation task(s) — one per specialist
-5. TaskUpdate: Consultation tasks status = "in_progress"
-6. TaskUpdate: Planning task addBlockedBy = [consultation IDs]
-7. Dispatch specialists in parallel (planning-only mode)
-8. Monitor until consultations complete
-9. TaskUpdate: Consultation tasks status = "completed" (as each completes)
-10. Synthesize → write plan document
-11. TaskUpdate: Planning task status = "completed", metadata.artifact = plan path
+4. TaskCreate: Consultation task(s) —one per specialist
+5. Spawn consultant teammates into the session team (planning-only mode)
+6. Consultants submit analysis plans for lead approval
+7. After approval, consultants analyze and send perspectives via SendMessage
+8. Collect perspectives as messages arrive
+9. Shutdown consultants after all perspectives received
+10. TaskUpdate: Consultation tasks status = "completed"
+11. Synthesize →write plan document
+12. TaskUpdate: Planning task status = "completed", metadata.artifact = plan path
 ```
 
 **Example structure:**
@@ -44,7 +45,7 @@ This command is the primary **S4 (Intelligence)** activity in PACT. While `/PACT
 - **Future focus**: What approach will lead to long-term success?
 - **Strategic thinking**: What are the risks? What could change?
 
-The output—an approved plan—bridges S4 intelligence to S3 execution. When `/PACT:orchestrate` runs, it shifts to S3 mode while referencing the S4 plan.
+The output —an approved plan —bridges S4 intelligence to S3 execution. When `/PACT:orchestrate` runs, it shifts to S3 mode while referencing the S4 plan.
 
 **S4 Questions to Hold Throughout**:
 - Are we solving the right problem?
@@ -78,12 +79,12 @@ Using extended thinking, analyze the task:
 - What's the estimated complexity (Low/Medium/High/Very High)?
 
 Determine which specialists to invoke based on the task:
-- **📚 pact-preparer**: Always include for research/context needs
-- **🏛️ pact-architect**: Include for any structural or design decisions
-- **💻 pact-backend-coder**: Include if server-side work is involved
-- **🎨 pact-frontend-coder**: Include if client-side work is involved
-- **🗄️ pact-database-engineer**: Include if data layer work is involved
-- **🧪 pact-test-engineer**: Always include for testing strategy
+- **pact-preparer**: Always include for research/context needs
+- **pact-architect**: Include for any structural or design decisions
+- **pact-backend-coder**: Include if server-side work is involved
+- **pact-frontend-coder**: Include if client-side work is involved
+- **pact-database-engineer**: Include if data layer work is involved
+- **pact-test-engineer**: Always include for testing strategy
 
 Skip specialists clearly not relevant (e.g., skip database engineer for pure UI work).
 
@@ -91,18 +92,58 @@ Skip specialists clearly not relevant (e.g., skip database engineer for pure UI 
 - Convert task to lowercase kebab-case
 - Keep it concise (3-5 words max)
 - Examples:
-  - "Add user authentication with JWT" → `user-auth-jwt`
-  - "Refactor payment processing module" → `refactor-payment-processing`
-  - "Fix dashboard loading performance" → `fix-dashboard-performance`
+  - "Add user authentication with JWT" →`user-auth-jwt`
+  - "Refactor payment processing module" →`refactor-payment-processing`
+  - "Fix dashboard loading performance" →`fix-dashboard-performance`
 
-### Phase 1: Parallel Specialist Consultation
+### Phase 1: Spawn Consultant Teammates
 
-Invoke relevant specialists **in parallel**, each in **planning-only mode**.
+Spawn relevant specialists **in parallel** into the session team, each in **planning-only mode** using `mode="plan"`.
 
-**Use this prompt template for each specialist:**
+#### Consultant Spawn Pattern
 
 ```
-PLANNING CONSULTATION ONLY — No implementation, no code changes.
+Task(
+  subagent_type="pact-preparer",
+  team_name="{team}",
+  name="preparer-consultant",
+  mode="plan",
+  prompt="..."
+)
+
+Task(
+  subagent_type="pact-architect",
+  team_name="{team}",
+  name="architect-consultant",
+  mode="plan",
+  prompt="..."
+)
+
+Task(
+  subagent_type="pact-test-engineer",
+  team_name="{team}",
+  name="test-consultant",
+  mode="plan",
+  prompt="..."
+)
+```
+
+Add domain coders as needed:
+```
+Task(
+  subagent_type="pact-backend-coder",
+  team_name="{team}",
+  name="backend-consultant",
+  mode="plan",
+  prompt="..."
+)
+```
+
+#### Consultant Prompt Template
+
+```
+PLANNING CONSULTATION ONLY —No implementation, no code changes.
+You are a consultant teammate providing planning perspective.
 
 Task: {task description}
 
@@ -132,18 +173,23 @@ As the {role} specialist, provide your planning perspective:
    - What sequence of steps do you recommend?
    - What should be done first?
 
-Output your analysis with clear headers matching the 5 sections above.
-Do NOT implement anything — planning consultation only.
+WORKFLOW:
+1. Submit an analysis plan (via ExitPlanMode) describing what you will examine.
+2. After plan approval, perform your analysis.
+3. Send your perspective to the lead via SendMessage with clear headers matching the 5 sections above.
+4. Mark your task complete via TaskUpdate.
+
+Do NOT implement anything —planning consultation only.
 ```
 
 **Domain-specific additions to the template:**
 
-For **📚 pact-preparer**, also ask:
+For **pact-preparer**, also ask:
 - What documentation/research is needed before implementation?
 - What external APIs or libraries need investigation?
 - What stakeholder clarifications are needed?
 
-For **🏛️ pact-architect**, also ask:
+For **pact-architect**, also ask:
 - What components/modules are affected or needed?
 - What design patterns should be applied?
 - What interface contracts need definition?
@@ -153,20 +199,31 @@ For **coders** (backend/frontend/database), also ask:
 - What existing patterns in the codebase should be followed?
 - What's the implementation sequence?
 
-For **🧪 pact-test-engineer**, also ask:
+For **pact-test-engineer**, also ask:
 - What test scenarios are critical (happy path, errors, edge cases)?
 - What coverage targets make sense?
 - What test data or fixtures are needed?
 
+#### Plan Approval for Consultants
+
+Review each consultant's plan to ensure it covers the consultant's assigned domain. If rejecting, provide specific guidance on what to analyze.
+
+#### Collecting Perspectives
+
+As each perspective arrives via SendMessage:
+1. Record the perspective content
+2. Mark the consultant's task as `completed`
+3. When all perspectives are collected, shut down consultants and proceed to synthesis
+
 **Handling incomplete or missing responses**:
 
-If a specialist provides minimal, incomplete, or off-topic output:
-1. Note the gap — record which specialist and which sections are missing
-2. Proceed with synthesis — use the inputs you have
-3. Flag in the plan — add to "Limitations" section with specific gaps identified
-4. Do NOT re-invoke — avoid infinite loops; missing input is data for the plan
+If a consultant provides minimal, incomplete, or off-topic output:
+1. Note the gap —record which consultant and which sections are missing
+2. Proceed with synthesis —use the inputs you have
+3. Flag in the plan —add to "Limitations" section with specific gaps identified
+4. Do NOT re-invoke —avoid infinite loops; missing input is data for the plan
 
-If a specialist fails entirely (timeout, error):
+If a consultant fails entirely (timeout, error, unexpected stoppage):
 1. Log the failure in synthesis notes
 2. Proceed without that perspective
 3. Flag prominently in "Open Questions" that this domain was not consulted
@@ -174,7 +231,7 @@ If a specialist fails entirely (timeout, error):
 
 ### Phase 2: Orchestrator Synthesis
 
-After collecting all specialist outputs, use extended thinking to synthesize:
+After collecting all consultant outputs, use extended thinking to synthesize:
 
 1. **Identify Agreements**
    - Where do specialists align?
@@ -221,7 +278,7 @@ After collecting all specialist outputs, use extended thinking to synthesize:
        - [ ] Unchecked questions to resolve
        - [ ] Empty/placeholder sections
        - [ ] Unresolved open questions
-     - **Any signal present** → mark phase as REQUIRED
+     - **Any signal present** →mark phase as REQUIRED
        - For more details on incompleteness signals, see [pact-completeness.md](../protocols/pact-completeness.md)
 
 6. **Risk Assessment**
@@ -238,9 +295,9 @@ After collecting all specialist outputs, use extended thinking to synthesize:
    - [ ] Cross-cutting concerns have been considered
 
    If validation fails:
-   - For insufficient specialist input → Flag in "Limitations", proceed with available data
-   - For unresolved blocking conflict → Present partial plan with BLOCKED status
-   - For missing mandatory sections → Populate with "TBD - requires {specific input}"
+   - For insufficient specialist input →Flag in "Limitations", proceed with available data
+   - For unresolved blocking conflict →Present partial plan with BLOCKED status
+   - For missing mandatory sections →Populate with "TBD - requires {specific input}"
 
 ### Phase 3: Plan Output
 
@@ -281,16 +338,16 @@ If a plan already exists for this feature slug:
 > Status: PENDING APPROVAL
 
 <!-- Status Lifecycle:
-     PENDING APPROVAL → APPROVED → IN_PROGRESS → IMPLEMENTED
-                    ↘ SUPERSEDED (if replaced by newer plan)
-                    ↘ BLOCKED (if unresolved conflicts)
+     PENDING APPROVAL →APPROVED →IN_PROGRESS →IMPLEMENTED
+                    \→SUPERSEDED (if replaced by newer plan)
+                    \→BLOCKED (if unresolved conflicts)
 
      Transition Ownership:
-     - PENDING APPROVAL → APPROVED: User (explicit approval)
-     - APPROVED → IN_PROGRESS: Orchestrator (when /PACT:orchestrate starts)
-     - IN_PROGRESS → IMPLEMENTED: Orchestrator (after successful completion)
-     - Any → SUPERSEDED: plan-mode (when creating replacement plan)
-     - Any → BLOCKED: plan-mode (when unresolved blocking conflicts)
+     - PENDING APPROVAL →APPROVED: User (explicit approval)
+     - APPROVED →IN_PROGRESS: Orchestrator (when /PACT:orchestrate starts)
+     - IN_PROGRESS →IMPLEMENTED: Orchestrator (after successful completion)
+     - Any →SUPERSEDED: plan-mode (when creating replacement plan)
+     - Any →BLOCKED: plan-mode (when unresolved blocking conflicts)
 -->
 
 <!-- Forward Reference Convention:
@@ -311,7 +368,7 @@ If a plan already exists for this feature slug:
 
 ## Specialist Perspectives
 
-### 📋 Preparation Phase
+### Preparation Phase
 **Effort**: {Low/Medium/High}
 
 #### Research Needed
@@ -327,7 +384,7 @@ If a plan already exists for this feature slug:
 
 ---
 
-### 🏗️ Architecture Phase
+### Architecture Phase
 **Effort**: {Low/Medium/High}
 
 #### Components Affected
@@ -350,7 +407,7 @@ If a plan already exists for this feature slug:
 
 ---
 
-### 💻 Code Phase
+### Code Phase
 **Effort**: {Low/Medium/High}
 
 #### Files to Modify
@@ -369,7 +426,7 @@ If a plan already exists for this feature slug:
 
 ---
 
-### 🧪 Test Phase
+### Test Phase
 **Effort**: {Low/Medium/High}
 
 #### Test Scenarios
@@ -395,8 +452,8 @@ If a plan already exists for this feature slug:
 
 > **Note**: This sequence represents the intended final git history order, **not** the execution order. Independent commits may be implemented in parallel even if numbered sequentially here. The orchestrator must analyze actual dependencies to determine execution strategy.
 
-1. `{type}: {description}` — {what this commit does}
-2. `{type}: {description}` — {what this commit does}
+1. `{type}: {description}` —{what this commit does}
+2. `{type}: {description}` —{what this commit does}
 
 ---
 
@@ -444,7 +501,7 @@ If a plan already exists for this feature slug:
 - **Overall Complexity**: {Low/Medium/High/Very High}
 - **Estimated Files**: {N} modified, {M} new
 - **Specialists Required**: {List}
-- **External Dependencies**: {Yes/No — details}
+- **External Dependencies**: {Yes/No —details}
 
 ---
 
@@ -457,10 +514,10 @@ If a plan already exists for this feature slug:
 
 | Phase | Required? | Rationale |
 |-------|-----------|-----------|
-| PREPARE | {Yes/No} | {e.g., "Yes — 3 unchecked research items remain" or "No — all research complete, no TBD items"} |
-| ARCHITECT | {Yes/No} | {e.g., "Yes — interface contracts marked TBD" or "No — all design decisions resolved"} |
+| PREPARE | {Yes/No} | {e.g., "Yes —3 unchecked research items remain" or "No —all research complete, no TBD items"} |
+| ARCHITECT | {Yes/No} | {e.g., "Yes —interface contracts marked TBD" or "No —all design decisions resolved"} |
 | CODE | Yes | Always required |
-| TEST | {Yes/No} | {e.g., "Yes — integration tests needed" or "No — trivial change, no test scenarios"} |
+| TEST | {Yes/No} | {e.g., "Yes —integration tests needed" or "No —trivial change, no test scenarios"} |
 
 ---
 
@@ -478,10 +535,11 @@ The orchestrator should reference this plan during execution.
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each specialist consultation dispatch
-- When specialist reports completion
-- On any unexpected specialist stoppage
+Monitor for blocker/algedonic signals:
+- After spawning each consultant
+- After plan approval for each consultant
+- When consultant sends their perspective
+- On any unexpected consultant stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
@@ -493,7 +551,7 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 | Internal (don't show) | External (show) |
 |----------------------|-----------------|
-| Specialist consultation reasoning | `Consulting: preparer, architect, backend, test` |
+| Specialist consultation reasoning | `Spawning: preparer, architect, backend, test consultants` |
 | Conflict resolution analysis | Summary in plan document |
 | Synthesis process details | `Plan saved to docs/plans/{slug}-plan.md` |
 
@@ -527,7 +585,7 @@ After saving the plan:
 
 **Do NOT exit plan mode** while "Require User Decision" items remain unresolved.
 
-**Do NOT proceed to implementation** — await user approval or feedback.
+**Do NOT proceed to implementation** —await user approval or feedback.
 
 ---
 
@@ -535,9 +593,9 @@ After saving the plan:
 
 If during Phase 0 analysis you determine:
 
-- **Task is trivial** (typo, config change, single-line fix) → Recommend `/PACT:comPACT` instead
-- **Task is unclear** → Ask clarifying questions before proceeding with planning
-- **Task requires immediate research first** → Recommend running preparation phase alone first
+- **Task is trivial** (typo, config change, single-line fix) →Recommend `/PACT:comPACT` instead
+- **Task is unclear** →Ask clarifying questions before proceeding with planning
+- **Task requires immediate research first** →Recommend running preparation phase alone first
 
 ---
 

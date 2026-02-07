@@ -4,8 +4,8 @@ Summary: Detect active PACT workflow from parsed transcript turns.
 Used by: refresh/__init__.py for workflow state extraction.
 
 Scans transcript turns to identify the most recent active workflow,
-checking for trigger commands, agent invocations, and termination
-signals.
+checking for trigger commands, agent/teammate invocations, and termination
+signals. Supports both v2 subagent model and v3 Agent Teams model.
 """
 
 from dataclasses import dataclass
@@ -130,18 +130,41 @@ def find_workflow_id(turns: list[Turn], workflow_name: str) -> str:
 
 def count_pact_agent_calls(turns: list[Turn], after_index: int = 0) -> int:
     """
-    Count Task calls to PACT agents after a given index.
+    Count Task calls to PACT agents/teammates after a given index.
+
+    Counts both v2 subagent Task calls and v3 Agent Teams Task calls
+    (both use subagent_type with "pact-" prefix).
 
     Args:
         turns: List of turns
         after_index: Only count calls after this index
 
     Returns:
-        Number of PACT agent invocations
+        Number of PACT agent/teammate invocations
     """
     count = 0
     for turn in turns[after_index:]:
         if turn.has_task_to_pact_agent():
+            count += 1
+    return count
+
+
+def count_team_interactions(turns: list[Turn], after_index: int = 0) -> int:
+    """
+    Count Agent Teams interactions (SendMessage, TeamCreate) after a given index.
+
+    This provides additional signal strength for v3 Agent Teams workflows.
+
+    Args:
+        turns: List of turns
+        after_index: Only count calls after this index
+
+    Returns:
+        Number of team interaction calls
+    """
+    count = 0
+    for turn in turns[after_index:]:
+        if turn.has_send_message() or turn.has_team_create():
             count += 1
     return count
 
@@ -193,11 +216,16 @@ def calculate_detection_confidence(
                         break  # Only count once per turn
                 break  # Only check first assistant turn after trigger
 
-    # Check for PACT agent invocations
+    # Check for PACT agent/teammate invocations
     agent_calls = count_pact_agent_calls(turns, trigger_index)
-    if agent_calls > 0:
+    team_interactions = count_team_interactions(turns, trigger_index)
+    total_dispatches = agent_calls + team_interactions
+    if total_dispatches > 0:
         confidence += CONFIDENCE_WEIGHTS["agent_invocation"]
-        notes_parts.append(f"{agent_calls} agent call(s)")
+        if team_interactions > 0:
+            notes_parts.append(f"{agent_calls} agent call(s), {team_interactions} team interaction(s)")
+        else:
+            notes_parts.append(f"{agent_calls} agent call(s)")
 
     # Check for pending action indicators
     from .patterns import PENDING_ACTION_PATTERNS

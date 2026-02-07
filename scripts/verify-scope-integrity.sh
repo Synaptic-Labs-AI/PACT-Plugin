@@ -112,13 +112,13 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "Detection"
 echo ""
 
-# --- 4. Flow Ordering: Detection → Contract → rePACT → Consolidate ---
+# --- 4. Flow Ordering: Detection → Contract → Teammate → Consolidate ---
 # Verify the expected flow ordering is documented in the scope contract lifecycle.
-echo "4. Flow ordering (detection → contract → rePACT → consolidate):"
+echo "4. Flow ordering (detection → contract → teammate → consolidate):"
 contract_lifecycle=$(sed -n '/^## Scope Contract/,/^## /p' "$SSOT" | sed '$d')
 # Check that the lifecycle section mentions the expected flow stages in order
 flow_ok=true
-for stage in "Detection" "Contracts generated" "rePACT" "Consolidate phase"; do
+for stage in "Detection" "Contracts generated" "teammate" "Consolidate phase"; do
     if ! echo "$contract_lifecycle" | grep -q "$stage"; then
         echo "  ✗ Flow ordering: '$stage' not found in scope contract lifecycle"
         FAIL=$((FAIL + 1))
@@ -131,20 +131,18 @@ if [ "$flow_ok" = true ]; then
 fi
 echo ""
 
-# --- 5. rePACT Scope Contract Reception ---
-# rePACT must document how it receives and operates on scope contracts.
-echo "5. rePACT scope contract reception:"
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT documents scope contract reception" \
-    "scope contract"
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT references contract fulfillment in handoff" \
+# --- 5. Scope contract references Agent Teams executor ---
+echo "5. Scope contract references Agent Teams executor:"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract documents Agent Teams executor" \
+    "Executor: Agent Teams"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract documents contract fulfillment" \
     "Contract Fulfillment"
 echo ""
 
 # --- 6. Scope Naming Consistency ---
-# The naming convention [scope:{scope_id}] must appear in both SSOT task hierarchy
-# and rePACT command file to ensure consistency.
+# The naming convention [scope:{scope_id}] must appear in the SSOT task hierarchy.
 echo "6. Scope naming consistency:"
 if echo "$task_hierarchy_section" | grep -q '\[scope:'; then
     echo "  ✓ SSOT task hierarchy uses [scope:] naming prefix"
@@ -153,9 +151,6 @@ else
     echo "  ✗ SSOT task hierarchy missing [scope:] naming prefix"
     FAIL=$((FAIL + 1))
 fi
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT uses [scope:] naming prefix" \
-    '\[scope:'
 echo ""
 
 # --- 7. ATOMIZE and CONSOLIDATE phases in orchestrate.md ---
@@ -172,7 +167,7 @@ check_pattern "$COMMANDS_DIR/orchestrate.md" \
 # (summaries reference the protocol, so check for that)
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
     "ATOMIZE references protocol or contains dispatch logic" \
-    "pact-scope-phases.md\|Invoke.*rePACT"
+    "pact-scope-phases.md\|teammate"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
     "CONSOLIDATE references protocol or contains delegation" \
     "pact-scope-phases.md\|pact-architect.*contract"
@@ -185,8 +180,8 @@ echo ""
 # The extracted protocol must contain the full phase details.
 echo "7b. Full ATOMIZE/CONSOLIDATE content in pact-scope-phases.md:"
 check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
-    "ATOMIZE phase has dispatch logic" \
-    "Invoke.*rePACT"
+    "ATOMIZE phase has teammate spawning" \
+    "Spawn one teammate"
 check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
     "CONSOLIDATE delegates to architect" \
     "pact-architect.*contract"
@@ -199,11 +194,11 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
 echo ""
 
 # --- 8. ATOMIZE behavioral checks ---
-# ATOMIZE phase must dispatch sub-scopes via rePACT.
+# ATOMIZE phase must spawn teammates for sub-scope execution.
 echo "8. ATOMIZE behavioral checks:"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "ATOMIZE dispatches via rePACT" \
-    "rePACT"
+    "ATOMIZE spawns teammates for sub-scopes" \
+    "teammate"
 echo ""
 
 # --- 9. decomposition_active skip reason ---
@@ -213,14 +208,14 @@ check_pattern "$COMMANDS_DIR/orchestrate.md" \
     "decomposition_active"
 echo ""
 
-# --- 10. Executor interface bidirectional cross-references ---
-echo "10. Executor interface cross-references:"
+# --- 10. Executor interface references Agent Teams ---
+echo "10. Executor interface references:"
 check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
-    "Scope contract references rePACT command" \
-    "rePACT.md"
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT references scope contract protocol" \
-    "pact-scope-contract.md"
+    "Scope contract documents TeamCreate" \
+    "TeamCreate"
+check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
+    "Scope contract documents SendMessage" \
+    "SendMessage"
 echo ""
 
 # --- 11. Detection bypass within sub-scopes ---
@@ -260,9 +255,6 @@ echo ""
 echo "13. Nesting limit value assertions:"
 
 # Positive checks: canonical files must contain "1 level" nesting limit
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT has 1-level nesting limit" \
-    "Maximum nesting: 1 level"
 check_pattern "$PROTOCOLS_DIR/pact-s1-autonomy.md" \
     "S1 autonomy has 1-level nesting limit" \
     "Nesting limit.*1 level"
@@ -280,9 +272,6 @@ done
 # Negative checks: old 2-level nesting limit must not appear anywhere
 echo ""
 echo "13b. Nesting limit negative checks (old values absent):"
-check_absent "$COMMANDS_DIR/rePACT.md" \
-    "rePACT has no 2-level nesting reference" \
-    "Max nesting: 2"
 check_absent "$PROTOCOLS_DIR/pact-s1-autonomy.md" \
     "S1 autonomy has no 2-level nesting reference" \
     "2 levels maximum"
@@ -337,17 +326,17 @@ echo ""
 
 # --- 16. Executor interface ---
 # Verify that the executor interface in pact-scope-contract.md documents
-# the Agent Teams mapping and maintains backend-agnostic design.
+# Agent Teams as the active executor (not future/speculative).
 echo "16. Executor interface:"
 check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
-    "Scope contract has Agent Teams section" \
-    "Agent Teams"
+    "Scope contract has Agent Teams executor section" \
+    "Executor: Agent Teams"
 check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "Scope contract is backend-agnostic" \
     "Backend-agnostic"
 check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
-    "Scope contract documents TeamCreate tool" \
-    "TeamCreate"
+    "Scope contract documents teammate spawning" \
+    "Teammate spawning example"
 echo ""
 
 # --- 17. Agent persistent memory ---

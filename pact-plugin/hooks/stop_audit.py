@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/stop_audit.py
-Summary: Stop hook that audits session state including Tasks and uncommitted changes.
+Summary: Stop hook that audits session state including Tasks, team state, and uncommitted changes.
 Used by: Claude Code settings.json Stop hook
 
 Audits for:
 1. Orphaned in_progress Tasks (workflow may be incomplete)
-2. Uncommitted file changes (git working tree)
+2. Active Agent Teams teammates (informational -- teammates are independent processes)
+3. Uncommitted file changes (git working tree)
 
 This replaces the older stop_audit.sh shell script with Task system integration.
 
@@ -28,6 +29,9 @@ if str(_hooks_dir) not in sys.path:
 
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import get_task_list
+
+# Import shared Team utilities for Agent Teams audit
+from shared.team_utils import find_active_teams, get_team_members
 
 
 def audit_tasks(tasks: list[dict[str, Any]]) -> list[str]:
@@ -95,6 +99,47 @@ def audit_tasks(tasks: list[dict[str, Any]]) -> list[str]:
         )
 
     return warnings
+
+
+def audit_team_state() -> list[str]:
+    """
+    Audit Agent Teams state at session end.
+
+    Checks for active teams and reports their member count. This is
+    informational only -- teammates are independent processes that may
+    still be running after the lead session ends.
+
+    Returns:
+        List of informational messages about team state
+    """
+    messages = []
+
+    teams = find_active_teams()
+    if not teams:
+        return messages
+
+    for team_name in teams:
+        members = get_team_members(team_name)
+        if members:
+            active = [m for m in members if m.get("status") == "active"]
+            if active:
+                names = [m.get("name", "unknown") for m in active[:5]]
+                messages.append(
+                    f"Team '{team_name}': {len(active)} active teammate(s) "
+                    f"({', '.join(names)})"
+                    + (f" (+{len(active)-5} more)" if len(active) > 5 else "")
+                )
+        else:
+            messages.append(f"Team '{team_name}': no members found")
+
+    if messages:
+        messages.insert(0, "Agent Teams still active (teammates are independent processes):")
+        messages.append(
+            "Agent Teams: Clean up team via TeamDelete. "
+            "Active teammates will be shut down."
+        )
+
+    return messages
 
 
 def audit_git_changes() -> list[str]:
@@ -176,6 +221,10 @@ def main():
         if tasks:
             task_warnings = audit_tasks(tasks)
             warnings.extend(task_warnings)
+
+        # Audit Agent Teams state (informational)
+        team_messages = audit_team_state()
+        warnings.extend(team_messages)
 
         # Audit git for uncommitted changes
         git_warnings = audit_git_changes()

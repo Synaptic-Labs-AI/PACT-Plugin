@@ -623,7 +623,7 @@ class TestBuildRefreshFromTasks:
         assert "Implement auth" in result
         assert "CODE: auth" in result
         assert "pact-backend-coder" in result
-        assert "Monitor active agents" in result
+        assert "Check on active teammates via SendMessage" in result
 
     def test_handles_missing_feature(self, make_task):
         """Test handles None feature task gracefully."""
@@ -706,9 +706,9 @@ class TestBuildRefreshFromTasks:
         result = build_refresh_from_tasks(feature, phase, agents, blockers)
         assert "Address blockers" in result
 
-        # Without blockers but with agents - should mention monitoring agents
+        # Without blockers but with agents - should mention checking on teammates
         result = build_refresh_from_tasks(feature, phase, agents, [])
-        assert "Monitor active agents" in result
+        assert "Check on active teammates via SendMessage" in result
 
         # Without blockers or agents but with phase - should mention continuing phase
         result = build_refresh_from_tasks(feature, phase, [], [])

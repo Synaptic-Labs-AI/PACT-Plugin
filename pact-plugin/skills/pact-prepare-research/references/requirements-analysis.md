@@ -10,14 +10,14 @@ rework during implementation.
 
 ```
 Business Requirements (Why)
-    |
-    +-- User Requirements (Who + What)
-            |
-            +-- Functional Requirements (How it works)
-            |
-            +-- Non-Functional Requirements (How well it works)
-                    |
-                    +-- Technical Requirements (Implementation details)
+    │
+    └── User Requirements (Who + What)
+            │
+            ├── Functional Requirements (How it works)
+            │
+            └── Non-Functional Requirements (How well it works)
+                    │
+                    └── Technical Requirements (Implementation details)
 ```
 
 ---

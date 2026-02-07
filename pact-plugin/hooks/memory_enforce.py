@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/memory_enforce.py
-Summary: SubagentStop hook that ENFORCES memory saves after PACT agent work.
+Summary: SubagentStop hook that ENFORCES memory saves after PACT teammate work.
 Used by: Claude Code settings.json SubagentStop hook
 
-When a PACT specialist agent completes meaningful work, this hook tells the
-orchestrator they MUST save memory before continuing. Uses strong language
+When a PACT specialist teammate completes meaningful work, this hook tells the
+lead (orchestrator) they MUST save memory before continuing. Uses strong language
 and additionalContext to make the instruction visible and mandatory.
 
-This addresses the pattern where memory saves are forgotten after agent work.
+This addresses the pattern where memory saves are forgotten after teammate work.
+Fires for both Agent Teams teammates and legacy subagents (SubagentStop fires
+for teammates -- empirically verified).
 
 Input: JSON from stdin with `transcript`, `agent_id`, `transcript_path`
 Output: JSON with `additionalContext` forcing memory save
@@ -57,7 +59,7 @@ DECISION_PATTERNS = [
 
 
 def is_pact_work_agent(agent_id: str) -> bool:
-    """Check if this is a PACT agent that does work needing memory saves."""
+    """Check if this is a PACT teammate/agent that does work needing memory saves."""
     if not agent_id:
         return False
     agent_lower = agent_id.lower()
@@ -102,16 +104,18 @@ def format_enforcement_message(agent_id: str, reasons: list[str]) -> str:
     """Format the mandatory memory save message."""
     reasons_str = ", ".join(reasons) if reasons else "work completed"
 
+    # Use Agent Teams terminology -- the lead spawns a memory-agent teammate
+    # or sends a message to an existing one
     return f"""
-🚨 MANDATORY MEMORY SAVE REQUIRED 🚨
+MANDATORY MEMORY SAVE REQUIRED
 
-Agent '{agent_id}' just completed with: {reasons_str}
+Teammate '{agent_id}' just completed with: {reasons_str}
 
-You MUST now delegate to pact-memory-agent to save this context.
+You MUST save this context via pact-memory-agent before continuing.
 This is NOT optional. Skipping this = lost context = repeated work.
 
-Action required:
-Task(subagent_type="pact-memory-agent", run_in_background=true, prompt="Save memory: [summarize what {agent_id} just did, decisions made, lessons learned]")
+Action: Spawn a pact-memory-agent teammate or send a message to an existing one:
+Task(subagent_type="pact-memory-agent", team_name="{{team}}", name="memory-save", prompt="Save memory: [summarize what {agent_id} just did, decisions made, lessons learned]")
 
 Do this NOW before any other work.
 """

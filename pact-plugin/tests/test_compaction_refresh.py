@@ -665,3 +665,112 @@ class TestExceptionHandlingPaths:
 
         # Empty env var triggers "unknown-project" fallback
         assert result == "unknown-project"
+
+
+class TestAppendTeamContext:
+    """Tests for _append_team_context function."""
+
+    def test_no_active_teams(self, tmp_path, monkeypatch):
+        """Test _append_team_context does nothing when no active teams."""
+        from compaction_refresh import _append_team_context
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        lines = ["existing line"]
+        _append_team_context(lines)
+
+        assert lines == ["existing line"]
+
+    def test_single_team_with_active_members(self, tmp_path, monkeypatch):
+        """Test _append_team_context adds team info with active members."""
+        from compaction_refresh import _append_team_context
+
+        # Set up team directory with config
+        teams_dir = tmp_path / ".claude" / "teams" / "test-team"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "backend-1", "type": "pact-backend-coder", "status": "active"},
+                {"name": "architect-1", "type": "pact-architect", "status": "active"},
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        lines = []
+        _append_team_context(lines)
+
+        assert len(lines) == 2
+        assert "test-team" in lines[0]
+        assert "2 active teammate(s)" in lines[0]
+        assert "backend-1" in lines[0]
+        assert "architect-1" in lines[0]
+        assert "SendMessage" in lines[1]
+
+    def test_team_with_no_active_members(self, tmp_path, monkeypatch):
+        """Test _append_team_context handles team with no active members."""
+        from compaction_refresh import _append_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "idle-team"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "backend-1", "type": "pact-backend-coder", "status": "stopped"},
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        lines = []
+        _append_team_context(lines)
+
+        assert len(lines) == 1
+        assert "no active teammates" in lines[0]
+
+    def test_team_with_many_members_truncates(self, tmp_path, monkeypatch):
+        """Test _append_team_context truncates member list at 6."""
+        from compaction_refresh import _append_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "big-team"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": f"member-{i}", "type": "pact-backend-coder", "status": "active"}
+                for i in range(8)
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        lines = []
+        _append_team_context(lines)
+
+        assert "+2 more" in lines[0]
+        assert "8 active teammate(s)" in lines[0]
+
+    def test_multiple_teams(self, tmp_path, monkeypatch):
+        """Test _append_team_context handles multiple active teams."""
+        from compaction_refresh import _append_team_context
+
+        # Create two teams
+        for name in ["team-alpha", "team-beta"]:
+            teams_dir = tmp_path / ".claude" / "teams" / name
+            teams_dir.mkdir(parents=True)
+            config = {
+                "members": [
+                    {"name": "backend-1", "type": "pact-backend-coder", "status": "active"},
+                ]
+            }
+            (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        lines = []
+        _append_team_context(lines)
+
+        # Should have entries for both teams (2 lines per team with active members)
+        team_lines = [l for l in lines if l.startswith("Team")]
+        assert len(team_lines) == 2

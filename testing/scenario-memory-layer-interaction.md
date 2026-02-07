@@ -68,7 +68,7 @@ Run a task that completes successfully, triggering the memory enforcement hook.
 /PACT:comPACT backend Fix a typo in the README introduction
 ```
 
-**What happens**: After the agent completes, `memory_enforce.py` hook evaluates whether a memory save is warranted. The orchestrator may also delegate to `pact-memory-agent` to save context.
+**What happens**: After the teammate completes, `memory_enforce.py` hook evaluates whether a memory save is warranted. The lead may also delegate to `pact-memory-agent` to save context.
 
 **Expected outcome**: If the hook triggers, it invokes the pact-memory skill to save a structured memory object to SQLite. The memory includes context, goal, lessons_learned, and entities fields.
 
@@ -102,11 +102,11 @@ grep -c "Memory ID" CLAUDE.md  # Should be <= 3
 
 ### Step 6: Verify Agent Persistent Memory
 
-Invoke a specialist agent (e.g., backend coder) and observe whether agent persistent memory is loaded.
+Invoke a specialist teammate (e.g., backend coder) and observe whether agent persistent memory is loaded.
 
-**What happens**: When an agent with `memory: user` frontmatter is spawned, Claude Code automatically loads the first 200 lines of `~/.claude/agent-memory/{agent-name}/MEMORY.md` into that agent's context.
+**What happens**: When a teammate with `memory: user` frontmatter is spawned via TeamCreate, Claude Code automatically loads the first 200 lines of `~/.claude/agent-memory/{agent-name}/MEMORY.md` into that teammate's context.
 
-**Expected outcome**: The specialist agent has access to domain expertise from previous sessions. This is separate from and complementary to pact-memory.
+**Expected outcome**: The specialist teammate has access to domain expertise from previous sessions. This is separate from and complementary to pact-memory.
 
 **Verification**: After the agent runs, check that the agent memory directory exists:
 ```bash

@@ -104,7 +104,7 @@ Delegate to `pact-memory-agent` with a clear intent:
 - **Save**: `"Save memory: [context of what was done, decisions, lessons]"`
 - **Search**: `"Retrieve memories about: [topic/query]"`
 
-See **Always Run Agents in Background** for the mandatory `run_in_background=true` requirement.
+See **Team Lifecycle** in the PACT Agent Orchestration section for how teammates are spawned.
 
 #### Three-Layer Memory Architecture
 
@@ -241,12 +241,12 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 | Writing, editing, refactoring code | coders |
 | Writing or running tests | test engineer |
 
-⚠️ Bug fixes, logic, refactoring, tests—NOT exceptions. **DELEGATE**.
-⚠️ "Simple" tasks, post-review cleanup—NOT exceptions. **DELEGATE**.
-⚠️ Urgent fixes, production issues—NOT exceptions. **DELEGATE**.
-⚠️ Rationalizing "it's small", "I know exactly how", "it's quick" = failure mode. **DELEGATE**.
+Bug fixes, logic, refactoring, tests—NOT exceptions. **DELEGATE**.
+"Simple" tasks, post-review cleanup—NOT exceptions. **DELEGATE**.
+Urgent fixes, production issues—NOT exceptions. **DELEGATE**.
+Rationalizing "it's small", "I know exactly how", "it's quick" = failure mode. **DELEGATE**.
 
-**Checkpoint**: Knowing the fix ≠ permission to fix. **DELEGATE**.
+**Checkpoint**: Knowing the fix does not equal permission to fix. **DELEGATE**.
 
 **Checkpoint**: Need to understand the codebase? Use **Explore agent** freely. Starting a PACT cycle is where true delegation begins.
 
@@ -258,39 +258,39 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 
 #### Invoke Multiple Specialists Concurrently
 
-> ⚠️ **DEFAULT TO CONCURRENT**: When delegating, dispatch multiple specialists together in a single response unless tasks share files or have explicit dependencies. This is not optional—it's the expected mode of orchestration.
+> **DEFAULT TO CONCURRENT**: When spawning teammates, dispatch multiple specialists together in a single response unless tasks share files or have explicit dependencies. This is not optional—it's the expected mode of orchestration.
 
-**Core Principle**: If specialist tasks can run independently, invoke them at once. Sequential dispatch is only for tasks with true dependencies.
+**Core Principle**: If specialist tasks can run independently, spawn them at once. Sequential dispatch is only for tasks with true dependencies.
 
-**How**: Include multiple `Task` tool calls in a single response. Each specialist runs concurrently.
+**How**: Include multiple `Task` tool calls in a single response. Each teammate runs concurrently within the team.
 
 | Scenario | Action |
 |----------|--------|
-| Same phase, independent tasks | Dispatch multiple specialists simultaneously |
-| Same domain, multiple items (3 bugs, 5 endpoints) | Invoke multiple specialists of same type at once |
-| Different domains touched | Dispatch specialists across domains together |
-| Tasks share files or have dependencies | Dispatch sequentially (exception, not default) |
+| Same phase, independent tasks | Spawn multiple teammates simultaneously |
+| Same domain, multiple items (3 bugs, 5 endpoints) | Spawn multiple teammates of same type at once |
+| Different domains touched | Spawn teammates across domains together |
+| Tasks share files or have dependencies | Spawn sequentially (exception, not default) |
 
 #### Agent Task Tracking
 
-> ⚠️ **AGENTS MUST HAVE TANDEM TRACKING TASKS**: Whenever invoking a specialist agent, you must also track what they are working on by using the Claude Code Task Management system (TaskCreate, TaskUpdate, TaskList, TaskGet).
+> **TEAMMATES MUST HAVE TRACKING TASKS**: Whenever spawning a teammate, you must also track what they are working on by using the Claude Code Task Management system (TaskCreate, TaskUpdate, TaskList, TaskGet).
 
-**Tracking Task lifecycle**:
+**Task lifecycle with Agent Teams**:
 
 | Event | Task Operation |
 |-------|----------------|
-| Before dispatching agent | `TaskCreate(subject, description, activeForm)` |
-| After dispatching agent | `TaskUpdate(taskId, status: "in_progress", addBlocks: [PARENT_TASK_ID])` |
-| Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
-| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
-| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
+| Before spawning teammate | `TaskCreate(subject, description, owner="{teammate-name}")` |
+| Teammate claims task | Teammate calls `TaskUpdate(taskId, status: "in_progress")` |
+| Teammate completes | Teammate calls `TaskUpdate(taskId, status: "completed")` + sends HANDOFF via SendMessage |
+| Teammate reports blocker | Teammate sends BLOCKER via SendMessage to "team-lead" |
+| Teammate reports algedonic signal | Teammate sends HALT (broadcast) or ALERT (direct message to "team-lead") |
 
-**Key principle**: Agents communicate status via structured text in their responses. The orchestrator reads agent output and translates it into Task operations. This separation ensures Task state is always managed by the process that has the tools.
+**Key principle**: Teammates self-manage their tasks using Task tools directly (TaskUpdate, TaskList, TaskCreate). The orchestrator creates top-level feature and phase tasks. Teammates claim, update, and complete their own agent-level tasks. The orchestrator monitors progress via TaskList and receives HANDOFFs via SendMessage.
 
 ##### Signal Task Handling
-When an agent reports a blocker or algedonic signal via text:
+When a teammate reports a blocker or algedonic signal via SendMessage:
 1. Create a signal Task (blocker or algedonic type)
-2. Block the agent's task via `addBlockedBy`
+2. Block the teammate's task via `addBlockedBy`
 3. For algedonic signals, amplify scope:
    - ALERT → block current phase task
    - HALT → block feature task (stops all work)
@@ -341,44 +341,42 @@ This is not punitive—it's corrective. The goal is maintaining role boundaries.
 
 ### Delegate to Specialist Agents
 
-When delegating a task, these specialist agents are available to execute PACT phases:
-- **📚 pact-preparer** (Prepare): Research, documentation, requirements gathering
-- **🏛️ pact-architect** (Architect): System design, component planning, interface definition
-- **💻 pact-backend-coder** (Code): Server-side implementation
-- **🎨 pact-frontend-coder** (Code): Client-side implementation
-- **🗄️ pact-database-engineer** (Code): Data layer implementation
-- **⚡ pact-n8n** (Code): Creates JSONs for n8n workflow automations
-- **🧪 pact-test-engineer** (Test): Testing and quality assurance
-- **🧠 pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
+When delegating a task, these specialist agents are available as teammates:
+- **pact-preparer** (Prepare): Research, documentation, requirements gathering
+- **pact-architect** (Architect): System design, component planning, interface definition
+- **pact-backend-coder** (Code): Server-side implementation
+- **pact-frontend-coder** (Code): Client-side implementation
+- **pact-database-engineer** (Code): Data layer implementation
+- **pact-n8n** (Code): Creates JSONs for n8n workflow automations
+- **pact-test-engineer** (Test): Testing and quality assurance
+- **pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
 
-### Always Run Agents in Background
+### Team Lifecycle
 
-> ⚠️ **MANDATORY**: Every `Task` call to a specialist agent MUST include `run_in_background=true`. No exceptions.
+The session team is created at session start by the `session_init.py` hook, which instructs the orchestrator to call `TeamCreate`. The team persists for the entire session and is shared across commands.
 
-**Why always background?**
-- Agent work should never block the user conversation
-- The orchestrator can continue coordinating while agents execute
-- Multiple specialists can run concurrently
-- Results are reported back when ready
+**If the team was not created** (e.g., hook failure, manual session), call `TeamCreate(team_name="{feature-slug}")` before spawning teammates.
 
-```python
-# Correct - always use run_in_background=true
-Task(
-    subagent_type="pact-backend-coder",
-    run_in_background=true,  # ← REQUIRED - never omit or set to false
-    prompt="Implement the user authentication endpoint..."
-)
-```
+**Teammate lifecycle**:
+- Teammates are spawned per phase into the session team using `Task` with `team_name` and `name` parameters
+- Between phases, shut down current teammates before spawning next-phase teammates
+- The team itself persists for the entire session
+
+**Naming convention**: `{role}-{number}` (e.g., `"backend-1"`, `"architect-2"`, `"preparer-1"`). For scoped orchestration: `"scope-{scope}-{role}"` (e.g., `"scope-auth-backend"`).
+
+**Plan Approval**: All teammates are spawned with `mode="plan"`. Review all plans for a phase before approving any to identify conflicts or gaps.
+
+**Shutting down teammates**: Between phases, shut down all current-phase teammates and wait for acknowledgment before spawning next-phase teammates.
 
 ### Recommended Agent Prompting Structure
 
-Use this structure in the `prompt` field to ensure agents have adequate context:
+Use this structure in the `prompt` field to ensure teammates have adequate context:
 
 **CONTEXT**
 [Brief background, what phase we are in, and relevant state]
 
 **MISSION**
-[What you need the agent to do, how it will know it's completed its job]
+[What you need the teammate to do, how it will know it's completed its job]
 
 **INSTRUCTIONS**
 1. [Step 1]
@@ -393,7 +391,7 @@ A list of things that include the following:
 
 #### Expected Agent HANDOFF Format
 
-Every agent ends their response with a structured HANDOFF. Expect this format:
+Every teammate ends their work with a structured HANDOFF delivered via SendMessage to "team-lead". Expect this format:
 
 ```
 HANDOFF:
@@ -409,7 +407,7 @@ HANDOFF:
 
 All five items are always present. Use this to update Task metadata and inform subsequent phases.
 
-If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
+If a teammate's HANDOFF is missing items, send a message asking for the missing information before proceeding.
 
 ### How to Delegate
 
@@ -417,17 +415,14 @@ Use these commands to trigger PACT workflows for delegating tasks:
 - `/PACT:plan-mode`: Multi-agent planning consultation before implementation (no code changes)
 - `/PACT:orchestrate`: Delegate a task to PACT specialist agents (multi-agent, full ceremony)
 - `/PACT:comPACT`: Delegate a focused task to a single specialist (light ceremony)
-- `/PACT:rePACT`: Recursive nested PACT cycle for complex sub-tasks (single or multi-domain)
 - `/PACT:imPACT`: Triage when blocked (Redo prior phase? Additional agents needed?)
 - `/PACT:peer-review`: Peer review of current work (commit, create PR, multi-agent review)
 
 See @~/.claude/protocols/pact-plugin/pact-workflows.md for workflow details.
 
 **How to Handle Blockers**
-- If an agent hits a blocker, they are instructed to stop working and report the blocker to you
-- As soon as a blocker is reported, execute `/PACT:imPACT` with the report as the command argument
-
-When delegating tasks to agents, remind them of their blocker-handling protocol
+- If a teammate hits a blocker, they send a BLOCKER message via SendMessage to "team-lead"
+- As soon as a blocker is received, execute `/PACT:imPACT` with the report as the command argument
 
 ### Agent Workflow
 
@@ -435,23 +430,24 @@ When delegating tasks to agents, remind them of their blocker-handling protocol
 
 **Optional**: Run `/PACT:plan-mode` first for complex tasks. Creates plan in `docs/plans/` with specialist consultation. When `/PACT:orchestrate` runs, it checks for approved plans and passes relevant sections to each phase.
 
-To invoke specialist agents, follow this sequence:
-1. **PREPARE Phase**: Invoke `pact-preparer` → outputs to `docs/preparation/`
-2. **ARCHITECT Phase**: Invoke `pact-architect` → outputs to `docs/architecture/`
-3. **CODE Phase**: Invoke relevant coders (includes smoke tests + decision log)
-4. **TEST Phase**: Invoke `pact-test-engineer` (for all substantive testing)
+To execute a task, follow this sequence:
+1. **Team exists** (created at session start by hook, or manually via TeamCreate)
+2. **PREPARE Phase**: Spawn `pact-preparer` teammate(s) → outputs to `docs/preparation/`
+3. **ARCHITECT Phase**: Spawn `pact-architect` teammate(s) → outputs to `docs/architecture/`
+4. **CODE Phase**: Spawn relevant coder teammate(s) (includes smoke tests + decision log)
+5. **TEST Phase**: Spawn `pact-test-engineer` teammate(s) (for all substantive testing)
 
-Within each phase, invoke **multiple specialists concurrently** for non-conflicting tasks.
+Within each phase, spawn **multiple teammates concurrently** for non-conflicting tasks. Between phases, shut down current teammates before spawning next-phase teammates.
 
-> ⚠️ **Single domain ≠ single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Default to concurrent dispatch unless tasks share files or have dependencies.
+> **Single domain does not equal single teammate.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Default to concurrent spawning unless tasks share files or have dependencies.
 
 **After all phases complete**: Run `/PACT:peer-review` to create a PR.
 
 ### PR Review Workflow
 
-Invoke **at least 3 agents in parallel**:
-- **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
-- **pact-test-engineer**: Test coverage, testability, performance implications, edge cases
+Spawn **at least 3 reviewer teammates** into the session team:
+- **pact-architect** (name: `"architect-reviewer"`): Design coherence, architectural patterns, interface contracts, separation of concerns
+- **pact-test-engineer** (name: `"test-reviewer"`): Test coverage, testability, performance implications, edge cases
 - **Domain specialist coder(s)**: Implementation quality specific to PR focus
   - Select the specialist(s) based on PR focus:
     - Frontend changes → **pact-frontend-coder** (UI implementation quality, accessibility, state management)
@@ -459,8 +455,11 @@ Invoke **at least 3 agents in parallel**:
     - Database changes → **pact-database-engineer** (Query efficiency, schema design, data integrity)
     - Multiple domains → Specialist for domain with most significant changes, or all relevant specialists if multiple domains are equally significant
 
-After agent reviews completed:
+Reviewer teammates deliver their findings via SendMessage to "team-lead".
+
+After reviewer HANDOFFs received:
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
+- Shut down all reviewer teammates
 - Execute `/PACT:pin-memory`
 
 ---

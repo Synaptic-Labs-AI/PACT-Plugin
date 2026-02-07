@@ -827,3 +827,337 @@ class TestCheckpointSchemaRoundTrip:
         assert exported["pending_action"]["data"]["nested"]["key"] == 123
         assert exported["context"]["tags"] == ["review", "test"]
         assert exported["context"]["pr_number"] == 99
+
+
+# =============================================================================
+# Tests for _get_team_context()
+# =============================================================================
+
+class TestGetTeamContext:
+    """Tests for _get_team_context function."""
+
+    def test_no_active_teams_returns_none(self, tmp_path, monkeypatch):
+        """Test returns None when no active teams exist."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is None
+
+    def test_active_team_with_members(self, tmp_path, monkeypatch):
+        """Test returns team context dict when active team with members exists."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "v3-agent-teams"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "backend-1", "type": "pact-backend-coder", "status": "active"},
+                {"name": "architect-1", "type": "pact-architect", "status": "active"},
+                {"name": "stopped-1", "type": "pact-test-engineer", "status": "stopped"},
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is not None
+        assert result["team_name"] == "v3-agent-teams"
+        assert result["member_count"] == 3
+        assert result["active_members"] == ["backend-1", "architect-1"]
+
+    def test_active_team_with_no_active_members(self, tmp_path, monkeypatch):
+        """Test returns context with empty active_members when all stopped."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "idle-team"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "member-1", "type": "pact-backend-coder", "status": "stopped"},
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is not None
+        assert result["team_name"] == "idle-team"
+        assert result["member_count"] == 1
+        assert result["active_members"] == []
+
+    def test_uses_first_active_team(self, tmp_path, monkeypatch):
+        """Test uses the first team from find_active_teams (one team per session)."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        # Create two teams; the function should use the first one
+        for name in ["alpha-team", "beta-team"]:
+            teams_dir = tmp_path / ".claude" / "teams" / name
+            teams_dir.mkdir(parents=True)
+            config = {
+                "members": [
+                    {"name": f"{name}-coder", "type": "pact-backend-coder", "status": "active"},
+                ]
+            }
+            (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is not None
+        # Should use one of the team names (order depends on filesystem)
+        assert result["team_name"] in ["alpha-team", "beta-team"]
+
+    def test_truncates_active_members_at_10(self, tmp_path, monkeypatch):
+        """Test active_members list is truncated at 10 entries."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "big-team"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": f"member-{i}", "type": "pact-backend-coder", "status": "active"}
+                for i in range(15)
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is not None
+        assert result["member_count"] == 15
+        assert len(result["active_members"]) == 10
+
+    def test_returns_none_on_import_failure(self, monkeypatch):
+        """Test returns None gracefully when team_utils import fails."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        # Simulate import failure by patching the function to raise
+        with patch("refresh.checkpoint_builder.Path") as mock_path:
+            mock_path.__file__ = "/fake"
+            mock_path.side_effect = Exception("simulated import error")
+            # The function has a top-level try/except that catches all exceptions
+            result = _get_team_context()
+
+        # On any exception, _get_team_context returns None
+        assert result is None
+
+    def test_handles_member_missing_name_field(self, tmp_path, monkeypatch):
+        """Test handles member dicts that lack the 'name' field."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "unnamed-team"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"type": "pact-backend-coder", "status": "active"},
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is not None
+        assert result["active_members"] == ["?"]
+
+    def test_handles_member_missing_status_field(self, tmp_path, monkeypatch):
+        """Test handles member dicts that lack the 'status' field."""
+        from refresh.checkpoint_builder import _get_team_context
+
+        teams_dir = tmp_path / ".claude" / "teams" / "status-missing"
+        teams_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "coder-1", "type": "pact-backend-coder"},
+            ]
+        }
+        (teams_dir / "config.json").write_text(json.dumps(config))
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        result = _get_team_context()
+
+        assert result is not None
+        # No members have status "active", so active_members should be empty
+        assert result["active_members"] == []
+        assert result["member_count"] == 1
+
+
+# =============================================================================
+# Tests for team context in checkpoint_to_refresh_message()
+# =============================================================================
+
+class TestRefreshMessageTeamContext:
+    """Tests for team context rendering in checkpoint_to_refresh_message."""
+
+    def test_team_context_renders_team_line(self):
+        """Test Team: line appears when team context is present in checkpoint."""
+        checkpoint = {
+            "workflow": {"name": "orchestrate", "id": "feat-auth"},
+            "step": {"name": "code"},
+            "extraction": {"confidence": 0.9},
+            "context": {
+                "team": {
+                    "team_name": "v3-agent-teams",
+                    "member_count": 3,
+                    "active_members": ["backend-1", "architect-1"],
+                },
+            },
+            "pending_action": {
+                "type": "AgentWork",
+                "instruction": "Wait for CODE phase agents to complete",
+            },
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "Team:" in message
+        assert "v3-agent-teams" in message
+        assert "2 active teammate(s)" in message
+        assert "backend-1" in message
+        assert "architect-1" in message
+
+    def test_team_context_includes_sendmessage_note(self):
+        """Test SendMessage note appears when team context is present."""
+        checkpoint = {
+            "workflow": {"name": "peer-review", "id": "pr-88"},
+            "step": {"name": "invoke-reviewers"},
+            "extraction": {"confidence": 0.9},
+            "context": {
+                "team": {
+                    "team_name": "pr-review",
+                    "member_count": 3,
+                    "active_members": ["arch-1", "test-1", "backend-1"],
+                },
+            },
+            "pending_action": None,
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "Teammates survived compaction" in message
+        assert "SendMessage" in message
+
+    def test_no_team_context_no_team_line(self):
+        """Test no Team: line when team context is absent from checkpoint."""
+        checkpoint = {
+            "workflow": {"name": "orchestrate", "id": "feat-auth"},
+            "step": {"name": "code"},
+            "extraction": {"confidence": 0.9},
+            "context": {},
+            "pending_action": None,
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "Team:" not in message
+        assert "SendMessage" not in message
+
+    def test_team_context_empty_active_members_no_team_line(self):
+        """Test no Team: line when active_members is empty."""
+        checkpoint = {
+            "workflow": {"name": "orchestrate", "id": "feat-auth"},
+            "step": {"name": "code"},
+            "extraction": {"confidence": 0.9},
+            "context": {
+                "team": {
+                    "team_name": "idle-team",
+                    "member_count": 2,
+                    "active_members": [],
+                },
+            },
+            "pending_action": None,
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        # Empty active_members means the if active_members: check fails
+        assert "Team:" not in message
+
+    def test_team_context_truncates_many_members(self):
+        """Test team member names truncated at 5 with '...' suffix."""
+        checkpoint = {
+            "workflow": {"name": "orchestrate", "id": "big-feat"},
+            "step": {"name": "code"},
+            "extraction": {"confidence": 0.9},
+            "context": {
+                "team": {
+                    "team_name": "big-team",
+                    "member_count": 8,
+                    "active_members": [f"member-{i}" for i in range(8)],
+                },
+            },
+            "pending_action": None,
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "Team:" in message
+        assert "8 active teammate(s)" in message
+        assert "..." in message
+        # Should show first 5 members
+        assert "member-0" in message
+        assert "member-4" in message
+
+    def test_team_context_line_count_with_team(self):
+        """Test correct line count when team context adds lines."""
+        checkpoint = {
+            "workflow": {"name": "orchestrate", "id": "feat"},
+            "step": {"name": "code"},
+            "extraction": {"confidence": 0.9},
+            "context": {
+                "team": {
+                    "team_name": "test-team",
+                    "member_count": 1,
+                    "active_members": ["coder-1"],
+                },
+            },
+            "pending_action": {
+                "type": "AgentWork",
+                "instruction": "Wait for agents",
+            },
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+        lines = message.split("\n")
+
+        # Expected lines:
+        # 1. [POST-COMPACTION CHECKPOINT]
+        # 2. Prior conversation auto-compacted...
+        # 3. Workflow: orchestrate (feat)
+        # 4. Context: {prose}
+        # 5. Team: 'test-team' with 1 active teammate(s): coder-1
+        # 6. Note: Teammates survived compaction...
+        # 7. Next Step: Wait for agents
+        assert len(lines) == 7
+
+    def test_team_context_missing_team_name_uses_unknown(self):
+        """Test handles missing team_name field gracefully."""
+        checkpoint = {
+            "workflow": {"name": "orchestrate", "id": ""},
+            "step": {"name": "code"},
+            "extraction": {"confidence": 0.9},
+            "context": {
+                "team": {
+                    "member_count": 1,
+                    "active_members": ["coder-1"],
+                },
+            },
+            "pending_action": None,
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "Team:" in message
+        assert "'unknown'" in message

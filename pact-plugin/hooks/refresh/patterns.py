@@ -10,7 +10,6 @@ Configuration constants are imported from constants.py for maintainability.
 
 import re
 from dataclasses import dataclass
-from typing import Pattern
 
 # Import configuration constants from centralized location (Item 12)
 from .constants import (
@@ -39,6 +38,12 @@ __all__ = [
     "PACT_AGENT_PATTERN",
     "TASK_TOOL_PATTERN",
     "SUBAGENT_TYPE_PATTERN",
+    # Agent Teams patterns (v3)
+    "TEAM_NAME_PATTERN",
+    "TEAMMATE_NAME_PATTERN",
+    "SEND_MESSAGE_PATTERN",
+    "TEAM_CREATE_PATTERN",
+    "TEAM_DELETE_PATTERN",
     "CONTEXT_EXTRACTORS",
     "PENDING_ACTION_PATTERNS",
     "CONFIDENCE_WEIGHTS",
@@ -54,11 +59,11 @@ class WorkflowPattern:
     """Pattern definition for a single PACT workflow type."""
 
     name: str
-    trigger_pattern: Pattern[str]
+    trigger_pattern: re.Pattern[str]
     step_markers: list[str]
     termination_signals: list[str]
     # Optional: patterns for extracting workflow-specific context
-    context_extractors: dict[str, Pattern[str]]
+    context_extractors: dict[str, re.Pattern[str]]
 
 
 # Workflow trigger patterns (match user messages that start workflows)
@@ -155,12 +160,22 @@ TERMINATION_SIGNALS = {
     ],
 }
 
-# Agent type patterns (for detecting Task tool calls to PACT agents)
+# Agent type patterns (for detecting Task tool calls to PACT agents/teammates)
 PACT_AGENT_PATTERN = re.compile(r"pact-(backend|frontend|database|test|architect|preparer|memory|n8n)")
 
-# Tool call patterns
+# Tool call patterns (v2 subagent model -- kept for backwards compatibility)
 TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
+
+# Agent Teams patterns (v3 teammate model)
+# Task calls with team_name parameter indicate Agent Teams usage
+TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"')
+# Matches ANY JSON "name" field, not just teammate names. Only use in contexts
+# where the surrounding JSON is already identified as a Task() call.
+TEAMMATE_NAME_PATTERN = re.compile(r'"name":\s*"([^"]+)"')
+SEND_MESSAGE_PATTERN = re.compile(r'"name":\s*"SendMessage"', re.IGNORECASE)
+TEAM_CREATE_PATTERN = re.compile(r'"name":\s*"TeamCreate"', re.IGNORECASE)
+TEAM_DELETE_PATTERN = re.compile(r'"name":\s*"TeamDelete"', re.IGNORECASE)
 
 # Context extraction patterns (for building rich checkpoint context)
 CONTEXT_EXTRACTORS = {

@@ -130,15 +130,7 @@ Provide:
 
 **HANDOFF**
 
-End with a structured handoff for the orchestrator:
-1. **Produced**: Workflow created, key node configurations
-2. **Key decisions**: Pattern selection rationale with assumptions that could be wrong
-3. **Areas of uncertainty** (PRIORITIZED):
-   - [HIGH] {description} — Why risky, suggested test focus
-   - [MEDIUM] {description}
-   - [LOW] {description}
-4. **Integration points**: Other components touched
-5. **Open questions**: Unresolved items
+See the pact-task-tracking skill for the full HANDOFF format, pre-completion checklist, and delivery via SendMessage to the team lead.
 
 **AUTONOMY CHARTER**
 
@@ -170,17 +162,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
-
-1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
-   - Context: What workflow you were building and why
-   - Goal: The automation objective
-   - Lessons learned: n8n patterns that worked, validation insights, expression gotchas
-   - Decisions: Workflow design choices with rationale
-   - Entities: Nodes used, webhooks configured, integrations involved
-
-This ensures your workflow context persists across sessions and is searchable by future agents.
-
+See the pact-task-tracking skill for the full completion workflow: memory preservation, pre-completion checklist, HANDOFF delivery via SendMessage, and task status update.
 
 # TEMPLATE DEPLOYMENT
 
@@ -194,12 +176,7 @@ Templates provide battle-tested starting points that you can customize.
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
-
-Examples of blockers:
-- Same error after multiple fixes
-- Missing info needed to proceed
-- Task goes beyond your specialty
+See the pact-task-tracking skill for the blocker protocol. Stop work immediately and report via SendMessage to the team lead.
 
 **DOMAIN-SPECIFIC BLOCKERS**
 

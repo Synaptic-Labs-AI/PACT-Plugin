@@ -6,6 +6,10 @@ Used by: refresh/__init__.py and PreCompact hook.
 Assembles a checkpoint dict following the schema defined in the
 refresh plan, suitable for writing to disk and later refresh.
 Also provides shared utilities for checkpoint path resolution.
+
+Agent Teams context: Checkpoints now include team state (active team name,
+teammate count) when available, helping the orchestrator understand team
+composition after compaction recovery.
 """
 
 import os
@@ -186,6 +190,44 @@ def get_current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _get_team_context() -> dict[str, Any] | None:
+    """
+    Get Agent Teams context from on-disk team state.
+
+    Returns team name and member count if a team is active.
+    This is a best-effort lookup -- returns None if no team state
+    is available (e.g., pre-v3 sessions).
+
+    Returns:
+        Dict with team_name, member_count, active_members or None
+    """
+    try:
+        # Import here to avoid circular dependency at module level
+        # (checkpoint_builder is part of refresh package; team_utils is in shared)
+        # Both are under hooks/ so this is safe (same package boundary)
+        hooks_dir = Path(__file__).parent.parent
+        if str(hooks_dir) not in sys.path:
+            sys.path.insert(0, str(hooks_dir))
+        from shared.team_utils import find_active_teams, get_team_members
+
+        teams = find_active_teams()
+        if not teams:
+            return None
+
+        # Use first active team (PACT uses one team per session)
+        team_name = teams[0]
+        members = get_team_members(team_name)
+        active = [m for m in members if m.get("status") == "active"]
+
+        return {
+            "team_name": team_name,
+            "member_count": len(members),
+            "active_members": [m.get("name", "?") for m in active[:10]],
+        }
+    except Exception:
+        return None
+
+
 def build_checkpoint(
     transcript_path: str,
     workflow_info: WorkflowInfo,
@@ -196,7 +238,8 @@ def build_checkpoint(
     Build a checkpoint dict from extracted workflow state.
 
     Assembles all extracted information into the checkpoint schema
-    defined in the refresh plan.
+    defined in the refresh plan. Includes Agent Teams context when
+    available.
 
     Args:
         transcript_path: Path to the source transcript
@@ -221,6 +264,12 @@ def build_checkpoint(
     if workflow_info.is_terminated:
         extraction_notes = "Workflow terminated"
 
+    # Build context with optional team state
+    context = dict(step_info.context)  # Copy to avoid mutating step_info
+    team_ctx = _get_team_context()
+    if team_ctx:
+        context["team"] = team_ctx
+
     checkpoint = {
         "version": CHECKPOINT_VERSION,
         "session_id": get_session_id(),
@@ -235,7 +284,7 @@ def build_checkpoint(
             "started_at": step_info.started_at,
         },
         "pending_action": pending_action_data,
-        "context": step_info.context,
+        "context": context,
         "extraction": {
             "confidence": workflow_info.confidence,
             "notes": extraction_notes,
@@ -397,7 +446,20 @@ def checkpoint_to_refresh_message(checkpoint: dict[str, Any]) -> str:
     prose_context = _build_prose_context(step_name, context)
     lines.append(f"Context: {prose_context}")
 
-    # Line 5: Next step
+    # Line 5 (optional): Team state
+    team_ctx = context.get("team")
+    if team_ctx:
+        team_name = team_ctx.get("team_name", "unknown")
+        active_members = team_ctx.get("active_members", [])
+        if active_members:
+            lines.append(
+                f"Team: '{team_name}' with {len(active_members)} active "
+                f"teammate(s): {', '.join(active_members[:5])}"
+                + (" ..." if len(active_members) > 5 else "")
+            )
+            lines.append("Note: Teammates survived compaction. Use SendMessage to check on them.")
+
+    # Next step
     if pending_action:
         instruction = pending_action.get("instruction", "")
         if instruction:

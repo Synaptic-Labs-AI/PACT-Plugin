@@ -79,28 +79,64 @@ Apply the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.m
 
 ## Signal Delivery Mechanism
 
-**Protocol-level, not architectural**: Agents emit algedonic signals through the same communication channel (to orchestrator), but the SIGNAL FORMAT itself demands immediate user escalation. The orchestrator is **REQUIRED** to surface algedonic signals to user immediately—it cannot triage, delay, or suppress them.
+Teammates deliver algedonic signals via **SendMessage**. The delivery method depends on the signal level. The lead (orchestrator) is **REQUIRED** to surface algedonic signals to user immediately—it cannot triage, delay, or suppress them.
+
+### Delivery Summary
+
+| Signal Type | Delivery Method | Recipients |
+|-------------|----------------|------------|
+| **HALT** | Direct message + Broadcast | Lead (guaranteed) + All peers |
+| **ALERT** | Direct message only | Lead only |
+| **BLOCKER** | Direct message only | Lead only |
+| **HANDOFF** | Direct message only | Lead only |
+
+### Teammate Signal Delivery
+
+**HALT signals use dual-delivery** — two SendMessage calls:
+
+1. **Direct message to lead** (guaranteed delivery):
+   ```
+   SendMessage(type: "message", recipient: "team-lead",
+     content: "⚠️ ALGEDONIC HALT: {CATEGORY}\n\n**Issue**: ...\n**Evidence**: ...\n**Impact**: ...\n**Recommended Action**: ...",
+     summary: "HALT: {category}")
+   ```
+2. **Broadcast to all peers** (so they stop work):
+   ```
+   SendMessage(type: "broadcast",
+     content: "⚠️ ALGEDONIC HALT: {CATEGORY}\n\n...\nSTOP ALL WORK IMMEDIATELY. Await lead instructions.",
+     summary: "HALT: {category}")
+   ```
+3. **Send partial HANDOFF** to the lead via a separate SendMessage.
+
+**Why dual-delivery**: Direct message to "team-lead" is guaranteed delivery. Broadcast reaches peers but may or may not reach the lead (API behavior unconfirmed). Sending both ensures the lead always gets HALT signals regardless of broadcast behavior. If the lead happens to receive both, the duplicate is harmless — it reinforces urgency. See [v3-agent-teams-addendum.md](../../docs/architecture/v3-agent-teams-addendum.md) for design rationale.
+
+**ALERT signals use direct message only** — the lead triages and decides whether peers need to stop:
+```
+SendMessage(type: "message", recipient: "team-lead",
+  content: "⚠️ ALGEDONIC ALERT: {CATEGORY}\n\n**Issue**: ...\n**Evidence**: ...\n**Impact**: ...\n**Recommended Action**: ...",
+  summary: "ALERT: {category}")
+```
 
 ### Task System Integration
 
 With PACT Task integration, algedonic signals create **signal Tasks** that persist and block affected work.
 
-**Agent behavior on algedonic signal:**
+**Teammate behavior on algedonic signal:**
 
-Agents do NOT have access to Task tools. When an agent detects a viability threat:
+When a teammate detects a viability threat:
 1. Stop work immediately
-2. Report the signal as structured text to the orchestrator (using the Signal Format above)
-3. Provide a partial handoff with whatever work was completed
+2. Send the signal via SendMessage (HALT: dual-delivery; ALERT: direct to lead)
+3. Send a partial HANDOFF via SendMessage to "team-lead"
 
-The orchestrator receives the text report and handles all Task operations.
+The lead receives the signal via SendMessage and handles all signal Task operations.
 
-**Orchestrator creates and manages the algedonic Task:**
+**Lead creates and manages the algedonic Task:**
 1. `TaskCreate(subject="[HALT|ALERT]: {category}", metadata={"type": "algedonic", "level": "...", "category": "..."})` — creates the signal Task
-2. `TaskUpdate(agent_task_id, addBlockedBy=[algedonic_task_id])` — blocks the reporting agent's task
+2. `TaskUpdate(agent_task_id, addBlockedBy=[algedonic_task_id])` — blocks the reporting teammate's task
 
-**Orchestrator amplifies scope:**
-| Signal Level | Orchestrator Action |
-|--------------|---------------------|
+**Lead amplifies scope:**
+| Signal Level | Lead Action |
+|--------------|-------------|
 | **ALERT** | `TaskUpdate(current_phase_id, addBlockedBy=[algedonic_id])` — blocks phase |
 | **HALT** | `TaskUpdate(feature_task_id, addBlockedBy=[algedonic_id])` — blocks entire workflow |
 
@@ -117,17 +153,20 @@ This makes algedonic signals **visible in TaskList** and ensures they properly b
 ### Flow
 
 ```
-Agent detects trigger condition
+Teammate detects trigger condition
     ↓
-Agent stops work immediately
+Teammate stops work immediately
     ↓
-Agent reports algedonic signal text to orchestrator + provides partial handoff
+HALT: Teammate sends direct message to lead + broadcasts to peers
+ALERT: Teammate sends direct message to lead only
     ↓
-Orchestrator creates algedonic Task + blocks agent's task (addBlockedBy)
+Teammate sends partial HANDOFF via SendMessage to lead
     ↓
-Orchestrator amplifies scope (blocks phase or feature Task)
+Lead creates algedonic Task + blocks teammate's task (addBlockedBy)
     ↓
-Orchestrator IMMEDIATELY presents to user (no other work continues)
+Lead amplifies scope (blocks phase or feature Task)
+    ↓
+Lead IMMEDIATELY presents to user (no other work continues)
     ↓
 User responds
     ↓
@@ -136,25 +175,25 @@ Algedonic Task marked completed
 Work resumes (or stops) based on user decision
 ```
 
-### Orchestrator Behavior
+### Lead Behavior
 
-On receiving an algedonic signal:
+On receiving an algedonic signal via SendMessage:
 
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
-2. For **HALT**: Stop ALL agents, await user acknowledgment
+2. For **HALT**: Stop ALL teammates (send shutdown requests), await user acknowledgment
 3. For **ALERT**: Pause current work, present options to user
 4. **Log** the signal in session record
 
-**Handling parallel agents on HALT**:
+**Handling parallel teammates on HALT**:
 
-When multiple agents are running and HALT is triggered:
-1. **Stop all agents immediately** — no agent continues work
+When multiple teammates are running and HALT is triggered:
+1. **Stop all teammates immediately** — the HALT broadcast from the emitting teammate instructs peers to stop; the lead sends shutdown requests to any that do not self-stop
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
-4. **Document agent states** — note which agents were interrupted and their progress
+4. **Document teammate states** — note which teammates were interrupted and their progress
 
 After HALT is resolved:
-- Review interrupted agents' work before resuming
+- Review interrupted teammates' work before resuming
 - Decide whether to continue from checkpoint or restart affected work
 - The HALT fix may invalidate some parallel work (especially for SECURITY issues)
 
@@ -189,11 +228,11 @@ User must provide **explicit justification** that:
 
 ## Who Can Emit Algedonic Signals
 
-**Any agent** can emit algedonic signals when they recognize trigger conditions. This is part of the Autonomy Charter (see [pact-s1-autonomy.md](pact-s1-autonomy.md)).
+**Any teammate** can emit algedonic signals when they recognize trigger conditions. This is part of the Autonomy Charter (see [pact-s1-autonomy.md](pact-s1-autonomy.md)).
 
-Agents do **NOT** need orchestrator permission to emit—the conditions themselves authorize the signal.
+Teammates do **NOT** need lead permission to emit—the conditions themselves authorize the signal.
 
-### Agent Responsibility
+### Teammate Responsibility
 
 Each specialist should be aware of algedonic triggers relevant to their domain:
 
@@ -215,7 +254,7 @@ Each specialist should be aware of algedonic triggers relevant to their domain:
 | Aspect | imPACT | Algedonic |
 |--------|--------|-----------|
 | **Level** | S3 (operational) | S5 (policy/viability) |
-| **Who decides** | Orchestrator triages | User decides |
+| **Who decides** | Lead triages | User decides |
 | **Question** | "How do we proceed?" | "Should we proceed at all?" |
 | **Examples** | Missing info, wrong approach, need help | Security breach, data risk, ethics issue |
 
@@ -231,9 +270,9 @@ imPACT is for operational problem-solving. If you're questioning whether the wor
 | Signal | Source | Scope | Bypass |
 |--------|--------|-------|--------|
 | 🔴 RED (Test) | Test engineer during TEST phase | Test failures, code issues | No—routes back to coders |
-| HALT/ALERT (Algedonic) | Any agent, any time | Viability threat | Yes—goes directly to user |
+| HALT/ALERT (Algedonic) | Any teammate, any time | Viability threat | Yes—goes directly to user |
 
-A 🔴 RED test signal indicates critical issues found during testing (test failures, security vulnerabilities). The orchestrator routes these back to coders for fixes. An algedonic signal indicates a viability threat that questions whether the work should continue at all.
+A 🔴 RED test signal indicates critical issues found during testing (test failures, security vulnerabilities). The lead routes these back to coders for fixes. An algedonic signal indicates a viability threat that questions whether the work should continue at all.
 
 ---
 
@@ -265,9 +304,9 @@ If answers lean toward "potential/normal/suspicion/concerning," consider imPACT 
 ### After Resolution
 
 - Once a HALT is resolved, **verify** the fix before resuming:
-  1. **Who verifies**: The agent who emitted the signal, or test engineer if security/data issue
+  1. **Who verifies**: The teammate who emitted the signal, or test engineer if security/data issue
   2. **What to verify**: The specific issue is fixed AND the fix doesn't introduce new issues
   3. **Scope**: Focused verification of the fix, not comprehensive testing (that comes in TEST phase)
-  4. **Report**: Confirm to orchestrator: "HALT resolved: {one-line summary of fix}"
+  4. **Report**: Confirm to lead via SendMessage: "HALT resolved: {one-line summary of fix}"
 - Document what was found and how it was resolved
-- Consider whether similar issues might exist elsewhere (orchestrator may request targeted audit)
+- Consider whether similar issues might exist elsewhere (lead may request targeted audit)

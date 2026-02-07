@@ -11,6 +11,10 @@ to build refresh context. If no TaskList is available, falls back to checkpoint 
 The Task system (TaskCreate, TaskUpdate, TaskGet, TaskList) is PACT's single source of truth
 for workflow state. Tasks persist across compaction at ~/.claude/tasks/{sessionId}/*.json.
 
+Agent Teams context: Teammates are independent processes that survive compaction
+(empirically verified). The refresh message includes team state to help the
+orchestrator understand what teammates are still active post-compaction.
+
 Input: JSON from stdin with:
   - source: Session start source ("compact" for post-compaction, others for normal start)
 
@@ -45,6 +49,15 @@ from shared.task_utils import (
     find_current_phase,
     find_active_agents,
     find_blockers,
+)
+
+# Import shared Team utilities for Agent Teams context in refresh
+from shared.team_utils import (
+    derive_team_name,
+    get_current_branch,
+    team_exists,
+    get_team_members,
+    find_active_teams,
 )
 
 
@@ -110,18 +123,57 @@ def build_refresh_from_tasks(
             else:
                 lines.append(f"  - {subj}")
 
+    # Team state (teammates survive compaction as independent processes)
+    _append_team_context(lines)
+
     # Next step guidance
     lines.append("")
     if blockers:
         lines.append("Next Step: **Address blockers before proceeding.**")
     elif agents:
-        lines.append("Next Step: Monitor active agents via TaskList, then proceed.")
+        lines.append(
+            "Next Step: Check on active teammates via SendMessage, "
+            "then continue current phase."
+        )
     elif phase:
-        lines.append("Next Step: Continue current phase or check agent completion.")
+        lines.append("Next Step: Continue current phase or check teammate completion.")
     else:
         lines.append("Next Step: **Check TaskList and ask user how to proceed.**")
 
     return "\n".join(lines)
+
+
+def _append_team_context(lines: list[str]) -> None:
+    """
+    Append Agent Teams context to refresh message lines.
+
+    Teammates are independent processes that survive compaction, so the
+    orchestrator needs to know which team and teammates are still active.
+
+    Args:
+        lines: List of message lines to append to (mutated in place)
+    """
+    teams = find_active_teams()
+    if not teams:
+        return
+
+    for team_name in teams:
+        members = get_team_members(team_name)
+        active_members = [m for m in members if m.get("status") == "active"]
+        if active_members:
+            names = [m.get("name", "?") for m in active_members[:6]]
+            lines.append(
+                f"Team '{team_name}': {len(active_members)} active teammate(s) "
+                f"({', '.join(names)})"
+                + (f" (+{len(active_members)-6} more)" if len(active_members) > 6 else "")
+            )
+            lines.append(
+                "Note: Teammates survived compaction and remain active. "
+                "Use SendMessage to communicate with them."
+            )
+        else:
+            lines.append(f"Team: '{team_name}' (no active teammates)")
+    return
 
 
 # -----------------------------------------------------------------------------

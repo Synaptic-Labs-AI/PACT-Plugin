@@ -8,13 +8,14 @@ This checklist defines a 3-tier verification process for PRs that touch `pact-pl
 
 ## Tier 1: Automated Verification
 
-Run all verification scripts from the repository root. Every PR touching `pact-plugin/` must pass all four.
+Run all verification scripts from the repository root. Every PR touching `pact-plugin/` must pass all five.
 
 ```bash
 bash scripts/verify-protocol-extracts.sh
 bash scripts/verify-scope-integrity.sh
 bash scripts/verify-task-hierarchy.sh
 bash scripts/verify-worktree-protocol.sh
+bash scripts/verify-agent-teams.sh
 ```
 
 **Expected output**: Each script prints individual check results (lines prefixed with `✓` or `✗`) followed by a summary block:
@@ -32,9 +33,10 @@ Any script exiting with `VERIFICATION FAILED` (exit code 1) means the PR has bro
 ### Checklist
 
 - [ ] `verify-protocol-extracts.sh` passes (16 checks) -- SSOT extracts match source line ranges
-- [ ] `verify-scope-integrity.sh` passes (68 checks) -- cross-references, naming conventions, nesting limits, worktree integration, memory hooks, executor interface, agent persistent memory
-- [ ] `verify-task-hierarchy.sh` passes (24 checks) -- task lifecycle patterns in all command files
+- [ ] `verify-scope-integrity.sh` passes (65 checks) -- cross-references, naming conventions, nesting limits, worktree integration, memory hooks, executor interface, agent persistent memory
+- [ ] `verify-task-hierarchy.sh` passes (21 checks) -- task lifecycle patterns in all command files
 - [ ] `verify-worktree-protocol.sh` passes (20 checks) -- worktree skill existence, command references, path propagation
+- [ ] `verify-agent-teams.sh` passes (54 checks) -- Agent Teams terminology, SendMessage references, teammate patterns, no legacy subagent patterns
 
 ### What failures mean
 
@@ -54,7 +56,7 @@ Human reviewers verify structural properties that automated scripts cannot fully
 ### Checklist
 
 - [ ] **Protocol extract line ranges are still valid** -- If the PR modifies `pact-protocols.md`, confirm that `verify-protocol-extracts.sh` line ranges (in the script itself) have been updated to match
-- [ ] **Cross-references are intact** -- Protocol files that reference other protocols (e.g., `pact-scope-contract.md` referencing `rePACT.md`) still point to correct targets
+- [ ] **Cross-references are intact** -- Protocol files that reference other protocols still point to correct targets (no references to deleted files like `rePACT.md`)
 - [ ] **SSOT extracts match their sources** -- Extracted protocol files are verbatim copies of their SSOT sections in `pact-protocols.md` (the automated script verifies this, but reviewers should confirm the line ranges themselves are correct)
 - [ ] **No orphaned references** -- Search for references to renamed or deleted files; confirm no dead links remain
 - [ ] **Agent definition consistency** -- All agent `.md` files under `pact-plugin/agents/` have matching frontmatter fields (`memory: user`, nesting limit, HANDOFF format)
@@ -73,17 +75,18 @@ Use the PACT framework on itself (dogfooding): run `/PACT:orchestrate` or `/PACT
 
 ### Checklist
 
-- [ ] **Agent spawning works** -- Specialist agents are invoked and receive their prompts (check that the orchestrator delegates rather than acting directly)
-- [ ] **Handoff format is correct** -- Agent responses end with the 5-item HANDOFF structure (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions)
+- [ ] **Teammate spawning works** -- Specialist teammates are spawned into the session team and receive their prompts via TeamCreate (check that the lead delegates rather than acting directly)
+- [ ] **Handoff format is correct** -- Teammate responses sent via SendMessage end with the 5-item HANDOFF structure (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions)
 - [ ] **Memory saves succeed** -- The `pact-memory` skill saves context without errors; saved memories are retrievable via search
 - [ ] **Worktree lifecycle completes** -- `worktree-setup` creates a worktree, agents work within it, and `worktree-cleanup` removes it after PR
 - [ ] **Verification scripts pass in the worktree** -- All Tier 1 scripts pass when run from the worktree working directory
-- [ ] **Task tracking is consistent** -- Task statuses follow the `pending -> in_progress -> completed` lifecycle without orphaned or stuck tasks
-- [ ] **Phase transitions are clean** -- Each PACT phase completes with a handoff before the next begins; no phase is skipped without documented rationale
+- [ ] **Task tracking is consistent** -- Task statuses follow the `pending -> in_progress -> completed` lifecycle without orphaned or stuck tasks; teammates self-manage their agent tasks
+- [ ] **Phase transitions are clean** -- Each PACT phase completes with a handoff (via SendMessage) before the next begins; no phase is skipped without documented rationale
+- [ ] **Teammate shutdown is clean** -- After each phase, the lead sends shutdown_request to the teammate and receives shutdown_response approval before proceeding
 
 ### When to run
 
 - Before merging a version bump PR
 - After completing a multi-step implementation round (e.g., all D1-D6 steps)
-- When changing orchestration logic in `orchestrate.md`, `comPACT.md`, or `rePACT.md`
+- When changing orchestration logic in `orchestrate.md` or `comPACT.md`
 - Quarterly as a general regression check

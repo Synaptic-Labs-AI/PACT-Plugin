@@ -6,6 +6,9 @@ Used by: refresh/__init__.py for extracting workflow state.
 Parses Claude Code JSONL transcript files into Turn objects for
 analysis. Handles streaming from end of file for efficiency and
 gracefully skips malformed lines.
+
+Supports both v2 subagent model (Task with subagent_type) and
+v3 Agent Teams model (Task with team_name/name, SendMessage events).
 """
 
 import json
@@ -70,12 +73,31 @@ class Turn:
         return None
 
     def has_task_to_pact_agent(self) -> bool:
-        """Check if this turn has a Task call to a PACT agent."""
+        """Check if this turn has a Task call to a PACT agent/teammate.
+
+        Supports both v2 subagent model (subagent_type) and v3 Agent Teams
+        model (team_name + subagent_type). A Task call is a PACT dispatch if
+        it has a subagent_type containing "pact-".
+        """
         for tc in self.tool_calls:
             if tc.name == "Task":
                 subagent = tc.input_data.get("subagent_type", "")
                 if "pact-" in subagent:
                     return True
+        return False
+
+    def has_send_message(self) -> bool:
+        """Check if this turn has a SendMessage call (Agent Teams communication)."""
+        for tc in self.tool_calls:
+            if tc.name == "SendMessage":
+                return True
+        return False
+
+    def has_team_create(self) -> bool:
+        """Check if this turn has a TeamCreate call."""
+        for tc in self.tool_calls:
+            if tc.name == "TeamCreate":
+                return True
         return False
 
 
@@ -314,7 +336,11 @@ def find_last_user_message(turns: list[Turn]) -> Turn | None:
 
 def find_task_calls_to_agent(turns: list[Turn], agent_pattern: str) -> list[tuple[Turn, ToolCall]]:
     """
-    Find all Task tool calls to agents matching the pattern.
+    Find all Task tool calls to agents/teammates matching the pattern.
+
+    Supports both v2 subagent model (subagent_type) and v3 Agent Teams
+    model (subagent_type + team_name). The agent_pattern is matched against
+    the subagent_type field which is present in both models.
 
     Args:
         turns: List of turns to search
@@ -330,6 +356,27 @@ def find_task_calls_to_agent(turns: list[Turn], agent_pattern: str) -> list[tupl
                 subagent = tc.input_data.get("subagent_type", "")
                 if agent_pattern in subagent:
                     results.append((turn, tc))
+    return results
+
+
+def find_send_messages(turns: list[Turn]) -> list[tuple[Turn, ToolCall]]:
+    """
+    Find all SendMessage tool calls in the transcript.
+
+    SendMessage is used in Agent Teams for teammate communication
+    (HANDOFFs, blockers, shutdown requests, etc.).
+
+    Args:
+        turns: List of turns to search
+
+    Returns:
+        List of (Turn, ToolCall) tuples for SendMessage calls
+    """
+    results = []
+    for turn in turns:
+        for tc in turn.tool_calls:
+            if tc.name == "SendMessage":
+                results.append((turn, tc))
     return results
 
 

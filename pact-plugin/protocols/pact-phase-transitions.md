@@ -5,6 +5,8 @@
 2. Key decisions made
 3. What the next agent needs to know
 
+Teammates deliver handoffs via `SendMessage(type: "message", recipient: "team-lead")`.
+
 Keep it brief. No templates required.
 
 ---
@@ -24,7 +26,7 @@ Keep it brief. No templates required.
 
 ### CODE → TEST Handoff
 
-Coders provide handoff summaries to the orchestrator, who passes them to the test engineer.
+Coders deliver handoff summaries via SendMessage to the team lead, who passes them to the test engineer.
 
 **Handoff Format**:
 ```
