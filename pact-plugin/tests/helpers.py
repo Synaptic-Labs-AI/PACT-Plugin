@@ -626,3 +626,103 @@ def create_repact_transcript(
         ))
 
     return create_transcript_lines(lines)
+
+
+def create_orchestrate_with_teams_transcript(
+    phase: str = "code",
+    include_task: str = "implement auth with Agent Teams",
+    include_termination: bool = False,
+) -> str:
+    """
+    Generate a realistic orchestrate workflow transcript using Agent Teams (v3).
+
+    This transcript includes TeamCreate and SendMessage tool calls alongside
+    Task calls with team_name parameters, exercising the v3 Agent Teams pipeline.
+
+    Args:
+        phase: Current phase (prepare, architect, code, test)
+        include_task: Task description
+        include_termination: Whether to add termination signal
+
+    Returns:
+        JSONL string representing an Agent Teams orchestrate transcript
+    """
+    lines = []
+
+    # User triggers orchestrate
+    lines.append(make_user_message(
+        f"/PACT:orchestrate {include_task}",
+        timestamp="2025-01-22T10:00:00Z",
+    ))
+
+    # Variety assessment
+    lines.append(make_assistant_message(
+        f"variety-assess: Analyzing task: {include_task}. Estimated complexity: medium.",
+        timestamp="2025-01-22T10:00:05Z",
+    ))
+
+    # TeamCreate call - orchestrator creates the session team
+    lines.append(make_assistant_message(
+        content=[
+            {"type": "text", "text": "Creating session team for this workflow."},
+            make_team_create_call("v3-agent-teams", tool_use_id="teamcreate-orch"),
+        ],
+        timestamp="2025-01-22T10:00:08Z",
+    ))
+
+    # Prepare phase with teammate
+    if phase in ["prepare", "architect", "code", "test"]:
+        content_blocks = [
+            {"type": "text", "text": "prepare phase: Spawning preparer teammate."},
+            make_task_call("pact-preparer", "Research auth patterns", "task-prep-team"),
+        ]
+        lines.append(make_assistant_message(content_blocks, "2025-01-22T10:00:15Z"))
+
+        # SendMessage from lead to teammate
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "Sending context to preparer teammate."},
+                make_send_message_call(
+                    "preparer-1", "Starting PREPARE phase for auth module.",
+                    tool_use_id="sendmsg-prep",
+                ),
+            ],
+            timestamp="2025-01-22T10:00:20Z",
+        ))
+
+    # Code phase with teammate
+    if phase in ["code", "test"]:
+        content_blocks = [
+            {"type": "text", "text": "code phase: Spawning backend coder teammate."},
+            make_task_call("pact-backend-coder", "Implement auth endpoint", "task-code-team"),
+        ]
+        lines.append(make_assistant_message(content_blocks, "2025-01-22T10:02:00Z"))
+
+        # SendMessage for handoff coordination
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "Coordinating with backend coder."},
+                make_send_message_call(
+                    "backend-1", "Architecture docs ready. Begin implementation.",
+                    tool_use_id="sendmsg-code",
+                ),
+            ],
+            timestamp="2025-01-22T10:02:05Z",
+        ))
+
+    # Test phase with teammate
+    if phase == "test":
+        content_blocks = [
+            {"type": "text", "text": "test phase: Spawning test engineer teammate."},
+            make_task_call("pact-test-engineer", "Test auth module", "task-test-team"),
+        ]
+        lines.append(make_assistant_message(content_blocks, "2025-01-22T10:03:00Z"))
+
+    # Termination
+    if include_termination:
+        lines.append(make_assistant_message(
+            "all phases complete. IMPLEMENTED: Auth endpoint is ready.",
+            timestamp="2025-01-22T10:05:00Z",
+        ))
+
+    return create_transcript_lines(lines)

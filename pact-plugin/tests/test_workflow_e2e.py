@@ -1,8 +1,10 @@
 """
-End-to-end tests for plan-mode, comPACT, and rePACT workflow refresh cycles.
+End-to-end tests for plan-mode, comPACT, rePACT, and Agent Teams workflow refresh cycles.
 
 Tests the complete PreCompact -> checkpoint -> SessionStart flow for each
 workflow type to ensure proper state extraction and refresh injection.
+Includes Agent Teams (v3) scenarios with TeamCreate, SendMessage, and
+team interaction counting.
 """
 
 import json
@@ -603,3 +605,234 @@ class TestMixedWorkflowScenarios:
 
         # Should detect comPACT as the most recent active workflow
         assert checkpoint["workflow"]["name"] == "comPACT"
+
+
+class TestAgentTeamsWorkflowE2E:
+    """End-to-end tests for Agent Teams (v3) workflow refresh cycle."""
+
+    def test_agent_teams_orchestrate_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path):
+        """Test complete refresh cycle for orchestrate workflow with Agent Teams."""
+        from conftest import create_orchestrate_with_teams_transcript
+
+        transcript_content = create_orchestrate_with_teams_transcript(
+            phase="code",
+            include_task="implement auth with Agent Teams",
+            include_termination=False,
+        )
+
+        # Set up directory structure
+        projects_dir = tmp_path / ".claude" / "projects"
+        encoded_path = "-test-project"
+        session_dir = projects_dir / encoded_path / "session-uuid"
+        session_dir.mkdir(parents=True)
+        transcript_path = session_dir / "session.jsonl"
+        transcript_path.write_text(transcript_content)
+
+        checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
+        checkpoint_dir.mkdir(parents=True)
+
+        # Step 1: Run PreCompact hook
+        precompact_input = json.dumps({"transcript_path": str(transcript_path)})
+
+        with patch("sys.stdin", StringIO(precompact_input)), \
+             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "agent-teams-session"}), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+
+            from precompact_refresh import main as precompact_main
+
+            with patch("sys.stdout", new_callable=StringIO):
+                with pytest.raises(SystemExit) as exc_info:
+                    precompact_main()
+                assert exc_info.value.code == 0
+
+        # Step 2: Verify checkpoint was created with orchestrate workflow
+        checkpoint_path = checkpoint_dir / f"{encoded_path}.json"
+        assert checkpoint_path.exists()
+
+        checkpoint = json.loads(checkpoint_path.read_text())
+        assert checkpoint["workflow"]["name"] == "orchestrate"
+        assert checkpoint["session_id"] == "agent-teams-session"
+
+        # Step 3: Run SessionStart hook (simulating post-compaction)
+        sessionstart_input = json.dumps({"source": "compact"})
+
+        with patch("sys.stdin", StringIO(sessionstart_input)), \
+             patch.dict(os.environ, {
+                 "CLAUDE_SESSION_ID": "agent-teams-session",
+                 "CLAUDE_PROJECT_DIR": "/test/project",
+             }), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+
+            from compaction_refresh import main as sessionstart_main
+
+            with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+                with pytest.raises(SystemExit) as exc_info:
+                    sessionstart_main()
+                assert exc_info.value.code == 0
+                output = mock_stdout.getvalue()
+
+        # Step 4: Verify refresh message was generated
+        result = json.loads(output)
+        refresh_msg = result["hookSpecificOutput"]["additionalContext"]
+
+        assert "[POST-COMPACTION CHECKPOINT]" in refresh_msg
+        assert "orchestrate" in refresh_msg
+
+    def test_agent_teams_confidence_includes_team_interactions(self, tmp_path: Path):
+        """Test that team interactions (SendMessage, TeamCreate) boost confidence."""
+        from conftest import create_orchestrate_with_teams_transcript
+
+        transcript_content = create_orchestrate_with_teams_transcript(
+            phase="code",
+            include_termination=False,
+        )
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        encoded_path = "-test-project"
+        session_dir = projects_dir / encoded_path / "session-uuid"
+        session_dir.mkdir(parents=True)
+        transcript_path = session_dir / "session.jsonl"
+        transcript_path.write_text(transcript_content)
+
+        checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
+        checkpoint_dir.mkdir(parents=True)
+
+        precompact_input = json.dumps({"transcript_path": str(transcript_path)})
+
+        with patch("sys.stdin", StringIO(precompact_input)), \
+             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "teams-confidence-session"}), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+
+            from precompact_refresh import main as precompact_main
+
+            with patch("sys.stdout", new_callable=StringIO):
+                with pytest.raises(SystemExit) as exc_info:
+                    precompact_main()
+                assert exc_info.value.code == 0
+
+        checkpoint_path = checkpoint_dir / f"{encoded_path}.json"
+        checkpoint = json.loads(checkpoint_path.read_text())
+
+        # Confidence should include agent_invocation weight (0.2)
+        # because the transcript has both Task calls AND team interactions
+        assert checkpoint["extraction"]["confidence"] >= 0.6
+
+        # Notes should mention team interactions
+        notes = checkpoint["extraction"]["notes"]
+        assert "team interaction" in notes
+
+    def test_agent_teams_send_messages_found_in_parsed_transcript(self, tmp_path: Path):
+        """Test that SendMessage calls are correctly found in parsed transcript."""
+        from conftest import create_orchestrate_with_teams_transcript
+
+        transcript_content = create_orchestrate_with_teams_transcript(
+            phase="code",
+            include_termination=False,
+        )
+
+        # Write transcript and parse it directly
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(transcript_content)
+
+        from refresh.transcript_parser import parse_transcript, find_send_messages
+
+        turns = parse_transcript(transcript_path)
+
+        # Find all SendMessage calls
+        send_messages = find_send_messages(turns)
+
+        # The "code" phase transcript has 2 SendMessage calls:
+        # one to preparer-1, one to backend-1
+        assert len(send_messages) == 2
+
+        # Verify recipients
+        recipients = [tc.input_data.get("recipient") for _, tc in send_messages]
+        assert "preparer-1" in recipients
+        assert "backend-1" in recipients
+
+    def test_agent_teams_team_create_detected_in_transcript(self, tmp_path: Path):
+        """Test that TeamCreate calls are detected in parsed transcript."""
+        from conftest import create_orchestrate_with_teams_transcript
+
+        transcript_content = create_orchestrate_with_teams_transcript(
+            phase="code",
+            include_termination=False,
+        )
+
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(transcript_content)
+
+        from refresh.transcript_parser import parse_transcript
+
+        turns = parse_transcript(transcript_path)
+
+        # Find turns with TeamCreate
+        team_create_turns = [t for t in turns if t.has_team_create()]
+        assert len(team_create_turns) == 1
+
+        # Verify team name in the TeamCreate call
+        tc = team_create_turns[0].get_tool_call("TeamCreate")
+        assert tc is not None
+        assert tc.input_data.get("team_name") == "v3-agent-teams"
+
+    def test_agent_teams_count_team_interactions(self, tmp_path: Path):
+        """Test that count_team_interactions counts SendMessage and TeamCreate."""
+        from conftest import create_orchestrate_with_teams_transcript
+
+        transcript_content = create_orchestrate_with_teams_transcript(
+            phase="code",
+            include_termination=False,
+        )
+
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(transcript_content)
+
+        from refresh.transcript_parser import parse_transcript
+        from refresh.workflow_detector import count_team_interactions
+
+        turns = parse_transcript(transcript_path)
+
+        # Count all team interactions from the beginning
+        interactions = count_team_interactions(turns, after_index=0)
+
+        # "code" phase transcript has: 1 TeamCreate + 2 SendMessage = 3 turns
+        # with team interactions
+        assert interactions == 3
+
+    def test_agent_teams_terminated_workflow(self, tmp_path: Path):
+        """Test that a terminated Agent Teams orchestrate workflow is handled."""
+        from conftest import create_orchestrate_with_teams_transcript
+
+        transcript_content = create_orchestrate_with_teams_transcript(
+            phase="test",
+            include_termination=True,
+        )
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        encoded_path = "-test-project"
+        session_dir = projects_dir / encoded_path / "session-uuid"
+        session_dir.mkdir(parents=True)
+        transcript_path = session_dir / "session.jsonl"
+        transcript_path.write_text(transcript_content)
+
+        checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
+        checkpoint_dir.mkdir(parents=True)
+
+        precompact_input = json.dumps({"transcript_path": str(transcript_path)})
+
+        with patch("sys.stdin", StringIO(precompact_input)), \
+             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "teams-term-session"}), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+
+            from precompact_refresh import main as precompact_main
+
+            with patch("sys.stdout", new_callable=StringIO):
+                with pytest.raises(SystemExit) as exc_info:
+                    precompact_main()
+                assert exc_info.value.code == 0
+
+        checkpoint_path = checkpoint_dir / f"{encoded_path}.json"
+        checkpoint = json.loads(checkpoint_path.read_text())
+
+        # Terminated workflow should be detected as orchestrate or none
+        assert checkpoint["workflow"]["name"] in ["orchestrate", "none"]
