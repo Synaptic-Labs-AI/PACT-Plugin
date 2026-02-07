@@ -772,5 +772,5 @@ class TestAppendTeamContext:
         _append_team_context(lines)
 
         # Should have entries for both teams (2 lines per team with active members)
-        team_lines = [l for l in lines if "Team:" in l]
+        team_lines = [l for l in lines if l.startswith("Team")]
         assert len(team_lines) == 2
