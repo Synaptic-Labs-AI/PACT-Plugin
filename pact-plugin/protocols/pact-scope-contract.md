@@ -123,23 +123,22 @@ Task(
 )
 ```
 
-**Key Agent Teams tools**:
+**PACT usage of Agent Teams tools**:
 
-| Tool | Purpose | PACT Mapping |
-|------|---------|--------------|
-| `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration (or reuse session team) |
-| `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
-| `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
-| `SendMessage` (type: `"broadcast"`) | Message to all teammates | Cross-scope coordination (used sparingly) |
-| `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
-| `TaskCreate`/`TaskUpdate` | Shared task list management | Teammates self-manage their tasks |
-| `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
+| Tool | PACT Mapping |
+|------|--------------|
+| `TeamCreate` | One team per scoped orchestration (or reuse session team) |
+| `Task` (with `team_name`, `name`) | One teammate per sub-scope |
+| `SendMessage` (type: `"message"`) | Handoff delivery, blocker reporting |
+| `SendMessage` (type: `"broadcast"`) | Cross-scope coordination (used sparingly) |
+| `TaskCreate`/`TaskUpdate` | Teammates self-manage their tasks |
+| `TeamDelete` | Cleanup after scoped orchestration completes |
 
-**Architectural notes**:
+**PACT-specific notes**:
 
-- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
-- No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
-- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), enabling sibling scope coordination during the CONSOLIDATE phase.
+- Teammates receive only the spawn prompt (scope contract + feature context) — they do not share the lead's conversation.
+- No nested teams — parallels PACT's 1-level nesting limit, enforced architecturally.
+- Peer-to-peer messaging enables sibling scope coordination during the CONSOLIDATE phase.
 
 #### Design Constraints
 
@@ -147,3 +146,4 @@ Task(
 - **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
 
 ---
+

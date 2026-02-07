@@ -148,36 +148,14 @@ REVIEW FORMAT (send via SendMessage to "team-lead"):
 
 ### Plan Approval for Reviewers
 
-When a reviewer submits their review plan via ExitPlanMode:
-1. Receive the plan approval request message
-2. Review the plan —ensure it covers the reviewer's assigned domain
-3. Approve or reject with feedback:
-   ```
-   SendMessage(type: "plan_approval_response",
-     request_id: "{request_id}",
-     recipient: "{reviewer-name}",
-     approve: true)
-   ```
-4. If rejected, provide specific guidance on what to cover
+Review each reviewer's plan to ensure it covers the reviewer's assigned domain. If rejecting, provide specific guidance on what to cover.
 
 ### Collecting Reviews
 
-Reviews arrive as SendMessage deliveries from reviewer teammates. As each review arrives:
+As each review arrives via SendMessage:
 1. Record the review content
-2. TaskUpdate the reviewer's task as `completed`
-3. When all reviews are collected, proceed to shutdown and synthesis
-
-### Shutting Down Reviewers
-
-After all reviews are collected, shutdown each reviewer:
-
-```
-SendMessage(type: "shutdown_request",
-  recipient: "{reviewer-name}",
-  content: "Review complete, shutting down")
-```
-
-Reviewers will approve the shutdown via their pact-task-tracking protocol.
+2. Mark the reviewer's task as `completed`
+3. When all reviews are collected, shut down reviewers and proceed to synthesis
 
 ---
 

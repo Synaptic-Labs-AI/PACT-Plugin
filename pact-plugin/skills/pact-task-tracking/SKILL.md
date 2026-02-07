@@ -159,14 +159,6 @@ You can communicate with peer teammates when coordination is needed.
 - Questions that should go to the lead (use SendMessage to "team-lead")
 - Anything requiring lead approval or triage
 
-### How to Message a Peer
-
-```
-SendMessage(type: "message", recipient: "{peer-name}",
-  content: "{your message}",
-  summary: "{5-10 word summary}")
-```
-
 Peer names are visible via TaskList (task owners) or your team configuration.
 
 ## Plan Approval Workflow
@@ -175,7 +167,5 @@ When you are spawned with `mode="plan"`, you must submit a plan before implement
 
 1. **Analyze your task**: Read relevant documentation, understand requirements, identify approach.
 2. **Create your plan**: Outline what you will do, in what order, and why.
-3. **Submit via ExitPlanMode**: The lead receives your plan and reviews it.
-4. **Wait for approval**: Do not begin implementation until the lead approves your plan.
-5. **If rejected**: Revise your plan based on the lead's feedback and resubmit via ExitPlanMode.
-6. **After approval**: Proceed with implementation following your approved plan.
+3. **Submit via ExitPlanMode** and wait for lead approval before implementing.
+4. **If rejected**: Revise based on the lead's feedback and resubmit.

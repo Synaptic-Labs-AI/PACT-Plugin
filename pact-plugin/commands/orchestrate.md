@@ -271,46 +271,15 @@ Lead: Single message (all parallel tool calls):
 └── Task(subagent_type="pact-preparer", team_name="{team}", name="preparer-2", mode="plan", prompt="...")
 ```
 
-**Parameters**:
-- `subagent_type`: The agent definition to use (e.g., `"pact-backend-coder"`)
-- `team_name`: The session team name (from hook or TeamCreate)
-- `name`: A discoverable name for the teammate (e.g., `"backend-1"`, `"preparer-1"`)
-- `mode`: Set to `"plan"` to require Plan Approval before implementation
-- `prompt`: The task description, context, and instructions
-
 **Naming convention**: `{role}-{number}` (e.g., `"backend-1"`, `"architect-2"`, `"preparer-1"`). For scoped orchestration: `"scope-{scope}-{role}"` (e.g., `"scope-auth-backend"`, `"scope-billing-frontend"`).
 
-### Plan Approval Workflow
+### Plan Approval
 
-All teammates are spawned with `mode="plan"` (plan approval required). The workflow:
-
-1. **Teammate analyzes task** and creates a plan.
-2. **Teammate submits plan** via ExitPlanMode.
-3. **Lead reviews the plan** — receives it as a plan approval request message.
-4. **Lead approves or rejects**:
-   ```
-   SendMessage(type: "plan_approval_response", request_id: "{id}", recipient: "{teammate-name}", approve: true)
-   ```
-   Or to reject with feedback:
-   ```
-   SendMessage(type: "plan_approval_response", request_id: "{id}", recipient: "{teammate-name}", approve: false, content: "Please also consider X")
-   ```
-5. **After approval**, teammate proceeds with implementation.
-6. **If rejected**, teammate revises and resubmits.
-
-**Review all plans for a phase before approving any** — this allows the lead to identify conflicts, overlaps, or gaps across the phase's work items before implementation begins.
+All teammates are spawned with `mode="plan"`. **Review all plans for a phase before approving any** — this allows the lead to identify conflicts, overlaps, or gaps across the phase's work items before implementation begins.
 
 ### Shutting Down Teammates Between Phases
 
-Before proceeding to the next phase, shut down all current-phase teammates:
-
-```
-SendMessage(type: "shutdown_request", recipient: "{teammate-name}", content: "Phase complete. Shutting down.")
-```
-
-Send shutdown requests to each active teammate. Teammates respond with shutdown approval or rejection. Wait for all shutdowns to be acknowledged before spawning next-phase teammates.
-
-**If a teammate rejects shutdown**: It may still be completing work. Check TaskList for its task status. If the task is complete, re-send the shutdown request. If incomplete, wait for completion.
+Shut down all current-phase teammates and wait for acknowledgment before spawning next-phase teammates. If a teammate rejects shutdown, check TaskList for its task status — it may still be completing work.
 
 ---
 
@@ -602,26 +571,6 @@ Task(subagent_type="pact-test-engineer", team_name="{team}", name="test-2", mode
 
 ## Teammate Monitoring
 
-### How Teammates Communicate
-
-Teammates communicate via SendMessage. The lead's inbox receives these automatically:
-- **HANDOFF messages**: Structured completion report (5-item format)
-- **BLOCKER messages**: Stop-work notification with partial handoff
-- **ALGEDONIC messages**: HALT (broadcast to all) or ALERT (direct to lead)
-- **Plan approval requests**: Teammate submitting plan for review
-
-### Monitoring Progress
-
-Use TaskList to monitor teammate progress:
-- Teammates self-update their task status via TaskUpdate
-- TaskList shows all tasks with current status and owner
-
-**Check TaskList**:
-- After spawning each phase's teammates
-- When a teammate sends a HANDOFF message
-- When a teammate reports a blocker
-- Periodically during long-running phases
-
 ### Handling Teammate Messages
 
 | Message Type | Action |
@@ -632,6 +581,8 @@ Use TaskList to monitor teammate progress:
 | ALGEDONIC HALT | Stop all work, present to user immediately |
 | ALGEDONIC ALERT | Pause, assess, present to user |
 | Peer coordination question | Typically no lead action needed (teammate-to-teammate) |
+
+**Check TaskList** after spawning teammates, on HANDOFF/BLOCKER receipt, and periodically during long-running phases.
 
 ---
 

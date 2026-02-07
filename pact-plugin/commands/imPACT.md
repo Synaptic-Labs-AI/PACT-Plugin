@@ -22,7 +22,7 @@ These are orchestrator-side operations (teammates report blockers via SendMessag
 5. Blocked agent task is now unblocked
 ```
 
-**Note**: Teammates report blockers via `SendMessage(type: "message", recipient: "team-lead", content: "BLOCKER: {description}")`. The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the teammate's task. When the blocker is resolved (marked completed), the teammate's task becomes unblocked.
+**Note**: Teammates report blockers via SendMessage to the lead using the `BLOCKER:` prefix format. The orchestrator creates blocker Tasks and uses `addBlockedBy` to track resolution.
 
 ---
 

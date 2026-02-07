@@ -362,33 +362,11 @@ The session team is created at session start by the `session_init.py` hook, whic
 - Between phases, shut down current teammates before spawning next-phase teammates
 - The team itself persists for the entire session
 
-**Spawning a teammate**:
-```
-Task(
-    subagent_type="pact-backend-coder",
-    team_name="{team}",
-    name="backend-1",
-    mode="plan",
-    prompt="CONTEXT: ... MISSION: ... INSTRUCTIONS: ... GUIDELINES: ..."
-)
-```
-
-**Parameters**:
-- `subagent_type`: The agent definition to use (e.g., `"pact-backend-coder"`)
-- `team_name`: The session team name (from hook or TeamCreate)
-- `name`: A discoverable name for the teammate (e.g., `"backend-1"`, `"preparer-1"`)
-- `mode`: Set to `"plan"` to require Plan Approval before implementation
-- `prompt`: The task description, context, and instructions
-
 **Naming convention**: `{role}-{number}` (e.g., `"backend-1"`, `"architect-2"`, `"preparer-1"`). For scoped orchestration: `"scope-{scope}-{role}"` (e.g., `"scope-auth-backend"`).
 
-**Plan Approval**: All teammates are spawned with `mode="plan"`. After analyzing their task, teammates submit a plan via ExitPlanMode. The lead reviews and approves (or rejects with feedback) via `SendMessage(type: "plan_approval_response", ...)`. Review all plans for a phase before approving any to identify conflicts or gaps.
+**Plan Approval**: All teammates are spawned with `mode="plan"`. Review all plans for a phase before approving any to identify conflicts or gaps.
 
-**Shutting down teammates**: Between phases, send shutdown requests to each active teammate:
-```
-SendMessage(type: "shutdown_request", recipient: "{teammate-name}", content: "Phase complete.")
-```
-Wait for all shutdowns to be acknowledged before spawning next-phase teammates.
+**Shutting down teammates**: Between phases, shut down all current-phase teammates and wait for acknowledgment before spawning next-phase teammates.
 
 ### Recommended Agent Prompting Structure
 

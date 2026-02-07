@@ -98,7 +98,7 @@ check_pattern "$CLAUDE_MD" \
     "TeamCreate"
 check_pattern "$CLAUDE_MD" \
     "CLAUDE.md has teammate spawning pattern" \
-    "Spawning a teammate"
+    "Teammate lifecycle"
 check_pattern "$CLAUDE_MD" \
     "CLAUDE.md has Plan Approval pattern" \
     "Plan Approval"

@@ -148,19 +148,7 @@ Before spawning multiple specialists concurrently, perform this coordination che
 
 ## Spawning Teammates
 
-Teammates are spawned into the existing session team using:
-
-```
-Task(
-  subagent_type="pact-{specialist}",
-  team_name="{team}",
-  name="{specialist-N}",
-  prompt="...",
-  mode="plan"
-)
-```
-
-The team already exists (created by the session-start hook). comPACT spawns specialists INTO the existing team. No `TeamCreate` needed.
+Spawn teammates into the existing session team (created by the session-start hook). No `TeamCreate` needed.
 
 **Spawn tasks and teammates together in a single message** (parallel tool calls):
 ```
@@ -230,26 +218,10 @@ Task: [user's task description]
 
 ## Plan Approval
 
-All teammates are spawned with `mode="plan"`. Before implementing, each teammate submits a plan for lead review.
-
-**Lead workflow**:
-1. Teammate submits plan via `ExitPlanMode`
-2. Lead receives `plan_approval_request` message
-3. Lead reviews the plan:
-   - Does it align with the task scope?
-   - Are file boundaries respected (for concurrent work)?
-   - Is the approach reasonable?
-4. Approve or reject:
-   ```
-   SendMessage(type: "plan_approval_response", request_id: "...",
-     recipient: "{teammate-name}", approve: true)
-   ```
-   Or reject with feedback:
-   ```
-   SendMessage(type: "plan_approval_response", request_id: "...",
-     recipient: "{teammate-name}", approve: false,
-     content: "Adjust approach: {feedback}")
-   ```
+All teammates are spawned with `mode="plan"`. Review each plan for:
+- Does it align with the task scope?
+- Are file boundaries respected (for concurrent work)?
+- Is the approach reasonable?
 
 ---
 
@@ -259,11 +231,7 @@ Teammates deliver their HANDOFF via `SendMessage` to the lead, then mark their t
 
 1. **Receive HANDOFF** via SendMessage from teammate(s)
 2. **Run tests** —verify work passes. If tests fail, message the teammate with details for fixes.
-3. **Shutdown teammate** after successful completion:
-   ```
-   SendMessage(type: "shutdown_request", recipient: "{teammate-name}",
-     content: "Work complete, shutting down")
-   ```
+3. **Shutdown teammate** after successful completion
 4. **Create atomic commit(s)** —stage and commit before proceeding
 5. **TaskUpdate**: Feature task status = "completed"
 

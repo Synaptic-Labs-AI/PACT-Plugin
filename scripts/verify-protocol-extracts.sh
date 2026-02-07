@@ -70,7 +70,7 @@ verify "pact-agent-stall.md" "Teammate Stall Detection (lines 1115-1145)" "1115,
 verify "pact-completeness.md" "Completeness Signals (lines 1147-1181)" "1147,1181"
 verify "pact-scope-detection.md" "Scope Detection (lines 1183-1314)" "1183,1314"
 verify "pact-scope-contract.md" "Scope Contract (lines 1316-1464)" "1316,1464"
-verify "pact-scope-phases.md" "Scoped Phases (lines 1466-1552)" "1466,1552"
+verify "pact-scope-phases.md" "Scoped Phases (lines 1465-1551)" "1465,1551"
 
 echo ""
 echo "=== Summary ==="

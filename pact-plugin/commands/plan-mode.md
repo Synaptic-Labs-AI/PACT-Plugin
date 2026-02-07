@@ -206,36 +206,14 @@ For **pact-test-engineer**, also ask:
 
 #### Plan Approval for Consultants
 
-When a consultant submits their analysis plan via ExitPlanMode:
-1. Receive the plan approval request message
-2. Review the plan —ensure it covers the consultant's assigned domain
-3. Approve or reject with feedback:
-   ```
-   SendMessage(type: "plan_approval_response",
-     request_id: "{request_id}",
-     recipient: "{consultant-name}",
-     approve: true)
-   ```
-4. If rejected, provide specific guidance on what to analyze
+Review each consultant's plan to ensure it covers the consultant's assigned domain. If rejecting, provide specific guidance on what to analyze.
 
 #### Collecting Perspectives
 
-Perspectives arrive as SendMessage deliveries from consultant teammates. As each perspective arrives:
+As each perspective arrives via SendMessage:
 1. Record the perspective content
-2. TaskUpdate the consultant's task as `completed`
-3. When all perspectives are collected, proceed to shutdown and synthesis
-
-#### Shutting Down Consultants
-
-After all perspectives are collected, shutdown each consultant:
-
-```
-SendMessage(type: "shutdown_request",
-  recipient: "{consultant-name}",
-  content: "Planning consultation complete, shutting down")
-```
-
-Consultants will approve the shutdown via their pact-task-tracking protocol.
+2. Mark the consultant's task as `completed`
+3. When all perspectives are collected, shut down consultants and proceed to synthesis
 
 **Handling incomplete or missing responses**:
 
