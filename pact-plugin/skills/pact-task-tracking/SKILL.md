@@ -12,18 +12,20 @@ description: |
 
 ## Task Self-Management
 
-You have direct access to Task tools. Use them to manage your own work:
+The lead assigns you a task when spawning you. Mark it in-progress and begin working immediately. From there, you self-manage your work using Task tools.
 
-- **TaskUpdate**: Claim unassigned tasks in your domain, mark tasks in-progress or complete.
+> **Batch work**: Sometimes the lead creates a pool of tasks in the same domain and spawns multiple specialists of your type to work them in parallel. In that case, use TaskList to find and claim unassigned tasks after completing your initial assignment.
+
+- **TaskUpdate**: Mark tasks in-progress or complete, claim unassigned tasks in your domain.
 - **TaskList**: View team progress and discover unassigned tasks.
 - **TaskCreate**: Create sub-tasks if your work expands beyond the original scope.
 
 ### Conventions
 
 - The team lead is always named **"team-lead"**.
-- Claim only tasks within your specialist domain. Do not claim cross-domain tasks.
-- When claiming an unassigned task, use `TaskUpdate(taskId, status: "in_progress")`.
+- When starting your assigned task, use `TaskUpdate(taskId, status: "in_progress")`.
 - When your task is done, use `TaskUpdate(taskId, status: "completed")` as part of your HANDOFF delivery (see section 8).
+- Claim only tasks within your specialist domain. Do not claim cross-domain tasks.
 
 ## Progress Reporting
 
