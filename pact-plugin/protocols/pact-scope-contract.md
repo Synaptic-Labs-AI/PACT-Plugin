@@ -1,6 +1,6 @@
 ## Scope Contract
 
-> **Purpose**: Define what a sub-scope promises to deliver to its parent orchestrator.
+> **Purpose**: Define what a sub-scope promises to deliver to its parent lead.
 > Scope contracts are generated at decomposition time using PREPARE output and serve as
 > the authoritative agreement between parent and sub-scope for deliverables and interfaces.
 
@@ -33,9 +33,9 @@ Constraints:
 
 ### Design Principles
 
-- **Minimal contracts** (~5-10 lines per scope): The [scope verification protocol](pact-scope-verification.md) catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
+- **Minimal contracts** (~5-10 lines per scope): The [scope verification protocol](pact-scope-verification.md) catches what the contract does not specify. Over-specifying front-loads context cost into the lead.
 - **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is Agent Teams (primary) or rePACT (sequential fallback).
-- **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
+- **Generated, not authored**: The lead populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
 
 ### Generation Process
 
@@ -77,7 +77,7 @@ The [scope verification protocol](pact-scope-verification.md) uses fulfillment s
 
 ### Executor Interface
 
-The executor interface defines the contract between the parent orchestrator and whatever mechanism fulfills a sub-scope. It is the "how" side of the scope contract: while the contract format above defines WHAT a scope delivers, the executor interface defines the input/output shape that any execution backend must implement.
+The executor interface defines the contract between the parent lead and whatever mechanism fulfills a sub-scope. It is the "how" side of the scope contract: while the contract format above defines WHAT a scope delivers, the executor interface defines the input/output shape that any execution backend must implement.
 
 #### Interface Shape
 
@@ -133,20 +133,20 @@ rePACT serves as the sequential execution fallback when Agent Teams is unavailab
 
 | Interface Element | rePACT Implementation |
 |-------------------|-----------------------|
-| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent lead |
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
 | **Input: branch** | Uses the current feature branch (no new branch created) |
-| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
+| **Input: nesting_depth** | Tracked via lead context; enforced at 1-level maximum |
 | **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
-| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
+| **Output: commits** | Code committed directly to the feature branch during inner CODE phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
-| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
+| **Delivery mechanism** | Sequential — the lead executes each sub-scope's inner P→A→C→T in order, using the same Agent Teams mechanisms (SendMessage + Task metadata) for specialist dispatch within each sub-scope |
 
 See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
 
 #### Design Constraints
 
-- **Backend-agnostic**: The parent orchestrator's logic (contract generation, [scope verification protocol](pact-scope-verification.md), failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Backend-agnostic**: The parent lead's logic (contract generation, [scope verification protocol](pact-scope-verification.md), failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
 - **Same output shape**: Both Agent Teams and rePACT produce the same structured output (5-item handoff + contract fulfillment). The scope verification protocol consumes this output identically regardless of source.
 - **Executor selection**: Agent Teams is the default executor. rePACT is used when sequential execution is preferred or when Agent Teams is unavailable. The executor interface abstraction insulates PACT from executor changes — only the mapping table needs updating.
 

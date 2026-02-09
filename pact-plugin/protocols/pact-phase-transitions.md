@@ -1,11 +1,14 @@
 ## Phase Handoffs
 
-**On completing any phase, state**:
-1. What you produced (with file paths)
-2. Key decisions made
-3. What the next agent needs to know
+Every agent stores a structured 5-item HANDOFF as JSON in Task metadata (via TaskUpdate) and sends a thin completion signal via SendMessage:
 
-Keep it brief. No templates required.
+1. **Produced**: Files created/modified
+2. **Key decisions**: Decisions with rationale, assumptions that could be wrong
+3. **Areas of uncertainty** (prioritized HIGH/MEDIUM/LOW)
+4. **Integration points**: Other components touched
+5. **Open questions**: Unresolved items
+
+All five items are always present. See the pact-task-tracking skill for full format details and JSON schema.
 
 ---
 
@@ -24,7 +27,7 @@ Keep it brief. No templates required.
 
 ### CODE → TEST Handoff
 
-Coders provide handoff summaries to the orchestrator, who passes them to the test engineer.
+Coders provide handoff summaries to the lead, who passes them to the test engineer.
 
 **Handoff Format**:
 ```

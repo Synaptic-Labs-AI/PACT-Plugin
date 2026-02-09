@@ -153,7 +153,7 @@ C) Other (specify)
 
 ## S4 Checkpoint Protocol
 
-At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
+At phase boundaries, the lead performs an S4 checkpoint to assess whether the current approach remains valid.
 
 > **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See `CLAUDE.md > Temporal Horizons` for the full horizon model.
 
@@ -393,13 +393,13 @@ S2 manages information flow between agents:
 | From | To | Information |
 |------|-----|-------------|
 | Earlier agent | Later agents | Conventions established, interfaces defined |
-| Orchestrator | All agents | Shared context, boundary assignments |
-| Any agent | Orchestrator → All others | Resource claims, conflict warnings |
+| Lead | All agents | Shared context, boundary assignments |
+| Any agent | Lead → All others | Resource claims, conflict warnings |
 | TaskList | All agents | Current in_progress work, blockers, completed decisions |
 
 ### Pre-Parallel Coordination Check
 
-Before invoking parallel agents, the orchestrator must:
+Before invoking parallel agents, the lead must:
 
 1. **Identify potential conflicts**:
    - Shared files (merge conflict risk)
@@ -413,7 +413,7 @@ Before invoking parallel agents, the orchestrator must:
 3. **Establish resolution authority**:
    - Technical disagreements → Architect arbitrates
    - Style/convention disagreements → First agent's choice becomes standard
-   - Resource contention → Orchestrator allocates
+   - Resource contention → Lead allocates
 
 ### S2 Pre-Parallel Checkpoint Format
 
@@ -439,20 +439,20 @@ When analyzing parallel work, emit proactive coordination signals:
 | Same file | Sequence agents OR assign clear section boundaries |
 | Interface disagreement | Architect arbitrates; document decision |
 | Naming/convention | First agent's choice becomes standard for the batch |
-| Resource contention | Orchestrator allocates; others wait or work on different tasks |
+| Resource contention | Lead allocates; others wait or work on different tasks |
 
 ### Convention Propagation
 
 When "first agent's choice becomes standard," subsequent agents need to discover those conventions:
 
-1. **Orchestrator responsibility**: When invoking parallel agents after the first completes:
+1. **Lead responsibility**: When invoking parallel agents after the first completes:
    - Extract key conventions from first agent's output (naming patterns, file structure, API style)
    - Include in subsequent agents' prompts: "Follow conventions established: {list}"
 
-2. **Handoff reference**: Orchestrator passes first agent's key decisions to subsequent agents
+2. **Handoff reference**: Lead passes first agent's key decisions to subsequent agents
 
 3. **For truly parallel invocation** (all start simultaneously):
-   - Orchestrator pre-defines conventions in all prompts
+   - Lead pre-defines conventions in all prompts
    - Or: Run one agent first to establish conventions, then invoke the rest concurrently
    - **Tie-breaker**: If agents complete simultaneously and no first-agent convention exists, use alphabetical domain order (backend, database, frontend) for convention precedence
 
@@ -531,9 +531,9 @@ Specialists (S1) have bounded autonomy to adapt within their domain. This sectio
 
 All specialists have authority to:
 - **Adjust implementation approach** based on discoveries during work
-- **Request context** from other specialists via the orchestrator
+- **Request context** from other specialists via the lead
 - **Recommend scope changes** when task complexity differs from estimate
-- **Apply domain expertise** without micro-management from orchestrator
+- **Apply domain expertise** without micro-management from lead
 
 All specialists must escalate when:
 - **Discovery contradicts architecture** — findings invalidate the design
@@ -547,7 +547,7 @@ When working in parallel (see S2 Coordination):
 - Check S2 protocols before starting if multiple agents are active
 - Respect assigned file/component boundaries
 - First agent's conventions become standard for the batch
-- Report potential conflicts to orchestrator immediately
+- Report potential conflicts to lead immediately
 
 ### Recursive PACT (Nested Cycles)
 
@@ -563,13 +563,13 @@ When a sub-task is complex enough to warrant its own PACT treatment:
 1. **Declare**: "Invoking nested PACT for {sub-task}"
 2. **Execute**: Run mini-PACT cycle (may skip phases if not needed)
 3. **Integrate**: Merge results back to parent task
-4. **Report**: Include nested work in handoff to orchestrator
+4. **Report**: Include nested work in handoff to lead
 
 **Constraints:**
 - **Nesting limit**: 1 level maximum (prevent infinite recursion)
-- **Scope check**: Nested PACT must be within your domain; cross-domain needs escalate to orchestrator
+- **Scope check**: Nested PACT must be within your domain; cross-domain needs escalate to lead
 - **Documentation**: Nested cycles report via handoff to parent
-- **Algedonic signals**: Algedonic signals from nested cycles still go **directly to user**—they bypass both the nested orchestration AND the parent orchestrator. Viability threats don't wait for hierarchy.
+- **Algedonic signals**: Algedonic signals from nested cycles still go **directly to user**—they bypass both the nested orchestration AND the parent lead. Viability threats don't wait for hierarchy.
 
 **Example:**
 ```
@@ -581,14 +581,14 @@ Nested PACT: "Research and implement OAuth2 token refresh mechanism"
   - Mini-Test: Smoke test the refresh flow
 ```
 
-### Orchestrator-Initiated Recursion (/PACT:rePACT)
+### Lead-Initiated Recursion (/PACT:rePACT)
 
-While specialists can invoke nested cycles autonomously, the orchestrator can also initiate them:
+While specialists can invoke nested cycles autonomously, the lead can also initiate them:
 
 | Initiator | Mechanism | When |
 |-----------|-----------|------|
 | Specialist | Autonomy Charter | Discovers complexity during work |
-| Orchestrator | `/PACT:rePACT` command | Identifies complex sub-task upfront |
+| Lead | `/PACT:rePACT` command | Identifies complex sub-task upfront |
 
 **Usage:**
 - Single-domain: `/PACT:rePACT backend "implement rate limiting"`
@@ -627,7 +627,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 ### Key Rules
 
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
-- Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
+- Lead **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
 - ALERT allows user to choose: Investigate / Continue / Stop
 
@@ -699,7 +699,7 @@ At phase transitions, briefly assess:
 - "Has variety decreased?" → Consider simplifying (skip phases, fewer agents)
 - "Are we matched?" → Continue as planned
 
-**Who performs checkpoints**: Orchestrator, at S4 mode transitions (between phases).
+**Who performs checkpoints**: Lead, at S4 mode transitions (between phases).
 
 ---
 
@@ -729,9 +729,9 @@ At phase transitions, briefly assess:
 
 | Phase | What Happens |
 |-------|--------------|
-| 0. Analyze | Orchestrator assesses scope, selects relevant specialists |
+| 0. Analyze | Lead assesses scope, selects relevant specialists |
 | 1. Consult | Specialists provide planning perspectives in parallel |
-| 2. Synthesize | Orchestrator resolves conflicts, sequences work, assesses risk |
+| 2. Synthesize | Lead resolves conflicts, sequences work, assesses risk |
 | 3. Present | Save plan to `docs/plans/`, present to user, await approval |
 
 **Key rules**:
@@ -848,12 +848,15 @@ Invoke multiple specialists of the same type when:
 
 ## Phase Handoffs
 
-**On completing any phase, state**:
-1. What you produced (with file paths)
-2. Key decisions made
-3. What the next agent needs to know
+Every agent stores a structured 5-item HANDOFF as JSON in Task metadata (via TaskUpdate) and sends a thin completion signal via SendMessage:
 
-Keep it brief. No templates required.
+1. **Produced**: Files created/modified
+2. **Key decisions**: Decisions with rationale, assumptions that could be wrong
+3. **Areas of uncertainty** (prioritized HIGH/MEDIUM/LOW)
+4. **Integration points**: Other components touched
+5. **Open questions**: Unresolved items
+
+All five items are always present. See the pact-task-tracking skill for full format details and JSON schema.
 
 ---
 
@@ -907,6 +910,7 @@ Agent tasks include metadata for context:
 
 ```json
 {
+  "assigner": "team-lead-name",
   "phase": "CODE",
   "domain": "backend",
   "feature": "user-auth",
@@ -1014,7 +1018,7 @@ Scope tasks are created during the CODE phase when decomposition is active. The 
 
 ### CODE → TEST Handoff
 
-Coders provide handoff summaries to the orchestrator, who passes them to the test engineer.
+Coders provide handoff summaries to the lead, who passes them to the test engineer.
 
 **Handoff Format**:
 ```
@@ -1141,7 +1145,7 @@ Metadata: `{"stalled": true, "reason": "..."}` | `{"failed": true, "reason": "..
 > Used by `plan-mode` (producer) to populate the Phase Requirements table,
 > and by `orchestrate` (consumer) to verify phase-skip decisions.
 
-A plan section may exist without being complete. Before skipping a phase, the orchestrator checks the corresponding plan section for these 6 incompleteness signals. **Any signal present means the phase should run.**
+A plan section may exist without being complete. Before skipping a phase, the lead checks the corresponding plan section for these 6 incompleteness signals. **Any signal present means the phase should run.**
 
 ---
 
@@ -1173,13 +1177,13 @@ A plan section may exist without being complete. Before skipping a phase, the or
 
 ## Scope Detection
 
-> **Purpose**: Detect multi-scope tasks during orchestration so the orchestrator can propose
+> **Purpose**: Detect multi-scope tasks during orchestration so the lead can propose
 > decomposition before committing to a single-scope execution plan.
 > Evaluated after PREPARE phase output is available, before ARCHITECT phase begins.
 
 ### Detection Heuristics
 
-The orchestrator evaluates PREPARE output against these heuristic signals to determine whether a task warrants decomposition into sub-scopes.
+The lead evaluates PREPARE output against these heuristic signals to determine whether a task warrants decomposition into sub-scopes.
 
 | Signal | Strength | Description |
 |--------|----------|-------------|
@@ -1220,15 +1224,15 @@ The threshold and point values are tunable. Adjust based on observed false-posit
 | Backend + frontend + DB migration, no shared models | Distinct domain boundaries (2) + Non-overlapping work areas (2) + High specialist count (1) | — | 5 | All strong signals fire — autonomous tier eligible |
 | API change + UI tweak, shared types | Distinct domain boundaries (2) | Small total scope (-1) + Shared data models (-1) | 0 | Below threshold — single scope |
 
-A score of 0 means counter-signals outweighed detection signals, not that no signals were observed. The orchestrator still noted the signals — they were simply insufficient to warrant decomposition.
+A score of 0 means counter-signals outweighed detection signals, not that no signals were observed. The lead still noted the signals — they were simply insufficient to warrant decomposition.
 
 ### Activation Tiers
 
 | Tier | Trigger | Behavior |
 |------|---------|----------|
 | **Manual** | User invokes `/rePACT` explicitly | Always available — bypasses detection entirely |
-| **Confirmed** (default) | Score >= threshold | Orchestrator proposes decomposition via S5 decision framing; user confirms, rejects, or adjusts boundaries |
-| **Autonomous** | ALL strong signals fire (Distinct domain boundaries + Non-overlapping work areas) AND no counter-signals AND autonomous mode enabled | Orchestrator auto-decomposes without user confirmation |
+| **Confirmed** (default) | Score >= threshold | Lead proposes decomposition via S5 decision framing; user confirms, rejects, or adjusts boundaries |
+| **Autonomous** | ALL strong signals fire (Distinct domain boundaries + Non-overlapping work areas) AND no counter-signals AND autonomous mode enabled | Lead auto-decomposes without user confirmation |
 
 **Autonomous mode** is opt-in. Enable by adding to `CLAUDE.md`:
 
@@ -1242,7 +1246,7 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 1. **PREPARE** phase runs in single scope (always — research output is needed to evaluate signals)
 2. If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation section content against the same heuristics. If neither PREPARE output nor plan content is available, skip detection entirely (proceed single-scope).
-3. Orchestrator evaluates PREPARE output (or plan content) against heuristics
+3. Lead evaluates PREPARE output (or plan content) against heuristics
 4. Score **below threshold** → proceed with single-scope execution (today's default behavior)
 5. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
 
@@ -1254,7 +1258,7 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 ### Evaluation Response
 
-When detection fires (score >= threshold), the orchestrator must present the result to the user using S5 Decision Framing.
+When detection fires (score >= threshold), the lead must present the result to the user using S5 Decision Framing.
 
 #### S5 Confirmation Flow
 
@@ -1300,13 +1304,13 @@ When **all** of the following conditions are true, skip user confirmation and pr
 
 ### Post-Detection: Scope Contract Generation
 
-When decomposition is confirmed (by user or autonomous tier), the orchestrator generates a scope contract for each identified sub-scope before dispatching to the executor. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format, generation process, and executor interface.
+When decomposition is confirmed (by user or autonomous tier), the lead generates a scope contract for each identified sub-scope before dispatching to the executor. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format, generation process, and executor interface.
 
 ---
 
 ## Scope Contract
 
-> **Purpose**: Define what a sub-scope promises to deliver to its parent orchestrator.
+> **Purpose**: Define what a sub-scope promises to deliver to its parent lead.
 > Scope contracts are generated at decomposition time using PREPARE output and serve as
 > the authoritative agreement between parent and sub-scope for deliverables and interfaces.
 
@@ -1339,9 +1343,9 @@ Constraints:
 
 ### Design Principles
 
-- **Minimal contracts** (~5-10 lines per scope): The [scope verification protocol](pact-scope-verification.md) catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
+- **Minimal contracts** (~5-10 lines per scope): The [scope verification protocol](pact-scope-verification.md) catches what the contract does not specify. Over-specifying front-loads context cost into the lead.
 - **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is Agent Teams (primary) or rePACT (sequential fallback).
-- **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
+- **Generated, not authored**: The lead populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
 
 ### Generation Process
 
@@ -1383,7 +1387,7 @@ The [scope verification protocol](pact-scope-verification.md) uses fulfillment s
 
 ### Executor Interface
 
-The executor interface defines the contract between the parent orchestrator and whatever mechanism fulfills a sub-scope. It is the "how" side of the scope contract: while the contract format above defines WHAT a scope delivers, the executor interface defines the input/output shape that any execution backend must implement.
+The executor interface defines the contract between the parent lead and whatever mechanism fulfills a sub-scope. It is the "how" side of the scope contract: while the contract format above defines WHAT a scope delivers, the executor interface defines the input/output shape that any execution backend must implement.
 
 #### Interface Shape
 
@@ -1439,20 +1443,20 @@ rePACT serves as the sequential execution fallback when Agent Teams is unavailab
 
 | Interface Element | rePACT Implementation |
 |-------------------|-----------------------|
-| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent lead |
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
 | **Input: branch** | Uses the current feature branch (no new branch created) |
-| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
+| **Input: nesting_depth** | Tracked via lead context; enforced at 1-level maximum |
 | **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
-| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
+| **Output: commits** | Code committed directly to the feature branch during inner CODE phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
-| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
+| **Delivery mechanism** | Sequential — the lead executes each sub-scope's inner P→A→C→T in order, using the same Agent Teams mechanisms (SendMessage + Task metadata) for specialist dispatch within each sub-scope |
 
 See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
 
 #### Design Constraints
 
-- **Backend-agnostic**: The parent orchestrator's logic (contract generation, [scope verification protocol](pact-scope-verification.md), failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Backend-agnostic**: The parent lead's logic (contract generation, [scope verification protocol](pact-scope-verification.md), failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
 - **Same output shape**: Both Agent Teams and rePACT produce the same structured output (5-item handoff + contract fulfillment). The scope verification protocol consumes this output identically regardless of source.
 - **Executor selection**: Agent Teams is the default executor. rePACT is used when sequential execution is preferred or when Agent Teams is unavailable. The executor interface abstraction insulates PACT from executor changes — only the mapping table needs updating.
 
@@ -1498,7 +1502,7 @@ Outer PREPARE → Outer ARCHITECT (includes decomposition) → Outer CODE:
 
 ### Step 2: Contract Fulfillment Verification
 
-**Who**: Lead (orchestrator-level metadata comparison).
+**Who**: Lead (lead-level metadata comparison).
 
 **Task**: Compare each scope's `contract_fulfillment` metadata against original contracts:
 - For each scope: are all deliverables marked ✅?
