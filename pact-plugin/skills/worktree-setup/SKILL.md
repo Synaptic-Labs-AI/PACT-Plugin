@@ -43,8 +43,9 @@ All worktrees live in `.worktrees/` relative to the repo root.
 MAIN_GIT_DIR=$(git rev-parse --git-common-dir)
 REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
 
-# Create directory if needed
+# Create directory and ensure gitignored
 mkdir -p "$REPO_ROOT/.worktrees"
+grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null || echo '.worktrees/' >> "$REPO_ROOT/.gitignore"
 ```
 
 ### Step 3: Create the Worktree
