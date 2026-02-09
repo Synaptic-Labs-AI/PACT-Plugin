@@ -9,9 +9,9 @@ Validates that PACT agents complete with proper handoff information
 (produced, decisions, next steps) in their transcript text.
 
 Note: Task protocol compliance (status, metadata) is NOT validated here.
-The orchestrator/lead owns all TaskUpdate calls and processes agent output
-after this hook fires, so Task state cannot be reliably checked at
-SubagentStop time.
+Task state may still be in flux at SubagentStop time (agents self-manage
+status under Agent Teams, and the lead may process output after this hook
+fires), so Task state cannot be reliably checked here.
 
 Input: JSON from stdin with `transcript` and `agent_id`
 Output: JSON with `systemMessage` if handoff format is incomplete
