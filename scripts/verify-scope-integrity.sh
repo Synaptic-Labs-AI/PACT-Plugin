@@ -112,13 +112,13 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "Detection"
 echo ""
 
-# --- 4. Flow Ordering: Detection → Contract → rePACT → Consolidate ---
+# --- 4. Flow Ordering: Detection → Contract → rePACT → Scope Verification ---
 # Verify the expected flow ordering is documented in the scope contract lifecycle.
-echo "4. Flow ordering (detection → contract → rePACT → consolidate):"
+echo "4. Flow ordering (detection → contract → rePACT → scope verification):"
 contract_lifecycle=$(sed -n '/^## Scope Contract/,/^## /p' "$SSOT" | sed '$d')
 # Check that the lifecycle section mentions the expected flow stages in order
 flow_ok=true
-for stage in "Detection" "Contracts generated" "rePACT" "Consolidate phase"; do
+for stage in "Detection" "Contracts generated" "rePACT" "Scope verification protocol"; do
     if ! echo "$contract_lifecycle" | grep -q "$stage"; then
         echo "  ✗ Flow ordering: '$stage' not found in scope contract lifecycle"
         FAIL=$((FAIL + 1))
@@ -158,52 +158,50 @@ check_pattern "$COMMANDS_DIR/rePACT.md" \
     '\[scope:'
 echo ""
 
-# --- 7. ATOMIZE and CONSOLIDATE phases in orchestrate.md ---
-# orchestrate.md must document both scoped phases (or reference them via extract).
-# Phase sections exist with either full content or summary + protocol reference.
-echo "7. ATOMIZE and CONSOLIDATE phases in orchestrate.md:"
+# --- 7. Scoped CODE path and scope verification in orchestrate.md ---
+# orchestrate.md must document the scoped CODE path (rePACT + scope verification).
+# No separate ATOMIZE/CONSOLIDATE phases -- scoped work happens inside standard phases.
+echo "7. Scoped CODE path and scope verification in orchestrate.md:"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "ATOMIZE phase section exists" \
-    "ATOMIZE Phase (Scoped Orchestration Only)"
+    "Scoped CODE path section exists" \
+    "CODE Phase (Scoped Path)"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "CONSOLIDATE phase section exists" \
-    "CONSOLIDATE Phase (Scoped Orchestration Only)"
-# Check that orchestrate.md references the extracted protocol OR contains full content
-# (summaries reference the protocol, so check for that)
-check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "ATOMIZE references protocol or contains dispatch logic" \
-    "pact-scope-phases.md\|Invoke.*rePACT"
-check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "CONSOLIDATE references protocol or contains delegation" \
-    "pact-scope-phases.md\|pact-architect.*contract"
-check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "Consolidation failure routes through imPACT" \
-    "imPACT"
-echo ""
-
-# --- 7b. Full ATOMIZE/CONSOLIDATE content in pact-scope-phases.md ---
-# The extracted protocol must contain the full phase details.
-echo "7b. Full ATOMIZE/CONSOLIDATE content in pact-scope-phases.md:"
-check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
-    "ATOMIZE phase has dispatch logic" \
-    "Invoke.*rePACT"
-check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
-    "CONSOLIDATE delegates to architect" \
-    "pact-architect.*contract"
-check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
-    "CONSOLIDATE delegates to test engineer" \
-    "pact-test-engineer.*cross-scope"
-check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
-    "Consolidation failure routes through imPACT" \
-    "imPACT"
-echo ""
-
-# --- 8. ATOMIZE behavioral checks ---
-# ATOMIZE phase must dispatch sub-scopes via rePACT.
-echo "8. ATOMIZE behavioral checks:"
-check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "ATOMIZE dispatches via rePACT" \
+    "Scoped CODE path references rePACT dispatch" \
     "rePACT"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Scoped CODE path references scope verification protocol" \
+    "pact-scope-verification.md"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Scope verification failure routes through imPACT" \
+    "imPACT"
+echo ""
+
+# --- 7b. Scope verification protocol content in pact-scope-verification.md ---
+# The extracted protocol must contain verification steps and failure handling.
+echo "7b. Scope verification protocol content in pact-scope-verification.md:"
+check_pattern "$PROTOCOLS_DIR/pact-scope-verification.md" \
+    "Scope verification has contract compatibility step" \
+    "Contract Compatibility"
+check_pattern "$PROTOCOLS_DIR/pact-scope-verification.md" \
+    "Scope verification delegates to architect" \
+    "pact-architect"
+check_pattern "$PROTOCOLS_DIR/pact-scope-verification.md" \
+    "Scope verification has integration testing step" \
+    "pact-test-engineer"
+check_pattern "$PROTOCOLS_DIR/pact-scope-verification.md" \
+    "Scope verification failure routes through imPACT" \
+    "imPACT"
+echo ""
+
+# --- 8. Scoped CODE behavioral checks ---
+# Scoped CODE path must dispatch sub-scopes via rePACT and run scope verification.
+echo "8. Scoped CODE behavioral checks:"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Scoped CODE dispatches via rePACT" \
+    "rePACT"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Scoped CODE has sub-scope task creation" \
+    "Sub-feature task"
 echo ""
 
 # --- 9. decomposition_active skip reason ---
@@ -230,22 +228,22 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-detection.md" \
     "does not re-evaluate detection"
 echo ""
 
-# --- 12. Scoped phase task hierarchy ---
-# The task hierarchy in orchestrate.md must include ATOMIZE and CONSOLIDATE phase tasks.
-echo "12. Scoped phase task hierarchy:"
+# --- 12. Scoped task hierarchy in orchestrate.md ---
+# The task hierarchy in orchestrate.md must describe scoped CODE path (sub-scopes + verification).
+echo "12. Scoped task hierarchy:"
 task_hierarchy_orchestrate=$(sed -n '/^## Task Hierarchy/,/^## /p' "$COMMANDS_DIR/orchestrate.md" | sed '$d')
-if echo "$task_hierarchy_orchestrate" | grep -q "ATOMIZE"; then
-    echo "  ✓ orchestrate.md task hierarchy includes ATOMIZE phase"
+if echo "$task_hierarchy_orchestrate" | grep -q "rePACT"; then
+    echo "  ✓ orchestrate.md task hierarchy references rePACT for sub-scopes"
     PASS=$((PASS + 1))
 else
-    echo "  ✗ orchestrate.md task hierarchy missing ATOMIZE phase"
+    echo "  ✗ orchestrate.md task hierarchy missing rePACT reference for sub-scopes"
     FAIL=$((FAIL + 1))
 fi
-if echo "$task_hierarchy_orchestrate" | grep -q "CONSOLIDATE"; then
-    echo "  ✓ orchestrate.md task hierarchy includes CONSOLIDATE phase"
+if echo "$task_hierarchy_orchestrate" | grep -q "scope verification\|Scope Verification\|scope_id"; then
+    echo "  ✓ orchestrate.md task hierarchy references scope verification"
     PASS=$((PASS + 1))
 else
-    echo "  ✗ orchestrate.md task hierarchy missing CONSOLIDATE phase"
+    echo "  ✗ orchestrate.md task hierarchy missing scope verification reference"
     FAIL=$((FAIL + 1))
 fi
 # TEST Phase exists (PACT acronym provides sequencing)
@@ -314,9 +312,6 @@ check_pattern "$COMMANDS_DIR/peer-review.md" \
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
     "orchestrate.md propagates worktree path to agents" \
     "worktree_path"
-check_pattern "$PROTOCOLS_DIR/pact-scope-phases.md" \
-    "ATOMIZE phase references worktree isolation" \
-    "worktree"
 echo ""
 
 # --- 15. Memory hooks baseline ---
