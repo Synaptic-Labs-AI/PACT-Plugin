@@ -75,7 +75,9 @@ Review task: in_progress (persists until merge-ready)
 
 **PR Review Workflow**
 
-Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Invoke **at least 3 agents in parallel** to provide comprehensive review coverage:
+If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. Reuse existing team if one exists.
+
+Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 reviewers in parallel** to provide comprehensive review coverage:
 
 Standard reviewer combination:
 - **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
@@ -87,6 +89,15 @@ Select the domain coder based on PR focus:
 - Backend changes → **pact-backend-coder** (Server-side implementation quality, API design, error handling)
 - Database changes → **pact-database-engineer** (Query efficiency, schema design, data integrity)
 - Multiple domains → Coder for domain with most significant changes, or all relevant domain coders if changes are equally significant
+
+**Dispatch reviewers**:
+
+For each reviewer:
+1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
+2. `TaskUpdate(taskId, owner="{reviewer-name}")`
+3. `Task(name="{reviewer-name}", team_name="pact-{branch}", subagent_type="pact-{reviewer-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+
+Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
 ---
 
@@ -179,10 +190,10 @@ Select the domain coder based on PR focus:
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each reviewer dispatch
-- After each remediation dispatch
-- On any unexpected agent stoppage
+Monitor for blocker/algedonic signals via:
+- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
+- **TaskList**: Check for tasks with blocker metadata or stalled status
+- After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
