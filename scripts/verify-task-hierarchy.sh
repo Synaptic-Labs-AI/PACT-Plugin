@@ -235,6 +235,14 @@ else
 fi
 echo ""
 
+# --- Agent Teams integration ---
+echo "Agent Teams integration:"
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" "orchestrate TeamCreate present" "TeamCreate"
+check_pattern_file "$COMMANDS_DIR/comPACT.md" "comPACT TeamCreate present" "TeamCreate"
+check_pattern_file "$COMMANDS_DIR/peer-review.md" "peer-review TeamCreate present" "TeamCreate"
+check_pattern_file "$COMMANDS_DIR/plan-mode.md" "plan-mode TeamCreate present" "TeamCreate"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"
