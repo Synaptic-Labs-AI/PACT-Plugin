@@ -36,12 +36,11 @@ For each phase execution:
 a. TaskUpdate: phase status = "in_progress"
 b. Analyze work needed (QDCL for CODE)
 c. TaskCreate: agent task(s) as children of phase
-d. TaskUpdate: agent tasks status = "in_progress"
+d. TaskUpdate: agent tasks owner = "{agent-name}"
 e. TaskUpdate: next phase addBlockedBy = [agent IDs]
-f. Dispatch agents with task IDs in their prompts
-g. Monitor via TaskList until agents complete
-h. TaskUpdate: agent tasks status = "completed" (as each completes)
-i. TaskUpdate: phase status = "completed"
+f. Spawn teammates: Task(name="{name}", team_name="pact-{branch}", subagent_type="pact-{type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")
+g. Monitor via SendMessage (HANDOFFs) and TaskList until agents complete
+h. TaskUpdate: phase status = "completed" (agents self-manage their task status)
 ```
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
@@ -165,7 +164,8 @@ Sequential execution is the exception requiring explicit justification. When ass
 ---
 
 1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. This creates both the feature branch and its worktree. All subsequent phases work in the worktree.
-2. **Check for plan** in `docs/plans/` matching this task
+2. **Create team**: If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. The team persists for the session — all specialists join this team.
+3. **Check for plan** in `docs/plans/` matching this task
 
 ### Plan Status Handling
 
@@ -177,6 +177,10 @@ Sequential execution is the exception requiring explicit justification. When ass
 | IN_PROGRESS | Confirm: continue or restart? |
 | SUPERSEDED/IMPLEMENTED | Confirm with user before proceeding |
 | No plan found | Proceed—phases will do full discovery |
+
+### Phase Transitions
+
+Lead monitors for phase completion via `SendMessage` from teammates (HANDOFF messages) and `TaskList` status. When all phase tasks are completed, create next phase's tasks and spawn next phase's teammates. Previous-phase teammates remain as consultants.
 
 ---
 
@@ -246,10 +250,13 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Invoke `pact-preparer` with**:
-- Task description
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+**Dispatch `pact-preparer`**:
+1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+   - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+2. `TaskUpdate(taskId, owner="preparer")`
+3. `Task(name="preparer", team_name="pact-{branch}", subagent_type="pact-preparer", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+
+Completed-phase teammates remain as consultants. Do not shutdown.
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/preparation/`
@@ -311,14 +318,15 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Key Decisions"
 - "Interface Contracts"
 
-**Invoke `pact-architect` with**:
-- Task description
-- PREPARE phase outputs:
-  - Tell `pact-architect` where to find them (e.g., "Read `docs/preparation/{feature}.md` for research context")
-  - Do not read the files yourself or paste their content into the prompt
-  - If PREPARE was skipped: pass the plan's Preparation Phase section instead
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+**Dispatch `pact-architect`**:
+1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+   - Include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), and plan reference.
+   - Do not read phase output files yourself or paste their content into the task description.
+   - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
+2. `TaskUpdate(taskId, owner="architect")`
+3. `Task(name="architect", team_name="pact-{branch}", subagent_type="pact-architect", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+
+Completed-phase teammates remain as consultants. Do not shutdown.
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/architecture/`
@@ -394,16 +402,21 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
 
-**Invoke coder(s) with**:
-- Task description
-- ARCHITECT phase outputs:
-  - Tell the coder(s) where to find them (e.g., "Read `docs/architecture/{feature}.md` for design context")
-  - Do not read the files yourself or paste their content into the prompt
-  - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-- If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
-- "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
+**Dispatch coder(s)**:
+
+For each coder needed:
+1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+   - Include task description, where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference.
+   - Do not read phase output files yourself or paste their content into the task description.
+   - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
+   - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
+   - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
+2. `TaskUpdate(taskId, owner="{coder-name}")`
+3. `Task(name="{coder-name}", team_name="pact-{branch}", subagent_type="pact-{coder-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+
+Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
+
+Completed-phase teammates remain as consultants. Do not shutdown.
 
 **Before next phase**:
 - [ ] Implementation complete
@@ -457,12 +470,12 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - "Test Scenarios"
 - "Coverage Targets"
 
-**Invoke `pact-test-engineer` with**:
-- Task description
-- CODE phase handoff(s): Pass coder handoff summaries (agent response text, not files on disk)
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-- "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+**Dispatch `pact-test-engineer`**:
+1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+   - Include task description, CODE phase handoff summaries (from SendMessage, not files), plan sections (if any), plan reference.
+   - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+2. `TaskUpdate(taskId, owner="test-engineer")`
+3. `Task(name="test-engineer", team_name="pact-{branch}", subagent_type="pact-test-engineer", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
 
 **Before completing**:
 - [ ] All tests passing
@@ -482,10 +495,10 @@ For stall detection indicators, recovery protocol, prevention, and non-happy-pat
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch
-- When agent reports completion
-- On any unexpected agent stoppage
+Monitor for blocker/algedonic signals via:
+- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
+- **TaskList**: Check for tasks with blocker metadata or stalled status
+- After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

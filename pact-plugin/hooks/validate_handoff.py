@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/validate_handoff.py
-Summary: SubagentStop hook that validates PACT agent handoff format.
-Used by: Claude Code settings.json SubagentStop hook
+Summary: SubagentStop hook that validates PACT agent/teammate handoff format.
+Used by: Claude Code hooks.json SubagentStop hook (fires for both background
+         Task agents and Agent Teams teammates)
 
 Validates that PACT agents complete with proper handoff information
 (produced, decisions, next steps) in their transcript text.
 
 Note: Task protocol compliance (status, metadata) is NOT validated here.
-The orchestrator owns all TaskUpdate calls and processes agent output after
-this hook fires, so Task state cannot be reliably checked at SubagentStop time.
+Task state may still be in flux at SubagentStop time (agents self-manage
+status under Agent Teams, and the lead may process output after this hook
+fires), so Task state cannot be reliably checked here.
 
 Input: JSON from stdin with `transcript` and `agent_id`
 Output: JSON with `systemMessage` if handoff format is incomplete
@@ -113,8 +115,9 @@ def main():
     """
     Main entry point for the SubagentStop hook.
 
-    Reads agent transcript from stdin and validates handoff format (prose)
-    for PACT agents. Outputs warning messages if validation fails.
+    Reads agent/teammate transcript from stdin and validates handoff format
+    (prose) for PACT agents. Fires for both background Task agents and
+    Agent Teams teammates. Outputs warning messages if validation fails.
     """
     try:
         # Read input from stdin

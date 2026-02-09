@@ -19,7 +19,9 @@ Feature Task (created by orchestrator)
 |-------|------------|----------|-----------|
 | Feature | Orchestrator | Orchestrator | Spans entire workflow |
 | Phase | Orchestrator | Orchestrator | Active during phase |
-| Agent | Orchestrator | Specialist | Completed when specialist returns |
+| Agent | Orchestrator | Specialist (self-managed) | Specialist claims via `TaskUpdate(status="in_progress")`, completes via `TaskUpdate(status="completed")` |
+
+Under Agent Teams, specialists self-manage their agent task lifecycle. The orchestrator creates tasks via `TaskCreate` and assigns ownership, but the specialist teammate claims the task (sets `in_progress`) and marks it `completed` upon finishing. This differs from the background task model where the orchestrator managed all task state transitions.
 
 ### Task States
 

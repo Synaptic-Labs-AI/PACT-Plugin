@@ -104,7 +104,7 @@ Delegate to `pact-memory-agent` with a clear intent:
 - **Save**: `"Save memory: [context of what was done, decisions, lessons]"`
 - **Search**: `"Retrieve memories about: [topic/query]"`
 
-See **Always Run Agents in Background** for the mandatory `run_in_background=true` requirement.
+See **Agent Teams Dispatch** for the dispatch pattern. Note: `pact-memory-agent` is the one exception that still uses `run_in_background=true`.
 
 #### Three-Layer Memory Architecture
 
@@ -285,10 +285,10 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
 | Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
 
-**Key principle**: Agents communicate status via structured text in their responses. The orchestrator reads agent output and translates it into Task operations. This separation ensures Task state is always managed by the process that has the tools.
+**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via SendMessage (HANDOFFs, blockers, algedonic signals). The orchestrator creates tasks and monitors via TaskList and incoming SendMessage signals. Exception: `pact-memory-agent` communicates status via structured text in its response output (background task model).
 
 ##### Signal Task Handling
-When an agent reports a blocker or algedonic signal via text:
+When an agent reports a blocker or algedonic signal via SendMessage (or via text for pact-memory-agent):
 1. Create a signal Task (blocker or algedonic type)
 2. Block the agent's task via `addBlockedBy`
 3. For algedonic signals, amplify scope:
@@ -351,22 +351,28 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🧠 pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
 
-### Always Run Agents in Background
+### Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Every `Task` call to a specialist agent MUST include `run_in_background=true`. No exceptions.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name=..., subagent_type=...)`. The team must be created first via `TeamCreate(team_name="pact-{branch}")`.
 
-**Why always background?**
-- Agent work should never block the user conversation
-- The orchestrator can continue coordinating while agents execute
-- Multiple specialists can run concurrently
-- Results are reported back when ready
+**Dispatch pattern**:
+1. `TeamCreate(team_name="pact-{branch}")` — create the team (once per session)
+2. `TaskCreate(subject, description)` — create the tracking task with full mission
+3. `TaskUpdate(taskId, owner="{name}")` — assign ownership
+4. `Task(name="{name}", team_name="pact-{branch}", subagent_type="pact-{type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")` — spawn the teammate
 
+**Why Agent Teams?**
+- Teammates self-manage task status (claim, progress, complete)
+- Communication via SendMessage (HANDOFFs, blockers, algedonic signals)
+- Completed-phase teammates remain as consultants for questions
+- Multiple specialists run concurrently within the same team
+
+**Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
 ```python
-# Correct - always use run_in_background=true
 Task(
-    subagent_type="pact-backend-coder",
-    run_in_background=true,  # ← REQUIRED - never omit or set to false
-    prompt="Implement the user authentication endpoint..."
+    subagent_type="pact-memory-agent",
+    run_in_background=true,  # ← memory agent only
+    prompt="Save memory: ..."
 )
 ```
 
@@ -393,7 +399,7 @@ A list of things that include the following:
 
 #### Expected Agent HANDOFF Format
 
-Every agent ends their response with a structured HANDOFF. Expect this format:
+Every agent delivers a structured HANDOFF. Under Agent Teams, HANDOFFs arrive via SendMessage to the lead. For `pact-memory-agent`, HANDOFFs are embedded in the task response output. Expect this format:
 
 ```
 HANDOFF:

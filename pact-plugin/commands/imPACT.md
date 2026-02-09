@@ -10,7 +10,7 @@ You hit a blocker: $ARGUMENTS
 
 imPACT operates on blocker Tasks reported by agents.
 
-These are orchestrator-side operations (agents report blockers via text; the orchestrator manages Tasks):
+These are orchestrator-side operations (agents report blockers via SendMessage to the lead; the orchestrator manages Tasks):
 
 ```
 1. TaskGet(blocker_id) — understand the blocker context
@@ -22,7 +22,7 @@ These are orchestrator-side operations (agents report blockers via text; the orc
 5. Blocked agent task is now unblocked
 ```
 
-**Note**: Agents report blockers via text ("BLOCKER: {description}"). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the agent's task. When the blocker is resolved (marked completed), the agent's task becomes unblocked.
+**Note**: Agents report blockers via SendMessage to the lead ("BLOCKER: {description}"). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the agent's task. When the blocker is resolved (marked completed), the agent's task becomes unblocked. Exception: `pact-memory-agent` reports blockers via text in its response output (it is not a team member).
 
 ---
 

@@ -33,7 +33,7 @@ Any script exiting with `VERIFICATION FAILED` (exit code 1) means the PR has bro
 
 - [ ] `verify-protocol-extracts.sh` passes (16 checks) -- SSOT extracts match source line ranges
 - [ ] `verify-scope-integrity.sh` passes (68 checks) -- cross-references, naming conventions, nesting limits, worktree integration, memory hooks, executor interface, agent persistent memory
-- [ ] `verify-task-hierarchy.sh` passes (24 checks) -- task lifecycle patterns in all command files
+- [ ] `verify-task-hierarchy.sh` passes (28 checks) -- task lifecycle patterns in all command files
 - [ ] `verify-worktree-protocol.sh` passes (20 checks) -- worktree skill existence, command references, path propagation
 
 ### What failures mean

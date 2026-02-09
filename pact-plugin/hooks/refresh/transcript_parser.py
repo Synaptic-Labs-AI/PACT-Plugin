@@ -6,6 +6,10 @@ Used by: refresh/__init__.py for extracting workflow state.
 Parses Claude Code JSONL transcript files into Turn objects for
 analysis. Handles streaming from end of file for efficiency and
 gracefully skips malformed lines.
+
+Supports both dispatch models for agent detection:
+- Background Task agent: subagent_type field in Task input
+- Agent Teams teammate: name and team_name fields in Task input
 """
 
 import json
@@ -70,11 +74,22 @@ class Turn:
         return None
 
     def has_task_to_pact_agent(self) -> bool:
-        """Check if this turn has a Task call to a PACT agent."""
+        """
+        Check if this turn has a Task call to a PACT agent.
+
+        Supports both dispatch models:
+        - Background Task agent: subagent_type contains "pact-"
+        - Agent Teams teammate: name field contains "pact-" (with team_name)
+        """
         for tc in self.tool_calls:
             if tc.name == "Task":
+                # Check subagent_type (present in both dispatch models)
                 subagent = tc.input_data.get("subagent_type", "")
                 if "pact-" in subagent:
+                    return True
+                # Check name field (Agent Teams dispatch includes name)
+                agent_name = tc.input_data.get("name", "")
+                if "pact-" in agent_name:
                     return True
         return False
 
@@ -316,9 +331,13 @@ def find_task_calls_to_agent(turns: list[Turn], agent_pattern: str) -> list[tupl
     """
     Find all Task tool calls to agents matching the pattern.
 
+    Supports both dispatch models:
+    - Background Task agent: checks subagent_type field
+    - Agent Teams teammate: checks both subagent_type and name fields
+
     Args:
         turns: List of turns to search
-        agent_pattern: Pattern to match in subagent_type (e.g., "pact-")
+        agent_pattern: Pattern to match in subagent_type or name (e.g., "pact-")
 
     Returns:
         List of (Turn, ToolCall) tuples for matching Task calls
@@ -327,8 +346,14 @@ def find_task_calls_to_agent(turns: list[Turn], agent_pattern: str) -> list[tupl
     for turn in turns:
         for tc in turn.tool_calls:
             if tc.name == "Task":
+                # Check subagent_type (present in both dispatch models)
                 subagent = tc.input_data.get("subagent_type", "")
                 if agent_pattern in subagent:
+                    results.append((turn, tc))
+                    continue
+                # Check name field (Agent Teams dispatch)
+                agent_name = tc.input_data.get("name", "")
+                if agent_pattern in agent_name:
                     results.append((turn, tc))
     return results
 

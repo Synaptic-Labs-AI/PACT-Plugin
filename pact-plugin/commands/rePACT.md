@@ -6,6 +6,8 @@ Run a recursive PACT cycle for this sub-task: $ARGUMENTS
 
 This command initiates a **nested P→A→C→T cycle** for a sub-task that is too complex for simple delegation but should remain part of the current feature work.
 
+**Team behavior**: rePACT spawns sub-scope teammates into the existing session team (`pact-{branch-name}`). No new team is created. Use scope-prefixed names (e.g., `backend-coder-auth-scope`) to distinguish sub-scope teammates from parent-scope teammates.
+
 ---
 
 ## Task Hierarchy
@@ -202,10 +204,15 @@ Design the sub-component:
 ### Phase 3: Mini-Code
 
 Implement the sub-component:
-- Invoke relevant specialist(s)
-- For multi-domain: may invoke multiple specialists
-- Apply S2 coordination if parallel work
-- Output: Code + handoff summary
+
+For each specialist needed:
+1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
+2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
+3. `Task(name="{scope-prefixed-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+
+For multi-domain: spawn multiple specialists in parallel.
+Apply S2 coordination if parallel work.
+Output: Code + HANDOFF via SendMessage to lead.
 
 ### Phase 4: Mini-Test
 
@@ -328,10 +335,9 @@ Consider using /PACT:orchestrate instead.
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch within nested phases
-- When agent reports completion
-- On any unexpected agent stoppage
+Monitor for blocker/algedonic signals via:
+- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
+- **TaskList**: Check for tasks with blocker metadata or stalled status
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

@@ -2,13 +2,19 @@
 """
 Location: pact-plugin/hooks/memory_enforce.py
 Summary: SubagentStop hook that ENFORCES memory saves after PACT agent work.
-Used by: Claude Code settings.json SubagentStop hook
+Used by: Claude Code hooks.json SubagentStop hook (fires for both background
+         Task agents and Agent Teams teammates)
 
-When a PACT specialist agent completes meaningful work, this hook tells the
-orchestrator they MUST save memory before continuing. Uses strong language
-and additionalContext to make the instruction visible and mandatory.
+When a PACT specialist agent/teammate completes meaningful work, this hook
+tells the orchestrator/lead they MUST save memory before continuing. Uses
+strong language and additionalContext to make the instruction visible and
+mandatory.
 
 This addresses the pattern where memory saves are forgotten after agent work.
+
+Note: The pact-memory-agent itself is excluded (PACT_WORK_AGENTS list) to
+avoid recursion. pact-memory-agent remains a background Task agent, NOT an
+Agent Teams teammate.
 
 Input: JSON from stdin with `transcript`, `agent_id`, `transcript_path`
 Output: JSON with `additionalContext` forcing memory save
@@ -118,7 +124,12 @@ Do this NOW before any other work.
 
 
 def main():
-    """Main entry point for the memory enforcement hook."""
+    """
+    Main entry point for the memory enforcement hook.
+
+    Fires for both background Task agents and Agent Teams teammates
+    via the SubagentStop event.
+    """
     try:
         try:
             input_data = json.load(sys.stdin)

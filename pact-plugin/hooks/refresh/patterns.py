@@ -6,11 +6,14 @@ Used by: workflow_detector.py and step_extractor.py for pattern matching.
 Defines the trigger patterns, step markers, and termination signals
 for each PACT workflow type as specified in the refresh plan.
 Configuration constants are imported from constants.py for maintainability.
+
+Supports both dispatch models for backward compatibility:
+- Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
+- Agent Teams teammate: Task(name="pact-*", team_name="pact-*", subagent_type="pact-*")
 """
 
 import re
 from dataclasses import dataclass
-from typing import Pattern
 
 # Import configuration constants from centralized location (Item 12)
 from .constants import (
@@ -39,6 +42,7 @@ __all__ = [
     "PACT_AGENT_PATTERN",
     "TASK_TOOL_PATTERN",
     "SUBAGENT_TYPE_PATTERN",
+    "TEAM_NAME_PATTERN",
     "CONTEXT_EXTRACTORS",
     "PENDING_ACTION_PATTERNS",
     "CONFIDENCE_WEIGHTS",
@@ -54,11 +58,11 @@ class WorkflowPattern:
     """Pattern definition for a single PACT workflow type."""
 
     name: str
-    trigger_pattern: Pattern[str]
+    trigger_pattern: re.Pattern[str]
     step_markers: list[str]
     termination_signals: list[str]
     # Optional: patterns for extracting workflow-specific context
-    context_extractors: dict[str, Pattern[str]]
+    context_extractors: dict[str, re.Pattern[str]]
 
 
 # Workflow trigger patterns (match user messages that start workflows)
@@ -158,9 +162,14 @@ TERMINATION_SIGNALS = {
 # Agent type patterns (for detecting Task tool calls to PACT agents)
 PACT_AGENT_PATTERN = re.compile(r"pact-(backend|frontend|database|test|architect|preparer|memory|n8n)")
 
-# Tool call patterns
+# Tool call patterns - support both dispatch models:
+# - Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
+# - Agent Teams teammate: Task(name="pact-*", team_name="pact-*", subagent_type="pact-*")
+# Both include subagent_type, so SUBAGENT_TYPE_PATTERN matches either model.
 TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
+# Agent Teams dispatch includes team_name field (not present in background dispatch)
+TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"')
 
 # Context extraction patterns (for building rich checkpoint context)
 CONTEXT_EXTRACTORS = {

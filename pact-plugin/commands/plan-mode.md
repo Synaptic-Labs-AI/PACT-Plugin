@@ -97,7 +97,9 @@ Skip specialists clearly not relevant (e.g., skip database engineer for pure UI 
 
 ### Phase 1: Parallel Specialist Consultation
 
-Invoke relevant specialists **in parallel**, each in **planning-only mode**.
+If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. Reuse existing team if one exists.
+
+Dispatch relevant specialists **in parallel**, each in **planning-only mode**.
 
 **Use this prompt template for each specialist:**
 
@@ -171,6 +173,13 @@ If a specialist fails entirely (timeout, error):
 2. Proceed without that perspective
 3. Flag prominently in "Open Questions" that this domain was not consulted
 4. Recommend the user consider re-running plan-mode or consulting that specialist manually
+
+**Dispatch each consultant**:
+1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
+2. `TaskUpdate(taskId, owner="{specialist-name}")`
+3. `Task(name="{specialist-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+
+Spawn all consultants in parallel.
 
 ### Phase 2: Orchestrator Synthesis
 
@@ -478,10 +487,9 @@ The orchestrator should reference this plan during execution.
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each specialist consultation dispatch
-- When specialist reports completion
-- On any unexpected specialist stoppage
+Monitor for blocker/algedonic signals via:
+- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
+- **TaskList**: Check for tasks with blocker metadata or stalled status
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

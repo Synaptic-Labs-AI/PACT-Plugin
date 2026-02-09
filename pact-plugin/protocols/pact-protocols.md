@@ -878,7 +878,9 @@ Feature Task (created by orchestrator)
 |-------|------------|----------|-----------|
 | Feature | Orchestrator | Orchestrator | Spans entire workflow |
 | Phase | Orchestrator | Orchestrator | Active during phase |
-| Agent | Orchestrator | Specialist | Completed when specialist returns |
+| Agent | Orchestrator | Specialist (self-managed) | Specialist claims via `TaskUpdate(status="in_progress")`, completes via `TaskUpdate(status="completed")` |
+
+Under Agent Teams, specialists self-manage their agent task lifecycle. The orchestrator creates tasks via `TaskCreate` and assigns ownership, but the specialist teammate claims the task (sets `in_progress`) and marks it `completed` upon finishing. This differs from the background task model where the orchestrator managed all task state transitions.
 
 ### Task States
 
@@ -1102,24 +1104,26 @@ If work spans sessions, update CLAUDE.md with:
 
 ## Agent Stall Detection
 
-**Stalled indicators**:
-- Background task running but no progress at monitoring checkpoints
-- Task completed but no handoff received
-- Process terminated without handoff or blocker report
+**Stalled indicators** (Agent Teams model):
+- TeammateIdle event received but no HANDOFF or blocker was sent via SendMessage
+- Task status in TaskList shows `in_progress` but no SendMessage activity from the teammate
+- Teammate process terminated without sending HANDOFF or blocker via SendMessage
 
-Detection is event-driven: check at signal monitoring points (after dispatch, on completion, on stoppage). If a background task returned but produced no handoff or blocker, treat as stalled immediately.
+Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on SendMessage receipt). If a teammate goes idle without producing a HANDOFF or blocker, treat as stalled immediately.
+
+**Exception — pact-memory-agent**: Uses the background task model (`run_in_background=true`). Stall indicators for this agent are: background task returned but no output, or task running with no progress at monitoring checkpoints.
 
 ### Recovery Protocol
 
-1. Check the agent's output (from `run_in_background`) for partial work or error messages
+1. Check the teammate's TaskList status and any partial SendMessage output for context on what happened
 2. Mark the stalled agent task as `completed` with `metadata={"stalled": true, "reason": "{what happened}"}`
 3. Assess: Is the work partially done? Can it be continued from where it stopped?
-4. Create a new agent task to retry or continue the work, passing any partial output as context
+4. Create a new agent task and spawn a new teammate to retry or continue the work, passing any partial output as context
 5. If stall persists after 1 retry, emit an **ALERT** algedonic signal (META-BLOCK category)
 
 ### Prevention
 
-Include in agent prompts: "If you encounter an error that prevents completion, report a partial handoff with whatever work you completed rather than silently failing."
+Include in agent prompts: "If you encounter an error that prevents completion, send a partial HANDOFF via SendMessage with whatever work you completed rather than silently failing."
 
 ### Non-Happy-Path Task Termination
 
