@@ -30,7 +30,7 @@ Before creating anything, check if a worktree already exists for this branch.
 git worktree list
 ```
 
-- If a worktree for the target branch already exists, **reuse it**. Report: "Reusing existing worktree at {path}" and skip to Step 5.
+- If a worktree for the target branch already exists, **reuse it**. Report: "Reusing existing worktree at {path}" and skip to Step 4.
   - If the worktree appears in the list but is marked **prunable**, run `git worktree prune` first and proceed to create a new one.
 - If the branch exists but has no worktree, ask the user: "Branch `{branch}` already exists. Check out existing branch, or create a new branch name?"
 
@@ -47,20 +47,7 @@ REPO_ROOT=$(cd "$(dirname "$MAIN_GIT_DIR")" && pwd)
 mkdir -p "$REPO_ROOT/.worktrees"
 ```
 
-### Step 3: Ensure `.worktrees/` Is Gitignored
-
-The `.worktrees/` directory must not be tracked by git.
-
-```bash
-# Check if .worktrees is already in .gitignore
-grep -q '\.worktrees' "$REPO_ROOT/.gitignore" 2>/dev/null
-```
-
-If `.worktrees` is NOT in `.gitignore`:
-1. Append `.worktrees/` to `.gitignore`
-2. Commit the change: `git add .gitignore && git commit -m "chore: add .worktrees/ to .gitignore"`
-
-### Step 4: Create the Worktree
+### Step 3: Create the Worktree
 
 ```bash
 git worktree add "$REPO_ROOT/.worktrees/{branch}" -b {branch}
@@ -72,7 +59,7 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 - Branch already exists: Ask user whether to check out the existing branch (`git worktree add "$REPO_ROOT/.worktrees/{branch}" {branch}` without `-b`)
 - Disk/permissions error: Surface git's error message and offer fallback to working in the main repo directory
 
-### Step 5: Report
+### Step 4: Report
 
 Output the result:
 
