@@ -453,9 +453,6 @@ New requirement: {Y}.
 ```
 Keep it minimal — the agent already has files loaded and domain understanding. Only provide the delta.
 
-**New agent prompt** (full briefing for fresh context):
-Use the standard **CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES** structure (see Recommended Agent Prompting Structure above).
-
 ### How to Delegate
 
 Use these commands to trigger PACT workflows for delegating tasks:
