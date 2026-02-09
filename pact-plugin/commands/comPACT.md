@@ -140,7 +140,8 @@ Before invoking multiple specialists concurrently, perform this coordination che
 ## Pre-Invocation (Required)
 
 1. **Set up worktree** — If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
-2. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
+2. **Create team** — If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. Reuse existing team if one exists.
+3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
 ---
 
@@ -150,27 +151,12 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 When the task contains multiple independent items, invoke multiple specialists together with boundary context:
 
-```
-comPACT mode (concurrent): You are one of [N] specialists working concurrently.
-You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree.
+For each specialist needed:
+1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and SendMessage it to the lead.\n\nTask: [this agent's specific sub-task]")`
+2. `TaskUpdate(taskId, owner="{specialist-name}")`
+3. `Task(name="{specialist-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
 
-YOUR SCOPE: [specific sub-task and files this agent owns]
-OTHER AGENTS' SCOPE: [what other agents are handling - do not touch]
-
-Work directly from this task description.
-Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context.
-Do not create new documentation artifacts in docs/.
-Stay within your assigned scope—do not modify files outside your boundary.
-
-Testing responsibilities:
-- New unit tests: Required for logic changes.
-- Existing tests: If your changes break existing tests, fix them.
-- Before handoff: Run the test suite for your scope.
-
-If you hit a blocker or need to modify files outside your scope, STOP and report it.
-
-Task: [this agent's specific sub-task]
-```
+Spawn all specialists in parallel (multiple `Task` calls in one response).
 
 **After all concurrent agents complete**: Verify no conflicts occurred, run full test suite.
 
@@ -182,33 +168,18 @@ Use a single specialist agent only when:
 - Sub-tasks have dependencies on each other
 - Conventions haven't been established yet (run one first to set patterns)
 
-**Invoke the specialist with**:
-```
-comPACT mode: Work directly from this task description.
-You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree.
-Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context.
-Do not create new documentation artifacts in docs/.
-Focus on the task at hand.
-Testing responsibilities:
-- New unit tests: Required for logic changes; optional for trivial changes (documentation, comments, config).
-- Existing tests: If your changes break existing tests, fix them.
-- Before handoff: Run the test suite and ensure all tests pass.
-
-> **Smoke vs comprehensive tests**: These are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work handled by `pact-test-engineer`.
-
-If you hit a blocker, STOP and report it so the orchestrator can run /PACT:imPACT.
-
-Task: [user's task description]
-```
+**Dispatch the specialist**:
+1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and SendMessage it to the lead.\n\nTask: [user's task description]")`
+2. `TaskUpdate(taskId, owner="{specialist-name}")`
+3. `Task(name="{specialist-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
 
 ---
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch
-- When agent reports completion
-- On any unexpected agent stoppage
+Monitor for blocker/algedonic signals via:
+- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
+- **TaskList**: Check for tasks with blocker metadata or stalled status
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
