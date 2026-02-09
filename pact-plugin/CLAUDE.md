@@ -383,8 +383,6 @@ Before spawning a new agent, check for idle teammates with relevant context:
 
 **Default**: Prefer reuse when domain + context overlap. The reused agent already has files loaded and understands the problem space — spawning a duplicate wastes tokens rebuilding that context.
 
-See also: **Context-Aware Reuse Prompts** below for how to prompt reused agents, and **Agent Shutdown Guidance** for when to release idle agents.
-
 #### Agent Shutdown Guidance
 
 - **Shut down after verification**: Once a reviewer's findings are addressed and verified, shut them down via `SendMessage(type="shutdown_request")`
