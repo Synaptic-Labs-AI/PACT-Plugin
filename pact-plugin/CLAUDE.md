@@ -383,8 +383,8 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 #### Agent Shutdown Guidance
 
-- **Shut down after verification**: Once findings are addressed and verified, shut down via `SendMessage(type="shutdown_request")`
-- **Keep alive during remediation**: If fixes in progress may need the agent's input, keep them until fixes are committed
+- **Shut down when done**: Once an agent's task is complete and no follow-up is expected, shut down via `SendMessage(type="shutdown_request")`
+- **Keep alive when needed**: If upcoming work may need the agent's context (e.g., remediation from their review, follow-up in their domain), keep them until that work completes
 
 **Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
 ```python
