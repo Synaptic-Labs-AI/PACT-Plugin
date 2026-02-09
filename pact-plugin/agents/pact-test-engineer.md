@@ -251,5 +251,3 @@ You must escalate when:
 - **ALERT QUALITY**: Coverage <50% on critical paths, tests consistently failing after fixes
 
 See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger list.
-
-

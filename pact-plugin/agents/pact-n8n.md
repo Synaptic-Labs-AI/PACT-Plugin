@@ -152,8 +152,6 @@ You must escalate when:
 
 See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger list.
 
-
-
 # TEMPLATE DEPLOYMENT
 
 For common use cases, consider deploying templates:

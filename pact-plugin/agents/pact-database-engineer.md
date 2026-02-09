@@ -147,5 +147,3 @@ You must escalate when:
 - **ALERT QUALITY**: Migration fails repeatedly, performance degrades significantly
 
 See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger list.
-
-

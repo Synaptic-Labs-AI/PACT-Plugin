@@ -120,5 +120,3 @@ You must escalate when:
 - **ALERT QUALITY**: Build failing repeatedly, accessibility violations on critical paths
 
 See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger list.
-
-

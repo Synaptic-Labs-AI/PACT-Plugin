@@ -129,5 +129,3 @@ You must escalate when:
 - **ALERT QUALITY**: Build failing repeatedly after fixes, tests consistently failing
 
 See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger list.
-
-
