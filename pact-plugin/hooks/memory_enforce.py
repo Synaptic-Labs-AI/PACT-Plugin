@@ -2,7 +2,7 @@
 """
 Location: pact-plugin/hooks/memory_enforce.py
 Summary: SubagentStop hook that ENFORCES memory saves after PACT agent work.
-Used by: Claude Code settings.json SubagentStop hook
+Used by: hooks.json SubagentStop hook registration
 
 When a PACT specialist agent completes meaningful work, this hook tells the
 orchestrator they MUST save memory before continuing. Uses strong language

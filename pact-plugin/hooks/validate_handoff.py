@@ -2,7 +2,7 @@
 """
 Location: pact-plugin/hooks/validate_handoff.py
 Summary: SubagentStop hook that validates PACT agent handoff format.
-Used by: Claude Code settings.json SubagentStop hook
+Used by: hooks.json SubagentStop hook registration
 
 Validates that PACT agents complete with proper handoff information
 (produced, decisions, next steps) in their transcript text.

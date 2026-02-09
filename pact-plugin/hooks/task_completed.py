@@ -38,7 +38,8 @@ def main():
     # Skip validation for phase tasks and signal tasks (completed by orchestrator)
     skip_prefixes = (
         "PREPARE:", "ARCHITECT:", "CODE:", "TEST:",
-        "BLOCKER:", "QUARANTINE:", "HALT:", "ALERT:",
+        "BLOCKER:", "QUARANTINE:",  # Reserved for future quarantine/isolation workflow
+        "HALT:", "ALERT:",
     )
     if any(task_subject.startswith(p) for p in skip_prefixes):
         sys.exit(0)

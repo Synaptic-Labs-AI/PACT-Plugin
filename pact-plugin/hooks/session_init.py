@@ -2,7 +2,7 @@
 """
 Location: pact-plugin/hooks/session_init.py
 Summary: SessionStart hook that initializes PACT environment.
-Used by: Claude Code settings.json SessionStart hook
+Used by: hooks.json SessionStart hook registration
 
 Performs:
 1. Creates plugin symlinks for @reference resolution

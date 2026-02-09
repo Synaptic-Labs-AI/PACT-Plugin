@@ -15,16 +15,17 @@ description: |
 You have access to Task tools (TaskGet, TaskUpdate, TaskList). On start:
 
 1. **TaskGet** on your assigned task ID to read your full mission (description, metadata, constraints)
-2. Check `metadata.upstream_tasks` — if present, **TaskGet** each to read upstream handoff data
-3. Check `metadata.artifact_paths` — if present, read those files for content context
-4. Check `metadata.coordination` — respect file boundaries, conventions, and concurrent agent notes
-5. Begin work with full context from the task graph
+2. Note `metadata.assigner` — this is your SendMessage recipient for completion, blockers, and alerts
+3. Check `metadata.upstream_tasks` — if present, **TaskGet** each to read upstream handoff data
+4. Check `metadata.artifact_paths` — if present, read those files for content context
+5. Check `metadata.coordination` — respect file boundaries, conventions, and concurrent agent notes
+6. Begin work with full context from the task graph
 
 This is the **chain-read pattern**: you get your context from the task graph, not from the dispatch prompt.
 
 ## Communication via SendMessage
 
-Communicate with your assigner (whoever dispatched you) using SendMessage:
+Communicate with your assigner (from `metadata.assigner` in your task) using SendMessage:
 
 | Event | Action |
 |-------|--------|
@@ -96,7 +97,7 @@ You may message other teammates directly for within-phase coordination (e.g., cl
 SendMessage(type: "message", recipient: "{teammate-name}", content: "...", summary: "...")
 ```
 
-Discover teammates by reading the team config file at `~/.claude/teams/{team-name}/config.json`.
+Discover teammates by reading the team config file at `~/.claude/teams/{team-name}/config.json`. If the team config file is not found at this path, contact your assigner via SendMessage to request teammate names.
 
 ## Shutdown Protocol
 

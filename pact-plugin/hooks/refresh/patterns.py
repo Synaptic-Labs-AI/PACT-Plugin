@@ -172,10 +172,10 @@ SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
 TEAM_CREATE_PATTERN = re.compile(r'"name":\s*"TeamCreate"', re.IGNORECASE)
 TEAM_DELETE_PATTERN = re.compile(r'"name":\s*"TeamDelete"', re.IGNORECASE)
 SEND_MESSAGE_PATTERN = re.compile(r'"name":\s*"SendMessage"', re.IGNORECASE)
-TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"')
+TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"', re.IGNORECASE)
 TASK_WITH_TEAM_PATTERN = re.compile(
     r'"name":\s*"Task".*?"team_name":\s*"([^"]+)"',
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 
 # Context extraction patterns (for building rich checkpoint context)
