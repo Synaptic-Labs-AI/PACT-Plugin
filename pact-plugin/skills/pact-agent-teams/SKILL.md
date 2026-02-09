@@ -123,6 +123,18 @@ This ensures your work context persists across sessions and is searchable by fut
 
 ## Shutdown
 
-When you receive a `shutdown_request`:
-- If mid-task: reject with reason ("Still working on task X")
-- If idle/consultant: approve shutdown
+When you receive a `shutdown_request`, decide whether to approve or reject:
+
+**Approve shutdown** when:
+- You are idle with no pending tasks
+- You are in consultant mode with no active questions
+- Your domain is no longer relevant to remaining work
+
+**Reject shutdown** when:
+- You are mid-task (include reason: "Still working on task X")
+- You are waiting on a response that will require follow-up action
+- Active remediation is in progress that may need your input
+
+When rejecting, always provide a reason so the lead can decide whether to wait or proceed without you.
+
+> **Save memory before approving**: If you haven't already saved your work context via `pact-memory`, do so before approving shutdown — your process terminates on approval.

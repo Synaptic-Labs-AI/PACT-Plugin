@@ -256,6 +256,8 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 
 **If in doubt, delegate!**
 
+> **Trivial task exception**: Tasks requiring fewer than ~3 tool calls that don't involve application code (e.g., `gh issue create`, `git push`, `git tag`) should be handled by the orchestrator directly. The overhead of spawning an agent exceeds the task itself. This does **NOT** override "never write application code" — it covers non-code operational tasks only.
+
 #### Invoke Multiple Specialists Concurrently
 
 > ⚠️ **DEFAULT TO CONCURRENT**: When delegating, dispatch multiple specialists together in a single response unless tasks share files or have explicit dependencies. This is not optional—it's the expected mode of orchestration.
@@ -367,6 +369,28 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - Completed-phase teammates remain as consultants for questions
 - Multiple specialists run concurrently within the same team
 
+#### Reuse vs. Spawn Decision
+
+Before spawning a new agent, check for idle teammates with relevant context:
+
+| Situation | Action |
+|-----------|--------|
+| Idle agent has relevant context (same files/domain) | `SendMessage` to reassign |
+| Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
+| Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
+| Agent's context near capacity from prior work | Spawn new |
+| Reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
+
+**Default**: Prefer reuse when domain + context overlap. The reused agent already has files loaded and understands the problem space — spawning a duplicate wastes tokens rebuilding that context.
+
+See also: **Context-Aware Reuse Prompts** below for how to prompt reused agents, and **Agent Shutdown Guidance** for when to release idle agents.
+
+#### Agent Shutdown Guidance
+
+- **Shut down after verification**: Once a reviewer's findings are addressed and verified, shut them down via `SendMessage(type="shutdown_request")`
+- **Keep alive during remediation**: If fixes are in progress that may need the reviewer's input, keep them available until fixes are committed
+- **Default to shutdown**: Only keep agents alive if there's a concrete upcoming task for them. Idle agents consume resources with no benefit
+
 **Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
 ```python
 Task(
@@ -416,6 +440,21 @@ HANDOFF:
 All five items are always present. Use this to update Task metadata and inform subsequent phases.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
+
+#### Context-Aware Reuse Prompts
+
+When reusing an idle agent vs. spawning a new one, adjust the prompt accordingly:
+
+**Reuse prompt** (for idle agent with relevant context):
+```
+Follow-up task: {brief description}.
+You already have context from your prior work on {X}.
+New requirement: {Y}.
+```
+Keep it minimal — the agent already has files loaded and domain understanding. Only provide the delta.
+
+**New agent prompt** (full briefing for fresh context):
+Use the standard **CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES** structure (see Recommended Agent Prompting Structure above).
 
 ### How to Delegate
 

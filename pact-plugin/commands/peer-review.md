@@ -71,6 +71,15 @@ Review task: in_progress (persists until merge-ready)
 
 **Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
 
+### Reviewer-to-Fixer Reuse
+
+> **Review → Remediation shortcut**: When a reviewer's findings need fixing in their own domain, `SendMessage` the reviewer directly with the fix task rather than spawning a new coder. They have the most relevant context — files loaded, issues understood, line numbers identified.
+
+Apply the **Reuse vs. Spawn Decision** framework (see CLAUDE.md > Agent Teams Dispatch):
+- Reviewer identified issues with specific file paths/line numbers → **reuse** (they're the ideal fixer)
+- Fixes span a different domain than the reviewer → **spawn** domain specialist
+- Multiple independent fixes needed in parallel → **spawn** additional agents alongside reused reviewer
+
 ---
 
 **PR Review Workflow**
