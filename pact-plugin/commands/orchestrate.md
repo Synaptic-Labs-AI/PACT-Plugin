@@ -624,9 +624,9 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 1. **Update plan status** (if plan exists): IN_PROGRESS -> IMPLEMENTED
 2. **Verify all work is committed** -- CODE and TEST phase commits should already exist; if any uncommitted changes remain, commit them now
-3. **Clean up team**: `TeamDelete(name="{feature-slug}")` -- terminates all remaining teammates and releases resources
-4. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
-5. **Run `/PACT:peer-review`** to create PR and get multi-agent review
+3. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
+4. **Run `/PACT:peer-review`** to create PR and get multi-agent review (team must still exist -- peer-review spawns reviewer teammates into it)
+5. **Clean up team**: `TeamDelete(name="{feature-slug}")` -- terminates all remaining teammates and releases resources
 6. **Present review summary and stop** -- orchestrator never merges (S5 policy)
 7. **S4 Retrospective** (after user decides): Briefly note--what worked well? What should we adapt for next time?
 8. **High-variety audit trail** (variety 10+ only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned

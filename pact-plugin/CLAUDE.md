@@ -515,7 +515,7 @@ Within each phase, spawn **multiple specialists concurrently** for non-conflicti
 
 > ⚠️ **Single domain ≠ single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Default to concurrent dispatch unless tasks share files or have dependencies.
 
-**After all phases complete**: Clean up team (`TeamDelete`), then run `/PACT:peer-review` to create a PR.
+**After all phases complete**: Run `/PACT:peer-review` to create a PR (team must still exist for spawning reviewers), then clean up team (`TeamDelete`).
 
 ### PR Review Workflow
 
