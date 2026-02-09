@@ -378,7 +378,7 @@ Before spawning a new agent, check for idle teammates with relevant context:
 | Idle agent has relevant context (same files/domain) | `SendMessage` to reassign |
 | Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
-| Agent's context near capacity from prior work | Spawn new |
+| Agent's context near capacity from prior work (e.g., completed 2+ substantive tasks or processed many large files — context usage is not directly observable, so use judgment) | Spawn new |
 | Reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
 
 **Default**: Prefer reuse when domain + context overlap. The reused agent already has files loaded and understands the problem space — spawning a duplicate wastes tokens rebuilding that context.

@@ -256,7 +256,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 2. `TaskUpdate(taskId, owner="preparer")`
 3. `Task(name="preparer", team_name="pact-{branch}", subagent_type="pact-preparer", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
 
-Completed-phase teammates remain as consultants. Do not shutdown.
+Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/preparation/`
@@ -326,7 +326,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 2. `TaskUpdate(taskId, owner="architect")`
 3. `Task(name="architect", team_name="pact-{branch}", subagent_type="pact-architect", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
 
-Completed-phase teammates remain as consultants. Do not shutdown.
+Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/architecture/`
@@ -416,7 +416,7 @@ For each coder needed:
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
-Completed-phase teammates remain as consultants. Do not shutdown.
+Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
 **Before next phase**:
 - [ ] Implementation complete
