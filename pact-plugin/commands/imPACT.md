@@ -8,21 +8,21 @@ You hit a blocker: $ARGUMENTS
 
 ## Task Operations
 
-imPACT operates on blocker Tasks reported by agents.
+imPACT operates on blocker Tasks reported by specialists.
 
-These are orchestrator-side operations (agents report blockers via text; the orchestrator manages Tasks):
+Specialists report blockers via SendMessage ("BLOCKER on task {ID}: ..."). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the specialist's task:
 
 ```
-1. TaskGet(blocker_id) — understand the blocker context
-2. Triage: redo prior phase? need specialist? need user?
-3. On resolution path chosen:
-   - If delegating: TaskCreate resolution agent task
+1. Receive SendMessage blocker signal from specialist
+2. TaskGet(specialist_task_id) — read partial handoff and blocker context from metadata
+3. TaskCreate: blocker task; TaskUpdate: specialist task addBlockedBy = [blocker_id]
+4. Triage: redo prior phase? need specialist? need user?
+5. On resolution path chosen:
+   - If spawning specialists: TaskCreate resolution task, spawn teammate
    - If self-resolving: proceed directly
-4. On resolution complete: TaskUpdate(blocker_id, status="completed")
-5. Blocked agent task is now unblocked
+6. On resolution complete: TaskUpdate(blocker_id, status="completed")
+7. Specialist's task is now unblocked
 ```
-
-**Note**: Agents report blockers via text ("BLOCKER: {description}"). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the agent's task. When the blocker is resolved (marked completed), the agent's task becomes unblocked.
 
 ---
 
@@ -47,7 +47,7 @@ Common traps to avoid:
 
 imPACT is **S3-level triage**—operational problem-solving within normal workflow. It is NOT S5 algedonic escalation (emergency bypass to user).
 
-**imPACT handles**: Blockers that can be resolved by redoing a phase or adding agents.
+**imPACT handles**: Blockers that can be resolved by redoing a phase or spawning additional specialists.
 
 **Algedonic escalation handles**: Viability threats (security, data, ethics violations). See [algedonic.md](../protocols/algedonic.md).
 
@@ -78,7 +78,7 @@ imPACT is for operational problem-solving. If you're questioning whether the wor
 |----------------------|-----------------|
 | Question-by-question analysis | `imPACT: Redo ARCHITECT — interface mismatch` |
 | Full diagnostic reasoning | `imPACT: Augmenting with parallel backend coder` |
-| Context-gathering details | `imPACT: Not blocked — clarifying guidance to agent` |
+| Context-gathering details | `imPACT: Not blocked — clarifying guidance to specialist` |
 
 **User can always ask** for triage details (e.g., "Why redo that phase?" or "What was the diagnosis?").
 
@@ -102,16 +102,16 @@ This context informs whether the blocker is isolated or systemic.
 Answer two questions:
 
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
-2. **Additional agents needed?** — Do we need help beyond the blocked agent's scope/specialty?
+2. **Additional specialists needed?** — Do we need help beyond the blocked specialist's scope/specialty?
 
 ## Outcomes
 
 | Outcome | When | Action |
 |---------|------|--------|
-| **Redo prior phase** | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
-| **Augment present phase** | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
+| **Redo prior phase** | Issue is upstream in P→A→C→T | Spawn specialist(s) to redo the prior phase |
+| **Augment present phase** | Need help in current phase | Spawn additional specialists + provide context to blocked specialist via Task metadata |
 | **Invoke rePACT** | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
-| **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
+| **Not truly blocked** | Neither question is "Yes" | Send guidance to specialist via SendMessage with clarified context |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
 **When to consider rePACT**:
@@ -134,6 +134,7 @@ When imPACT decides to redo a prior phase (e.g., "redo ARCHITECT because the des
 2. **Create a new retry phase task**: `TaskCreate("ARCHITECT (retry): {feature-slug}")`
 3. **Set retry task to `in_progress`**
 4. **Block the current phase** (the one that hit the blocker): `TaskUpdate(currentPhaseId, addBlockedBy=[retryPhaseId])`
-5. **Dispatch agent(s)** for the retry phase
-6. **On retry completion**: `TaskUpdate(retryPhaseId, status="completed")` — unblocks the current phase
-7. **Retry the current phase** with a new agent task using the updated outputs
+5. **Spawn specialist(s)** as teammates for the retry phase
+6. **Receive SendMessage completion signal**; TaskGet for handoff metadata
+7. **On retry completion**: `TaskUpdate(retryPhaseId, status="completed")` — unblocks the current phase
+8. **Retry the current phase** with a new specialist task using the updated outputs

@@ -10,6 +10,10 @@ Delegate this focused task within a single PACT domain: $ARGUMENTS
 
 ---
 
+## Team Lifecycle
+
+comPACT operates within an Agent Teams session. If the session team already exists (e.g., created by `/PACT:orchestrate`), reuse it. If comPACT is invoked standalone, ensure a team exists first.
+
 ## Task Hierarchy
 
 Create a simpler Task hierarchy than full orchestrate:
@@ -17,13 +21,14 @@ Create a simpler Task hierarchy than full orchestrate:
 ```
 1. TaskCreate: Feature task "{verb} {feature}" (single-domain work)
 2. TaskUpdate: Feature task status = "in_progress"
-3. Analyze: How many agents needed?
-4. TaskCreate: Agent task(s) — direct children of feature
-5. TaskUpdate: Agent tasks status = "in_progress"
-6. TaskUpdate: Feature task addBlockedBy = [all agent IDs]
-7. Dispatch agents concurrently with task IDs
-8. Monitor via TaskList until all agents complete
-9. TaskUpdate: Agent tasks status = "completed" (as each completes)
+3. Analyze: How many specialists needed?
+4. TaskCreate: Specialist task(s) — direct children of feature
+   (include metadata: upstream_tasks, artifact_paths, coordination boundaries)
+5. TaskUpdate: Specialist tasks status = "in_progress"
+6. TaskUpdate: Feature task addBlockedBy = [all specialist task IDs]
+7. Spawn specialists as teammates with thin bootstrap prompts
+8. Receive SendMessage completion signals; TaskGet for handoff metadata
+9. TaskUpdate: Specialist tasks status = "completed" (as each completes)
 10. TaskUpdate: Feature task status = "completed"
 ```
 
@@ -31,10 +36,10 @@ Create a simpler Task hierarchy than full orchestrate:
 
 **Example structure:**
 ```
-[Feature] "Fix 3 backend bugs"           (blockedBy: agent1, agent2, agent3)
-├── [Agent] "backend-coder: fix bug A"
-├── [Agent] "backend-coder: fix bug B"
-└── [Agent] "backend-coder: fix bug C"
+[Feature] "Fix 3 backend bugs"           (blockedBy: spec1, spec2, spec3)
+├── [Specialist] "backend-coder: fix bug A"
+├── [Specialist] "backend-coder: fix bug B"
+└── [Specialist] "backend-coder: fix bug C"
 ```
 
 ---
@@ -108,11 +113,11 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 2. **Resolve conflicts (if any)**
    - **Same file**: Sequence those sub-tasks OR assign clear section boundaries
-   - **Style/convention**: First agent's choice becomes standard
+   - **Style/convention**: First specialist's choice becomes standard
 
 3. **Set boundaries**
    - Clearly state which sub-task handles which files/components
-   - Include this in each specialist's prompt
+   - Include this in each specialist's Task metadata (coordination.scope)
 
 **If conflicts cannot be resolved**: Sequence the work instead of dispatching concurrently.
 
@@ -146,69 +151,49 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 ## Invocation
 
+Specialists are spawned as teammates with **thin bootstrap prompts**. The specialist reads their full mission from the Task system via the chain-read pattern (TaskGet on their task ID, then reading upstream tasks and artifacts from metadata).
+
+### Task Metadata Setup
+
+Before spawning, populate the specialist's Task metadata:
+
+```
+TaskCreate(subject, description, metadata={
+  "upstream_tasks": [...],          # IDs of prior phase tasks to chain-read
+  "artifact_paths": [...],          # docs/ files to read for context
+  "coordination": {                 # For concurrent specialists
+    "scope": "...",                 # This specialist's file/component boundary
+    "concurrent_with": ["..."],     # Other specialist task IDs
+    "conventions": "..."            # First specialist's choices, if established
+  },
+  "worktree_path": "..."           # Absolute worktree path
+})
+```
+
 ### Multiple Specialists Concurrently (Default)
 
-When the task contains multiple independent items, invoke multiple specialists together with boundary context:
+When the task contains multiple independent items, spawn multiple specialists as teammates. Each specialist's Task metadata includes their scope boundary and concurrent specialist info.
 
-```
-comPACT mode (concurrent): You are one of [N] specialists working concurrently.
-You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree.
+**After all concurrent specialists complete** (signaled via SendMessage): Verify no conflicts occurred, run full test suite.
 
-YOUR SCOPE: [specific sub-task and files this agent owns]
-OTHER AGENTS' SCOPE: [what other agents are handling - do not touch]
+### Single Specialist (When Required)
 
-Work directly from this task description.
-Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context.
-Do not create new documentation artifacts in docs/.
-Stay within your assigned scope—do not modify files outside your boundary.
-
-Testing responsibilities:
-- New unit tests: Required for logic changes.
-- Existing tests: If your changes break existing tests, fix them.
-- Before handoff: Run the test suite for your scope.
-
-If you hit a blocker or need to modify files outside your scope, STOP and report it.
-
-Task: [this agent's specific sub-task]
-```
-
-**After all concurrent agents complete**: Verify no conflicts occurred, run full test suite.
-
-### Single Specialist Agent (When Required)
-
-Use a single specialist agent only when:
+Use a single specialist only when:
 - Task is atomic (one bug, one endpoint, one component)
 - Sub-tasks modify the same files
 - Sub-tasks have dependencies on each other
 - Conventions haven't been established yet (run one first to set patterns)
 
-**Invoke the specialist with**:
-```
-comPACT mode: Work directly from this task description.
-You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree.
-Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context.
-Do not create new documentation artifacts in docs/.
-Focus on the task at hand.
-Testing responsibilities:
-- New unit tests: Required for logic changes; optional for trivial changes (documentation, comments, config).
-- Existing tests: If your changes break existing tests, fix them.
-- Before handoff: Run the test suite and ensure all tests pass.
-
-> **Smoke vs comprehensive tests**: These are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work handled by `pact-test-engineer`.
-
-If you hit a blocker, STOP and report it so the orchestrator can run /PACT:imPACT.
-
-Task: [user's task description]
-```
-
 ---
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch
-- When agent reports completion
-- On any unexpected agent stoppage
+Monitor for SendMessage signals from specialists:
+- **Completion signals**: "Task {ID} complete" — trigger TaskGet to read handoff metadata
+- **Blocker signals**: "BLOCKER on task {ID}: ..." — trigger imPACT triage
+- **Algedonic signals**: HALT broadcasts or ALERT messages — follow algedonic protocol
+
+Also check TaskList periodically for unexpected state changes.
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
@@ -218,11 +203,12 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 ## After Specialist Completes
 
-1. **Receive handoff** from specialist(s)
-2. **TaskUpdate**: Agent tasks status = "completed" (as each completes)
-3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
-4. **Create atomic commit(s)** — stage and commit before proceeding
-5. **TaskUpdate**: Feature task status = "completed"
+1. **Receive SendMessage completion signal** from specialist
+2. **TaskGet** on the specialist's task to read handoff metadata
+3. **TaskUpdate**: Specialist tasks status = "completed" (as each completes)
+4. **Run tests** — verify work passes. If tests fail → spawn specialist for fixes (create new task, repeat from step 1).
+5. **Create atomic commit(s)** — stage and commit before proceeding
+6. **TaskUpdate**: Feature task status = "completed"
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - **Yes (Recommended)** → invoke `/PACT:peer-review`
@@ -236,7 +222,7 @@ Examples of blockers:
 - Missing dependencies, access, or information
 - Same error persists after multiple fix attempts
 - Scope exceeds single-domain capability (needs cross-domain coordination)
-- Concurrent agents have unresolvable conflicts
+- Concurrent specialists have unresolvable conflicts
 
 When blocker is reported:
 1. Receive blocker report from specialist

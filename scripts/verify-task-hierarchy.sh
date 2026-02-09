@@ -91,8 +91,8 @@ verify_patterns "comPACT.md" "Feature task lifecycle" \
     "TaskCreate: Feature task" \
     "in_progress" \
     "completed"
-verify_patterns "comPACT.md" "Agent task lifecycle" \
-    "Agent task" \
+verify_patterns "comPACT.md" "Specialist task lifecycle" \
+    "Specialist task" \
     "in_progress" \
     "completed"
 echo ""
@@ -123,8 +123,8 @@ echo ""
 
 # --- rePACT.md ---
 echo "rePACT.md:"
-verify_patterns "rePACT.md" "Sub-feature task lifecycle" \
-    "TaskCreate: Sub-feature task" \
+verify_patterns "rePACT.md" "Sub-scope task lifecycle" \
+    "TaskCreate: Sub-scope task" \
     "in_progress" \
     "completed"
 echo ""
@@ -184,9 +184,15 @@ check_pattern_file "$COMMANDS_DIR/orchestrate.md" "PREPARE Phase exists" "### PR
 check_pattern_file "$COMMANDS_DIR/orchestrate.md" "ARCHITECT Phase exists" "### ARCHITECT Phase"
 check_pattern_file "$COMMANDS_DIR/orchestrate.md" "CODE Phase exists" "### CODE Phase"
 check_pattern_file "$COMMANDS_DIR/orchestrate.md" "TEST Phase exists" "### TEST Phase"
-# Scoped phases (only active when decomposition occurs)
-check_pattern_file "$COMMANDS_DIR/orchestrate.md" "ATOMIZE Phase exists" "ATOMIZE Phase (Scoped Orchestration Only)"
-check_pattern_file "$COMMANDS_DIR/orchestrate.md" "CONSOLIDATE Phase exists" "CONSOLIDATE Phase (Scoped Orchestration Only)"
+# Scoped CODE path (only active when decomposition occurs)
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" "Scoped CODE path exists" "CODE Phase (Scoped Path)"
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" "Scope Verification Protocol referenced" "Scope Verification Protocol"
+echo ""
+
+echo "Agent Teams patterns (orchestrate.md):"
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" "TaskGet referenced in workflow" "TaskGet"
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" "SendMessage referenced in workflow" "SendMessage"
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" "team_name referenced in workflow" "team_name"
 echo ""
 
 echo "Scope-aware conventions (pact-protocols.md SSOT):"
@@ -213,20 +219,20 @@ if [ -f "$PROTOCOLS_FILE" ]; then
         FAIL=$((FAIL + 1))
     fi
 
-    # Check 3: Scoped hierarchy diagram present (ATOMIZE and CONSOLIDATE)
-    atomize_ok=false
-    consolidate_ok=false
-    if echo "$section" | grep -q "ATOMIZE Phase Task"; then
-        atomize_ok=true
+    # Check 3: Scoped hierarchy diagram present (Sub-Feature Task + Scope Verification Task)
+    subscope_ok=false
+    verification_ok=false
+    if echo "$section" | grep -q "Sub-Feature Task"; then
+        subscope_ok=true
     fi
-    if echo "$section" | grep -q "CONSOLIDATE Phase Task"; then
-        consolidate_ok=true
+    if echo "$section" | grep -q "Scope Verification Task"; then
+        verification_ok=true
     fi
-    if [ "$atomize_ok" = true ] && [ "$consolidate_ok" = true ]; then
-        echo "  ✓ SSOT scoped hierarchy: ATOMIZE and CONSOLIDATE Phase Tasks in diagram"
+    if [ "$subscope_ok" = true ] && [ "$verification_ok" = true ]; then
+        echo "  ✓ SSOT scoped hierarchy: Sub-Feature Task and Scope Verification Task in diagram"
         PASS=$((PASS + 1))
     else
-        echo "  ✗ SSOT scoped hierarchy: missing ATOMIZE/CONSOLIDATE Phase Tasks in hierarchy diagram"
+        echo "  ✗ SSOT scoped hierarchy: missing Sub-Feature Task/Scope Verification Task in hierarchy diagram"
         FAIL=$((FAIL + 1))
     fi
 else

@@ -113,7 +113,7 @@ def make_task_call(
     tool_use_id: str = "task-123",
 ) -> dict[str, Any]:
     """
-    Create a Task tool call block for invoking PACT agents.
+    Create a Task tool call block for invoking PACT agents (subagent model).
 
     Args:
         subagent_type: Agent type (e.g., "pact-backend-coder")
@@ -129,6 +129,113 @@ def make_task_call(
             "subagent_type": subagent_type,
             "prompt": prompt,
             "run_in_background": True,
+        },
+        tool_use_id=tool_use_id,
+    )
+
+
+# =============================================================================
+# Agent Teams Tool Call Factories (v3.0)
+# =============================================================================
+
+def make_send_message_call(
+    recipient: str,
+    content: str,
+    tool_use_id: str = "sendmsg-123",
+) -> dict[str, Any]:
+    """
+    Create a SendMessage tool call block for Agent Teams communication.
+
+    Args:
+        recipient: Name of the recipient agent
+        content: Message content
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing a SendMessage tool_use content block
+    """
+    return make_tool_use_block(
+        name="SendMessage",
+        input_data={
+            "type": "message",
+            "recipient": recipient,
+            "content": content,
+            "summary": f"Message to {recipient}",
+        },
+        tool_use_id=tool_use_id,
+    )
+
+
+def make_team_task_call(
+    team_name: str,
+    agent_name: str,
+    prompt: str,
+    tool_use_id: str = "teamtask-123",
+) -> dict[str, Any]:
+    """
+    Create a Task tool call block with team_name for Agent Teams dispatch.
+
+    Args:
+        team_name: Name of the team (e.g., "pact-auth-feature")
+        agent_name: Name of the agent within the team
+        prompt: Bootstrap prompt for the agent
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing a Task tool_use content block with team_name
+    """
+    return make_tool_use_block(
+        name="Task",
+        input_data={
+            "team_name": team_name,
+            "name": agent_name,
+            "prompt": prompt,
+        },
+        tool_use_id=tool_use_id,
+    )
+
+
+def make_team_create_call(
+    team_name: str,
+    tool_use_id: str = "teamcreate-123",
+) -> dict[str, Any]:
+    """
+    Create a TeamCreate tool call block for Agent Teams.
+
+    Args:
+        team_name: Name of the team to create
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing a TeamCreate tool_use content block
+    """
+    return make_tool_use_block(
+        name="TeamCreate",
+        input_data={
+            "name": team_name,
+        },
+        tool_use_id=tool_use_id,
+    )
+
+
+def make_team_delete_call(
+    team_name: str,
+    tool_use_id: str = "teamdelete-123",
+) -> dict[str, Any]:
+    """
+    Create a TeamDelete tool call block for Agent Teams.
+
+    Args:
+        team_name: Name of the team to delete
+        tool_use_id: Unique ID for the tool call
+
+    Returns:
+        Dict representing a TeamDelete tool_use content block
+    """
+    return make_tool_use_block(
+        name="TeamDelete",
+        input_data={
+            "name": team_name,
         },
         tool_use_id=tool_use_id,
     )
@@ -573,6 +680,114 @@ def create_repact_transcript(
         lines.append(make_assistant_message(
             "nested cycle complete. rePACT complete. Returning to parent workflow.",
             timestamp="2025-01-22T10:35:00Z",
+        ))
+
+    return create_transcript_lines(lines)
+
+
+# =============================================================================
+# Agent Teams Transcript Factories (v3.0)
+# =============================================================================
+
+def create_agent_teams_orchestrate_transcript(
+    phase: str = "code",
+    include_task: str = "implement auth",
+    include_termination: bool = False,
+) -> str:
+    """
+    Generate a realistic orchestrate workflow transcript using Agent Teams dispatch.
+
+    Uses TeamCreate, Task-with-team_name, and SendMessage instead of
+    the subagent-model Task calls. This represents the v3.0 dispatch model.
+
+    Args:
+        phase: Current phase (variety-assess, prepare, architect, code, test)
+        include_task: Task description
+        include_termination: Whether to add termination signal
+
+    Returns:
+        JSONL string representing the transcript
+    """
+    lines = []
+    team_name = "pact-auth-feature"
+
+    # User triggers orchestrate
+    lines.append(make_user_message(
+        f"/PACT:orchestrate {include_task}",
+        timestamp="2025-01-22T10:00:00Z",
+    ))
+
+    # Variety assessment
+    lines.append(make_assistant_message(
+        f"variety-assess: Analyzing task: {include_task}. Estimated complexity: medium.",
+        timestamp="2025-01-22T10:00:05Z",
+    ))
+
+    # Create team
+    lines.append(make_assistant_message(
+        content=[
+            {"type": "text", "text": f"Creating team for orchestration: {team_name}"},
+            make_team_create_call(team_name, "teamcreate-orch"),
+        ],
+        timestamp="2025-01-22T10:00:08Z",
+    ))
+
+    # Prepare phase
+    if phase in ["prepare", "architect", "code", "test"]:
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "prepare phase: Spawning preparer into team."},
+                make_team_task_call(team_name, "preparer-1", "You are a pact-preparer.", "teamtask-prep"),
+            ],
+            timestamp="2025-01-22T10:00:15Z",
+        ))
+        # SendMessage completion signal from preparer
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "Preparer completed. Reading handoff from task metadata."},
+                make_send_message_call("preparer-1", "Task complete", "sendmsg-prep"),
+            ],
+            timestamp="2025-01-22T10:00:30Z",
+        ))
+
+    # Architect phase
+    if phase in ["architect", "code", "test"]:
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "architect phase: Spawning architect into team."},
+                make_team_task_call(team_name, "architect-1", "You are a pact-architect.", "teamtask-arch"),
+            ],
+            timestamp="2025-01-22T10:01:00Z",
+        ))
+
+    # Code phase
+    if phase in ["code", "test"]:
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "code phase: Spawning backend coder into team."},
+                make_team_task_call(team_name, "backend-coder-1", "You are a pact-backend-coder.", "teamtask-code"),
+            ],
+            timestamp="2025-01-22T10:02:00Z",
+        ))
+
+    # Test phase
+    if phase == "test":
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "test phase: Spawning test engineer into team."},
+                make_team_task_call(team_name, "test-engineer-1", "You are a pact-test-engineer.", "teamtask-test"),
+            ],
+            timestamp="2025-01-22T10:03:00Z",
+        ))
+
+    # Termination
+    if include_termination:
+        lines.append(make_assistant_message(
+            content=[
+                {"type": "text", "text": "all phases complete. IMPLEMENTED: Auth endpoint is ready."},
+                make_team_delete_call(team_name, "teamdelete-orch"),
+            ],
+            timestamp="2025-01-22T10:05:00Z",
         ))
 
     return create_transcript_lines(lines)

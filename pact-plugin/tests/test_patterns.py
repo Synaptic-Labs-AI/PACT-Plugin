@@ -29,6 +29,11 @@ from refresh.patterns import (
     PACT_AGENT_PATTERN,
     TASK_TOOL_PATTERN,
     SUBAGENT_TYPE_PATTERN,
+    TEAM_CREATE_PATTERN,
+    TEAM_DELETE_PATTERN,
+    SEND_MESSAGE_PATTERN,
+    TEAM_NAME_PATTERN,
+    TASK_WITH_TEAM_PATTERN,
     WorkflowPattern,
     compile_workflow_patterns,
     is_termination_signal,
@@ -499,3 +504,151 @@ class TestConstants:
         """Test termination signals have expected workflow keys."""
         expected_keys = {"peer-review", "orchestrate", "plan-mode", "comPACT", "rePACT", "imPACT"}
         assert set(TERMINATION_SIGNALS.keys()) == expected_keys
+
+
+class TestAgentTeamsPatterns:
+    """Tests for Agent Teams (v3.0) pattern constants."""
+
+    # -------------------------------------------------------------------------
+    # TEAM_CREATE_PATTERN
+    # -------------------------------------------------------------------------
+
+    def test_team_create_pattern_matches_standard(self):
+        """Test TEAM_CREATE_PATTERN matches standard TeamCreate JSON."""
+        json_str = '{"name": "TeamCreate", "input": {"name": "pact-feature"}}'
+        assert TEAM_CREATE_PATTERN.search(json_str) is not None
+
+    def test_team_create_pattern_matches_no_spaces(self):
+        """Test TEAM_CREATE_PATTERN matches JSON without spaces."""
+        json_str = '{"name":"TeamCreate","input":{"name":"my-team"}}'
+        assert TEAM_CREATE_PATTERN.search(json_str) is not None
+
+    def test_team_create_pattern_case_insensitive(self):
+        """Test TEAM_CREATE_PATTERN is case insensitive."""
+        json_str = '{"name": "teamcreate"}'
+        assert TEAM_CREATE_PATTERN.search(json_str) is not None
+
+    def test_team_create_pattern_no_match_other_tools(self):
+        """Test TEAM_CREATE_PATTERN does not match other tool names."""
+        assert TEAM_CREATE_PATTERN.search('"name": "Task"') is None
+        assert TEAM_CREATE_PATTERN.search('"name": "TeamDelete"') is None
+        assert TEAM_CREATE_PATTERN.search('"name": "SendMessage"') is None
+
+    # -------------------------------------------------------------------------
+    # TEAM_DELETE_PATTERN
+    # -------------------------------------------------------------------------
+
+    def test_team_delete_pattern_matches_standard(self):
+        """Test TEAM_DELETE_PATTERN matches standard TeamDelete JSON."""
+        json_str = '{"name": "TeamDelete", "input": {"name": "pact-feature"}}'
+        assert TEAM_DELETE_PATTERN.search(json_str) is not None
+
+    def test_team_delete_pattern_matches_no_spaces(self):
+        """Test TEAM_DELETE_PATTERN matches JSON without spaces."""
+        json_str = '{"name":"TeamDelete","input":{"name":"my-team"}}'
+        assert TEAM_DELETE_PATTERN.search(json_str) is not None
+
+    def test_team_delete_pattern_case_insensitive(self):
+        """Test TEAM_DELETE_PATTERN is case insensitive."""
+        json_str = '{"name": "teamdelete"}'
+        assert TEAM_DELETE_PATTERN.search(json_str) is not None
+
+    def test_team_delete_pattern_no_match_other_tools(self):
+        """Test TEAM_DELETE_PATTERN does not match other tool names."""
+        assert TEAM_DELETE_PATTERN.search('"name": "Task"') is None
+        assert TEAM_DELETE_PATTERN.search('"name": "TeamCreate"') is None
+        assert TEAM_DELETE_PATTERN.search('"name": "SendMessage"') is None
+
+    # -------------------------------------------------------------------------
+    # SEND_MESSAGE_PATTERN
+    # -------------------------------------------------------------------------
+
+    def test_send_message_pattern_matches_standard(self):
+        """Test SEND_MESSAGE_PATTERN matches standard SendMessage JSON."""
+        json_str = '{"name": "SendMessage", "input": {"recipient": "agent-1"}}'
+        assert SEND_MESSAGE_PATTERN.search(json_str) is not None
+
+    def test_send_message_pattern_matches_no_spaces(self):
+        """Test SEND_MESSAGE_PATTERN matches JSON without spaces."""
+        json_str = '{"name":"SendMessage","input":{"type":"message"}}'
+        assert SEND_MESSAGE_PATTERN.search(json_str) is not None
+
+    def test_send_message_pattern_case_insensitive(self):
+        """Test SEND_MESSAGE_PATTERN is case insensitive."""
+        json_str = '{"name": "sendmessage"}'
+        assert SEND_MESSAGE_PATTERN.search(json_str) is not None
+
+    def test_send_message_pattern_no_match_other_tools(self):
+        """Test SEND_MESSAGE_PATTERN does not match other tool names."""
+        assert SEND_MESSAGE_PATTERN.search('"name": "Task"') is None
+        assert SEND_MESSAGE_PATTERN.search('"name": "TeamCreate"') is None
+        assert SEND_MESSAGE_PATTERN.search('"name": "Read"') is None
+
+    # -------------------------------------------------------------------------
+    # TEAM_NAME_PATTERN
+    # -------------------------------------------------------------------------
+
+    def test_team_name_pattern_extracts_name(self):
+        """Test TEAM_NAME_PATTERN extracts team name from JSON."""
+        json_str = '{"team_name": "pact-auth-feature"}'
+        match = TEAM_NAME_PATTERN.search(json_str)
+        assert match is not None
+        assert match.group(1) == "pact-auth-feature"
+
+    def test_team_name_pattern_no_spaces(self):
+        """Test TEAM_NAME_PATTERN works without spaces in JSON."""
+        json_str = '{"team_name":"my-team-123"}'
+        match = TEAM_NAME_PATTERN.search(json_str)
+        assert match is not None
+        assert match.group(1) == "my-team-123"
+
+    def test_team_name_pattern_no_match_without_team_name(self):
+        """Test TEAM_NAME_PATTERN does not match when team_name is absent."""
+        assert TEAM_NAME_PATTERN.search('"name": "my-team"') is None
+        assert TEAM_NAME_PATTERN.search('"subagent_type": "pact-backend"') is None
+
+    # -------------------------------------------------------------------------
+    # TASK_WITH_TEAM_PATTERN
+    # -------------------------------------------------------------------------
+
+    def test_task_with_team_pattern_matches(self):
+        """Test TASK_WITH_TEAM_PATTERN matches Task call with team_name."""
+        json_str = '{"name": "Task", "input": {"team_name": "pact-feature", "prompt": "test"}}'
+        match = TASK_WITH_TEAM_PATTERN.search(json_str)
+        assert match is not None
+        assert match.group(1) == "pact-feature"
+
+    def test_task_with_team_pattern_multiline(self):
+        """Test TASK_WITH_TEAM_PATTERN matches across lines (DOTALL)."""
+        json_str = '{"name": "Task",\n  "input": {\n    "team_name": "pact-auth"\n  }}'
+        match = TASK_WITH_TEAM_PATTERN.search(json_str)
+        assert match is not None
+        assert match.group(1) == "pact-auth"
+
+    def test_task_with_team_pattern_no_match_non_task(self):
+        """Test TASK_WITH_TEAM_PATTERN does not match non-Task tools with team_name."""
+        json_str = '{"name": "Read", "input": {"team_name": "pact-feature"}}'
+        assert TASK_WITH_TEAM_PATTERN.search(json_str) is None
+
+    def test_task_with_team_pattern_no_match_task_without_team(self):
+        """Test TASK_WITH_TEAM_PATTERN does not match Task without team_name."""
+        json_str = '{"name": "Task", "input": {"subagent_type": "pact-backend"}}'
+        assert TASK_WITH_TEAM_PATTERN.search(json_str) is None
+
+    # -------------------------------------------------------------------------
+    # __all__ exports
+    # -------------------------------------------------------------------------
+
+    def test_agent_teams_patterns_in_all_exports(self):
+        """Test Agent Teams pattern constants are in __all__."""
+        from refresh.patterns import __all__ as pattern_exports
+
+        expected = [
+            "TEAM_CREATE_PATTERN",
+            "TEAM_DELETE_PATTERN",
+            "SEND_MESSAGE_PATTERN",
+            "TEAM_NAME_PATTERN",
+            "TASK_WITH_TEAM_PATTERN",
+        ]
+        for name in expected:
+            assert name in pattern_exports, f"{name} missing from __all__"

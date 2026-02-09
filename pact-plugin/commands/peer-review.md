@@ -18,25 +18,26 @@ Create a review Task hierarchy:
 1. TaskCreate: Review task "Review: {feature}"
 2. TaskUpdate: Review task status = "in_progress"
 3. Analyze PR: Which reviewers needed?
-4. TaskCreate: Reviewer agent tasks (architect, test-engineer, domain specialists)
+4. TaskCreate: Reviewer tasks (architect, test-engineer, domain specialists)
+   (include metadata: PR URL, review scope, artifact_paths for relevant files)
 5. TaskUpdate: Reviewer tasks status = "in_progress"
 6. TaskUpdate: Review task addBlockedBy = [reviewer IDs]
-7. Dispatch reviewers in parallel
-8. Monitor until reviewers complete
+7. Spawn reviewers as teammates with thin bootstrap prompts
+8. Receive SendMessage completion signals; TaskGet for review findings in metadata
 9. TaskUpdate: Reviewer tasks status = "completed" (as each completes)
 10. Synthesize findings
 11. If major issues:
-    a. TaskCreate: Remediation agent tasks
+    a. TaskCreate: Remediation tasks
     b. TaskUpdate: Remediation tasks status = "in_progress"
-    c. Dispatch, monitor until complete
+    c. Spawn remediation specialists, receive completion signals
     d. TaskUpdate: Remediation tasks status = "completed"
 12. TaskCreate: "User: review minor issues" step task
 13. Present minor issues to user, record decisions in step metadata
 14. TaskUpdate: Step task status = "completed"
 15. If "fix now" decisions:
-    a. TaskCreate: Remediation agent tasks
+    a. TaskCreate: Remediation tasks
     b. TaskUpdate: Remediation tasks status = "in_progress"
-    c. Dispatch, monitor until complete
+    c. Spawn remediation specialists, receive completion signals
     d. TaskUpdate: Remediation tasks status = "completed"
 16. TaskCreate: "Awaiting merge decision" approval task
 17. Present to user, await approval
@@ -49,14 +50,14 @@ Create a review Task hierarchy:
 **Example structure:**
 ```
 [Review] "Review: user authentication"
-├── [Agent] "architect: design review"
-├── [Agent] "test-engineer: coverage review"
-├── [Agent] "backend-coder: implementation review"
+├── [Reviewer] "architect: design review"
+├── [Reviewer] "test-engineer: coverage review"
+├── [Reviewer] "backend-coder: implementation review"
 ├── [Remediation] (dynamic, for major issues)
-│   └── [Agent] "fix: auth vulnerability"
+│   └── [Specialist] "fix: auth vulnerability"
 ├── [Step] "User: review minor issues"
 ├── [Remediation] (dynamic, for "fix now" minors)
-│   └── [Agent] "fix: input validation"
+│   └── [Specialist] "fix: input validation"
 └── [Approval] "Awaiting merge decision"
 ```
 
@@ -64,7 +65,7 @@ Create a review Task hierarchy:
 
 ```
 Review task: in_progress (persists until merge-ready)
-├─ Cycle N: remediation tasks → re-review (verify-only) → check
+├─ Cycle N: spawn remediation specialists → re-review (verify-only) → check
 ├─ After 2 failed cycles: BLOCKER task → addBlockedBy review → /PACT:imPACT
 └─ On resolution: blocker completed → review resumes
 ```
@@ -75,7 +76,7 @@ Review task: in_progress (persists until merge-ready)
 
 **PR Review Workflow**
 
-Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Invoke **at least 3 agents in parallel** to provide comprehensive review coverage:
+Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Spawn **at least 3 reviewers as teammates** to provide comprehensive review coverage:
 
 Standard reviewer combination:
 - **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
@@ -86,7 +87,7 @@ Select the domain coder based on PR focus:
 - Frontend changes → **pact-frontend-coder** (UI implementation quality, accessibility, state management)
 - Backend changes → **pact-backend-coder** (Server-side implementation quality, API design, error handling)
 - Database changes → **pact-database-engineer** (Query efficiency, schema design, data integrity)
-- Multiple domains → Coder for domain with most significant changes, or all relevant domain coders if changes are equally significant
+- Multiple domains → Specialist for domain with most significant changes, or all relevant specialists if changes are equally significant
 
 ---
 
@@ -109,8 +110,8 @@ Select the domain coder based on PR focus:
 
 ---
 
-**After all reviews complete**:
-1. Synthesize findings into a unified review summary with consolidated recommendations
+**After all reviews complete** (signaled via SendMessage):
+1. TaskGet each reviewer's task to read findings from metadata; synthesize into a unified review summary with consolidated recommendations
 2. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
 
    | Recommendation | Severity | Reviewer |
@@ -179,10 +180,12 @@ Select the domain coder based on PR focus:
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each reviewer dispatch
-- After each remediation dispatch
-- On any unexpected agent stoppage
+Monitor for SendMessage signals from reviewers and remediation specialists:
+- **Completion signals**: "Task {ID} complete" — trigger TaskGet to read review findings
+- **Blocker signals**: "BLOCKER on task {ID}: ..." — trigger imPACT triage
+- **Algedonic signals**: HALT broadcasts or ALERT messages — follow algedonic protocol
+
+Also check TaskList periodically for unexpected state changes.
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

@@ -14,7 +14,7 @@ Scope Contract: {scope-name}
 Identity:
   scope_id: {kebab-case identifier, e.g., "backend-api"}
   parent_scope: {parent scope_id or "root"}
-  executor: {assigned at dispatch — currently rePACT}
+  executor: {assigned at dispatch — Agent Teams (primary) or rePACT (sequential fallback)}
 
 Deliverables:
   - {Expected file paths or patterns this scope produces}
@@ -33,8 +33,8 @@ Constraints:
 
 ### Design Principles
 
-- **Minimal contracts** (~5-10 lines per scope): The consolidate phase catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
-- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is rePACT (today) or Agent Teams (future).
+- **Minimal contracts** (~5-10 lines per scope): The [scope verification protocol](pact-scope-verification.md) catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
+- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is Agent Teams (primary) or rePACT (sequential fallback).
 - **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
 
 ### Generation Process
@@ -44,17 +44,18 @@ Constraints:
    a. Assign `scope_id` from domain keywords (e.g., "backend-api", "frontend-ui", "database-migration")
    b. List expected deliverables from PREPARE output file references
    c. Identify interface exports/imports by analyzing cross-scope references in PREPARE output
-   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the consolidate phase.
+   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the [scope verification protocol](pact-scope-verification.md).
    e. Propagate parent conventions (from plan or ARCHITECT output if available)
-3. Present contracts in the rePACT invocation prompt for each sub-scope
+3. Present contracts in the executor dispatch prompt for each sub-scope (teammate spawn prompt for Agent Teams, or rePACT invocation prompt for sequential fallback)
 
 ### Contract Lifecycle
 
 ```
 Detection fires → User confirms boundaries → Contracts generated
-    → Passed to rePACT per sub-scope → Sub-scope executes against contract
+    → Dispatched to executor per sub-scope (Agent Teams or rePACT)
+    → Sub-scope executes against contract
     → Sub-scope handoff includes contract fulfillment section
-    → Consolidate phase verifies contracts across sub-scopes
+    → Scope verification protocol verifies contracts across sub-scopes
 ```
 
 ### Contract Fulfillment in Handoff
@@ -72,7 +73,7 @@ Contract Fulfillment:
   Deviations: {any departures from the contract, with rationale}
 ```
 
-The consolidate phase uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
+The [scope verification protocol](pact-scope-verification.md) uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
 
 ### Executor Interface
 
@@ -93,31 +94,9 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
-#### Current Executor: rePACT
+#### Primary Executor: Agent Teams
 
-rePACT implements the executor interface as follows:
-
-| Interface Element | rePACT Implementation |
-|-------------------|-----------------------|
-| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
-| **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
-| **Input: branch** | Uses the current feature branch (no new branch created) |
-| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
-| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
-| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
-| **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
-| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
-
-See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
-
-#### Future Executor: Agent Teams
-
-> **Status**: Agent Teams is experimental, gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
-> The API has evolved from earlier community-documented versions (monolithic `TeammateTool` with 13 operations)
-> into separate purpose-built tools. The mappings below reflect the current API shape but may change
-> before official release. This section is documentation/future reference, not current behavior.
-
-When Claude Code Agent Teams reaches stable release, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
+Agent Teams is the primary executor for scoped orchestration. The lead spawns teammates as sub-scope executors, each receiving a scope contract and operating independently.
 
 | Interface Element | Agent Teams Mapping |
 |-------------------|---------------------|
@@ -146,12 +125,29 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 - Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
 - No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
-- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
+- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration can use this for sibling scope coordination during the [scope verification protocol](pact-scope-verification.md).
+
+#### Sequential Fallback: rePACT
+
+rePACT serves as the sequential execution fallback when Agent Teams is unavailable or when the lead chooses sequential sub-scope execution.
+
+| Interface Element | rePACT Implementation |
+|-------------------|-----------------------|
+| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
+| **Input: branch** | Uses the current feature branch (no new branch created) |
+| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
+| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
+| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
+| **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
+| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
+
+See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
 
 #### Design Constraints
 
-- **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
-- **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
+- **Backend-agnostic**: The parent orchestrator's logic (contract generation, [scope verification protocol](pact-scope-verification.md), failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Same output shape**: Both Agent Teams and rePACT produce the same structured output (5-item handoff + contract fulfillment). The scope verification protocol consumes this output identically regardless of source.
+- **Executor selection**: Agent Teams is the default executor. rePACT is used when sequential execution is preferred or when Agent Teams is unavailable. The executor interface abstraction insulates PACT from executor changes — only the mapping table needs updating.
 
 ---

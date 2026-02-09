@@ -8,10 +8,11 @@ Orchestrate specialist PACT agents through the PACT workflow to address: $ARGUME
 
 ## Task Hierarchy
 
-Create the full Task hierarchy upfront for workflow visibility:
+Create the full Task hierarchy upfront for workflow visibility. Tasks serve as both tracking artifacts and instruction sets (Task-as-instruction model).
 
 ```
 1. TaskCreate: Feature task "{verb} {feature}"
+   metadata: { worktree_path, feature_branch, plan_path, plan_status, nesting_depth: 0, impact_cycles: 0 }
 2. TaskCreate: Phase tasks (all upfront):
    - "PREPARE: {feature-slug}"
    - "ARCHITECT: {feature-slug}"
@@ -24,52 +25,64 @@ Create the full Task hierarchy upfront for workflow visibility:
 4. TaskUpdate: Feature task status = "in_progress"
 ```
 
-**Scoped PACT phases**: When decomposition fires after PREPARE, the standard ARCHITECT and CODE phases are skipped (`decomposition_active`) and replaced by scoped phases. Create retroactively (detection occurs after PREPARE):
-- `"ATOMIZE: {feature-slug}"` with `blockedBy = [PREPARE task ID]`
-- `"CONSOLIDATE: {feature-slug}"` with `blockedBy = [all scope task IDs]`
-- Add CONSOLIDATE to TEST's `blockedBy` via `addBlockedBy = [CONSOLIDATE task ID]` (the original CODE dependency auto-resolves when CODE is marked completed/skipped)
+**Scoped PACT phases**: When decomposition fires after PREPARE, the standard ARCHITECT and CODE phases handle scoped work — they are NOT skipped. The difference is what happens *inside* them:
+- **ARCHITECT** includes decomposition: architect produces scope contracts + boundaries; lead amends with coordination constraints
+- **CODE** includes rePACT execution (inner P->A->C->T per sub-scope) + scope verification
+- Scope sub-feature tasks are created as children of the CODE phase task during execution
 
-The scoped flow is: **P**repare → **A**tomize → **C**onsolidate → **T**est (same PACT acronym, scoped meanings).
+The scoped flow is the same P->A->C->T sequence — no special phase names at any level.
 
 For each phase execution:
 ```
-a. TaskUpdate: phase status = "in_progress"
+a. TaskUpdate: phase status = "in_progress", metadata = { phase, s4_checkpoint }
 b. Analyze work needed (QDCL for CODE)
-c. TaskCreate: agent task(s) as children of phase
-d. TaskUpdate: agent tasks status = "in_progress"
-e. TaskUpdate: next phase addBlockedBy = [agent IDs]
-f. Dispatch agents with task IDs in their prompts
-g. Monitor via TaskList until agents complete
-h. TaskUpdate: agent tasks status = "completed" (as each completes)
-i. TaskUpdate: phase status = "completed"
+c. TaskCreate: agent work task(s) as children of phase
+   - subject: short imperative label
+   - description: full mission (what to do, acceptance criteria, file scope, constraints)
+   - metadata: { phase, scope_id, scope_contract, upstream_tasks, artifact_paths, conventions, coordination }
+d. Spawn teammate for each agent task (thin bootstrap prompt)
+e. Monitor via SendMessage signals (push-based) and TaskList
+f. On specialist completion signal: TaskGet to read handoff metadata, TaskUpdate agent task status = "completed"
+g. TaskUpdate: phase status = "completed", metadata += { s4_checkpoint }
 ```
 
-**Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
+### Five Metadata Levels
+
+Task metadata is structured across five levels, each stored on the appropriate task:
+
+| Level | Stored On | Key Fields |
+|-------|-----------|------------|
+| **Feature** | Feature task | `worktree_path`, `feature_branch`, `plan_path`, `plan_status`, `nesting_depth`, `impact_cycles`, `triage_history` |
+| **Phase** | Phase tasks | `phase`, `skipped`, `skip_reason`, `skip_context`, `s4_checkpoint` |
+| **Agent** | Agent work tasks | `coordination` (file_scope, convention_source, concurrent_with, boundary_note), `nesting_depth`, `parent_feature_task`, `recovery_attempts` |
+| **Scope** | Scope sub-feature tasks | `scope_id`, `contract_fulfillment` (deliverables, exports_actual, imports_actual, deviations) |
+| **Review** | Review task | `pr_url`, `remediation_cycles`, `findings_path` |
+
+**Skipped phases**: Mark directly `completed` (no `in_progress` -- no work occurs):
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "{reason}"})`
-Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, `"decomposition_active"`, or custom.
+Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, or custom.
 <!-- Skip reason semantics:
   - "approved_plan_exists": Plan exists but completeness not verified (legacy/weak)
   - "plan_section_complete": Plan exists AND section passed completeness check (preferred)
   - "requirements_explicit": Task description contains all needed context
   - "existing_docs_cover_scope": docs/preparation/ or docs/architecture/ already complete
   - "trivial_change": Change too small to warrant this phase
-  - "decomposition_active": Scope detection triggered decomposition; sub-scopes handle this phase via rePACT
 -->
 
 ---
 
 ## S3/S4 Mode Awareness
 
-This command primarily operates in **S3 mode** (operational control)—executing the plan and coordinating agents. However, mode transitions are important:
+This command primarily operates in **S3 mode** (operational control)--executing the plan and coordinating agents. However, mode transitions are important:
 
 | Phase | Primary Mode | Mode Checks |
 |-------|--------------|-------------|
 | **Before Starting** | S4 | Understand task, assess complexity, check for plans |
 | **Context Assessment** | S4 | Should phases be skipped? What's the right approach? |
 | **Phase Execution** | S3 | Coordinate agents, track progress, clear blockers |
-| **On Blocker** | S4 | Assess before responding—is this operational or strategic? |
+| **On Blocker** | S4 | Assess before responding--is this operational or strategic? |
 | **Between Phases** | S4 | Still on track? Adaptation needed? |
-| **After Completion** | S4 | Retrospective—what worked, what didn't? |
+| **After Completion** | S4 | Retrospective--what worked, what didn't? |
 
 When transitioning to S4 mode, pause and ask: "Are we still building the right thing, or should we adapt?"
 
@@ -87,7 +100,7 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 
 | Internal (don't show) | External (show) |
 |----------------------|-----------------|
-| Variety dimension scores, full tables | One-line summary: `Variety: Low (5) — proceeding with orchestrate` |
+| Variety dimension scores, full tables | One-line summary: `Variety: Low (5) -- proceeding with orchestrate` |
 | QDCL checklist, dependency analysis | Decision only: `Invoking 2 backend coders in parallel` |
 | Phase skip reasoning details | Brief: `Skipping PREPARE/ARCHITECT (approved plan exists)` |
 
@@ -96,14 +109,14 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 **Narration style**: State decisions, not reasoning process. Minimize commentary.
 
 **Exceptions warranting more detail**:
-- Error conditions, blockers, or unexpected issues — proactively explain what went wrong
-- High-variety tasks (11+) — visible reasoning helps user track complex orchestration
+- Error conditions, blockers, or unexpected issues -- proactively explain what went wrong
+- High-variety tasks (11+) -- visible reasoning helps user track complex orchestration
 
 | Verbose (avoid) | Concise (prefer) |
 |-----------------|------------------|
 | "Let me assess variety and check for the approved plan" | (just do it, show result) |
-| "I'm now going to invoke the backend coder" | `Invoking backend coder` |
-| "S4 Mode — Task Assessment" | (implicit, don't announce) |
+| "I'm now going to invoke the backend coder" | `Spawning backend coder` |
+| "S4 Mode -- Task Assessment" | (implicit, don't announce) |
 
 ---
 
@@ -124,12 +137,12 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 | Novel technology, unclear requirements, critical stakes | Extreme (15-16) | Recommend research spike before planning |
 
 **Variety Dimensions** (score 1-4 each, sum for total):
-- **Novelty**: Routine (1) → Unprecedented (4)
-- **Scope**: Single concern (1) → Cross-cutting (4)
-- **Uncertainty**: Clear (1) → Unknown (4)
-- **Risk**: Low impact (1) → Critical (4)
+- **Novelty**: Routine (1) -> Unprecedented (4)
+- **Scope**: Single concern (1) -> Cross-cutting (4)
+- **Uncertainty**: Clear (1) -> Unknown (4)
+- **Risk**: Low impact (1) -> Critical (4)
 
-**Output format**: One-line summary only. Example: `Variety: Medium (8) — standard orchestrate with all phases`
+**Output format**: One-line summary only. Example: `Variety: Medium (8) -- standard orchestrate with all phases`
 
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
@@ -148,6 +161,16 @@ AskUserQuestion(
 
 If comPACT selected, hand off to `/PACT:comPACT`.
 
+### Team Creation
+
+Create the session team before dispatching any specialists:
+
+```
+TeamCreate(name="{feature-slug}")
+```
+
+The team persists for the duration of orchestration. All specialists are spawned into this team.
+
 ---
 
 ## Execution Philosophy
@@ -155,10 +178,10 @@ If comPACT selected, hand off to `/PACT:comPACT`.
 **MANDATORY: Invoke concurrently unless blocked.** The burden of proof is on sequential dispatch. If you cannot cite a specific file conflict or data dependency, you MUST invoke them concurrently.
 
 This applies across ALL phases, not just CODE:
-- PREPARE with multiple research areas → multiple preparers at once
-- ARCHITECT with independent component designs → multiple architects simultaneously
-- CODE with multiple domains or independent tasks → multiple coders together
-- TEST with independent test suites → multiple test engineers concurrently
+- PREPARE with multiple research areas -> multiple preparers at once
+- ARCHITECT with independent component designs -> multiple architects simultaneously
+- CODE with multiple domains or independent tasks -> multiple coders together
+- TEST with independent test suites -> multiple test engineers concurrently
 
 Sequential execution is the exception requiring explicit justification. When assessing any phase, ask: "Can specialists be invoked concurrently?" The answer is usually yes.
 
@@ -171,12 +194,12 @@ Sequential execution is the exception requiring explicit justification. When ass
 
 | Status | Action |
 |--------|--------|
-| PENDING APPROVAL | `/PACT:orchestrate` = implicit approval → update to IN_PROGRESS |
+| PENDING APPROVAL | `/PACT:orchestrate` = implicit approval -> update to IN_PROGRESS |
 | APPROVED | Update to IN_PROGRESS |
 | BLOCKED | Ask user to resolve or proceed without plan |
 | IN_PROGRESS | Confirm: continue or restart? |
 | SUPERSEDED/IMPLEMENTED | Confirm with user before proceeding |
-| No plan found | Proceed—phases will do full discovery |
+| No plan found | Proceed--phases will do full discovery |
 
 ---
 
@@ -191,9 +214,9 @@ Before executing phases, assess which are needed based on existing context:
 | **CODE** | Always run | Never skip |
 | **TEST** | Integration/E2E tests needed, complex component interactions, security/performance verification | ALL of the following are true: (1) trivial change with no new logic requiring tests, (2) no integration boundaries crossed, (3) isolated change with no meaningful test scenarios, AND (4) plan's Phase Requirements section does not mark TEST as REQUIRED (if plan exists) |
 
-**Conflict resolution**: When both "Run if" and "Skip if" criteria apply, **run the phase** (safer default). Example: A plan exists but requirements have changed—run PREPARE to validate.
+**Conflict resolution**: When both "Run if" and "Skip if" criteria apply, **run the phase** (safer default). Example: A plan exists but requirements have changed--run PREPARE to validate.
 
-**Plan-aware fast path**: When an approved plan exists in `docs/plans/`, PREPARE and ARCHITECT are typically skippable—the plan already synthesized specialist perspectives. Skip unless scope has changed, plan appears stale (typically >2 weeks; ask user to confirm if uncertain), OR the plan contains incompleteness signals for that phase (see Phase Skip Completeness Check below).
+**Plan-aware fast path**: When an approved plan exists in `docs/plans/`, PREPARE and ARCHITECT are typically skippable--the plan already synthesized specialist perspectives. Skip unless scope has changed, plan appears stale (typically >2 weeks; ask user to confirm if uncertain), OR the plan contains incompleteness signals for that phase (see Phase Skip Completeness Check below).
 
 **State your assessment briefly.** Example: `Skipping PREPARE/ARCHITECT (approved plan exists). Running CODE and TEST.`
 
@@ -201,20 +224,20 @@ The user can override your assessment or ask for details.
 
 ### Phase Skip Completeness Check
 
-**Principle: Existence ≠ Completeness.**
+**Principle: Existence != Completeness.**
 
 Before skipping, scan the plan section for incompleteness signals (see [pact-completeness.md](../protocols/pact-completeness.md)):
 - [ ] No unchecked research items (`- [ ]`)
 - [ ] No TBD values in decision tables
-- [ ] No `⚠️ Handled during {PHASE_NAME}` forward references
+- [ ] No `Warning: Handled during {PHASE_NAME}` forward references
 - [ ] No unchecked questions to resolve
 - [ ] No empty/placeholder sections
 - [ ] No unresolved open questions
 
-**All clear** → Skip with reason `"plan_section_complete"` (not `"approved_plan_exists"`)
-**Any signal present** → Run the phase
+**All clear** -> Skip with reason `"plan_section_complete"` (not `"approved_plan_exists"`)
+**Any signal present** -> Run the phase
 
-> **Note**: The plan's Phase Requirements table is advisory. When in doubt, verify against actual section content — the table may be stale if the plan was updated after initial synthesis.
+> **Note**: The plan's Phase Requirements table is advisory. When in doubt, verify against actual section content -- the table may be stale if the plan was updated after initial synthesis.
 
 **Scope detection**: After PREPARE completes (or is skipped), scope detection evaluates whether the task warrants decomposition into sub-scopes. See [Scope Detection Evaluation](#scope-detection-evaluation) below.
 
@@ -228,36 +251,54 @@ When a phase is skipped but a coder encounters a decision that would have been h
 |----------------|----------|--------|
 | **Minor** | Naming conventions, local file structure, error message wording | Coder decides, documents in commit message |
 | **Moderate** | Interface shape within your module, error handling pattern, internal component boundaries | Coder decides and implements, but flags decision with rationale in handoff; orchestrator validates before next phase |
-| **Major** | New module needed, cross-module contract, architectural pattern affecting multiple components | Blocker → `/PACT:imPACT` → may need to run skipped phase |
+| **Major** | New module needed, cross-module contract, architectural pattern affecting multiple components | Blocker -> `/PACT:imPACT` -> may need to run skipped phase |
 
 **Boundary heuristic**: If a decision affects files outside the current specialist's scope, treat it as Major.
 
 **Coder instruction when phases were skipped**:
 
-> "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
+> "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers--don't implement, escalate."
 
 ---
 
-### PREPARE Phase → `pact-preparer`
+### PREPARE Phase -> `pact-preparer`
 
-**Skip criteria met (including completeness check)?** → Proceed to ARCHITECT phase.
+**Skip criteria met (including completeness check)?** -> Proceed to ARCHITECT phase.
 
 **Plan sections to pass** (if plan exists):
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Invoke `pact-preparer` with**:
-- Task description
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+**Create agent work task** (Task-as-instruction):
+```
+TaskCreate(
+  subject: "Research: {feature-slug}",
+  description: "Full mission — task description, acceptance criteria, what to research, output expectations",
+  metadata: {
+    phase: "PREPARE",
+    upstream_tasks: [feature_task_id],
+    artifact_paths: ["docs/preparation/"],
+    plan_reference: "docs/plans/{slug}-plan.md"
+  }
+)
+```
+
+**Spawn teammate** with thin bootstrap prompt:
+```
+Task(
+  name="preparer-1",
+  team_name="{feature-slug}",
+  prompt="You are a pact-preparer. You have been assigned task {task_id}. Read it with TaskGet and execute it. When done, store your handoff in task metadata via TaskUpdate and send a completion signal via SendMessage to the lead."
+)
+```
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/preparation/`
-- [ ] Specialist handoff received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] Specialist handoff received (via SendMessage signal + TaskGet for metadata)
+- [ ] If blocker reported -> `/PACT:imPACT`
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 
-**Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
+**Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), create separate agent work tasks and spawn multiple preparers with clear scope boundaries.
 
 ---
 
@@ -265,13 +306,13 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 If PREPARE ran and ARCHITECT was marked "Skip," compare PREPARE's recommended approach to the skip rationale:
 
-- **Approach matches rationale** → Skip holds
-- **Novel approach** (new components, interfaces, expanded scope) → Override, run ARCHITECT
+- **Approach matches rationale** -> Skip holds
+- **Novel approach** (new components, interfaces, expanded scope) -> Override, run ARCHITECT
 
 **Example**:
 > Skip rationale: "following established pattern in `src/utils/`"
-> PREPARE recommends "add helper to existing utils" → Skip holds
-> PREPARE recommends "new ValidationService class" → Override, run ARCHITECT
+> PREPARE recommends "add helper to existing utils" -> Skip holds
+> PREPARE recommends "new ValidationService class" -> Override, run ARCHITECT
 
 ---
 
@@ -288,58 +329,77 @@ After PREPARE completes (or is skipped with plan context), evaluate whether the 
 
 | Result | Action |
 |--------|--------|
-| Score below threshold | Single scope — continue with today's behavior |
+| Score below threshold | Single scope -- continue with standard execution |
 | Score at/above threshold | Propose decomposition (see Evaluation Response below) |
 | All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Evaluation Response below) |
 
-**Output format**: `Scope detection: Single scope (score 2/3 threshold)` or `Scope detection: Multi-scope detected (score 4/3 threshold) — proposing decomposition`
+**Output format**: `Scope detection: Single scope (score 2/3 threshold)` or `Scope detection: Multi-scope detected (score 4/3 threshold) -- proposing decomposition`
 
 #### Evaluation Response
 
-When detection fires (score >= threshold), follow the evaluation response protocol in [pact-scope-detection.md](../protocols/pact-scope-detection.md) — S5 confirmation flow, user response mapping, and autonomous tier.
+When detection fires (score >= threshold), follow the evaluation response protocol in [pact-scope-detection.md](../protocols/pact-scope-detection.md) -- S5 confirmation flow, user response mapping, and autonomous tier.
 
-**On confirmed decomposition**: Generate a scope contract for each sub-scope before invoking rePACT. See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contract format and generation process. Skip top-level ARCHITECT and CODE — mark both `completed` with `{"skipped": true, "skip_reason": "decomposition_active"}`. The workflow switches to scoped PACT phases: ATOMIZE (dispatch sub-scopes) → CONSOLIDATE (verify contracts) → TEST (comprehensive feature testing). See ATOMIZE Phase and CONSOLIDATE Phase below.
+**On confirmed decomposition**: ARCHITECT and CODE phases proceed normally (they are NOT skipped), but with decomposition awareness:
+- **ARCHITECT**: Architect produces scope contracts and decomposition boundaries in addition to overall architecture. Lead amends contracts with coordination constraints (shared_files restrictions, dependency ordering). See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contract format and generation process.
+- **CODE**: Lead executes `/PACT:rePACT` for sequential sub-scope execution, then runs Scope Verification Protocol. See [CODE Phase (Scoped Path)](#code-phase-scoped-path) below.
 
 ---
 
-### ARCHITECT Phase → `pact-architect`
+### ARCHITECT Phase -> `pact-architect`
 
-**Skip criteria met (including completeness check, after re-assessment)?** → Proceed to CODE phase.
+**Skip criteria met (including completeness check, after re-assessment)?** -> Proceed to CODE phase.
 
 **Plan sections to pass** (if plan exists):
 - "Architecture Phase"
 - "Key Decisions"
 - "Interface Contracts"
 
-**Invoke `pact-architect` with**:
-- Task description
-- PREPARE phase outputs:
-  - Tell `pact-architect` where to find them (e.g., "Read `docs/preparation/{feature}.md` for research context")
-  - Do not read the files yourself or paste their content into the prompt
-  - If PREPARE was skipped: pass the plan's Preparation Phase section instead
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+**Create agent work task** (Task-as-instruction):
+```
+TaskCreate(
+  subject: "Design: {feature-slug}",
+  description: "Full mission — design components, define interfaces, make architectural decisions. Read upstream PREPARE task {prepare_task_id} for research context. If decomposition is active: also produce scope contracts and decomposition boundaries.",
+  metadata: {
+    phase: "ARCHITECT",
+    upstream_tasks: [prepare_task_id],
+    artifact_paths: ["docs/preparation/", "docs/architecture/"],
+    plan_reference: "docs/plans/{slug}-plan.md",
+    decomposition_active: true/false
+  }
+)
+```
+
+**Spawn teammate** with thin bootstrap prompt:
+```
+Task(
+  name="architect-1",
+  team_name="{feature-slug}",
+  prompt="You are a pact-architect. You have been assigned task {task_id}. Read it with TaskGet and execute it. When done, store your handoff in task metadata via TaskUpdate and send a completion signal via SendMessage to the lead."
+)
+```
+
+**If decomposition is active**: After architect completes, lead amends scope contracts with coordination constraints (shared_files restrictions, dependency ordering) and writes them into scope task metadata. The architect produces contracts as S1 design work; the lead adds S2/S3 coordination constraints.
 
 **Before next phase**:
 - [ ] Outputs exist in `docs/architecture/`
-- [ ] Specialist handoff received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] Specialist handoff received (via SendMessage signal + TaskGet for metadata)
+- [ ] If blocker reported -> `/PACT:imPACT`
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
-**Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
+**Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), create separate agent work tasks and spawn multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
 
 ---
 
-### CODE Phase → `pact-*-coder(s)`
+### CODE Phase -> `pact-*-coder(s)`
 
 **Always runs.** This is the core work.
 
-> **S5 Policy Checkpoint (Pre-CODE)**: Before invoking coders, verify:
+> **S5 Policy Checkpoint (Pre-CODE)**: Before spawning coders, verify:
 > 1. "Does the architecture align with project principles?"
 > 2. "Am I delegating ALL code changes to specialists?" (orchestrator writes no application code)
 > 3. "Are there any S5 non-negotiables at risk?"
 >
-> **Delegation reminder**: Even if you identified the exact implementation during earlier phases, you must delegate the actual coding. Knowing what to build ≠ permission to build it yourself.
+> **Delegation reminder**: Even if you identified the exact implementation during earlier phases, you must delegate the actual coding. Knowing what to build != permission to build it yourself.
 
 **Plan sections to pass** (if plan exists):
 - "Code Phase"
@@ -347,130 +407,197 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Commit Sequence"
 
 **Select coder(s)** based on scope:
-- `pact-backend-coder` — server-side logic, APIs
-- `pact-frontend-coder` — UI, client-side
-- `pact-database-engineer` — schema, queries, migrations
+- `pact-backend-coder` -- server-side logic, APIs
+- `pact-frontend-coder` -- UI, client-side
+- `pact-database-engineer` -- schema, queries, migrations
 
-#### Invoke Concurrently by Default
+#### Standard Path (Non-Scoped)
+
+##### Invoke Concurrently by Default
 
 **Default stance**: Dispatch specialists together unless proven dependent. Sequential requires explicit justification.
 
 **Required decision output** (no exceptions):
-- "**Concurrent**: [groupings]" — the expected outcome
-- "**Sequential because [specific reason]**: [ordering]" — requires explicit justification
-- "**Mixed**: [concurrent groupings], then [sequential dependencies]" — when genuinely mixed
+- "**Concurrent**: [groupings]" -- the expected outcome
+- "**Sequential because [specific reason]**: [ordering]" -- requires explicit justification
+- "**Mixed**: [concurrent groupings], then [sequential dependencies]" -- when genuinely mixed
 
 **Deviation from concurrent dispatch requires articulated reasoning.** "I'm not sure" defaults to concurrent with S2 coordination, not sequential.
 
-**Analysis should complete quickly.** Use the Quick Dependency Checklist (QDCL) below. If QDCL analysis takes more than 2 minutes, you're likely over-analyzing independent tasks—default to concurrent dispatch with S2 coordination.
+**Analysis should complete quickly.** Use the Quick Dependency Checklist (QDCL) below. If QDCL analysis takes more than 2 minutes, you're likely over-analyzing independent tasks--default to concurrent dispatch with S2 coordination.
 
-#### Execution Strategy Analysis
+##### Execution Strategy Analysis
 
-**REQUIRED**: Complete the QDCL internally before invoking coders.
+**REQUIRED**: Complete the QDCL internally before spawning coders.
 
-**Quick Dependency Checklist (QDCL)** — run mentally, don't output:
+**Quick Dependency Checklist (QDCL)** -- run mentally, don't output:
 
 For each pair of work units, check:
-- Same file modified? → Sequential (or define strict boundaries)
-- A's output is B's input? → Sequential (A first)
-- Shared interface undefined? → Define interface first, then concurrent
-- None of above? → Concurrent
+- Same file modified? -> Sequential (or define strict boundaries)
+- A's output is B's input? -> Sequential (A first)
+- Shared interface undefined? -> Define interface first, then concurrent
+- None of above? -> Concurrent
 
-**Output format**: Decision only. Example: `Invoking backend + frontend coders in parallel` or `Sequential: database first, then backend (schema dependency)`
+**Output format**: Decision only. Example: `Spawning backend + frontend coders in parallel` or `Sequential: database first, then backend (schema dependency)`
 
 **If QDCL shows no dependencies**: Concurrent is your answer. Don't second-guess.
 
-#### S2 Pre-Dispatch Coordination
+##### S2 Pre-Dispatch Coordination
 
 Before concurrent dispatch, check internally: shared files? shared interfaces? conventions established?
 
 - **Shared files**: Sequence those agents OR assign clear boundaries
 - **Conventions**: First agent's choice becomes standard; propagate to others
-- **Resolution authority**: Technical disagreements → Architect arbitrates; Style/convention → First agent's choice
+- **Resolution authority**: Technical disagreements -> Architect arbitrates; Style/convention -> First agent's choice
 
-**Output**: Silent if no conflicts; only mention if conflicts found (e.g., `S2 check: types.ts shared — backend writes, frontend reads`).
+**Output**: Silent if no conflicts; only mention if conflicts found (e.g., `S2 check: types.ts shared -- backend writes, frontend reads`).
 
-**Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
+##### Dispatch
 
-**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
+**Create agent work task(s)** (Task-as-instruction):
+```
+TaskCreate(
+  subject: "Implement: {component}",
+  description: "Full mission — what to implement, acceptance criteria, file scope. Read upstream ARCHITECT task {architect_task_id} for design context. Smoke test: run test suite before completing; fix any tests your changes break.",
+  metadata: {
+    phase: "CODE",
+    upstream_tasks: [architect_task_id],
+    artifact_paths: ["docs/architecture/"],
+    plan_reference: "docs/plans/{slug}-plan.md",
+    coordination: {
+      file_scope: ["src/auth/**"],
+      concurrent_with: [other_task_ids],
+      boundary_note: "Do not modify files outside your scope"
+    },
+    conventions: { ... }
+  }
+)
+```
 
-**Invoke coder(s) with**:
-- Task description
-- ARCHITECT phase outputs:
-  - Tell the coder(s) where to find them (e.g., "Read `docs/architecture/{feature}.md` for design context")
-  - Do not read the files yourself or paste their content into the prompt
-  - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-- If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
-- "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
+If PREPARE/ARCHITECT were skipped, include in description: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers--don't implement, escalate."
+
+**Spawn teammate(s)** with thin bootstrap prompt:
+```
+Task(
+  name="{coder-type}-1",
+  team_name="{feature-slug}",
+  prompt="You are a {agent-type}. You have been assigned task {task_id}. Read it with TaskGet and execute it. You are working in a git worktree at {worktree_path}. All file paths must be absolute and within this worktree. When done, store your handoff in task metadata via TaskUpdate and send a completion signal via SendMessage to the lead."
+)
+```
+
+**Include worktree path in all agent task descriptions**: "You are working in a git worktree at {worktree_path}. All file paths must be absolute and within this worktree."
+
+**Include for concurrent specialists** in task description: "You are working concurrently with other specialists. Your scope is {file_scope}. Do not modify files outside your scope."
 
 **Before next phase**:
 - [ ] Implementation complete
 - [ ] All tests passing (full test suite; fix any tests your changes break)
-- [ ] Specialist handoff(s) received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] Specialist handoff(s) received (via SendMessage signal + TaskGet for metadata)
+- [ ] If blocker reported -> `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
+#### CODE Phase (Scoped Path)
+
+When decomposition is active (scope detection fired and ARCHITECT produced scope contracts):
+
+**1. Sub-scope execution via rePACT**
+
+For each sub-scope sequentially:
+```
+a. TaskCreate: Sub-feature task as child of CODE phase task
+   subject: "Scope: {scope_id}"
+   metadata: {
+     scope_id: "{scope_id}",
+     scope_contract: { ... },  // from architect output, amended by lead
+     upstream_tasks: [architect_task_id, feature_task_id],
+     nesting_depth: 1,
+     parent_feature_task: feature_task_id
+   }
+b. Execute /PACT:rePACT for this sub-scope (inner P->A->C->T)
+   - rePACT spawns specialists into the same team for the inner cycle
+   - On completion: commit sub-scope work
+```
+
+**2. Scope Verification Protocol**
+
+After all sub-scopes complete, execute the [Scope Verification Protocol](../protocols/pact-scope-verification.md):
+
+```
+a. Spawn architect for cross-scope contract compatibility verification
+b. Lead verifies contract fulfillment (metadata comparison — orchestrator-level work)
+c. Optionally spawn test engineer for cross-scope integration tests (parallel with step a)
+```
+
+On verification pass: CODE phase complete -> proceed to TEST.
+On verification failure: Route through `/PACT:imPACT` for triage.
+
+**Before next phase** (same as standard path):
+- [ ] All sub-scopes implemented and committed
+- [ ] Scope verification passed
+- [ ] Specialist handoff(s) received
+- [ ] If blocker reported -> `/PACT:imPACT`
+- [ ] **Create atomic commit(s)** if any verification-phase work produced
+- [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
+
 #### Handling Complex Sub-Tasks During CODE
 
-If a sub-task emerges that is too complex for a single specialist invocation:
+If a sub-task emerges that is too complex for a single specialist:
 
 | Sub-Task Complexity | Indicators | Use |
 |---------------------|------------|-----|
-| **Simple** | Code-only, clear requirements | Direct specialist invocation |
+| **Simple** | Code-only, clear requirements | Direct specialist spawn |
 | **Focused** | Single domain, no research needed | `/PACT:comPACT` |
-| **Complex** | Needs own P→A→C→T cycle | `/PACT:rePACT` |
+| **Complex** | Needs own P->A->C->T cycle | `/PACT:rePACT` |
 
 **When to use `/PACT:rePACT`:**
 - Sub-task needs its own research/preparation phase
 - Sub-task requires architectural decisions before coding
 - Sub-task spans multiple concerns within a domain
 
-**Phase re-entry** (via `/PACT:imPACT`): When imPACT decides to redo a prior phase, create a new retry phase task — do not reopen the completed one. See [imPACT.md Phase Re-Entry Task Protocol](imPACT.md#phase-re-entry-task-protocol) for details.
+**Phase re-entry** (via `/PACT:imPACT`): When imPACT decides to redo a prior phase, create a new retry phase task -- do not reopen the completed one. See [imPACT.md Phase Re-Entry Task Protocol](imPACT.md#phase-re-entry-task-protocol) for details.
 
 ---
 
-### ATOMIZE Phase (Scoped Orchestration Only)
+### TEST Phase -> `pact-test-engineer`
 
-Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-phase).
-
-**Worktree isolation**: Before dispatching each sub-scope's rePACT, invoke `/PACT:worktree-setup` with the suffix branch name (e.g., `feature-X--backend`). Pass the resulting worktree path to the rePACT invocation.
-
----
-
-### CONSOLIDATE Phase (Scoped Orchestration Only)
-
-Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#consolidate-phase).
-
-**Worktree cleanup**: After merging each sub-scope branch back to the feature branch, invoke `/PACT:worktree-cleanup` for that sub-scope's worktree.
-
----
-
-### TEST Phase → `pact-test-engineer`
-
-**Skip criteria met?** → Proceed to "After All Phases Complete."
+**Skip criteria met?** -> Proceed to "After All Phases Complete."
 
 **Plan sections to pass** (if plan exists):
 - "Test Phase"
 - "Test Scenarios"
 - "Coverage Targets"
 
-**Invoke `pact-test-engineer` with**:
-- Task description
-- CODE phase handoff(s): Pass coder handoff summaries (agent response text, not files on disk)
-- Plan sections above (if any)
-- "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-- "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+**Create agent work task** (Task-as-instruction):
+```
+TaskCreate(
+  subject: "Test: {feature-slug}",
+  description: "Full mission — what to test, test scenarios, coverage targets. Read upstream CODE task(s) for implementation context. You own ALL substantive testing: unit tests, integration, E2E, edge cases.",
+  metadata: {
+    phase: "TEST",
+    upstream_tasks: [code_task_ids],
+    artifact_paths: ["src/", "docs/architecture/"],
+    plan_reference: "docs/plans/{slug}-plan.md"
+  }
+)
+```
+
+**Spawn teammate** with thin bootstrap prompt:
+```
+Task(
+  name="test-engineer-1",
+  team_name="{feature-slug}",
+  prompt="You are a pact-test-engineer. You have been assigned task {task_id}. Read it with TaskGet and execute it. You are working in a git worktree at {worktree_path}. All file paths must be absolute and within this worktree. When done, store your handoff in task metadata via TaskUpdate and send a completion signal via SendMessage to the lead."
+)
+```
 
 **Before completing**:
 - [ ] All tests passing
-- [ ] Specialist handoff received
-- [ ] If blocker reported → `/PACT:imPACT`
+- [ ] Specialist handoff received (via SendMessage signal + TaskGet for metadata)
+- [ ] If blocker reported -> `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
 
-**Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
+**Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), create separate agent work tasks and spawn multiple test engineers with clear suite boundaries.
 
 ---
 
@@ -482,10 +609,10 @@ For stall detection indicators, recovery protocol, prevention, and non-happy-pat
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each agent dispatch
-- When agent reports completion
-- On any unexpected agent stoppage
+Monitor for blocker/algedonic signals via SendMessage:
+- After each teammate spawn
+- When teammate reports completion
+- On any unexpected teammate idle/termination
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
@@ -495,10 +622,11 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 > **S5 Policy Checkpoint (Pre-PR)**: Before creating PR, verify: "Do all tests pass? Is system integrity maintained? Have S5 non-negotiables been respected throughout?"
 
-1. **Update plan status** (if plan exists): IN_PROGRESS → IMPLEMENTED
-2. **Verify all work is committed** — CODE and TEST phase commits should already exist; if any uncommitted changes remain, commit them now
-3. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
-4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
-5. **Present review summary and stop** — orchestrator never merges (S5 policy)
-6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **High-variety audit trail** (variety 10+ only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned
+1. **Update plan status** (if plan exists): IN_PROGRESS -> IMPLEMENTED
+2. **Verify all work is committed** -- CODE and TEST phase commits should already exist; if any uncommitted changes remain, commit them now
+3. **Clean up team**: `TeamDelete(name="{feature-slug}")` -- terminates all remaining teammates and releases resources
+4. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
+5. **Run `/PACT:peer-review`** to create PR and get multi-agent review
+6. **Present review summary and stop** -- orchestrator never merges (S5 policy)
+7. **S4 Retrospective** (after user decides): Briefly note--what worked well? What should we adapt for next time?
+8. **High-variety audit trail** (variety 10+ only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned

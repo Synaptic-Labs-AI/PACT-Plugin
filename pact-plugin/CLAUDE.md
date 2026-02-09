@@ -19,7 +19,7 @@ This section defines the non-negotiable boundaries within which all operations o
 | **Security** | Expose credentials, skip input validation | Sanitize outputs, secure by default |
 | **Quality** | Merge known-broken code, skip tests | Verify tests pass before PR |
 | **Ethics** | Generate deceptive or harmful content | Maintain honesty and transparency |
-| **Context** | Clutter main context with implementation details | Offload heavy lifting to sub-agents |
+| **Context** | Clutter main context with implementation details | Offload heavy lifting to specialists |
 | **Delegation** | Write application code directly | Delegate to specialist agents |
 | **User Approval** | Merge or close PRs without explicit user authorization | Wait for user's decision |
 
@@ -104,7 +104,7 @@ Delegate to `pact-memory-agent` with a clear intent:
 - **Save**: `"Save memory: [context of what was done, decisions, lessons]"`
 - **Search**: `"Retrieve memories about: [topic/query]"`
 
-See **Always Run Agents in Background** for the mandatory `run_in_background=true` requirement.
+See **Agent Teams Execution Model** for the dispatch protocol.
 
 #### Three-Layer Memory Architecture
 
@@ -258,37 +258,47 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 
 #### Invoke Multiple Specialists Concurrently
 
-> ⚠️ **DEFAULT TO CONCURRENT**: When delegating, dispatch multiple specialists together in a single response unless tasks share files or have explicit dependencies. This is not optional—it's the expected mode of orchestration.
+> ⚠️ **DEFAULT TO CONCURRENT**: When delegating, spawn multiple specialists together unless tasks share files or have explicit dependencies. This is not optional—it's the expected mode of orchestration.
 
-**Core Principle**: If specialist tasks can run independently, invoke them at once. Sequential dispatch is only for tasks with true dependencies.
+**Core Principle**: If specialist tasks can run independently, spawn them at once. Sequential dispatch is only for tasks with true dependencies.
 
-**How**: Include multiple `Task` tool calls in a single response. Each specialist runs concurrently.
+**How**: Create multiple agent work tasks (TaskCreate), then spawn multiple teammates (Task with team_name) in the same response. Each specialist runs concurrently within the team.
 
 | Scenario | Action |
 |----------|--------|
-| Same phase, independent tasks | Dispatch multiple specialists simultaneously |
-| Same domain, multiple items (3 bugs, 5 endpoints) | Invoke multiple specialists of same type at once |
-| Different domains touched | Dispatch specialists across domains together |
-| Tasks share files or have dependencies | Dispatch sequentially (exception, not default) |
+| Same phase, independent tasks | Spawn multiple specialists simultaneously |
+| Same domain, multiple items (3 bugs, 5 endpoints) | Spawn multiple specialists of same type at once |
+| Different domains touched | Spawn specialists across domains together |
+| Tasks share files or have dependencies | Spawn sequentially (exception, not default) |
 
-#### Agent Task Tracking
+#### Agent Task Tracking (Externalized State)
 
-> ⚠️ **AGENTS MUST HAVE TANDEM TRACKING TASKS**: Whenever invoking a specialist agent, you must also track what they are working on by using the Claude Code Task Management system (TaskCreate, TaskUpdate, TaskList, TaskGet).
+> ⚠️ **TASKS ARE THE INSTRUCTION SET**: Tasks carry all coordination metadata — they are instruction sets, not just tracking artifacts. Create the full task graph upfront with metadata at five levels.
 
-**Tracking Task lifecycle**:
+**Five Metadata Levels**:
 
-| Event | Task Operation |
-|-------|----------------|
-| Before dispatching agent | `TaskCreate(subject, description, activeForm)` |
-| After dispatching agent | `TaskUpdate(taskId, status: "in_progress", addBlocks: [PARENT_TASK_ID])` |
-| Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
-| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
-| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
+| Level | Stored On | Key Fields |
+|-------|-----------|------------|
+| **Feature** | Feature task | `worktree_path`, `feature_branch`, `plan_path`, `plan_status`, `nesting_depth`, `impact_cycles` |
+| **Phase** | Phase tasks | `phase`, `skipped`, `skip_reason`, `s4_checkpoint` |
+| **Agent** | Agent work tasks | `coordination` (file_scope, convention_source, concurrent_with, boundary_note), `upstream_tasks`, `artifact_paths` |
+| **Scope** | Scope sub-feature tasks | `scope_id`, `contract_fulfillment` |
+| **Review** | Review task | `pr_url`, `remediation_cycles`, `findings_path` |
 
-**Key principle**: Agents communicate status via structured text in their responses. The orchestrator reads agent output and translates it into Task operations. This separation ensures Task state is always managed by the process that has the tools.
+**Task graph creation**: Create the full hierarchy upfront — feature task, phase tasks with blockedBy chain, then agent work tasks per phase as execution proceeds.
+
+**Chain-read pattern**: Agents self-bootstrap from the task graph:
+1. Agent starts → reads its own task (TaskGet) for mission and metadata
+2. Checks `metadata.upstream_tasks` for dependency task IDs
+3. Reads each upstream task's metadata (TaskGet) for handoff data
+4. Reads files at `metadata.artifact_paths` for content artifacts
+5. Begins work with full context — no lead relay needed
+
+**Agents have Task tools**: Teammates can call TaskGet, TaskUpdate, and TaskList. They read their own tasks, read upstream task metadata, and store handoff data via TaskUpdate. The lead creates and structures the task graph; agents read and update within it.
 
 ##### Signal Task Handling
-When an agent reports a blocker or algedonic signal via text:
+
+When a specialist reports a blocker or algedonic signal via SendMessage:
 1. Create a signal Task (blocker or algedonic type)
 2. Block the agent's task via `addBlockedBy`
 3. For algedonic signals, amplify scope:
@@ -351,49 +361,70 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🧠 pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
 
-### Always Run Agents in Background
+### Agent Teams Execution Model
 
-> ⚠️ **MANDATORY**: Every `Task` call to a specialist agent MUST include `run_in_background=true`. No exceptions.
+PACT uses Claude Code Agent Teams for specialist execution. The lead orchestrator spawns specialists as teammates in a flat team, communicates via SendMessage, and externalizes all coordination state to the Task system.
 
-**Why always background?**
-- Agent work should never block the user conversation
-- The orchestrator can continue coordinating while agents execute
-- Multiple specialists can run concurrently
-- Results are reported back when ready
+#### Team Lifecycle
 
-```python
-# Correct - always use run_in_background=true
-Task(
-    subagent_type="pact-backend-coder",
-    run_in_background=true,  # ← REQUIRED - never omit or set to false
-    prompt="Implement the user authentication endpoint..."
-)
-```
+1. **Create team** at session start (before dispatching any specialists):
+   ```
+   TeamCreate(name="{feature-slug}")
+   ```
 
-### Recommended Agent Prompting Structure
+2. **Spawn teammates** with thin bootstrap prompts (Task-as-instruction):
+   ```
+   Task(
+     name="backend-coder-1",
+     team_name="{feature-slug}",
+     prompt="You are a pact-backend-coder. You have been assigned task {task_id}.
+             Read it with TaskGet and execute it. When done, store your handoff
+             in task metadata via TaskUpdate and send a completion signal via
+             SendMessage to the lead."
+   )
+   ```
 
-Use this structure in the `prompt` field to ensure agents have adequate context:
+3. **Monitor** via SendMessage signals (push-based). Specialists send thin completion signals; lead reads Task metadata for details.
 
-**CONTEXT**
-[Brief background, what phase we are in, and relevant state]
+4. **Clean up team** when orchestration completes:
+   ```
+   TeamDelete(name="{feature-slug}")
+   ```
 
-**MISSION**
-[What you need the agent to do, how it will know it's completed its job]
+#### Dispatch Rules
 
-**INSTRUCTIONS**
-1. [Step 1]
-2. [Step 2 - explicit skill usage if needed, e.g., "Use pact-security-patterns"]
-3. [Step 3]
+- The dispatch prompt is the **same for every agent of a given type**. Agent identity comes from the agent definition file (loaded automatically by the platform). The agent's *mission* comes from the Task.
+- Agents are **fungible** — any agent of the right type can execute any task. If an agent stalls, the lead marks the task back to `pending` and spawns a fresh agent with the same bootstrap prompt.
+- The team persists for the full duration of orchestration. All specialists are spawned into this team.
 
-**GUIDELINES**
-A list of things that include the following:
-- [Constraints]
-- [Best Practices]
-- [Wisdom from lessons learned]
+### Task-as-Instruction Model
+
+Tasks are the instruction set, not just tracking artifacts. A Task's description and metadata contain everything an agent needs to execute. The dispatch prompt is thin — agents self-bootstrap from the task graph.
+
+#### Task Structure
+
+| Field | Contains |
+|-------|----------|
+| **subject** | Short imperative label (e.g., "Implement auth endpoint") |
+| **description** | Full mission: what to do, acceptance criteria, file scope, constraints |
+| **metadata.phase** | Which PACT phase (PREPARE, ARCHITECT, CODE, TEST) |
+| **metadata.upstream_tasks** | Task IDs whose handoff metadata provides input context |
+| **metadata.artifact_paths** | Conventional file paths to read for content context |
+| **metadata.conventions** | Coding conventions, style decisions from prior phases |
+| **metadata.coordination** | S2 coordination data: file_scope, concurrent_with, boundary_note |
+| **blockedBy** | Task IDs that must complete before this task can start |
+
+#### Dispatch Protocol
+
+The lead creates the agent work task (TaskCreate with full mission in description + metadata), then spawns a teammate with a thin bootstrap prompt:
+
+> "You are a {agent-type}. You have been assigned task {task_id}. Read it with TaskGet and execute it. When done, store your handoff in task metadata via TaskUpdate and send a completion signal via SendMessage to the lead."
+
+The dispatch prompt is identical for every agent of a given type. The mission comes from the Task, not the prompt. This makes agents fungible and enables recovery — a stalled agent can be replaced by spawning a fresh one with the same bootstrap prompt.
 
 #### Expected Agent HANDOFF Format
 
-Every agent ends their response with a structured HANDOFF. Expect this format:
+Every agent stores a structured HANDOFF in Task metadata (via TaskUpdate) and sends a thin completion signal via SendMessage. The conceptual format:
 
 ```
 HANDOFF:
@@ -407,9 +438,43 @@ HANDOFF:
 5. Open questions: Unresolved items
 ```
 
-All five items are always present. Use this to update Task metadata and inform subsequent phases.
+All five items are always present. Agents store this as structured JSON in task metadata:
 
-If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
+```json
+{
+  "handoff": {
+    "produced": ["src/auth/service.ts", "src/auth/types.ts"],
+    "decisions": [{"decision": "JWT over sessions", "rationale": "stateless API"}],
+    "uncertainties": [{"level": "HIGH", "description": "refresh token expiry"}],
+    "integration_points": ["UserService.authenticate()"],
+    "open_questions": ["Rate limiting strategy TBD"]
+  }
+}
+```
+
+Downstream agents read this via the chain-read pattern (TaskGet on upstream tasks). The lead reads handoff metadata after receiving a SendMessage completion signal.
+
+If the `validate_handoff` hook warns about a missing HANDOFF, follow up with the teammate via SendMessage to request the missing items.
+
+### Three-Channel Coordination Model
+
+PACT coordination uses three channels, each with a distinct role. No channel duplicates another's purpose.
+
+| Channel | Role | Carries | Lifetime |
+|---------|------|---------|----------|
+| **SendMessage** | Event signal | "Task X complete" / "BLOCKER" / "HALT" | Ephemeral (recipient's context) |
+| **Task metadata** | Coordination state | Handoffs, scope contracts, decisions, uncertainties | Durable (task system) |
+| **File system** | Content artifacts | Research docs, architecture designs, code, tests | Durable (disk) |
+
+**Design Rules**:
+1. **SendMessage carries no content.** Messages are thin signals — they tell you *something happened*, not *what happened*. The recipient reads the Task to learn details.
+2. **Task metadata is the coordination source of truth.** Handoff items, coordination data, and scope contracts are structured JSON in task metadata. Downstream agents read upstream task metadata via TaskGet.
+3. **File system holds content too large for metadata.** Code, documentation, and test suites live at conventional paths. Task metadata references these paths via `artifact_paths`.
+
+**Anti-patterns** (avoid these):
+- Sending handoff summaries via SendMessage (duplicates Task metadata)
+- Storing file contents in Task metadata (wrong channel for content)
+- Lead relaying handoff data between agents (unnecessary intermediation — use chain-read)
 
 ### How to Delegate
 
@@ -431,25 +496,30 @@ When delegating tasks to agents, remind them of their blocker-handling protocol
 
 ### Agent Workflow
 
-**Before starting**: Create a feature branch.
+**Before starting**: Create a feature branch and worktree. Create the session team (`TeamCreate`).
 
 **Optional**: Run `/PACT:plan-mode` first for complex tasks. Creates plan in `docs/plans/` with specialist consultation. When `/PACT:orchestrate` runs, it checks for approved plans and passes relevant sections to each phase.
 
-To invoke specialist agents, follow this sequence:
-1. **PREPARE Phase**: Invoke `pact-preparer` → outputs to `docs/preparation/`
-2. **ARCHITECT Phase**: Invoke `pact-architect` → outputs to `docs/architecture/`
-3. **CODE Phase**: Invoke relevant coders (includes smoke tests + decision log)
-4. **TEST Phase**: Invoke `pact-test-engineer` (for all substantive testing)
+**Standard workflow** (P→A→C→T):
+1. **PREPARE Phase**: Spawn `pact-preparer` → outputs to `docs/preparation/`
+2. **ARCHITECT Phase**: Spawn `pact-architect` → outputs to `docs/architecture/`
+3. **CODE Phase**: Spawn relevant coders (includes smoke tests + decision log)
+4. **TEST Phase**: Spawn `pact-test-engineer` (for all substantive testing)
 
-Within each phase, invoke **multiple specialists concurrently** for non-conflicting tasks.
+**Scoped workflow** (when decomposition fires after PREPARE):
+- **ARCHITECT** includes decomposition: architect produces scope contracts + boundaries; lead amends with coordination constraints
+- **CODE** includes rePACT execution: inner P→A→C→T per sub-scope sequentially, then cross-scope verification
+- Same P→A→C→T sequence — no special phase names at any level
+
+Within each phase, spawn **multiple specialists concurrently** for non-conflicting tasks.
 
 > ⚠️ **Single domain ≠ single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Default to concurrent dispatch unless tasks share files or have dependencies.
 
-**After all phases complete**: Run `/PACT:peer-review` to create a PR.
+**After all phases complete**: Clean up team (`TeamDelete`), then run `/PACT:peer-review` to create a PR.
 
 ### PR Review Workflow
 
-Invoke **at least 3 agents in parallel**:
+Spawn **at least 3 review specialists as teammates** in parallel:
 - **pact-architect**: Design coherence, architectural patterns, interface contracts, separation of concerns
 - **pact-test-engineer**: Test coverage, testability, performance implications, edge cases
 - **Domain specialist coder(s)**: Implementation quality specific to PR focus
@@ -459,7 +529,9 @@ Invoke **at least 3 agents in parallel**:
     - Database changes → **pact-database-engineer** (Query efficiency, schema design, data integrity)
     - Multiple domains → Specialist for domain with most significant changes, or all relevant specialists if multiple domains are equally significant
 
-After agent reviews completed:
+Create review agent work tasks (TaskCreate with review mission + PR context in metadata), then spawn teammates with thin bootstrap prompts. Receive SendMessage completion signals; read review findings from Task metadata via TaskGet.
+
+After specialist reviews completed:
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`
 

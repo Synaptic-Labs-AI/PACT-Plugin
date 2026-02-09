@@ -184,7 +184,7 @@ When coders flag areas of uncertainty in their handoff:
 
 ### Signal Output System
 
-Report your findings to the orchestrator using this signal format:
+Report your findings to your assigner using this signal format:
 
 ```
 Risk Tier: {CRITICAL|HIGH|STANDARD|LIGHT}
@@ -229,7 +229,7 @@ The orchestrator passes CODE phase handoff summaries. Use these for context:
 
 **HANDOFF**
 
-End with a structured handoff for the orchestrator:
+End with a structured handoff for your assigner:
 1. **Produced**: Test files created, coverage achieved
 2. **Key decisions**: Testing approach with rationale, assumptions that could be wrong
 3. **Areas of uncertainty** (PRIORITIZED):
@@ -270,7 +270,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
+Before returning your final output to your assigner:
 
 1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
    - Context: What you were testing and why
@@ -283,7 +283,7 @@ This ensures your testing context persists across sessions and is searchable by 
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
+If you run into a blocker, STOP what you're doing and report the blocker to your assigner, so they can take over and invoke `/PACT:imPACT`.
 
 Examples of blockers:
 - Same error after multiple fixes

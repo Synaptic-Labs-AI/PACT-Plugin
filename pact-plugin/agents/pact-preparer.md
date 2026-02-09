@@ -129,7 +129,7 @@ When evaluating multiple options:
 
 Remember: Your research forms the foundation for the entire project. Be thorough, accurate, and practical. When uncertain about conflicting information, present multiple viewpoints with clear source attribution. Your goal is to empower the Architect and subsequent phases with comprehensive, reliable information with a comprehensive markdown file. Save to the `docs/preparation` folder.
 
-MANDATORY: Pass back to the Orchestrator upon completion of your markdown files.
+MANDATORY: Pass back to your assigner upon completion of your markdown files.
 
 **AUTONOMY CHARTER**
 
@@ -161,7 +161,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
+Before returning your final output to your assigner:
 
 1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
    - Context: What you were researching and why
@@ -174,7 +174,7 @@ This ensures your research context persists across sessions and is searchable by
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
+If you run into a blocker, STOP what you're doing and report the blocker to your assigner, so they can take over and invoke `/PACT:imPACT`.
 
 Examples of blockers:
 - Same error after multiple fixes

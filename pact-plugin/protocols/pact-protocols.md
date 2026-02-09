@@ -757,14 +757,14 @@ At phase transitions, briefly assess:
 
 **Two questions**:
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
-2. **Additional agents needed?** — Do I need subagents to assist?
+2. **Additional specialists needed?** — Do I need additional specialists to assist?
 
 **Three outcomes**:
 | Outcome | When | Action |
 |---------|------|--------|
 | Redo solo | Prior phase broken, I can fix it | Loop back and fix yourself |
-| Redo with help | Prior phase broken, need specialist | Loop back with subagent assistance |
-| Proceed with help | Current phase correct, blocked on execution | Invoke subagents to help forward |
+| Redo with help | Prior phase broken, need specialist | Loop back with specialist assistance |
+| Proceed with help | Current phase correct, blocked on execution | Invoke specialists to help forward |
 
 If neither question is "Yes," you're not blocked—continue.
 
@@ -864,7 +864,7 @@ This document explains how PACT uses Claude Code's Task system to track work at 
 ### Hierarchy Levels
 
 ```
-Feature Task (created by orchestrator)
+Feature Task (created by lead)
 ├── Phase Tasks (PREPARE, ARCHITECT, CODE, TEST)
 │   ├── Agent Task 1 (specialist work)
 │   ├── Agent Task 2 (parallel specialist)
@@ -876,9 +876,11 @@ Feature Task (created by orchestrator)
 
 | Level | Created By | Owned By | Lifecycle |
 |-------|------------|----------|-----------|
-| Feature | Orchestrator | Orchestrator | Spans entire workflow |
-| Phase | Orchestrator | Orchestrator | Active during phase |
-| Agent | Orchestrator | Specialist | Completed when specialist returns |
+| Feature | Lead | Lead | Spans entire workflow |
+| Phase | Lead | Lead | Active during phase |
+| Agent | Lead | Specialist | Completed when specialist finishes |
+
+**Note**: Teammates have access to Task tools (TaskGet, TaskUpdate, TaskList) as a platform feature. They use these for self-management — updating their own task status and creating sub-tasks when needed. The lead creates the initial agent task; the specialist manages it from there.
 
 ### Task States
 
@@ -929,7 +931,7 @@ Prefix task subjects with `[scope:{scope_id}]` to make TaskList output scannable
 [scope:frontend-ui] CODE: frontend-ui
 ```
 
-Tasks without a scope prefix belong to the root (parent) orchestrator scope.
+Tasks without a scope prefix belong to the root (parent) lead scope.
 
 #### Scope Metadata
 
@@ -943,26 +945,26 @@ Include `scope_id` in task metadata to enable structured filtering:
 }
 ```
 
-The parent orchestrator iterates all tasks and filters by `scope_id` metadata to track per-scope progress. Claude Code's Task API does not support native scope filtering, so this convention-based approach is required.
+The lead iterates all tasks and filters by `scope_id` metadata to track per-scope progress. Claude Code's Task API does not support native scope filtering, so this convention-based approach is required.
 
 #### Scoped Hierarchy
 
-When decomposition occurs, the hierarchy extends with scope-level tasks:
+When decomposition occurs, the standard hierarchy uses the same P→A→C→T phases. The CODE phase gains richer behavior — sequential sub-scope execution plus cross-scope verification:
 
 ```
-Feature Task (root orchestrator)
-├── PREPARE Phase Task (single scope, always)
-├── ATOMIZE Phase Task (dispatches sub-scopes)
-│   └── Scope Tasks (one per sub-scope)
-│       ├── [scope:backend-api] Phase Tasks
-│       │   └── [scope:backend-api] Agent Tasks
-│       └── [scope:frontend-ui] Phase Tasks
-│           └── [scope:frontend-ui] Agent Tasks
-├── CONSOLIDATE Phase Task (cross-scope verification)
+Feature Task (lead)
+├── PREPARE Phase Task (includes scope detection)
+├── ARCHITECT Phase Task (includes scope contracts + decomposition boundaries)
+├── CODE Phase Task (scoped: sequential sub-scope execution + verification)
+│   ├── [scope:backend-api] Sub-Feature Task (inner P→A→C→T via rePACT)
+│   │   └── [scope:backend-api] Agent Tasks
+│   ├── [scope:frontend-ui] Sub-Feature Task (inner P→A→C→T via rePACT)
+│   │   └── [scope:frontend-ui] Agent Tasks
+│   └── Scope Verification Task (contract compatibility + fulfillment)
 └── TEST Phase Task (comprehensive feature testing)
 ```
 
-Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is blocked by all scope task completions. TEST is blocked by CONSOLIDATE completion.
+Scope tasks are created during the CODE phase when decomposition is active. The lead follows the rePACT protocol to execute each sub-scope sequentially (inner P→A→C→T), then runs scope verification. TEST is blocked by CODE completion (which includes scope verification).
 
 ### Integration with PACT Signals
 
@@ -972,12 +974,12 @@ Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is 
 
 ### Example Flow
 
-1. Orchestrator creates Feature task: "Implement user authentication" (parent container)
-2. Orchestrator creates PREPARE phase task under the Feature task
-3. Orchestrator dispatches pact-preparer with agent task (blocked by PREPARE phase task)
-4. Preparer completes, updates task to completed with handoff metadata
-5. Orchestrator marks PREPARE complete, creates ARCHITECT phase task
-6. Orchestrator creates CODE phase task (blocked by ARCHITECT phase task)
+1. Lead creates Feature task: "Implement user authentication" (parent container)
+2. Lead creates PREPARE phase task under the Feature task
+3. Lead spawns pact-preparer teammate with agent task
+4. Preparer completes, sends HANDOFF via SendMessage, updates own task to completed
+5. Lead marks PREPARE complete, creates ARCHITECT phase task
+6. Lead creates CODE phase task (blocked by ARCHITECT phase task)
 7. Pattern continues through remaining phases
 
 ---
@@ -1103,27 +1105,29 @@ If work spans sessions, update CLAUDE.md with:
 ## Agent Stall Detection
 
 **Stalled indicators**:
-- Background task running but no progress at monitoring checkpoints
-- Task completed but no handoff received
-- Process terminated without handoff or blocker report
+- Teammate idle with no handoff delivered (detected via TeammateIdle hook)
+- Task stuck in `in_progress` with no progress at monitoring checkpoints
+- Teammate process terminated without handoff or blocker report
 
-Detection is event-driven: check at signal monitoring points (after dispatch, on completion, on stoppage). If a background task returned but produced no handoff or blocker, treat as stalled immediately.
+Detection is event-driven via two mechanisms:
+1. **TeammateIdle hook**: Fires when a teammate stops working. If the teammate's task has no handoff, treat as stalled immediately.
+2. **Lead monitoring**: Lead periodically checks TaskList for tasks stuck `in_progress` without recent updates (timeout-based detection).
 
 ### Recovery Protocol
 
-1. Check the agent's output (from `run_in_background`) for partial work or error messages
+1. Check the teammate's messages (via SendMessage history) for partial work or error reports
 2. Mark the stalled agent task as `completed` with `metadata={"stalled": true, "reason": "{what happened}"}`
 3. Assess: Is the work partially done? Can it be continued from where it stopped?
-4. Create a new agent task to retry or continue the work, passing any partial output as context
+4. Spawn a new teammate to retry or continue the work, passing any partial output as context
 5. If stall persists after 1 retry, emit an **ALERT** algedonic signal (META-BLOCK category)
 
 ### Prevention
 
-Include in agent prompts: "If you encounter an error that prevents completion, report a partial handoff with whatever work you completed rather than silently failing."
+Teammates are instructed via the pact-task-tracking skill: "If you encounter an error that prevents completion, report a partial handoff with whatever work you completed rather than silently failing."
 
 ### Non-Happy-Path Task Termination
 
-When an agent cannot complete normally (stall, failure, or unresolvable blocker), mark its task as `completed` with descriptive metadata:
+When a teammate cannot complete normally (stall, failure, or unresolvable blocker), mark its task as `completed` with descriptive metadata:
 
 Metadata: `{"stalled": true, "reason": "..."}` | `{"failed": true, "reason": "..."}` | `{"blocked": true, "blocker_task": "..."}`
 
@@ -1278,9 +1282,9 @@ Recommendation: [A or B with brief rationale]
 
 | Response | Action |
 |----------|--------|
-| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Confirmed (A) | Generate scope contracts during ARCHITECT phase (see [pact-scope-contract.md](pact-scope-contract.md)), then dispatch sub-scopes via executor (Agent Teams or rePACT) during CODE phase |
 | Rejected (B) | Continue single scope (today's behavior) |
-| Adjusted (C) | Generate scope contracts with user's modified boundaries, then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Adjusted (C) | Generate scope contracts with user's modified boundaries during ARCHITECT phase, then dispatch sub-scopes via executor during CODE phase |
 
 #### Autonomous Tier
 
@@ -1296,7 +1300,7 @@ When **all** of the following conditions are true, skip user confirmation and pr
 
 ### Post-Detection: Scope Contract Generation
 
-When decomposition is confirmed (by user or autonomous tier), the orchestrator generates a scope contract for each identified sub-scope before invoking rePACT. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format and generation process.
+When decomposition is confirmed (by user or autonomous tier), the orchestrator generates a scope contract for each identified sub-scope before dispatching to the executor. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format, generation process, and executor interface.
 
 ---
 
@@ -1316,7 +1320,7 @@ Scope Contract: {scope-name}
 Identity:
   scope_id: {kebab-case identifier, e.g., "backend-api"}
   parent_scope: {parent scope_id or "root"}
-  executor: {assigned at dispatch — currently rePACT}
+  executor: {assigned at dispatch — Agent Teams (primary) or rePACT (sequential fallback)}
 
 Deliverables:
   - {Expected file paths or patterns this scope produces}
@@ -1335,8 +1339,8 @@ Constraints:
 
 ### Design Principles
 
-- **Minimal contracts** (~5-10 lines per scope): The consolidate phase catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
-- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is rePACT (today) or Agent Teams (future).
+- **Minimal contracts** (~5-10 lines per scope): The [scope verification protocol](pact-scope-verification.md) catches what the contract does not specify. Over-specifying front-loads context cost into the orchestrator.
+- **Backend-agnostic**: The contract defines WHAT a scope delivers, not HOW. The same contract format works whether the executor is Agent Teams (primary) or rePACT (sequential fallback).
 - **Generated, not authored**: The orchestrator populates contracts from PREPARE output and detection analysis. Contracts are not hand-written.
 
 ### Generation Process
@@ -1346,17 +1350,18 @@ Constraints:
    a. Assign `scope_id` from domain keywords (e.g., "backend-api", "frontend-ui", "database-migration")
    b. List expected deliverables from PREPARE output file references
    c. Identify interface exports/imports by analyzing cross-scope references in PREPARE output
-   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the consolidate phase.
+   d. Set shared file constraints by comparing file lists across scopes — when a file appears in multiple scopes' deliverables, assign ownership to one scope (typically the scope with the most significant changes to that file); other scopes list it in `shared_files` (no-modify). The owning scope may modify the file; others must coordinate via the [scope verification protocol](pact-scope-verification.md).
    e. Propagate parent conventions (from plan or ARCHITECT output if available)
-3. Present contracts in the rePACT invocation prompt for each sub-scope
+3. Present contracts in the executor dispatch prompt for each sub-scope (teammate spawn prompt for Agent Teams, or rePACT invocation prompt for sequential fallback)
 
 ### Contract Lifecycle
 
 ```
 Detection fires → User confirms boundaries → Contracts generated
-    → Passed to rePACT per sub-scope → Sub-scope executes against contract
+    → Dispatched to executor per sub-scope (Agent Teams or rePACT)
+    → Sub-scope executes against contract
     → Sub-scope handoff includes contract fulfillment section
-    → Consolidate phase verifies contracts across sub-scopes
+    → Scope verification protocol verifies contracts across sub-scopes
 ```
 
 ### Contract Fulfillment in Handoff
@@ -1374,7 +1379,7 @@ Contract Fulfillment:
   Deviations: {any departures from the contract, with rationale}
 ```
 
-The consolidate phase uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
+The [scope verification protocol](pact-scope-verification.md) uses fulfillment sections from all sub-scopes to verify cross-scope compatibility.
 
 ### Executor Interface
 
@@ -1395,31 +1400,9 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
-#### Current Executor: rePACT
+#### Primary Executor: Agent Teams
 
-rePACT implements the executor interface as follows:
-
-| Interface Element | rePACT Implementation |
-|-------------------|-----------------------|
-| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
-| **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
-| **Input: branch** | Uses the current feature branch (no new branch created) |
-| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
-| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
-| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
-| **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
-| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
-
-See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
-
-#### Future Executor: Agent Teams
-
-> **Status**: Agent Teams is experimental, gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
-> The API has evolved from earlier community-documented versions (monolithic `TeammateTool` with 13 operations)
-> into separate purpose-built tools. The mappings below reflect the current API shape but may change
-> before official release. This section is documentation/future reference, not current behavior.
-
-When Claude Code Agent Teams reaches stable release, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
+Agent Teams is the primary executor for scoped orchestration. The lead spawns teammates as sub-scope executors, each receiving a scope contract and operating independently.
 
 | Interface Element | Agent Teams Mapping |
 |-------------------|---------------------|
@@ -1448,82 +1431,114 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 - Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
 - No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
-- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
+- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration can use this for sibling scope coordination during the [scope verification protocol](pact-scope-verification.md).
+
+#### Sequential Fallback: rePACT
+
+rePACT serves as the sequential execution fallback when Agent Teams is unavailable or when the lead chooses sequential sub-scope execution.
+
+| Interface Element | rePACT Implementation |
+|-------------------|-----------------------|
+| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
+| **Input: branch** | Uses the current feature branch (no new branch created) |
+| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
+| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
+| **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
+| **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
+| **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
+
+See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
 
 #### Design Constraints
 
-- **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
-- **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
+- **Backend-agnostic**: The parent orchestrator's logic (contract generation, [scope verification protocol](pact-scope-verification.md), failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Same output shape**: Both Agent Teams and rePACT produce the same structured output (5-item handoff + contract fulfillment). The scope verification protocol consumes this output identically regardless of source.
+- **Executor selection**: Agent Teams is the default executor. rePACT is used when sequential execution is preferred or when Agent Teams is unavailable. The executor interface abstraction insulates PACT from executor changes — only the mapping table needs updating.
 
 ---
 
-## Scoped Phases (ATOMIZE and CONSOLIDATE)
+## Scope Verification Protocol
 
-> **Purpose**: Define the scoped orchestration phases used when decomposition creates sub-scopes.
-> These phases replace the standard ARCHITECT and CODE phases when scope detection fires.
-> For single-scope workflows, these phases are skipped entirely.
+> **Purpose**: Cross-scope contract compatibility and fulfillment verification.
+> Executed by the lead at the end of the outer CODE phase during scoped orchestration,
+> after all sub-scopes complete their inner P→A→C→T cycles via rePACT.
+>
+> This protocol replaces the retired `pact-scope-phases.md` (ATOMIZE/CONSOLIDATE).
+> Scoped orchestration now uses the same P→A→C→T sequence at every level —
+> no special phase names.
 
-### ATOMIZE Phase
+### When This Runs
 
-**Skip criteria**: No decomposition occurred (no scope contracts generated) → Proceed to CONSOLIDATE phase.
+After all sub-scopes have completed (still within the outer CODE phase):
 
-This phase dispatches sub-scopes for independent execution. Each sub-scope runs a full PACT cycle (Prepare → Architect → Code → Test) via rePACT.
+```
+Outer PREPARE → Outer ARCHITECT (includes decomposition) → Outer CODE:
+  ├── rePACT sub-scope 1: inner P→A→C→T (sequential)
+  ├── rePACT sub-scope 2: inner P→A→C→T (sequential)
+  ├── ...
+  └── Scope Verification Protocol (this document)  ← you are here
+→ Outer TEST
+```
 
-**Worktree isolation**: Before dispatching sub-scopes, create an isolated worktree for each:
-1. Invoke `/PACT:worktree-setup` with suffix branch: `feature-X--{scope_id}`
-2. Pass the worktree path to the rePACT invocation so the sub-scope operates in its own filesystem
+### Step 1: Contract Compatibility Verification
 
-**Dispatch**: Invoke `/PACT:rePACT` for each sub-scope with its scope contract and worktree path. Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
+**Who**: Lead spawns `pact-architect` as teammate.
 
-**Sub-scope failure policy**: Sub-scope failure is isolated — sibling scopes continue independently. Individual scope failures route through `/PACT:imPACT` to the affected scope only. However, when a sub-scope emits HALT, the parent orchestrator stops ALL sub-scopes (consistent with algedonic protocol: "Stop ALL agents"). Preserve work-in-progress for all scopes. After HALT resolution, review interrupted scopes before resuming.
+**Task**: Verify cross-scope interface alignment:
+- Compare contract fulfillment sections from all sub-scope handoffs
+- Check that exports from each scope match imports expected by siblings
+- Flag interface mismatches, type conflicts, or undelivered contract items
+- Assess whether any contract deviations are architecturally acceptable
 
-**Before next phase**:
-- [ ] All sub-scope rePACT cycles complete
-- [ ] Contract fulfillment sections received from all sub-scopes
-- [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint**: All scopes delivered? Any scope stalled?
-
----
-
-### CONSOLIDATE Phase
-
-**Skip criteria**: No decomposition occurred → Proceed to TEST phase.
-
-This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
-
-**Merge sub-scope branches**: Before running contract verification, merge each sub-scope's work back:
-1. For each completed sub-scope, merge its suffix branch to the feature branch
-2. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
-3. Proceed to contract verification and integration tests (below) on the merged feature branch
-
-**Delegate in parallel**:
-- **`pact-architect`**: Verify cross-scope contract compatibility
-  - Compare contract fulfillment sections from all sub-scope handoffs
-  - Check that exports from each scope match imports expected by siblings
-  - Flag interface mismatches, type conflicts, or undelivered contract items
-- **`pact-test-engineer`**: Run cross-scope integration tests
-  - Verify cross-scope interfaces work together (API calls, shared types, data flow)
-  - Test integration points identified in scope contracts
-  - Confirm no shared file constraint violations occurred
-
-**Invoke each with**:
-- Feature description and scope contract summaries
-- All sub-scope handoffs (contract fulfillment sections)
+**Invoke with**:
+- Feature description and all scope contracts (from scope task metadata)
+- All sub-scope handoffs (contract fulfillment sections from task metadata)
 - "This is cross-scope integration verification. Focus on compatibility between scopes, not internal scope correctness."
 
-**On consolidation failure**: Route through `/PACT:imPACT` for triage. Possible outcomes:
+### Step 2: Contract Fulfillment Verification
+
+**Who**: Lead (orchestrator-level metadata comparison).
+
+**Task**: Compare each scope's `contract_fulfillment` metadata against original contracts:
+- For each scope: are all deliverables marked ✅?
+- Are any ❌ items blocking? (deferred items may be acceptable)
+- Do interface exports/imports match across scopes?
+- Are deviations documented with rationale?
+
+This is metadata comparison, not code review — the lead can do this directly.
+
+### Step 3: Integration Testing (Optional)
+
+**Who**: Lead spawns `pact-test-engineer` as teammate (in parallel with Step 1).
+
+**Task**: Run cross-scope integration tests:
+- Verify cross-scope interfaces work together (API calls, shared types, data flow)
+- Test integration points identified in scope contracts
+- Confirm no shared file constraint violations occurred
+
+**Invoke with**:
+- Feature description and scope contract summaries
+- All sub-scope handoffs (integration points)
+- "This is cross-scope integration testing. Focus on interactions between scopes."
+
+### On Verification Failure
+
+Route through `/PACT:imPACT` for triage. Possible outcomes:
 - Interface mismatch → re-invoke affected scope's coder to fix
 - Contract deviation → architect reviews whether deviation is acceptable
 - Test failure → test engineer provides details, coder fixes
 
-**Before next phase**:
-- [ ] Cross-scope contract compatibility verified
-- [ ] Integration tests passing
-- [ ] Specialist handoff(s) received
-- [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of CONSOLIDATE phase work
-- [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
+If verification failure is severe (multiple scopes incompatible):
+- Quarantine affected scope(s) — `TaskCreate("QUARANTINE: {reason}")` → block downstream
+- Escalate to user (Failure Mode #7 per design doc)
+
+### Completion
+
+After verification passes:
+- Lead commits any verification-phase work (integration test files, etc.)
+- S4 Checkpoint: Scopes compatible? Integration clean? Plan viable?
+- Outer CODE phase is now complete → proceed to outer TEST phase
 
 ---
 
@@ -1531,9 +1546,7 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 
 - [pact-scope-detection.md](pact-scope-detection.md) — Heuristics for detecting multi-scope tasks
 - [pact-scope-contract.md](pact-scope-contract.md) — Contract format and lifecycle
-- [rePACT.md](../commands/rePACT.md) — Recursive PACT command for sub-scope execution
-
----
+- [rePACT.md](../commands/rePACT.md) — Sequential sub-scope execution command
 
 ## Related
 

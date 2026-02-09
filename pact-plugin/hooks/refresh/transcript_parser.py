@@ -70,12 +70,35 @@ class Turn:
         return None
 
     def has_task_to_pact_agent(self) -> bool:
-        """Check if this turn has a Task call to a PACT agent."""
+        """Check if this turn has a Task call to a PACT agent.
+
+        Supports both subagent-model dispatch (subagent_type field) and
+        Agent Teams dispatch (team_name field with PACT team naming).
+        """
         for tc in self.tool_calls:
             if tc.name == "Task":
+                # Subagent-model dispatch
                 subagent = tc.input_data.get("subagent_type", "")
                 if "pact-" in subagent:
                     return True
+                # Agent Teams dispatch (Task with team_name)
+                team_name = tc.input_data.get("team_name", "")
+                if "pact" in team_name.lower():
+                    return True
+        return False
+
+    def has_send_message(self) -> bool:
+        """Check if this turn has a SendMessage call (Agent Teams)."""
+        for tc in self.tool_calls:
+            if tc.name == "SendMessage":
+                return True
+        return False
+
+    def has_team_management(self) -> bool:
+        """Check if this turn has TeamCreate or TeamDelete calls (Agent Teams)."""
+        for tc in self.tool_calls:
+            if tc.name in ("TeamCreate", "TeamDelete"):
+                return True
         return False
 
 
@@ -330,6 +353,42 @@ def find_task_calls_to_agent(turns: list[Turn], agent_pattern: str) -> list[tupl
                 subagent = tc.input_data.get("subagent_type", "")
                 if agent_pattern in subagent:
                     results.append((turn, tc))
+    return results
+
+
+def find_send_message_calls(turns: list[Turn]) -> list[tuple[Turn, ToolCall]]:
+    """
+    Find all SendMessage tool calls in the transcript (Agent Teams).
+
+    Args:
+        turns: List of turns to search
+
+    Returns:
+        List of (Turn, ToolCall) tuples for SendMessage calls
+    """
+    results = []
+    for turn in turns:
+        for tc in turn.tool_calls:
+            if tc.name == "SendMessage":
+                results.append((turn, tc))
+    return results
+
+
+def find_team_management_calls(turns: list[Turn]) -> list[tuple[Turn, ToolCall]]:
+    """
+    Find all TeamCreate and TeamDelete tool calls in the transcript (Agent Teams).
+
+    Args:
+        turns: List of turns to search
+
+    Returns:
+        List of (Turn, ToolCall) tuples for team management calls
+    """
+    results = []
+    for turn in turns:
+        for tc in turn.tool_calls:
+            if tc.name in ("TeamCreate", "TeamDelete"):
+                results.append((turn, tc))
     return results
 
 

@@ -126,7 +126,7 @@ Your work isn't done until smoke tests pass. Smoke tests verify: "Does the schem
 
 **HANDOFF**
 
-End with a structured handoff for the orchestrator:
+End with a structured handoff for your assigner:
 1. **Produced**: Files created/modified (schemas, migrations, queries)
 2. **Key decisions**: Decisions with rationale (normalization, indexes), assumptions that could be wrong
 3. **Areas of uncertainty** (PRIORITIZED):
@@ -166,7 +166,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
+Before returning your final output to your assigner:
 
 1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
    - Context: What you were working on and why
@@ -179,7 +179,7 @@ This ensures your work context persists across sessions and is searchable by fut
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
+If you run into a blocker, STOP what you're doing and report the blocker to your assigner, so they can take over and invoke `/PACT:imPACT`.
 
 Examples of blockers:
 - Same error after multiple fixes

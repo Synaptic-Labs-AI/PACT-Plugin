@@ -29,9 +29,13 @@ from conftest import (
     create_orchestrate_transcript,
     create_no_workflow_transcript,
     create_terminated_workflow_transcript,
+    create_agent_teams_orchestrate_transcript,
     make_user_message,
     make_assistant_message,
     make_task_call,
+    make_team_task_call,
+    make_team_create_call,
+    make_send_message_call,
     create_transcript_lines,
 )
 
@@ -549,3 +553,118 @@ class TestEdgeCases:
         # Should NOT be terminated just because word "merged" appears in discussion
         # This test may vary based on pattern specificity
         assert workflow_info is not None
+
+
+class TestAgentTeamsWorkflowDetection:
+    """Tests for workflow detection with Agent Teams (v3.0) dispatch model."""
+
+    def test_detect_agent_teams_orchestrate(self, tmp_transcript, agent_teams_orchestrate_transcript):
+        """Test detecting active orchestrate workflow using Agent Teams dispatch."""
+        path = tmp_transcript(agent_teams_orchestrate_transcript)
+        turns = parse_transcript(path)
+
+        workflow_info = detect_active_workflow(turns)
+
+        assert workflow_info is not None
+        assert workflow_info.name == "orchestrate"
+        assert workflow_info.is_terminated is False
+        assert workflow_info.confidence >= 0.3
+
+    def test_agent_teams_dispatch_counted_as_agent_calls(self):
+        """Test that Agent Teams Task-with-team_name is counted by count_pact_agent_calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(
+                        name="Task",
+                        input_data={"team_name": "pact-auth-feature", "name": "backend-1", "prompt": "test"},
+                    ),
+                ],
+            ),
+        ]
+
+        count = count_pact_agent_calls(turns)
+
+        assert count == 1
+
+    def test_agent_teams_dispatch_counted_alongside_subagent(self):
+        """Test that both dispatch models are counted together."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(
+                        name="Task",
+                        input_data={"subagent_type": "pact-preparer", "prompt": "research"},
+                    ),
+                ],
+            ),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(
+                        name="Task",
+                        input_data={"team_name": "pact-auth-feature", "name": "backend-1", "prompt": "implement"},
+                    ),
+                ],
+            ),
+        ]
+
+        count = count_pact_agent_calls(turns)
+
+        assert count == 2
+
+    def test_non_pact_team_not_counted(self):
+        """Test that Task with non-PACT team_name is not counted."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(
+                        name="Task",
+                        input_data={"team_name": "other-team", "name": "agent-1", "prompt": "test"},
+                    ),
+                ],
+            ),
+        ]
+
+        count = count_pact_agent_calls(turns)
+
+        assert count == 0
+
+    def test_agent_teams_terminated_workflow(self, tmp_path: Path):
+        """Test detecting terminated Agent Teams workflow."""
+        transcript = create_agent_teams_orchestrate_transcript(
+            phase="test",
+            include_task="implement auth",
+            include_termination=True,
+        )
+
+        file_path = tmp_path / "terminated_teams.jsonl"
+        file_path.write_text(transcript)
+
+        turns = parse_transcript(file_path)
+        workflow_info = detect_active_workflow(turns)
+
+        assert workflow_info is not None
+        assert workflow_info.name == "orchestrate"
+        assert workflow_info.is_terminated is True
+
+    def test_agent_teams_confidence_includes_agent_calls(self, tmp_path: Path):
+        """Test that Agent Teams dispatch contributes to confidence score."""
+        transcript = create_agent_teams_orchestrate_transcript(
+            phase="code",
+            include_task="implement auth",
+        )
+
+        file_path = tmp_path / "teams_confidence.jsonl"
+        file_path.write_text(transcript)
+
+        turns = parse_transcript(file_path)
+        workflow_info = detect_active_workflow(turns)
+
+        assert workflow_info is not None
+        # Should have trigger (0.4) + step marker (0.2) + agent calls (0.2) at minimum
+        assert workflow_info.confidence >= 0.6
+        assert "agent call" in workflow_info.notes

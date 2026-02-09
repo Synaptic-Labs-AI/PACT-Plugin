@@ -17,6 +17,11 @@ migration, pending embedding catch-up) is now lazy-loaded on first memory
 operation via pact-memory/scripts/memory_init.py. This reduces startup
 cost for non-memory users.
 
+Note: Agent Teams team creation (TeamCreate) is handled by the orchestrate
+command workflow, not by session_init. Session init runs for every session
+(including non-orchestration sessions), so team lifecycle is intentionally
+managed at the workflow level where team scope and membership are known.
+
 Input: JSON from stdin with session context
 Output: JSON with `hookSpecificOutput.additionalContext` for status
 """

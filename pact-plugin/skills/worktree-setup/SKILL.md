@@ -3,7 +3,7 @@ name: worktree-setup
 description: |
   Create an isolated git worktree with a feature branch for PACT workflows.
   Use when: starting a new feature, beginning orchestrate or comPACT,
-  creating sub-scope isolation for ATOMIZE, or manually isolating work.
+  creating sub-scope isolation for scoped orchestration (v3.1), or manually isolating work.
   Triggers on: worktree setup, feature isolation, parallel workflow, new worktree.
 user_invokable: true
 ---
@@ -15,7 +15,7 @@ Create an isolated git worktree with a feature branch for PACT workflows. This p
 ## When to Use
 
 - Starting a new feature workflow (`/PACT:orchestrate`, `/PACT:comPACT`)
-- ATOMIZE phase creating sub-scope isolation
+- Scoped orchestration creating sub-scope isolation (v3.1 -- not used in v3.0 single-branch model)
 - Manually isolating work for a feature branch
 
 ## Process

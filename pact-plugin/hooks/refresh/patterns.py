@@ -39,6 +39,11 @@ __all__ = [
     "PACT_AGENT_PATTERN",
     "TASK_TOOL_PATTERN",
     "SUBAGENT_TYPE_PATTERN",
+    "TEAM_CREATE_PATTERN",
+    "TEAM_DELETE_PATTERN",
+    "SEND_MESSAGE_PATTERN",
+    "TEAM_NAME_PATTERN",
+    "TASK_WITH_TEAM_PATTERN",
     "CONTEXT_EXTRACTORS",
     "PENDING_ACTION_PATTERNS",
     "CONFIDENCE_WEIGHTS",
@@ -158,9 +163,21 @@ TERMINATION_SIGNALS = {
 # Agent type patterns (for detecting Task tool calls to PACT agents)
 PACT_AGENT_PATTERN = re.compile(r"pact-(backend|frontend|database|test|architect|preparer|memory|n8n)")
 
-# Tool call patterns
+# Tool call patterns (subagent-model dispatch)
 TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
+
+# Agent Teams patterns (v3.0 team-based dispatch)
+# These patterns detect Agent Teams tool calls alongside subagent-model patterns.
+# Both sets are kept for backward compatibility during migration.
+TEAM_CREATE_PATTERN = re.compile(r'"name":\s*"TeamCreate"', re.IGNORECASE)
+TEAM_DELETE_PATTERN = re.compile(r'"name":\s*"TeamDelete"', re.IGNORECASE)
+SEND_MESSAGE_PATTERN = re.compile(r'"name":\s*"SendMessage"', re.IGNORECASE)
+TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"')
+TASK_WITH_TEAM_PATTERN = re.compile(
+    r'"name":\s*"Task".*?"team_name":\s*"([^"]+)"',
+    re.DOTALL,
+)
 
 # Context extraction patterns (for building rich checkpoint context)
 CONTEXT_EXTRACTORS = {

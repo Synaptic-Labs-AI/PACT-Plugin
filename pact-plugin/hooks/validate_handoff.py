@@ -115,6 +115,10 @@ def main():
 
     Reads agent transcript from stdin and validates handoff format (prose)
     for PACT agents. Outputs warning messages if validation fails.
+
+    Note: This hook validates handoffs for subagent-model dispatch
+    (SubagentStop). For Agent Teams, handoff validation is handled by
+    task_completed.py which fires on the TaskCompleted event.
     """
     try:
         # Read input from stdin

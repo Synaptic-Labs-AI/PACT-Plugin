@@ -118,7 +118,13 @@ Do this NOW before any other work.
 
 
 def main():
-    """Main entry point for the memory enforcement hook."""
+    """
+    Main entry point for the memory enforcement hook (SubagentStop).
+
+    This hook enforces memory loading for subagent-model dispatch. For
+    Agent Teams, memory enforcement is handled by the pact-task-tracking
+    skill which instructs teammates to invoke pact-memory before completing.
+    """
     try:
         try:
             input_data = json.load(sys.stdin)

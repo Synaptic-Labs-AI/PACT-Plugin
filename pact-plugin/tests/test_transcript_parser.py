@@ -22,6 +22,8 @@ from refresh.transcript_parser import (
     find_turns_with_content,
     find_last_user_message,
     find_task_calls_to_agent,
+    find_send_message_calls,
+    find_team_management_calls,
     find_trigger_turn_index,
 )
 from refresh.constants import LARGE_FILE_THRESHOLD_BYTES
@@ -67,8 +69,8 @@ class TestTurnDataclass:
         assert turn.get_tool_call("Write") == write_call
         assert turn.get_tool_call("NonExistent") is None
 
-    def test_turn_has_task_to_pact_agent(self):
-        """Test Turn.has_task_to_pact_agent method."""
+    def test_turn_has_task_to_pact_agent_subagent_model(self):
+        """Test Turn.has_task_to_pact_agent with subagent_type dispatch."""
         pact_task = ToolCall(
             name="Task",
             input_data={"subagent_type": "pact-backend-coder", "prompt": "test"},
@@ -85,6 +87,91 @@ class TestTurnDataclass:
 
         turn_no_task = Turn(turn_type="assistant", content="No tools")
         assert turn_no_task.has_task_to_pact_agent() is False
+
+    def test_turn_has_task_to_pact_agent_teams_model(self):
+        """Test Turn.has_task_to_pact_agent with Agent Teams team_name dispatch."""
+        pact_team_task = ToolCall(
+            name="Task",
+            input_data={"team_name": "pact-auth-feature", "name": "backend-1", "prompt": "test"},
+        )
+        turn_with_pact_team = Turn(turn_type="assistant", tool_calls=[pact_team_task])
+        assert turn_with_pact_team.has_task_to_pact_agent() is True
+
+    def test_turn_has_task_to_pact_agent_teams_non_pact_team(self):
+        """Test Turn.has_task_to_pact_agent returns False for non-PACT team names."""
+        non_pact_team_task = ToolCall(
+            name="Task",
+            input_data={"team_name": "other-team", "name": "agent-1", "prompt": "test"},
+        )
+        turn_non_pact_team = Turn(turn_type="assistant", tool_calls=[non_pact_team_task])
+        assert turn_non_pact_team.has_task_to_pact_agent() is False
+
+    def test_turn_has_task_to_pact_agent_teams_case_insensitive(self):
+        """Test Turn.has_task_to_pact_agent is case insensitive on team_name."""
+        upper_pact_task = ToolCall(
+            name="Task",
+            input_data={"team_name": "PACT-Feature-Team", "name": "agent-1", "prompt": "test"},
+        )
+        turn = Turn(turn_type="assistant", tool_calls=[upper_pact_task])
+        assert turn.has_task_to_pact_agent() is True
+
+    def test_turn_has_send_message(self):
+        """Test Turn.has_send_message detects SendMessage calls."""
+        send_msg = ToolCall(
+            name="SendMessage",
+            input_data={"type": "message", "recipient": "agent-1", "content": "Done"},
+        )
+        turn_with_msg = Turn(turn_type="assistant", tool_calls=[send_msg])
+        assert turn_with_msg.has_send_message() is True
+
+        turn_without_msg = Turn(turn_type="assistant", content="No tools")
+        assert turn_without_msg.has_send_message() is False
+
+    def test_turn_has_send_message_mixed_tools(self):
+        """Test Turn.has_send_message with mixed tool calls."""
+        read_call = ToolCall(name="Read", input_data={"file_path": "/test"})
+        send_msg = ToolCall(name="SendMessage", input_data={"content": "Done"})
+        turn = Turn(turn_type="assistant", tool_calls=[read_call, send_msg])
+        assert turn.has_send_message() is True
+
+    def test_turn_has_send_message_no_match_similar_names(self):
+        """Test Turn.has_send_message does not match similar tool names."""
+        other_tool = ToolCall(name="SendEmail", input_data={"to": "user"})
+        turn = Turn(turn_type="assistant", tool_calls=[other_tool])
+        assert turn.has_send_message() is False
+
+    def test_turn_has_team_management_create(self):
+        """Test Turn.has_team_management detects TeamCreate calls."""
+        team_create = ToolCall(
+            name="TeamCreate",
+            input_data={"name": "pact-feature"},
+        )
+        turn = Turn(turn_type="assistant", tool_calls=[team_create])
+        assert turn.has_team_management() is True
+
+    def test_turn_has_team_management_delete(self):
+        """Test Turn.has_team_management detects TeamDelete calls."""
+        team_delete = ToolCall(
+            name="TeamDelete",
+            input_data={"name": "pact-feature"},
+        )
+        turn = Turn(turn_type="assistant", tool_calls=[team_delete])
+        assert turn.has_team_management() is True
+
+    def test_turn_has_team_management_no_match(self):
+        """Test Turn.has_team_management returns False without team management calls."""
+        task_call = ToolCall(name="Task", input_data={"subagent_type": "pact-backend"})
+        turn = Turn(turn_type="assistant", tool_calls=[task_call])
+        assert turn.has_team_management() is False
+
+        empty_turn = Turn(turn_type="assistant", content="No tools")
+        assert empty_turn.has_team_management() is False
+
+    def test_turn_has_team_management_no_match_similar_names(self):
+        """Test Turn.has_team_management does not match similar names."""
+        other_tool = ToolCall(name="TeamUpdate", input_data={"name": "my-team"})
+        turn = Turn(turn_type="assistant", tool_calls=[other_tool])
+        assert turn.has_team_management() is False
 
 
 class TestParseLine:
@@ -360,6 +447,184 @@ class TestFindFunctions:
         """Test finding Task calls with no matches."""
         results = find_task_calls_to_agent(sample_turns, "nonexistent-")
         assert results == []
+
+
+class TestFindSendMessageCalls:
+    """Tests for find_send_message_calls function (Agent Teams)."""
+
+    def test_find_send_message_calls_basic(self):
+        """Test finding SendMessage calls in turns."""
+        turns = [
+            Turn(turn_type="user", content="Hello"),
+            Turn(
+                turn_type="assistant",
+                content="Sending message",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"recipient": "agent-1", "content": "Done"}),
+                ],
+            ),
+            Turn(turn_type="assistant", content="Finished"),
+        ]
+
+        results = find_send_message_calls(turns)
+
+        assert len(results) == 1
+        turn, tc = results[0]
+        assert tc.name == "SendMessage"
+        assert tc.input_data["recipient"] == "agent-1"
+
+    def test_find_send_message_calls_multiple(self):
+        """Test finding multiple SendMessage calls across turns."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"recipient": "agent-1"}),
+                ],
+            ),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"recipient": "agent-2"}),
+                    ToolCall(name="SendMessage", input_data={"recipient": "agent-3"}),
+                ],
+            ),
+        ]
+
+        results = find_send_message_calls(turns)
+
+        assert len(results) == 3
+
+    def test_find_send_message_calls_none_found(self):
+        """Test finding SendMessage when none exist."""
+        turns = [
+            Turn(turn_type="user", content="Hello"),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[ToolCall(name="Task", input_data={"subagent_type": "pact-backend"})],
+            ),
+        ]
+
+        results = find_send_message_calls(turns)
+
+        assert results == []
+
+    def test_find_send_message_calls_empty_turns(self):
+        """Test finding SendMessage with empty turns list."""
+        assert find_send_message_calls([]) == []
+
+    def test_find_send_message_calls_mixed_tools(self):
+        """Test finding SendMessage among mixed tool calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="Read", input_data={"file_path": "/test"}),
+                    ToolCall(name="SendMessage", input_data={"recipient": "lead"}),
+                    ToolCall(name="Write", input_data={"file_path": "/out"}),
+                ],
+            ),
+        ]
+
+        results = find_send_message_calls(turns)
+
+        assert len(results) == 1
+        assert results[0][1].input_data["recipient"] == "lead"
+
+
+class TestFindTeamManagementCalls:
+    """Tests for find_team_management_calls function (Agent Teams)."""
+
+    def test_find_team_create(self):
+        """Test finding TeamCreate calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="TeamCreate", input_data={"name": "pact-feature"}),
+                ],
+            ),
+        ]
+
+        results = find_team_management_calls(turns)
+
+        assert len(results) == 1
+        assert results[0][1].name == "TeamCreate"
+
+    def test_find_team_delete(self):
+        """Test finding TeamDelete calls."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="TeamDelete", input_data={"name": "pact-feature"}),
+                ],
+            ),
+        ]
+
+        results = find_team_management_calls(turns)
+
+        assert len(results) == 1
+        assert results[0][1].name == "TeamDelete"
+
+    def test_find_both_create_and_delete(self):
+        """Test finding both TeamCreate and TeamDelete across turns."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="TeamCreate", input_data={"name": "pact-feature"}),
+                ],
+            ),
+            Turn(turn_type="assistant", content="Work done"),
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="TeamDelete", input_data={"name": "pact-feature"}),
+                ],
+            ),
+        ]
+
+        results = find_team_management_calls(turns)
+
+        assert len(results) == 2
+        assert results[0][1].name == "TeamCreate"
+        assert results[1][1].name == "TeamDelete"
+
+    def test_find_team_management_none_found(self):
+        """Test finding team management when none exist."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[ToolCall(name="Task", input_data={"subagent_type": "pact-backend"})],
+            ),
+        ]
+
+        results = find_team_management_calls(turns)
+
+        assert results == []
+
+    def test_find_team_management_empty_turns(self):
+        """Test finding team management with empty turns list."""
+        assert find_team_management_calls([]) == []
+
+    def test_find_team_management_excludes_other_tools(self):
+        """Test that non-team-management tools are excluded."""
+        turns = [
+            Turn(
+                turn_type="assistant",
+                tool_calls=[
+                    ToolCall(name="SendMessage", input_data={"content": "test"}),
+                    ToolCall(name="Task", input_data={"team_name": "my-team"}),
+                    ToolCall(name="TeamCreate", input_data={"name": "pact-feature"}),
+                ],
+            ),
+        ]
+
+        results = find_team_management_calls(turns)
+
+        assert len(results) == 1
+        assert results[0][1].name == "TeamCreate"
 
 
 class TestEdgeCases:

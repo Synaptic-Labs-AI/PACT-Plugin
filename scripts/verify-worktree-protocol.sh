@@ -105,40 +105,20 @@ echo "6. peer-review.md includes worktree-cleanup after merge:"
 check_pattern "$COMMANDS_DIR/peer-review.md" "peer-review.md includes worktree-cleanup after merge" "worktree-cleanup"
 echo ""
 
-# --- 7. pact-scope-phases.md ATOMIZE references worktree-setup ---
-echo "7. pact-scope-phases.md ATOMIZE references worktree-setup:"
-# Extract ATOMIZE section and check for worktree-setup within it
-atomize_section=$(sed -n '/^### ATOMIZE Phase/,/^### /p' "$PROTOCOLS_DIR/pact-scope-phases.md" | sed '$d')
-if echo "$atomize_section" | grep -q "worktree-setup"; then
-    echo "  ✓ ATOMIZE phase references worktree-setup"
-    PASS=$((PASS + 1))
-else
-    echo "  ✗ ATOMIZE phase references worktree-setup: pattern not found in ATOMIZE section"
-    FAIL=$((FAIL + 1))
-fi
+# --- 7. Single-branch model: no per-scope worktrees ---
+# v3.0 uses single-branch model. rePACT operates on the current feature branch.
+# pact-scope-phases.md was retired; pact-scope-verification.md replaces it.
+echo "7. Single-branch model (no per-scope worktrees):"
+check_pattern "$COMMANDS_DIR/rePACT.md" \
+    "rePACT operates on current feature branch" \
+    "current.*branch\|feature branch"
 echo ""
 
-# --- 8. pact-scope-phases.md CONSOLIDATE references worktree-cleanup ---
-echo "8. pact-scope-phases.md CONSOLIDATE references worktree-cleanup:"
-# Extract CONSOLIDATE section and check for worktree-cleanup within it
-consolidate_section=$(sed -nE '/^### CONSOLIDATE Phase/,/^### |^---$/p' "$PROTOCOLS_DIR/pact-scope-phases.md" | sed '$d')
-if echo "$consolidate_section" | grep -q "worktree-cleanup"; then
-    echo "  ✓ CONSOLIDATE phase references worktree-cleanup"
-    PASS=$((PASS + 1))
-else
-    echo "  ✗ CONSOLIDATE phase references worktree-cleanup: pattern not found in CONSOLIDATE section"
-    FAIL=$((FAIL + 1))
-fi
-echo ""
-
-# --- 9. rePACT.md documents suffix branch behavior for scoped execution ---
-echo "9. rePACT.md documents suffix branch behavior for scoped execution:"
+# --- 9. rePACT.md documents single-branch sequential execution ---
+echo "9. rePACT.md documents single-branch sequential execution:"
 check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT.md documents suffix branch" \
-    "suffix branch"
-check_pattern "$COMMANDS_DIR/rePACT.md" \
-    "rePACT.md documents isolated worktree operation" \
-    "isolated worktree"
+    "rePACT.md documents sequential sub-scope execution" \
+    "sequentially"
 echo ""
 
 # --- 10. orchestrate.md contains worktree path propagation instruction ---
@@ -151,9 +131,11 @@ echo "11. comPACT.md agent prompt templates include worktree path:"
 check_pattern "$COMMANDS_DIR/comPACT.md" "comPACT.md agent prompt templates include worktree path" "worktree_path"
 echo ""
 
-# --- 12. rePACT.md documents receiving worktree path ---
-echo "12. rePACT.md documents receiving worktree path:"
-check_pattern "$COMMANDS_DIR/rePACT.md" "rePACT.md documents receiving worktree path" "worktree path"
+# --- 12. rePACT.md documents operating on feature branch ---
+# v3.0 single-branch model: rePACT operates on the current feature branch
+# (inherits worktree context from outer scope via task metadata)
+echo "12. rePACT.md documents operating on feature branch:"
+check_pattern "$COMMANDS_DIR/rePACT.md" "rePACT.md documents feature branch operation" "feature branch"
 echo ""
 
 # --- 13. plan-mode.md does not reference worktree skills ---
@@ -184,17 +166,13 @@ check_pattern "$COMMANDS_DIR/imPACT.md" \
     "worktree"
 echo ""
 
-# --- 16. orchestrate.md CONSOLIDATE references worktree-cleanup ---
-echo "16. orchestrate.md CONSOLIDATE references worktree-cleanup:"
-# Extract the CONSOLIDATE Phase section from orchestrate.md
-consolidate_orchestrate=$(sed -n '/^### CONSOLIDATE Phase/,/^### \|^---$/p' "$COMMANDS_DIR/orchestrate.md" | sed '$d')
-if echo "$consolidate_orchestrate" | grep -q "worktree-cleanup"; then
-    echo "  ✓ orchestrate.md CONSOLIDATE phase references worktree-cleanup"
-    PASS=$((PASS + 1))
-else
-    echo "  ✗ orchestrate.md CONSOLIDATE phase references worktree-cleanup: pattern not found in CONSOLIDATE section"
-    FAIL=$((FAIL + 1))
-fi
+# --- 16. orchestrate.md delegates to peer-review for cleanup ---
+# v3.0: orchestrate.md's "After All Phases" section delegates to /PACT:peer-review.
+# peer-review.md handles worktree-cleanup (verified in section 6 above).
+echo "16. orchestrate.md delegates to peer-review for workflow completion:"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate.md references peer-review in completion" \
+    "peer-review"
 echo ""
 
 # --- Summary ---

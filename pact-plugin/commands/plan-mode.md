@@ -17,10 +17,11 @@ Create a planning Task hierarchy:
 2. TaskUpdate: Planning task status = "in_progress"
 3. Analyze: Which specialists to consult?
 4. TaskCreate: Consultation task(s) — one per specialist
+   (include metadata: planning context, domain-specific questions)
 5. TaskUpdate: Consultation tasks status = "in_progress"
 6. TaskUpdate: Planning task addBlockedBy = [consultation IDs]
-7. Dispatch specialists in parallel (planning-only mode)
-8. Monitor until consultations complete
+7. Spawn consultants as teammates with thin bootstrap prompts
+8. Receive SendMessage completion signals; TaskGet for consultation findings in metadata
 9. TaskUpdate: Consultation tasks status = "completed" (as each completes)
 10. Synthesize → write plan document
 11. TaskUpdate: Planning task status = "completed", metadata.artifact = plan path
@@ -97,9 +98,11 @@ Skip specialists clearly not relevant (e.g., skip database engineer for pure UI 
 
 ### Phase 1: Parallel Specialist Consultation
 
-Invoke relevant specialists **in parallel**, each in **planning-only mode**.
+Spawn relevant specialists **as teammates**, each in **planning-only mode**.
 
-**Use this prompt template for each specialist:**
+Each consultant's Task description should contain the planning consultation questions. The specialist reads their task via TaskGet (chain-read pattern) and stores their findings in Task metadata.
+
+**Task description template for each consultant:**
 
 ```
 PLANNING CONSULTATION ONLY — No implementation, no code changes.
@@ -132,18 +135,18 @@ As the {role} specialist, provide your planning perspective:
    - What sequence of steps do you recommend?
    - What should be done first?
 
-Output your analysis with clear headers matching the 5 sections above.
+Store your analysis in Task metadata with clear headers matching the 5 sections above.
 Do NOT implement anything — planning consultation only.
 ```
 
 **Domain-specific additions to the template:**
 
-For **📚 pact-preparer**, also ask:
+For **pact-preparer**, also ask:
 - What documentation/research is needed before implementation?
 - What external APIs or libraries need investigation?
 - What stakeholder clarifications are needed?
 
-For **🏛️ pact-architect**, also ask:
+For **pact-architect**, also ask:
 - What components/modules are affected or needed?
 - What design patterns should be applied?
 - What interface contracts need definition?
@@ -153,20 +156,20 @@ For **coders** (backend/frontend/database), also ask:
 - What existing patterns in the codebase should be followed?
 - What's the implementation sequence?
 
-For **🧪 pact-test-engineer**, also ask:
+For **pact-test-engineer**, also ask:
 - What test scenarios are critical (happy path, errors, edge cases)?
 - What coverage targets make sense?
 - What test data or fixtures are needed?
 
 **Handling incomplete or missing responses**:
 
-If a specialist provides minimal, incomplete, or off-topic output:
+If a specialist provides minimal, incomplete, or off-topic output (detected via TaskGet on their metadata):
 1. Note the gap — record which specialist and which sections are missing
 2. Proceed with synthesis — use the inputs you have
 3. Flag in the plan — add to "Limitations" section with specific gaps identified
-4. Do NOT re-invoke — avoid infinite loops; missing input is data for the plan
+4. Do NOT re-spawn — avoid infinite loops; missing input is data for the plan
 
-If a specialist fails entirely (timeout, error):
+If a specialist fails entirely (timeout, stall):
 1. Log the failure in synthesis notes
 2. Proceed without that perspective
 3. Flag prominently in "Open Questions" that this domain was not consulted
@@ -174,7 +177,7 @@ If a specialist fails entirely (timeout, error):
 
 ### Phase 2: Orchestrator Synthesis
 
-After collecting all specialist outputs, use extended thinking to synthesize:
+After receiving all specialist completion signals (via SendMessage), TaskGet each consultant's task to read their findings from metadata. Use extended thinking to synthesize:
 
 1. **Identify Agreements**
    - Where do specialists align?
@@ -478,10 +481,12 @@ The orchestrator should reference this plan during execution.
 
 ## Signal Monitoring
 
-Check TaskList for blocker/algedonic signals:
-- After each specialist consultation dispatch
-- When specialist reports completion
-- On any unexpected specialist stoppage
+Monitor for SendMessage signals from consultants:
+- **Completion signals**: "Task {ID} complete" — trigger TaskGet to read consultation findings
+- **Blocker signals**: "BLOCKER on task {ID}: ..." — note gap, proceed with available input
+- **Algedonic signals**: HALT broadcasts or ALERT messages — follow algedonic protocol
+
+Also check TaskList periodically for unexpected state changes.
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

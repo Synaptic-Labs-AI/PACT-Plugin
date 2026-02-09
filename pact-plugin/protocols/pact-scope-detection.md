@@ -109,9 +109,9 @@ Recommendation: [A or B with brief rationale]
 
 | Response | Action |
 |----------|--------|
-| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Confirmed (A) | Generate scope contracts during ARCHITECT phase (see [pact-scope-contract.md](pact-scope-contract.md)), then dispatch sub-scopes via executor (Agent Teams or rePACT) during CODE phase |
 | Rejected (B) | Continue single scope (today's behavior) |
-| Adjusted (C) | Generate scope contracts with user's modified boundaries, then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Adjusted (C) | Generate scope contracts with user's modified boundaries during ARCHITECT phase, then dispatch sub-scopes via executor during CODE phase |
 
 #### Autonomous Tier
 
@@ -127,6 +127,6 @@ When **all** of the following conditions are true, skip user confirmation and pr
 
 ### Post-Detection: Scope Contract Generation
 
-When decomposition is confirmed (by user or autonomous tier), the orchestrator generates a scope contract for each identified sub-scope before invoking rePACT. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format and generation process.
+When decomposition is confirmed (by user or autonomous tier), the orchestrator generates a scope contract for each identified sub-scope before dispatching to the executor. See [pact-scope-contract.md](pact-scope-contract.md) for the contract format, generation process, and executor interface.
 
 ---

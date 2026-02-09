@@ -24,6 +24,11 @@ from refresh.patterns import (
     PACT_AGENT_PATTERN,
     TASK_TOOL_PATTERN,
     SUBAGENT_TYPE_PATTERN,
+    TEAM_CREATE_PATTERN,
+    TEAM_DELETE_PATTERN,
+    SEND_MESSAGE_PATTERN,
+    TEAM_NAME_PATTERN,
+    TASK_WITH_TEAM_PATTERN,
     is_termination_signal,
     extract_context_value,
 )
@@ -236,6 +241,36 @@ class TestAgentPatternsEdgeCases:
         result = SUBAGENT_TYPE_PATTERN.search(content)
         assert result is None or hasattr(result, 'group')
 
+    @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
+    def test_team_create_pattern_no_crash(self, content: str):
+        """Test TeamCreate pattern doesn't crash on edge cases."""
+        result = TEAM_CREATE_PATTERN.search(content)
+        assert result is None or hasattr(result, 'group')
+
+    @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
+    def test_team_delete_pattern_no_crash(self, content: str):
+        """Test TeamDelete pattern doesn't crash on edge cases."""
+        result = TEAM_DELETE_PATTERN.search(content)
+        assert result is None or hasattr(result, 'group')
+
+    @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
+    def test_send_message_pattern_no_crash(self, content: str):
+        """Test SendMessage pattern doesn't crash on edge cases."""
+        result = SEND_MESSAGE_PATTERN.search(content)
+        assert result is None or hasattr(result, 'group')
+
+    @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
+    def test_team_name_pattern_no_crash(self, content: str):
+        """Test team_name pattern doesn't crash on edge cases."""
+        result = TEAM_NAME_PATTERN.search(content)
+        assert result is None or hasattr(result, 'group')
+
+    @pytest.mark.parametrize("content", EDGE_CASE_INPUTS)
+    def test_task_with_team_pattern_no_crash(self, content: str):
+        """Test Task-with-team pattern doesn't crash on edge cases."""
+        result = TASK_WITH_TEAM_PATTERN.search(content)
+        assert result is None or hasattr(result, 'group')
+
 
 class TestPathologicalInputs:
     """Tests for known pathological regex inputs."""
@@ -270,6 +305,11 @@ class TestPathologicalInputs:
             PACT_AGENT_PATTERN.search(content)
             TASK_TOOL_PATTERN.search(content)
             SUBAGENT_TYPE_PATTERN.search(content)
+            TEAM_CREATE_PATTERN.search(content)
+            TEAM_DELETE_PATTERN.search(content)
+            SEND_MESSAGE_PATTERN.search(content)
+            TEAM_NAME_PATTERN.search(content)
+            TASK_WITH_TEAM_PATTERN.search(content)
 
             elapsed = time.time() - start_time
             assert elapsed < 1.0, f"Pathological input took too long: {elapsed}s on input length {len(content)}"

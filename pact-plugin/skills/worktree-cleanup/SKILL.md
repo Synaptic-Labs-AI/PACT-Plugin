@@ -2,19 +2,19 @@
 name: worktree-cleanup
 description: |
   Remove a git worktree and its branch after PACT workflow completes.
-  Use when: PR is merged, sub-scope work is consolidated, or manual cleanup is needed.
+  Use when: PR is merged, sub-scope work is verified, or manual cleanup is needed.
   Triggers on: worktree cleanup, remove worktree, delete worktree, branch cleanup.
 user_invokable: true
 ---
 
 # Worktree Cleanup
 
-Remove a git worktree and its associated branch after work is complete. Typically invoked after a PR is merged, after CONSOLIDATE merges sub-scope branches, or manually by the user.
+Remove a git worktree and its associated branch after work is complete. Typically invoked after a PR is merged, after scoped orchestration completes (v3.1 multi-branch model), or manually by the user.
 
 ## When to Use
 
 - After `peer-review` merges a PR (automatic cleanup)
-- After CONSOLIDATE merges sub-scope branches
+- After scoped orchestration completes (v3.1 multi-branch model)
 - Manual cleanup of stale worktrees (`/PACT:worktree-cleanup`)
 - User aborts a workflow and wants to clean up
 

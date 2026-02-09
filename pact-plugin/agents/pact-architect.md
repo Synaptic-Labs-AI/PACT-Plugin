@@ -160,7 +160,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 **BEFORE COMPLETING**
 
-Before returning your final output to the orchestrator:
+Before returning your final output to your assigner:
 
 1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
    - Context: What you were designing and why
@@ -173,7 +173,7 @@ This ensures your design context persists across sessions and is searchable by f
 
 **HOW TO HANDLE BLOCKERS**
 
-If you run into a blocker, STOP what you're doing and report the blocker to the orchestrator, so they can take over and invoke `/PACT:imPACT`.
+If you run into a blocker, STOP what you're doing and report the blocker to your assigner, so they can take over and invoke `/PACT:imPACT`.
 
 Examples of blockers:
 - Same error after multiple fixes
