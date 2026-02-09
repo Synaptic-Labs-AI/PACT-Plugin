@@ -75,7 +75,6 @@ Review task: in_progress (persists until merge-ready)
 
 > **Review → Remediation shortcut**: When a reviewer's findings need fixing in their own domain, `SendMessage` the reviewer directly with the fix task rather than spawning a new coder. They have the most relevant context — files loaded, issues understood, line numbers identified.
 
-Apply the **Reuse vs. Spawn Decision** framework (see CLAUDE.md > Agent Teams Dispatch):
 - Reviewer identified issues with specific file paths/line numbers → **reuse** (they're the ideal fixer)
 - Fixes span a different domain than the reviewer → **spawn** domain specialist
 - Multiple independent fixes needed in parallel → **spawn** additional agents alongside reused reviewer
