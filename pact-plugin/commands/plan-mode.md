@@ -97,7 +97,7 @@ Skip specialists clearly not relevant (e.g., skip database engineer for pure UI 
 
 ### Phase 1: Parallel Specialist Consultation
 
-The `PACT` team should already exist from session start (INSTRUCTIONS step 2). If not, create it now: `TeamCreate(team_name="PACT")`.
+The `PACT` team should already exist from session start. If not, create it now: `TeamCreate(team_name="PACT")`.
 
 Dispatch relevant specialists **in parallel**, each in **planning-only mode**.
 

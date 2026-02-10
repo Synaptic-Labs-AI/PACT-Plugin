@@ -85,7 +85,7 @@ Review task: in_progress (persists until merge-ready)
 
 **PR Review Workflow**
 
-The `PACT` team should already exist from session start (INSTRUCTIONS step 2). If not, create it now: `TeamCreate(team_name="PACT")`.
+The `PACT` team should already exist from session start. If not, create it now: `TeamCreate(team_name="PACT")`.
 
 Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 reviewers in parallel** to provide comprehensive review coverage:
 
