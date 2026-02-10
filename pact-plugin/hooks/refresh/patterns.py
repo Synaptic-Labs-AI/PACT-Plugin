@@ -9,7 +9,7 @@ Configuration constants are imported from constants.py for maintainability.
 
 Supports both dispatch models for backward compatibility:
 - Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
-- Agent Teams teammate: Task(name="pact-*", team_name="pact-*", subagent_type="pact-*")
+- Agent Teams teammate: Task(name="pact-*", team_name="PACT", subagent_type="pact-*")
 """
 
 import re
@@ -164,7 +164,7 @@ PACT_AGENT_PATTERN = re.compile(r"pact-(backend|frontend|database|test|architect
 
 # Tool call patterns - support both dispatch models:
 # - Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
-# - Agent Teams teammate: Task(name="pact-*", team_name="pact-*", subagent_type="pact-*")
+# - Agent Teams teammate: Task(name="pact-*", team_name="PACT", subagent_type="pact-*")
 # Both include subagent_type, so SUBAGENT_TYPE_PATTERN matches either model.
 TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
