@@ -42,7 +42,6 @@ __all__ = [
     "PACT_AGENT_PATTERN",
     "TASK_TOOL_PATTERN",
     "SUBAGENT_TYPE_PATTERN",
-    "TEAM_NAME_PATTERN",
     "CONTEXT_EXTRACTORS",
     "PENDING_ACTION_PATTERNS",
     "CONFIDENCE_WEIGHTS",
@@ -168,8 +167,6 @@ PACT_AGENT_PATTERN = re.compile(r"pact-(backend|frontend|database|test|architect
 # Both include subagent_type, so SUBAGENT_TYPE_PATTERN matches either model.
 TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
-# Agent Teams dispatch includes team_name field (not present in background dispatch)
-TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"')
 
 # Context extraction patterns (for building rich checkpoint context)
 CONTEXT_EXTRACTORS = {
