@@ -38,7 +38,7 @@ b. Analyze work needed (QDCL for CODE)
 c. TaskCreate: agent task(s) as children of phase
 d. TaskUpdate: agent tasks owner = "{agent-name}"
 e. TaskUpdate: next phase addBlockedBy = [agent IDs]
-f. Spawn teammates: Task(name="{name}", team_name="pact-{branch}", subagent_type="pact-{type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")
+f. Spawn teammates: Task(name="{name}", team_name="PACT", subagent_type="pact-{type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")
 g. Monitor via SendMessage (HANDOFFs) and TaskList until agents complete
 h. TaskUpdate: phase status = "completed" (agents self-manage their task status)
 ```
@@ -164,7 +164,7 @@ Sequential execution is the exception requiring explicit justification. When ass
 ---
 
 1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. This creates both the feature branch and its worktree. All subsequent phases work in the worktree.
-2. **Create team**: If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. The team persists for the session — all specialists join this team.
+2. **Verify session team exists**: The `PACT` team should already exist from session start. If not, create it now: `TeamCreate(team_name="PACT")`.
 3. **Check for plan** in `docs/plans/` matching this task
 
 ### Plan Status Handling
@@ -254,7 +254,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 2. `TaskUpdate(taskId, owner="preparer")`
-3. `Task(name="preparer", team_name="pact-{branch}", subagent_type="pact-preparer", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="preparer", team_name="PACT", subagent_type="pact-preparer", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -324,7 +324,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    - Do not read phase output files yourself or paste their content into the task description.
    - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
 2. `TaskUpdate(taskId, owner="architect")`
-3. `Task(name="architect", team_name="pact-{branch}", subagent_type="pact-architect", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="architect", team_name="PACT", subagent_type="pact-architect", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -412,7 +412,7 @@ For each coder needed:
    - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
    - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
 2. `TaskUpdate(taskId, owner="{coder-name}")`
-3. `Task(name="{coder-name}", team_name="pact-{branch}", subagent_type="pact-{coder-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{coder-name}", team_name="PACT", subagent_type="pact-{coder-type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
@@ -475,7 +475,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    - Include task description, CODE phase handoff summaries (from SendMessage, not files), plan sections (if any), plan reference.
    - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
 2. `TaskUpdate(taskId, owner="test-engineer")`
-3. `Task(name="test-engineer", team_name="pact-{branch}", subagent_type="pact-test-engineer", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="test-engineer", team_name="PACT", subagent_type="pact-test-engineer", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 **Before completing**:
 - [ ] All tests passing

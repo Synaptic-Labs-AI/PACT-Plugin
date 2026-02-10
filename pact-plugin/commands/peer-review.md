@@ -85,7 +85,7 @@ Review task: in_progress (persists until merge-ready)
 
 **PR Review Workflow**
 
-If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. Reuse existing team if one exists.
+The `PACT` team should already exist from session start. If not, create it now: `TeamCreate(team_name="PACT")`.
 
 Pull request reviews should mirror real-world team practices where multiple reviewers sign off before merging. Dispatch **at least 3 reviewers in parallel** to provide comprehensive review coverage:
 
@@ -105,7 +105,7 @@ Select the domain coder based on PR focus:
 For each reviewer:
 1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. `Task(name="{reviewer-name}", team_name="pact-{branch}", subagent_type="pact-{reviewer-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{reviewer-name}", team_name="PACT", subagent_type="pact-{reviewer-type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 

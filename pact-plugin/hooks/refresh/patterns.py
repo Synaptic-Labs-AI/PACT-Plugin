@@ -9,7 +9,7 @@ Configuration constants are imported from constants.py for maintainability.
 
 Supports both dispatch models for backward compatibility:
 - Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
-- Agent Teams teammate: Task(name="pact-*", team_name="pact-*", subagent_type="pact-*")
+- Agent Teams teammate: Task(name="pact-*", team_name="PACT", subagent_type="pact-*")
 """
 
 import re
@@ -42,7 +42,6 @@ __all__ = [
     "PACT_AGENT_PATTERN",
     "TASK_TOOL_PATTERN",
     "SUBAGENT_TYPE_PATTERN",
-    "TEAM_NAME_PATTERN",
     "CONTEXT_EXTRACTORS",
     "PENDING_ACTION_PATTERNS",
     "CONFIDENCE_WEIGHTS",
@@ -164,12 +163,10 @@ PACT_AGENT_PATTERN = re.compile(r"pact-(backend|frontend|database|test|architect
 
 # Tool call patterns - support both dispatch models:
 # - Background Task agent: Task(subagent_type="pact-*", run_in_background=true)
-# - Agent Teams teammate: Task(name="pact-*", team_name="pact-*", subagent_type="pact-*")
+# - Agent Teams teammate: Task(name="pact-*", team_name="PACT", subagent_type="pact-*")
 # Both include subagent_type, so SUBAGENT_TYPE_PATTERN matches either model.
 TASK_TOOL_PATTERN = re.compile(r'"name":\s*"Task"', re.IGNORECASE)
 SUBAGENT_TYPE_PATTERN = re.compile(r'"subagent_type":\s*"([^"]+)"')
-# Agent Teams dispatch includes team_name field (not present in background dispatch)
-TEAM_NAME_PATTERN = re.compile(r'"team_name":\s*"([^"]+)"')
 
 # Context extraction patterns (for building rich checkpoint context)
 CONTEXT_EXTRACTORS = {
