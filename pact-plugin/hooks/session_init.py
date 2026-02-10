@@ -10,7 +10,8 @@ Performs:
 3. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
 4. Ensures project CLAUDE.md exists with memory sections
 5. Checks for stale pinned context (delegated to staleness.py)
-6. Checks for in_progress Tasks (resumption context via Task integration)
+6. Reminds orchestrator to create PACT team before dispatching
+7. Checks for in_progress Tasks (resumption context via Task integration)
 
 Note: Memory-related initialization (dependency installation, embedding
 migration, pending embedding catch-up) is now lazy-loaded on first memory
@@ -380,7 +381,8 @@ def main():
     3. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
     4. Ensures project CLAUDE.md exists with memory sections
     5. Checks for stale pinned context entries in project CLAUDE.md
-    6. Checks for in_progress Tasks (resumption context via Task integration)
+    6. Reminds orchestrator to create PACT team before dispatching
+    7. Checks for in_progress Tasks (resumption context via Task integration)
 
     Memory initialization (dependencies, migrations, embedding catch-up) is
     now lazy-loaded on first memory operation to reduce startup cost for
@@ -435,7 +437,10 @@ def main():
             else:
                 context_parts.append(staleness_msg)
 
-        # 6. Check for in_progress Tasks (resumption context via Task integration)
+        # 6. Remind orchestrator to create PACT team
+        context_parts.append("⚠️ Once per session, run TeamCreate(team_name=\"PACT\") before starting any work.")
+
+        # 7. Check for in_progress Tasks (resumption context via Task integration)
         tasks = get_task_list()
         if tasks:
             resumption_msg = check_resumption_context(tasks)
