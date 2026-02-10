@@ -512,8 +512,6 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 2. **Verify all work is committed** — CODE and TEST phase commits should already exist; if any uncommitted changes remain, commit them now
 3. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
 
-> ⚠️ **Keep coders alive through peer-review.** Peer review commonly surfaces issues requiring fixes. The original coders have the best context for remediation — do not shut them down before peer-review and all remediation complete. Shut down coders only after the user's merge decision.
-
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — orchestrator never merges (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?

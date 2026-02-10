@@ -85,13 +85,6 @@ Review task: in_progress (persists until merge-ready)
 
 > ⚠️ **Do not shut down reviewers before all remediation is complete.** Reviewers are the ideal fixers for their own findings. Shutting them down and spawning fresh coders wastes context and spawn overhead.
 
-| When | Shutdown? |
-|------|-----------|
-| After review synthesis, before remediation decisions | **No** — remediation likely needs them |
-| All reviewers approve with zero findings | **Yes** — no remediation needed |
-| After all remediation complete + user merge decision | **Yes** — no further work expected |
-| User says "No" to all minor/future items (no fixes needed) | **Yes** — review workflow complete |
-
 **Coders from CODE phase** (if still alive from `/PACT:orchestrate`): Same rules apply — keep alive through review remediation, shut down after merge decision.
 
 ---
