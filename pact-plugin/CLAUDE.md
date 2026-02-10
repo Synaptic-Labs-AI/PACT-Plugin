@@ -386,7 +386,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible (see Reuse vs. Spawn above). Teammates persist until after PR merge or `/PACT:wrap-up`.
 
 Exceptions:
-- rePACT sub-scope specialists shut down after their nested cycle
+- rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
 - comPACT specialists shut down when user chooses "Not yet"
 
 **Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
