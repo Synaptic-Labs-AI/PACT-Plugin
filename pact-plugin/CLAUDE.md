@@ -385,6 +385,15 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 - **Shut down when done**: Once an agent's task is complete and no follow-up is expected, shut down via `SendMessage(type="shutdown_request")`
 - **Keep alive when needed**: If upcoming work may need the agent's context (e.g., remediation from their review, follow-up in their domain), keep them until that work completes
+- **Assume follow-up is likely** after CODE (peer-review surfaces fixes) and after review synthesis (remediation uses reviewers as fixers). Default to keeping agents alive through the full orchestrate→peer-review→remediation→merge cycle.
+
+**Lifecycle boundaries** (when shutdown is safe):
+
+| Agent Role | Safe to Shut Down After |
+|------------|------------------------|
+| Coders (from CODE phase) | All peer-review remediation complete + user merge decision |
+| Reviewers (from peer-review) | All remediation complete + user merge decision |
+| Preparer / Architect | Next phase begins (unless retained as consultant for active questions) |
 
 **Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
 ```python

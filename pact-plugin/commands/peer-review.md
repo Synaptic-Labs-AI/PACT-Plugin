@@ -73,11 +73,25 @@ Review task: in_progress (persists until merge-ready)
 
 ### Reviewer-to-Fixer Reuse
 
-> **Review → Remediation shortcut**: When a reviewer's findings need fixing in their own domain, `SendMessage` the reviewer directly with the fix task rather than spawning a new coder. They have the most relevant context — files loaded, issues understood, line numbers identified.
+> ⚠️ **MANDATORY**: When a reviewer's findings need fixing in their domain, `SendMessage` the reviewer directly with the fix task. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
 
-- Reviewer identified issues with specific file paths/line numbers → **reuse** (they're the ideal fixer)
-- Fixes span a different domain than the reviewer → **spawn** domain specialist
-- Multiple independent fixes needed in parallel → **spawn** additional agents alongside reused reviewer
+| Situation | Action |
+|-----------|--------|
+| Reviewer identified issues in their domain | **Reuse** reviewer as fixer via `SendMessage` |
+| Fixes span a different domain | **Spawn** domain specialist (reviewer stays for consultation) |
+| Multiple independent fixes in parallel | **Spawn** additional agents alongside reused reviewer |
+
+### Agent Shutdown Timing
+
+> ⚠️ **Do not shut down reviewers before all remediation is complete.** Reviewers are the ideal fixers for their own findings. Shutting them down and spawning fresh coders wastes context and spawn overhead.
+
+| When | Shutdown? |
+|------|-----------|
+| After review synthesis, before remediation decisions | **No** — remediation likely needs them |
+| After all remediation complete + user merge decision | **Yes** — no further work expected |
+| User says "No" to all minor/future items (no fixes needed) | **Yes** — review workflow complete |
+
+**Coders from CODE phase** (if still alive from `/PACT:orchestrate`): Same rules apply — keep alive through review remediation, shut down after merge decision.
 
 ---
 

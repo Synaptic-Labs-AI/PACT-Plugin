@@ -195,6 +195,8 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 4. **Create atomic commit(s)** — stage and commit before proceeding
 5. **TaskUpdate**: Feature task status = "completed"
 
+> ⚠️ **Keep specialists alive until peer-review remediation completes.** If the next step is peer-review, do not shut down specialists — review commonly surfaces issues requiring fixes, and the original specialist has the best context for remediation. Shut down only after all remediation is complete and the user's merge decision.
+
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - **Yes (Recommended)** → invoke `/PACT:peer-review`
 - **Not yet** → worktree persists; user resumes later. Clean up manually with `/PACT:worktree-cleanup` when done.
