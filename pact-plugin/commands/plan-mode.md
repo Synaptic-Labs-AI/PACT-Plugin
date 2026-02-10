@@ -97,7 +97,7 @@ Skip specialists clearly not relevant (e.g., skip database engineer for pure UI 
 
 ### Phase 1: Parallel Specialist Consultation
 
-If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. Reuse existing team if one exists.
+The `PACT` team should already exist from session start (INSTRUCTIONS step 2). If not, create it now: `TeamCreate(team_name="PACT")`.
 
 Dispatch relevant specialists **in parallel**, each in **planning-only mode**.
 
@@ -177,7 +177,7 @@ If a specialist fails entirely (timeout, error):
 **Dispatch each consultant**:
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{specialist-name}", team_name="PACT", subagent_type="pact-{specialist-type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 Spawn all consultants in parallel.
 

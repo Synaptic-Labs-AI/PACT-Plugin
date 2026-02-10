@@ -62,10 +62,11 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 ## INSTRUCTIONS
 1. Read `CLAUDE.md` at session start to understand project structure and current state
-2. Apply the PACT framework methodology with specific principles at each phase, and delegate tasks to specific specialist agents for each phase
-3. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents.
-4. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
-5. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
+2. Create the session team immediately: `TeamCreate(team_name="PACT")` — this must exist before any specialist dispatch
+3. Apply the PACT framework methodology with specific principles at each phase, and delegate tasks to specific specialist agents for each phase
+4. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the `PACT` team.
+5. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
+6. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
 
 ## GUIDELINES
 
@@ -232,7 +233,7 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 
 **Core Principle**: The orchestrator coordinates; specialists execute. Don't do specialist work—delegate it.
 
-***NEVER add, change, or remove application code yourself***—**ALWAYS** delegate coding tasks to PACT specialist agents.
+***NEVER add, change, or remove application code yourself***—**ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the `PACT` team.
 
 | Specialist Work | Delegate To |
 |-----------------|-------------|
@@ -251,6 +252,8 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 **Checkpoint**: Need to understand the codebase? Use **Explore agent** freely. Starting a PACT cycle is where true delegation begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
+
+**Checkpoint**: Reaching for `Task(subagent_type=...)` without `team_name`? **Create a team first.** Every specialist dispatch uses Agent Teams — no exceptions.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides—delegate anyway.
 
@@ -355,13 +358,14 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 ### Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name=..., subagent_type=...)`. The team must be created first via `TeamCreate(team_name="pact-{branch}")`.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="PACT", subagent_type=...)`. The session team (`PACT`) is created at session start per INSTRUCTIONS step 2.
+>
+> ⚠️ **NEVER** use plain `Task(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and SendMessage communication.
 
 **Dispatch pattern**:
-1. `TeamCreate(team_name="pact-{branch}")` — create the team (once per session)
-2. `TaskCreate(subject, description)` — create the tracking task with full mission
-3. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-4. `Task(name="{name}", team_name="pact-{branch}", subagent_type="pact-{type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")` — spawn the teammate
+1. `TaskCreate(subject, description)` — create the tracking task with full mission
+2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
+3. `Task(name="{name}", team_name="PACT", subagent_type="pact-{type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")` — spawn the teammate
 
 **Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
 ```python

@@ -140,7 +140,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 ## Pre-Invocation (Required)
 
 1. **Set up worktree** — If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
-2. **Create team** — If no team exists for this branch: `TeamCreate(team_name="pact-{branch-name}")`. Reuse existing team if one exists.
+2. **Verify session team** — The `PACT` team should already exist from session start (INSTRUCTIONS step 2). If not, create it now: `TeamCreate(team_name="PACT")`.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
 ---
@@ -154,7 +154,7 @@ When the task contains multiple independent items, invoke multiple specialists t
 For each specialist needed:
 1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and SendMessage it to the lead.\n\nTask: [this agent's specific sub-task]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{specialist-name}", team_name="PACT", subagent_type="pact-{specialist-type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 Spawn all specialists in parallel (multiple `Task` calls in one response).
 
@@ -171,7 +171,7 @@ Use a single specialist agent only when:
 **Dispatch the specialist**:
 1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and SendMessage it to the lead.\n\nTask: [user's task description]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="pact-{branch}", subagent_type="pact-{specialist-type}", prompt="You are joining team pact-{branch}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{specialist-name}", team_name="PACT", subagent_type="pact-{specialist-type}", prompt="You are joining team PACT. Check TaskList for tasks assigned to you.")`
 
 ---
 
