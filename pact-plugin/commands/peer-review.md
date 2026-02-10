@@ -73,19 +73,13 @@ Review task: in_progress (persists until merge-ready)
 
 ### Reviewer-to-Fixer Reuse
 
-> ⚠️ **MANDATORY**: When a reviewer's findings need fixing in their domain, `SendMessage` the reviewer directly with the fix task. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
+> ⚠️ **MANDATORY**: When a reviewer's findings need fixing in their domain, send the fix task directly to the reviewer via `SendMessage`. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
 
 | Situation | Action |
 |-----------|--------|
 | Reviewer identified issues in their domain | **Reuse** reviewer as fixer via `SendMessage` |
 | Fixes span a different domain | **Spawn** domain specialist (reviewer stays for consultation) |
 | Multiple independent fixes in parallel | **Spawn** additional agents alongside reused reviewer |
-
-### Agent Shutdown Timing
-
-> ⚠️ **Do not shut down reviewers before all remediation is complete.** Reviewers are the ideal fixers for their own findings. Shutting them down and spawning fresh coders wastes context and spawn overhead.
-
-**Coders from CODE phase** (if still alive from `/PACT:orchestrate`): Same rules apply — keep alive through review remediation, shut down after merge decision.
 
 ---
 

@@ -383,14 +383,11 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 #### Agent Shutdown Guidance
 
-Do *not* shut down teammates preemptively. Reuse idle teammates whenever possible (see Reuse vs. Spawn above).
+Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible (see Reuse vs. Spawn above). Teammates persist until after PR merge or `/PACT:wrap-up`.
 
-Teammates should only be shut down when:
-- The user approves a PR merge
-- The user invokes `/PACT:wrap-up`
-- The teammate stops after encountering an unrecoverable error
-- **rePACT sub-scope specialists**: After nested cycle completes (apply Reuse vs. Spawn for subsequent sub-scopes)
-- **comPACT "Not yet" path**: User defers PR creation — no immediate follow-up expected
+Exceptions:
+- rePACT sub-scope specialists shut down after their nested cycle
+- comPACT specialists shut down when user chooses "Not yet"
 
 **Exception — `pact-memory-agent`**: This agent is NOT a team member. It still uses the background task model:
 ```python
