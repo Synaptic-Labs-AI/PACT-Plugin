@@ -302,11 +302,12 @@ class TestGetProjectClaudeMdPath:
 
         assert result == claude_md
 
-    def test_returns_none_when_no_claude_md_found(self, clean_env_no_claude_project_dir):
+    def test_returns_none_when_no_claude_md_found(self, tmp_path, clean_env_no_claude_project_dir):
         """Should return None when CLAUDE.md does not exist anywhere."""
         from session_init import _get_project_claude_md_path
 
-        with patch("subprocess.run", side_effect=FileNotFoundError()):
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
             result = _get_project_claude_md_path()
 
         assert result is None
