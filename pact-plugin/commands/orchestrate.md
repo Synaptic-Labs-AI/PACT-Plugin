@@ -504,7 +504,7 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 ---
 
-### Post-CODE Checkpoint
+## Post-CODE Checkpoint
 
 > **Hard constraint**: During orchestrate workflows, the orchestrator **MUST NOT** manually run `git push` or `gh pr create`. PR creation is owned by `/PACT:peer-review`. This is **NOT** covered by the trivial task exception.
 

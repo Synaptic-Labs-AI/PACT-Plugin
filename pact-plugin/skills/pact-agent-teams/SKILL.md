@@ -120,7 +120,7 @@ Agents commit their own work before delivering HANDOFF. This ensures atomic, tra
 - **Local commits only**: Do NOT run `git push` — the orchestrator handles pushing
 - **Atomic commits**: One logical change per commit. If you made multiple distinct changes, create multiple commits.
 - **Conventional prefixes**: Use `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:` prefixes
-- **Include commit hashes in HANDOFF**: List your commit hash(es) in the "Produced" field (see HANDOFF Format below)
+- **Include commit hashes in HANDOFF**: List your commit hash(es) in the "Produced" field (see HANDOFF Format above)
 
 ## Before Completing
 

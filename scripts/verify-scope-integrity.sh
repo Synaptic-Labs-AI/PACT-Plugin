@@ -413,6 +413,13 @@ check_pattern "$SKILLS_DIR/pact-agent-teams/SKILL.md" \
     "commit hash"
 echo ""
 
+# --- 23. Post-review remediation: CLAUDE.md HANDOFF format includes commit hash ---
+echo "23. CLAUDE.md HANDOFF format includes commit hash:"
+check_pattern "pact-plugin/CLAUDE.md" \
+    "CLAUDE.md HANDOFF format includes commit hash" \
+    "commit hash"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"

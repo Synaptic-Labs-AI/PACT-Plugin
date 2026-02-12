@@ -438,7 +438,7 @@ Every agent delivers a structured HANDOFF. Under Agent Teams, HANDOFFs arrive vi
 
 ```
 HANDOFF:
-1. Produced: Files created/modified
+1. Produced: Files created/modified + commit hash(es)
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
 3. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
