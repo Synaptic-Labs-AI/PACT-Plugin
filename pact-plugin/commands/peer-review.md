@@ -4,9 +4,10 @@ argument-hint: [e.g., feature X implementation]
 ---
 Review the current work: $ARGUMENTS
 
-1. Commit any uncommitted work
-2. Create a PR if one doesn't exist
-3. Review the PR
+1. Verify all agent commits are present (agents commit their own work before HANDOFF)
+2. Commit any remaining cross-agent or orchestrator-generated changes
+3. Create a PR if one doesn't exist
+4. Review the PR
 
 ---
 
@@ -28,16 +29,20 @@ Create a review Task hierarchy:
 11. If major issues:
     a. TaskCreate: Remediation agent tasks
     b. TaskUpdate: Remediation tasks status = "in_progress"
-    c. Dispatch, monitor until complete
-    d. TaskUpdate: Remediation tasks status = "completed"
+    c. Dispatch, monitor until complete (agents commit their own fixes)
+    d. Verify agent commits exist (from HANDOFF commit hashes)
+    e. Run integration verification (see below)
+    f. TaskUpdate: Remediation tasks status = "completed"
 12. TaskCreate: "User: review minor issues" step task
 13. Present minor issues to user, record decisions in step metadata
 14. TaskUpdate: Step task status = "completed"
 15. If "fix now" decisions:
     a. TaskCreate: Remediation agent tasks
     b. TaskUpdate: Remediation tasks status = "in_progress"
-    c. Dispatch, monitor until complete
-    d. TaskUpdate: Remediation tasks status = "completed"
+    c. Dispatch, monitor until complete (agents commit their own fixes)
+    d. Verify agent commits exist (from HANDOFF commit hashes)
+    e. Run integration verification (see below)
+    f. TaskUpdate: Remediation tasks status = "completed"
 16. TaskCreate: "Awaiting merge decision" approval task
 17. Present to user, await approval
 18. On approval: TaskUpdate approval task status = "completed"
@@ -80,6 +85,67 @@ Review task: in_progress (persists until merge-ready)
 | Reviewer identified issues in their domain | **Reuse** reviewer as fixer via `SendMessage` |
 | Fixes span a different domain | **Spawn** domain specialist (reviewer stays for consultation) |
 | Multiple independent fixes in parallel | **Spawn** additional agents alongside reused reviewer |
+
+### Integration Verification
+
+After all parallel remediation agents complete and commit, the orchestrator runs integration verification before proceeding to re-review:
+
+```
+1. All remediation agents complete → verify commit hashes from HANDOFFs
+2. Run full test suite: smoke tests + any project-specific checks
+3. If conflicts or failures found:
+   a. Identify which agent's changes conflict
+   b. Route back to the relevant agent(s) via SendMessage for resolution
+   c. Re-run integration verification after fixes
+4. Only proceed to verify-only re-review after integration tests pass
+```
+
+> **Who runs this**: The orchestrator — this is an operational gate (S2 coordination), not specialist work.
+
+### Verify-Only Re-Review Protocol
+
+When remediation fixes are complete and integration verification passes, a verify-only re-review confirms that findings were addressed. This is NOT a fresh full review.
+
+| Aspect | Verify-Only Re-Review | Full Review |
+|--------|----------------------|-------------|
+| **Scope** | Only files changed during remediation (use commit hashes from agent HANDOFFs to determine the diff) | Entire PR |
+| **Depth** | Spot-check that each finding was addressed | Full architectural, quality, and implementation review |
+| **Agent** | `SendMessage` to the reviewer who found the issues (they are in consultant mode — reuse them) | Spawn dedicated reviewer agents |
+| **Format** | Checklist: "Finding X: Resolved / Not Resolved / New Issue Introduced" | Full HANDOFF with findings table |
+| **Duration** | Significantly faster than initial review | Full review cycle |
+
+**Dispatch**: Send each original reviewer a `SendMessage` with:
+- The list of findings they raised that were marked as blocking
+- The commit hashes from the remediation agent's HANDOFF (so they can diff)
+- Request: "Verify each finding is resolved. Report back with checklist."
+
+**Outcome**:
+- All findings resolved → proceed to merge readiness
+- Any "Not Resolved" or "New Issue Introduced" → new remediation cycle (fresh tasks)
+- After 2 failed fix-verify cycles → escalate via `/PACT:imPACT`
+
+### Pattern: Parallel Domain-Batched Remediation
+
+When review findings span multiple domains, batch them by domain and dispatch one remediation agent per domain in parallel (comPACT-style). This pattern is implicitly supported by the concurrent dispatch guidance — naming it makes it explicit and referenceable.
+
+**Steps**:
+1. **Batch findings by domain** — Group blocking items by specialist domain (backend, frontend, database, etc.)
+2. **S2 coordination** — Verify no file conflicts between domain batches before dispatch
+3. **Dispatch one agent per domain** — Use Reviewer-to-Fixer Reuse where applicable (reviewer becomes fixer for their domain)
+4. **Integration verification** — After all agents complete and commit, run integration verification (see above)
+5. **Verify-only re-review** — SendMessage to original reviewers to confirm findings are resolved (see above)
+
+**When to use**: Multiple blocking findings across 2+ specialist domains. For single-domain findings, standard remediation dispatch is sufficient.
+
+**Example**:
+```
+Review findings: 3 blocking items
+├── Backend: auth validation missing, error handling incomplete → backend-coder (or reuse backend reviewer)
+├── Frontend: XSS in user input display → frontend-coder (or reuse frontend reviewer)
+└── After both complete:
+    ├── Integration verification (orchestrator runs tests)
+    └── Verify-only re-review (SendMessage to reviewers)
+```
 
 ---
 
