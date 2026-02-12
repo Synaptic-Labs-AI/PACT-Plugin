@@ -423,7 +423,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
+- [ ] **Verify agent commits exist** — agents commit before HANDOFF; check `git log --oneline` for expected commit hashes from HANDOFFs. If any agent failed to commit, ask them to commit now.
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE
@@ -481,7 +481,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - [ ] All tests passing
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
+- [ ] **Verify agent commits exist** — check `git log --oneline` for expected commit hashes from TEST handoff
 
 **Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
 
@@ -504,12 +504,28 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 ---
 
+### Post-CODE Checkpoint
+
+> **Hard constraint**: During orchestrate workflows, the orchestrator **MUST NOT** manually run `git push` or `gh pr create`. PR creation is owned by `/PACT:peer-review`. This is **NOT** covered by the trivial task exception.
+
+```
+CODE complete, tests pass
+    ↓
+CHECKPOINT: Next step is `/PACT:peer-review`
+    ↓
+DO NOT: `git push`, `gh pr create`, shut down teammates
+    ↓
+Invoke `/PACT:peer-review`
+```
+
+---
+
 ## After All Phases Complete
 
 > **S5 Policy Checkpoint (Pre-PR)**: Before creating PR, verify: "Do all tests pass? Is system integrity maintained? Have S5 non-negotiables been respected throughout?"
 
 1. **Update plan status** (if plan exists): IN_PROGRESS → IMPLEMENTED
-2. **Verify all work is committed** — CODE and TEST phase commits should already exist; if any uncommitted changes remain, commit them now
+2. **Verify all work is committed** — agents commit before HANDOFF; use `git log --oneline` to confirm expected commits exist. Only commit remaining cross-agent integration changes (if any) yourself.
 3. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — orchestrator never merges (S5 policy)

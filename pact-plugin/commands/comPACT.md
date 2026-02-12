@@ -192,13 +192,27 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 1. **Receive handoff** from specialist(s)
 2. Agent tasks marked `completed` (agents self-manage their task status via TaskUpdate)
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
-4. **Create atomic commit(s)** — stage and commit before proceeding
+4. **Verify agent commits exist** — agents commit before HANDOFF; check `git log --oneline` for expected commit hashes. Only commit remaining integration changes (if any) yourself.
 5. **TaskUpdate**: Feature task status = "completed"
 
 > ⚠️ **Specialist shutdown depends on the next step.** Do not shut down specialists preemptively — the next step determines their lifecycle.
 
-**Next steps** — After commit, ask: "Work committed. Create PR?"
-- **Yes (Recommended)** → invoke `/PACT:peer-review`. Keep specialists alive — review commonly surfaces issues requiring fixes, and the original specialist has the best context for remediation. Shut down after all remediation complete + user merge decision.
+### Post-CODE Checkpoint
+
+> **Hard constraint**: During comPACT workflows, the orchestrator **MUST NOT** manually run `git push` or `gh pr create`. PR creation is owned by `/PACT:peer-review`. This is **NOT** covered by the trivial task exception.
+
+```
+Work complete, tests pass
+    ↓
+CHECKPOINT: Next step is `/PACT:peer-review`
+    ↓
+DO NOT: `git push`, `gh pr create`, shut down teammates
+    ↓
+Ask user: "Work committed. Create PR?"
+```
+
+**Next steps** — After verification, ask: "Work committed. Create PR?"
+- **Yes (Recommended)** → invoke `/PACT:peer-review`. The "Yes" option **MUST** invoke `/PACT:peer-review` — do **NOT** manually run `gh pr create`. Keep specialists alive — review commonly surfaces issues requiring fixes, and the original specialist has the best context for remediation. Shut down after all remediation complete + user merge decision.
 - **Not yet** → worktree persists; user resumes later. Shut down specialists — their task is complete, no immediate follow-up expected.
 - **More work** → continue with `/PACT:comPACT` or `/PACT:orchestrate`. Keep specialists alive — apply Reuse vs. Spawn table for the follow-up task.
 
