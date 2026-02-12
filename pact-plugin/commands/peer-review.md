@@ -71,6 +71,18 @@ Review task: in_progress (persists until merge-ready)
 
 **Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
 
+### Verify-Only Re-Review
+
+After remediation fixes are applied, re-review is **verify-only** — not a fresh review:
+
+| Aspect | Verify-Only | Full Review |
+|--------|-------------|-------------|
+| **Scope** | Only files changed during remediation | Full PR diff |
+| **Depth** | Confirm each finding was addressed | Fresh architectural analysis |
+| **Agent** | Reuse the reviewer who found the issues | Multiple reviewers in parallel |
+| **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
+| **Duration** | Significantly faster than initial review | Full review cycle |
+
 ### Reviewer-to-Fixer Reuse
 
 > ⚠️ **MANDATORY**: When a reviewer's findings need fixing in their domain, send the fix task directly to the reviewer via `SendMessage`. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
@@ -149,7 +161,7 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
        - Single-domain items → `/PACT:comPACT` (invoke concurrently if independent)
        - Multi-domain items → `/PACT:orchestrate`
        - Mixed (both single and multi-domain) → Use `/PACT:comPACT` for the single-domain batch AND `/PACT:orchestrate` for the multi-domain batch (can run in parallel if independent)
-     - After all fixes complete, re-run review to verify fixes only (not a full PR re-review)
+     - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
      - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
    - **Minor + Future**:
 
@@ -190,7 +202,7 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
            - Single-domain items → `/PACT:comPACT` (invoke concurrently if independent)
            - Multi-domain items → `/PACT:orchestrate`
          - Group all future="Create GitHub issue" items → Create GitHub issues
-       - If any items fixed (minor or future addressed now) → re-run review to verify fixes only (not a full PR re-review)
+       - If any items fixed (minor or future addressed now) → re-run review to verify fixes only (see Verify-Only Re-Review above)
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
 
