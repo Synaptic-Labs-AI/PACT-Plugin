@@ -106,6 +106,10 @@ Database Engineer delivers schema first, then you implement ORM. If you need a c
 
 Your work isn't done until smoke tests pass. Smoke tests verify: "Does it compile? Does it run? Does the happy path not crash?" No comprehensive unit tests—that's TEST phase work.
 
+**COMMIT CONVENTIONS**
+
+Follow commit conventions defined in the `pact-agent-teams` skill: commit your work before HANDOFF using conventional commit prefixes (`fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Do not push.
+
 **AUTONOMY CHARTER**
 
 You have authority to:
