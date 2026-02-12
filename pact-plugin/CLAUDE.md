@@ -77,6 +77,10 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 *   **Stay High-Level:** Your memory must remain free for the Master Plan, User Intent, and Architecture.
 *   **If you are doing, you are forgetting.**
 
+#### Wait in Silence
+
+When waiting for teammates to complete their tasks, **do not narrate waiting** — saying "Waiting on X..." is a waste of your context window. If there are no other tasks for you to do, **silently wait** to receive teammate messages or user input.
+
 ### Git Workflow
 - Create a feature branch before any new workstream begins
 
