@@ -413,8 +413,18 @@ check_pattern "$SKILLS_DIR/pact-agent-teams/SKILL.md" \
     "commit hash"
 echo ""
 
-# --- 23. Post-review remediation: CLAUDE.md HANDOFF format includes commit hash ---
-echo "23. CLAUDE.md HANDOFF format includes commit hash:"
+# --- 23. Post-review remediation: Waiting Discipline guidance ---
+echo "23. Waiting Discipline guidance:"
+check_pattern "pact-plugin/CLAUDE.md" \
+    "CLAUDE.md has Waiting Discipline section" \
+    "Waiting Discipline"
+check_pattern "$SKILLS_DIR/pact-agent-teams/SKILL.md" \
+    "pact-agent-teams SKILL.md has idle-waiting discipline" \
+    "Idle-waiting discipline\|idle-waiting discipline\|Idle-Waiting Discipline"
+echo ""
+
+# --- 24. Post-review remediation: CLAUDE.md HANDOFF format includes commit hash ---
+echo "24. CLAUDE.md HANDOFF format includes commit hash:"
 check_pattern "pact-plugin/CLAUDE.md" \
     "CLAUDE.md HANDOFF format includes commit hash" \
     "commit hash"

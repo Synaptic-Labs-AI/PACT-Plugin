@@ -74,7 +74,7 @@ Review task: in_progress (persists until merge-ready)
 └─ On resolution: blocker completed → review resumes
 ```
 
-**Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
+**Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); after 2 failed fix-verify cycles, escalate via `/PACT:imPACT` which triages whether to redo a prior phase, bring in additional agents, or escalate to user; imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
 
 ### Reviewer-to-Fixer Reuse
 
@@ -88,16 +88,16 @@ Review task: in_progress (persists until merge-ready)
 
 ### Integration Verification
 
-After all parallel remediation agents complete and commit, the orchestrator runs integration verification before proceeding to re-review:
+After all parallel remediation agents complete and commit, the orchestrator runs integration verification to confirm that fixes don't conflict with each other and don't break the existing codebase. This is a compatibility gate, not a comprehensive test phase.
 
 ```
 1. All remediation agents complete → verify commit hashes from HANDOFFs
-2. Run full test suite: smoke tests + any project-specific checks
+2. Run test suite to check for regressions or conflicts between fixes
 3. If conflicts or failures found:
    a. Identify which agent's changes conflict
    b. Route back to the relevant agent(s) via SendMessage for resolution
    c. Re-run integration verification after fixes
-4. Only proceed to verify-only re-review after integration tests pass
+4. Only proceed to verify-only re-review after verification passes
 ```
 
 > **Who runs this**: The orchestrator — this is an operational gate (S2 coordination), not specialist work.

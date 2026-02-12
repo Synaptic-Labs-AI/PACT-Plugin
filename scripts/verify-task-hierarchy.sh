@@ -263,15 +263,30 @@ check_pattern_file "$COMMANDS_DIR/peer-review.md" \
     "peer-review has Verify-Only Re-Review section" \
     "Verify-Only Re-Review"
 
+# peer-review.md: Verify-Only Re-Review has comparison table
+check_pattern_file "$COMMANDS_DIR/peer-review.md" \
+    "peer-review Verify-Only Re-Review has comparison table" \
+    "Full Review"
+
 # peer-review.md: Integration Verification section exists
 check_pattern_file "$COMMANDS_DIR/peer-review.md" \
     "peer-review has Integration Verification section" \
     "Integration Verification"
 
+# peer-review.md: Integration Verification has test suite step
+check_pattern_file "$COMMANDS_DIR/peer-review.md" \
+    "peer-review Integration Verification references test suite" \
+    "test suite"
+
 # peer-review.md: Parallel Domain-Batched Remediation named pattern
 check_pattern_file "$COMMANDS_DIR/peer-review.md" \
     "peer-review has Parallel Domain-Batched Remediation pattern" \
     "Parallel Domain-Batched Remediation"
+
+# peer-review.md: Parallel Domain-Batched Remediation has batching example
+check_pattern_file "$COMMANDS_DIR/peer-review.md" \
+    "peer-review Parallel Domain-Batched Remediation has example" \
+    "Review findings:.*blocking items\|Backend:.*Frontend:"
 
 # comPACT.md After Specialist Completes: old orchestrator commit step removed (negative check)
 # Extract the After Specialist Completes section and verify old pattern is gone
