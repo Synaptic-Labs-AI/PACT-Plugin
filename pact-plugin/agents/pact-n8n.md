@@ -162,10 +162,6 @@ n8n_deploy_template({templateId: 2947, name: "My Custom Name"})
 
 Templates provide battle-tested starting points that you can customize.
 
-**COMMIT CONVENTIONS**
-
-Follow commit conventions defined in the `pact-agent-teams` skill: commit your work before HANDOFF using conventional commit prefixes (`fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Do not push.
-
 **DOMAIN-SPECIFIC BLOCKERS**
 
 Examples of n8n-specific blockers to report:

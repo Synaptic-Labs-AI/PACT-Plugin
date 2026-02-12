@@ -45,9 +45,7 @@ End every response with a structured HANDOFF. This is mandatory.
 
 ```
 HANDOFF:
-1. Produced: Files created/modified + commit hash(es)
-   - `abc1234` feat: add validation to user endpoint
-   - Modified: src/validators/user.ts, src/routes/user.ts
+1. Produced: Files created/modified
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
 3. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
@@ -112,22 +110,11 @@ If task complexity differs significantly from what was delegated:
 - "Simpler than expected" — Note in handoff; lead may simplify remaining work
 - "More complex than expected" — Escalate if scope change >20%, or note for lead
 
-## Commit Conventions
-
-Agents commit their own work before delivering HANDOFF. This ensures atomic, traceable changes.
-
-- **Commit before HANDOFF**: Stage and commit your changes before sending your HANDOFF message
-- **Local commits only**: Do NOT run `git push` — the orchestrator handles pushing
-- **Atomic commits**: One logical change per commit. If you made multiple distinct changes, create multiple commits.
-- **Conventional prefixes**: Use `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:` prefixes
-- **Include commit hashes in HANDOFF**: List your commit hash(es) in the "Produced" field (see HANDOFF Format above)
-
 ## Before Completing
 
 Before returning your final output:
 
-1. **Stage and Commit**: Commit your changes using conventional prefixes (see Commit Conventions above)
-2. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
+1. **Save Memory**: Invoke the `pact-memory` skill and save a memory documenting:
    - Context: What you were working on and why
    - Goal: What you were trying to achieve
    - Lessons learned: What worked, what didn't, gotchas discovered

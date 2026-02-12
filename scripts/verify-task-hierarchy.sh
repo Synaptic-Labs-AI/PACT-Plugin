@@ -238,11 +238,6 @@ echo ""
 # --- Post-review remediation improvements ---
 echo "Post-review remediation improvements:"
 
-# comPACT.md: agent commit reference exists in After Specialist Completes
-check_pattern_file "$COMMANDS_DIR/comPACT.md" \
-    "comPACT has agent commit verification step" \
-    "Verify agent commits"
-
 # orchestrate.md: Post-CODE Checkpoint section exists
 check_pattern_file "$COMMANDS_DIR/orchestrate.md" \
     "orchestrate has Post-CODE Checkpoint" \
@@ -288,16 +283,6 @@ check_pattern_file "$COMMANDS_DIR/peer-review.md" \
     "peer-review Parallel Domain-Batched Remediation has example" \
     "Review findings:.*blocking items\|Backend:.*Frontend:"
 
-# comPACT.md After Specialist Completes: old orchestrator commit step removed (negative check)
-# Extract the After Specialist Completes section and verify old pattern is gone
-after_section=$(sed -n '/^## After Specialist Completes/,/^## /p' "$COMMANDS_DIR/comPACT.md" | sed '$d')
-if echo "$after_section" | grep -q "Create atomic commit"; then
-    echo "  ✗ comPACT After Specialist Completes: old 'Create atomic commit' step should be removed"
-    FAIL=$((FAIL + 1))
-else
-    echo "  ✓ comPACT After Specialist Completes: old orchestrator commit step removed"
-    PASS=$((PASS + 1))
-fi
 echo ""
 
 # --- Agent Teams integration ---

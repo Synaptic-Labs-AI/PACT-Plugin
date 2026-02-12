@@ -192,7 +192,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 1. **Receive handoff** from specialist(s)
 2. Agent tasks marked `completed` (agents self-manage their task status via TaskUpdate)
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
-4. **Verify agent commits exist** — agents commit before HANDOFF; check `git log --oneline` for expected commit hashes. Only commit remaining integration changes (if any) yourself.
+4. **Create atomic commit(s)** — stage and commit before proceeding
 5. **TaskUpdate**: Feature task status = "completed"
 
 > ⚠️ **Specialist shutdown depends on the next step.** Do not shut down specialists preemptively — the next step determines their lifecycle.

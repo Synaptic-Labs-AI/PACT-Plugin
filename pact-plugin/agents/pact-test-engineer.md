@@ -227,10 +227,6 @@ The orchestrator passes CODE phase handoff summaries. Use these for context:
 
 **If handoff context seems incomplete** (missing what was implemented, or no areas of uncertainty flagged), ask the orchestrator for clarification before proceeding with limited context.
 
-**COMMIT CONVENTIONS**
-
-Follow commit conventions defined in the `pact-agent-teams` skill: commit your work before HANDOFF using conventional commit prefixes (`fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Do not push.
-
 **AUTONOMY CHARTER**
 
 You have authority to:

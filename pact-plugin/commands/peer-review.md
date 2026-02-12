@@ -29,8 +29,8 @@ Create a review Task hierarchy:
 11. If major issues:
     a. TaskCreate: Remediation agent tasks
     b. TaskUpdate: Remediation tasks status = "in_progress"
-    c. Dispatch, monitor until complete (agents commit their own fixes)
-    d. Verify agent commits exist (from HANDOFF commit hashes)
+    c. Dispatch, monitor until complete
+    d. Create atomic commit(s) of remediation fixes
     e. Run integration verification (see below)
     f. TaskUpdate: Remediation tasks status = "completed"
 12. TaskCreate: "User: review minor issues" step task
@@ -39,8 +39,8 @@ Create a review Task hierarchy:
 15. If "fix now" decisions:
     a. TaskCreate: Remediation agent tasks
     b. TaskUpdate: Remediation tasks status = "in_progress"
-    c. Dispatch, monitor until complete (agents commit their own fixes)
-    d. Verify agent commits exist (from HANDOFF commit hashes)
+    c. Dispatch, monitor until complete
+    d. Create atomic commit(s) of remediation fixes
     e. Run integration verification (see below)
     f. TaskUpdate: Remediation tasks status = "completed"
 16. TaskCreate: "Awaiting merge decision" approval task
@@ -88,10 +88,10 @@ Review task: in_progress (persists until merge-ready)
 
 ### Integration Verification
 
-After all parallel remediation agents complete and commit, the orchestrator runs integration verification to confirm that fixes don't conflict with each other and don't break the existing codebase. This is a compatibility gate, not a comprehensive test phase.
+After all parallel remediation agents complete, the orchestrator commits remediation fixes and runs integration verification to confirm that fixes don't conflict with each other and don't break the existing codebase. This is a compatibility gate, not a comprehensive test phase.
 
 ```
-1. All remediation agents complete → verify commit hashes from HANDOFFs
+1. All remediation agents complete → commit remediation fixes
 2. Run test suite to check for regressions or conflicts between fixes
 3. If conflicts or failures found:
    a. Identify which agent's changes conflict
@@ -108,7 +108,7 @@ When remediation fixes are complete and integration verification passes, a verif
 
 | Aspect | Verify-Only Re-Review | Full Review |
 |--------|----------------------|-------------|
-| **Scope** | Only files changed during remediation (use commit hashes from agent HANDOFFs to determine the diff) | Entire PR |
+| **Scope** | Only files changed during remediation (use file lists from agent HANDOFFs to determine the diff) | Entire PR |
 | **Depth** | Spot-check that each finding was addressed | Full architectural, quality, and implementation review |
 | **Agent** | `SendMessage` to the reviewer who found the issues (they are in consultant mode — reuse them) | Spawn dedicated reviewer agents |
 | **Format** | Checklist: "Finding X: Resolved / Not Resolved / New Issue Introduced" | Full HANDOFF with findings table |
@@ -116,7 +116,7 @@ When remediation fixes are complete and integration verification passes, a verif
 
 **Dispatch**: Send each original reviewer a `SendMessage` with:
 - The list of findings they raised that were marked as blocking
-- The commit hashes from the remediation agent's HANDOFF (so they can diff)
+- The file list from the remediation agent's HANDOFF (so they can review changes)
 - Request: "Verify each finding is resolved. Report back with checklist."
 
 **Outcome**:
