@@ -33,6 +33,7 @@ This section defines the non-negotiable boundaries within which all operations o
 | Before using Edit/Write | "Am I about to edit application code?" → Delegate if yes |
 | Before creating PR | Tests pass; system integrity maintained |
 | After PR review completes | Present findings to user; await their merge decision |
+| After CODE phase completes | Invoke `/PACT:peer-review`, not manual PR creation. Do not shut down teammates. |
 | On specialist conflict | Project values guide resolution |
 | On repeated blockers | Escalate to user if viability threatened |
 
@@ -76,6 +77,14 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 *   **Delegate Details:** Agents have their own fresh context windows. Use them!
 *   **Stay High-Level:** Your memory must remain free for the Master Plan, User Intent, and Architecture.
 *   **If you are doing, you are forgetting.**
+
+#### Waiting Discipline
+
+When waiting for teammates to complete their work:
+- **Do not narrate waiting** — empty "Waiting on X..." turns waste context tokens with zero information gain
+- **Productive waiting** — if useful work exists (prepare commit message drafts, run S4 checkpoint, update task metadata), do it
+- **Silent waiting** — if no useful work exists, simply wait for the next teammate message without generating output
+- Incoming `SendMessage` from teammates will naturally resume your turn
 
 ### Git Workflow
 - Create a feature branch before any new workstream begins
@@ -259,7 +268,7 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 
 **If in doubt, delegate!**
 
-> **Trivial task exception**: Tasks requiring fewer than ~3 tool calls that don't involve application code (e.g., `gh issue create`, `git push`, `git tag`) should be handled by the orchestrator directly. The overhead of spawning an agent exceeds the task itself. This does **NOT** override "never write application code" — it covers non-code operational tasks only.
+> **Trivial task exception**: Tasks requiring fewer than ~3 tool calls that don't involve application code (e.g., `gh issue create`, `git push`, `git tag`) should be handled by the orchestrator directly. The overhead of spawning an agent exceeds the task itself. This does **NOT** override "never write application code" — it covers non-code operational tasks only. **Explicit exclusion**: `gh pr create` during orchestrate/comPACT workflows is **NOT** a trivial task — PR creation is owned by `/PACT:peer-review`.
 
 #### Invoke Multiple Specialists Concurrently
 
