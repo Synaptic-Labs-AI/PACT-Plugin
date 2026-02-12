@@ -398,9 +398,6 @@ echo "21. Waiting Discipline guidance:"
 check_pattern "pact-plugin/CLAUDE.md" \
     "CLAUDE.md has Waiting Discipline section" \
     "Waiting Discipline"
-check_pattern "$SKILLS_DIR/pact-agent-teams/SKILL.md" \
-    "pact-agent-teams SKILL.md has idle-waiting discipline" \
-    "Idle-waiting discipline\|idle-waiting discipline\|Idle-Waiting Discipline"
 echo ""
 
 # --- Summary ---

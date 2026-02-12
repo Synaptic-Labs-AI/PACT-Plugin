@@ -71,8 +71,6 @@ When your active task is done and no follow-up tasks are available:
 - Do NOT seek new work outside your domain
 - Do NOT proactively message unless you spot a problem relevant to active work
 
-**Idle-waiting discipline**: When multiple teammates are running in parallel, avoid generating unnecessary "waiting" messages. Either do productive work (update task metadata, prepare for next steps) or wait silently for the next SendMessage.
-
 ## On Blocker
 
 If you cannot proceed:
