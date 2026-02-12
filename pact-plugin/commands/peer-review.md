@@ -147,6 +147,8 @@ Review findings: 3 blocking items
     └── Verify-only re-review (SendMessage to reviewers)
 ```
 
+> See also: S2 Coordination protocol in [pact-s2-coordination.md](../protocols/pact-s2-coordination.md)
+
 ---
 
 **PR Review Workflow**
