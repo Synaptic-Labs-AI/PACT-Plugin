@@ -1019,7 +1019,9 @@ Coders provide handoff summaries to the orchestrator, who passes them to the tes
 
 **Handoff Format**:
 ```
-1. Produced: Files created/modified
+1. Produced: Files created/modified + commit hash(es)
+   - `abc1234` feat: add validation to user endpoint
+   - Modified: src/validators/user.ts, src/routes/user.ts
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
 3. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
