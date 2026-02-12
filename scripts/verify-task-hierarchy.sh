@@ -235,6 +235,56 @@ else
 fi
 echo ""
 
+# --- Post-review remediation improvements ---
+echo "Post-review remediation improvements:"
+
+# comPACT.md: agent commit reference exists in After Specialist Completes
+check_pattern_file "$COMMANDS_DIR/comPACT.md" \
+    "comPACT has agent commit verification step" \
+    "Verify agent commits"
+
+# orchestrate.md: Post-CODE Checkpoint section exists
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate has Post-CODE Checkpoint" \
+    "Post-CODE Checkpoint"
+
+# orchestrate.md: PR creation constraint
+check_pattern_file "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate has PR creation constraint (MUST NOT)" \
+    "MUST NOT.*git push\|MUST NOT.*gh pr create"
+
+# comPACT.md: PR creation constraint
+check_pattern_file "$COMMANDS_DIR/comPACT.md" \
+    "comPACT has PR creation constraint (MUST NOT)" \
+    "MUST NOT.*git push\|MUST NOT.*gh pr create"
+
+# peer-review.md: Verify-Only Re-Review section exists
+check_pattern_file "$COMMANDS_DIR/peer-review.md" \
+    "peer-review has Verify-Only Re-Review section" \
+    "Verify-Only Re-Review"
+
+# peer-review.md: Integration Verification section exists
+check_pattern_file "$COMMANDS_DIR/peer-review.md" \
+    "peer-review has Integration Verification section" \
+    "Integration Verification"
+
+# peer-review.md: Parallel Domain-Batched Remediation named pattern
+check_pattern_file "$COMMANDS_DIR/peer-review.md" \
+    "peer-review has Parallel Domain-Batched Remediation pattern" \
+    "Parallel Domain-Batched Remediation"
+
+# comPACT.md After Specialist Completes: old orchestrator commit step removed (negative check)
+# Extract the After Specialist Completes section and verify old pattern is gone
+after_section=$(sed -n '/^## After Specialist Completes/,/^## /p' "$COMMANDS_DIR/comPACT.md" | sed '$d')
+if echo "$after_section" | grep -q "Create atomic commit"; then
+    echo "  ✗ comPACT After Specialist Completes: old 'Create atomic commit' step should be removed"
+    FAIL=$((FAIL + 1))
+else
+    echo "  ✓ comPACT After Specialist Completes: old orchestrator commit step removed"
+    PASS=$((PASS + 1))
+fi
+echo ""
+
 # --- Agent Teams integration ---
 echo "Agent Teams integration:"
 check_pattern_file "$COMMANDS_DIR/orchestrate.md" "orchestrate TeamCreate present" "TeamCreate"

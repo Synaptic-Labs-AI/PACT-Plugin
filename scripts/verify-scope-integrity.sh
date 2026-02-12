@@ -393,6 +393,26 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "SendMessage"
 echo ""
 
+# --- 21. Post-review remediation: agent commit guidance ---
+# All 5 implementation agent defs must have COMMIT CONVENTIONS section.
+echo "21. Agent commit guidance in agent definitions:"
+for agent in pact-backend-coder pact-frontend-coder pact-database-engineer pact-test-engineer pact-n8n; do
+    check_pattern "$AGENTS_DIR/$agent.md" \
+        "$agent has COMMIT CONVENTIONS section" \
+        "COMMIT CONVENTIONS"
+done
+echo ""
+
+# --- 22. Post-review remediation: SKILL.md commit conventions ---
+echo "22. pact-agent-teams SKILL.md commit conventions:"
+check_pattern "$SKILLS_DIR/pact-agent-teams/SKILL.md" \
+    "pact-agent-teams SKILL.md has Commit Conventions section" \
+    "## Commit Conventions"
+check_pattern "$SKILLS_DIR/pact-agent-teams/SKILL.md" \
+    "pact-agent-teams SKILL.md HANDOFF format includes commit hash" \
+    "commit hash"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"
