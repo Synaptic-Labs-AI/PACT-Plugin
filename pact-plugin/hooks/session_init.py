@@ -11,6 +11,7 @@ Performs:
 4. Ensures project CLAUDE.md exists with memory sections
 5. Checks for stale pinned context (delegated to staleness.py)
 6. Generates session-unique PACT team name and reminds orchestrator to create it
+6b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
 7. Checks for in_progress Tasks (resumption context via Task integration)
 
 Note: Memory-related initialization (dependency installation, embedding
@@ -23,9 +24,11 @@ Output: JSON with `hookSpecificOutput.additionalContext` for status
 """
 
 import json
+import re
 import secrets
 import sys
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -314,6 +317,11 @@ def ensure_project_memory_md() -> str | None:
 This file contains project-specific memory managed by the PACT framework.
 The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`.
 
+<!-- SESSION_START -->
+## Current Session
+<!-- Auto-managed by session_init hook. Overwritten each session. -->
+<!-- SESSION_END -->
+
 ## Retrieved Context
 <!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->
 
@@ -326,6 +334,83 @@ The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`.
         return "Created project CLAUDE.md with memory sections"
     except Exception as e:
         return f"Project CLAUDE.md failed: {str(e)[:30]}"
+
+
+def update_session_info(session_id: str, team_name: str) -> str | None:
+    """
+    Write the Current Session section to the project's CLAUDE.md.
+
+    Inserts (or overwrites) a managed section containing the session resume
+    command, team name, and start timestamp. Uses <!-- SESSION_START --> /
+    <!-- SESSION_END --> comment markers for reliable replacement across
+    sessions.
+
+    Args:
+        session_id: Full session UUID (e.g. "93cf3da0-c792-4daa-888e-...")
+        team_name: Generated team name (e.g. "PACT-93cf3da0")
+
+    Returns:
+        Status message or None if no action taken.
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir:
+        return None
+
+    target_file = Path(project_dir) / "CLAUDE.md"
+    if not target_file.exists():
+        return None
+
+    SESSION_START = "<!-- SESSION_START -->"
+    SESSION_END = "<!-- SESSION_END -->"
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    session_block = (
+        f"{SESSION_START}\n"
+        f"## Current Session\n"
+        f"<!-- Auto-managed by session_init hook. Overwritten each session. -->\n"
+        f"- Resume: `claude --resume {session_id}`\n"
+        f"- Team: `{team_name}`\n"
+        f"- Started: {timestamp}\n"
+        f"{SESSION_END}"
+    )
+
+    try:
+        content = target_file.read_text(encoding="utf-8")
+
+        # Case 1: Markers already exist — replace the block
+        if SESSION_START in content and SESSION_END in content:
+            new_content = re.sub(
+                re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END),
+                session_block,
+                content,
+                count=1,
+                flags=re.DOTALL,
+            )
+            if new_content != content:
+                target_file.write_text(new_content, encoding="utf-8")
+                return "Session info updated in project CLAUDE.md"
+            return None
+
+        # Case 2: No markers — insert before "## Retrieved Context" if present
+        insert_marker = "## Retrieved Context"
+        if insert_marker in content:
+            new_content = content.replace(
+                insert_marker,
+                session_block + "\n\n" + insert_marker,
+                1,
+            )
+        else:
+            # Fallback: append at end
+            if not content.endswith("\n"):
+                content += "\n"
+            new_content = content + "\n" + session_block + "\n"
+
+        target_file.write_text(new_content, encoding="utf-8")
+        return "Session info added to project CLAUDE.md"
+
+    except Exception as e:
+        return f"Session info failed: {str(e)[:30]}"
 
 
 def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
@@ -465,6 +550,17 @@ def main():
         # 6. Remind orchestrator to create session-unique PACT team
         team_name = generate_team_name(input_data)
         context_parts.append(f"⚠️ Once per session, run TeamCreate(team_name=\"{team_name}\") before starting any work or spawning any agents. Use the name `{team_name}` wherever `{{team_name}}` appears in commands.")
+
+        # 6b. Write session resume info to project CLAUDE.md
+        raw_id = input_data.get("session_id")
+        session_id = str(raw_id) if raw_id else os.environ.get("CLAUDE_SESSION_ID", "")
+        if session_id:
+            session_msg = update_session_info(session_id, team_name)
+            if session_msg:
+                if "failed" in session_msg.lower():
+                    system_messages.append(session_msg)
+                else:
+                    context_parts.append(session_msg)
 
         # 7. Check for in_progress Tasks (resumption context via Task integration)
         tasks = get_task_list()
