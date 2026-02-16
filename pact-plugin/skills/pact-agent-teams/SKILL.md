@@ -31,6 +31,8 @@ Common chain-reads:
 - **Test engineers** → read coder tasks for what was built and flagged uncertainties
 - **Reviewers** → read prior phase tasks for full context
 
+If TaskGet returns no metadata or the referenced task doesn't exist, proceed with information from your task description and file system artifacts (docs/architecture/, docs/preparation/).
+
 ## Progress Reporting
 
 Report progress naturally in your responses. For significant milestones, update your task metadata:
@@ -50,6 +52,7 @@ When your work is done:
      "open_questions": [...]
    }})
    ```
+   If TaskUpdate fails, include the full HANDOFF in your SendMessage content as a fallback.
 2. **Notify lead with summary only**:
    ```
    SendMessage(type="message", recipient="lead",
@@ -65,6 +68,7 @@ When your work is done:
 ### HANDOFF Format
 
 End every response with a structured HANDOFF. This is mandatory.
+This HANDOFF must ALSO be stored in task metadata (see On Completion Step 1 above). The prose version in your response ensures validate_handoff hook compatibility; the metadata version enables chain-read by downstream agents.
 
 ```
 HANDOFF:
@@ -98,6 +102,7 @@ in your task description.
 
 Keep messages actionable — state what you did/found, what they need to know, and
 any action needed from them.
+Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the lead.
 
 ## Consultant Mode
 
