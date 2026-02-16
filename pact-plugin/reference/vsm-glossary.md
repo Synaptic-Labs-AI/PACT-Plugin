@@ -58,20 +58,13 @@
 
 ### S3* — Audit Channel
 
-**VSM Definition**: A sporadic audit channel that allows S3 to directly monitor S1, bypassing S2's filters. Catches what routine coordination might miss. The "sporadic" aspect refers to unpredictability (preventing gaming), not real-time concurrent monitoring.
+**VSM Definition**: A sporadic audit channel that allows S3 to directly monitor S1, bypassing S2's filters. The unpredictability prevents S1 from gaming the audit.
 
-**In PACT**: Independent observation mechanisms:
-- **Risk-tiered testing** — Higher scrutiny for security-sensitive, novel, or complex code
-- **Mandatory uncertainty coverage** — Coder-flagged concerns MUST be tested
-- **Automated checks** — Lint, type checking, security scans (static tooling)
-- **Direct quality signals** — Test engineer reports GREEN/YELLOW/RED to orchestrator
+**In PACT**: Not currently implemented as a distinct mechanism. The TEST phase provides independent verification (different agent reviews the work), and mandatory uncertainty coverage ensures coder-flagged concerns are tested. However, TEST is sequential and predictable — it lacks the sporadic, unpredictable quality that defines Beer's S3*.
 
-**Architectural Note**: Due to Claude Code's agent isolation (agents run in separate 200K-token context windows), S3* cannot be realized as parallel real-time monitoring. Instead, PACT implements S3* through:
-1. Strengthened sequential TEST phase with risk-based rigor
-2. Mandatory coverage of uncertainty areas flagged by coders
-3. Static analysis tools that can run independently
+**Future Enhancement**: Real S3*-like behavior could include post-merge spot-checks, rotating reviewer assignments, or random independent code reviews. See the design document for exploration notes.
 
-**Key Point**: S3* is about *independent observation and ground truth*, not timing. While not achieving real-time monitoring, this sequential approach provides independent ground-truth observation. The test engineer's independence from coders (sequential execution) and mandatory uncertainty coverage approximate the audit function that S3* represents in classical VSM. In PACT's sequential model, the VSM concept of "unpredictability" (which prevents gaming the audit) is approximated through mandatory uncertainty coverage: coders cannot predict which of their flagged uncertainties the test engineer will scrutinize most heavily, preserving the audit's independence.
+**Key Point**: Independent verification is valuable regardless of label. PACT's TEST phase achieves separation of concerns between development and testing, even though it doesn't achieve the sporadic audit that S3* represents.
 
 ---
 
@@ -422,7 +415,7 @@ These terms are specific to PACT's implementation of VSM concepts.
 | S1 | Primary operations | Specialist agents |
 | S2 | Coordination between S1 units | Protocols, conflict resolution |
 | S3 | Operational control (inside-now) | Orchestrator execution mode |
-| S3* | Audit channel bypassing S2 | Independent quality observation |
+| S3* | Audit channel bypassing S2 | Not implemented; TEST provides independent verification (see entry) |
 | S4 | Intelligence (outside-future) | plan-mode, adaptation checks |
 | S5 | Policy/identity/values | User + CLAUDE.md principles |
 | Algedonic | Emergency bypass signal | HALT/ALERT to user |
