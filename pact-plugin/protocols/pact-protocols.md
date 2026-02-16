@@ -155,8 +155,6 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See `CLAUDE.md > Temporal Horizons` for the full horizon model.
-
 ### Trigger Points
 
 - After PREPARE phase completes
@@ -221,144 +219,23 @@ S4 Checkpoints complement Variety Checkpoints (see Variety Management):
 
 Both occur at phase transitions but ask different questions.
 
----
+### S3/S4 Tension Detection
 
-## S4 Environment Model
+At checkpoints, watch for tension between operational pressure (S3) and strategic caution (S4):
 
-S4 checkpoints assess whether our mental model matches reality. The **Environment Model** makes this model explicit—documenting assumptions, constraints, and context that inform decision-making.
+**Common tensions:**
+- Schedule vs Quality (skip phases vs thorough work)
+- Execute vs Investigate (code now vs understand first)
+- Commit vs Adapt (stay course vs change approach)
+- Efficiency vs Safety (parallel execution speed vs coordination overhead)
 
-### Purpose
-
-- **Make implicit assumptions explicit** — What do we assume about the tech stack, APIs, constraints?
-- **Enable divergence detection** — When reality contradicts the model, we notice faster
-- **Provide checkpoint reference** — S4 checkpoints compare current state against this baseline
-
-### When to Create
-
-| Trigger | Action |
-|---------|--------|
-| Start of PREPARE phase | Create initial environment model |
-| High-variety tasks (11+) | Required — model complexity demands explicit tracking |
-| Medium-variety tasks (7-10) | Recommended — document key assumptions |
-| Low-variety tasks (4-6) | Optional — implicit model often sufficient |
-
-### Model Contents
-
-```markdown
-# Environment Model: {Feature/Project}
-
-## Tech Stack Assumptions
-- Language: {language/version}
-- Framework: {framework/version}
-- Key dependencies: {list with version expectations}
-
-## External Dependencies
-- APIs: {list with version/availability assumptions}
-- Services: {list with status assumptions}
-- Data sources: {list with schema/format assumptions}
-
-## Constraints
-- Performance: {expected loads, latency requirements}
-- Security: {compliance requirements, auth constraints}
-- Time: {deadlines, phase durations}
-- Resources: {team capacity, compute limits}
-
-## Unknowns (Acknowledged Gaps)
-- {List areas of uncertainty}
-- {Questions that need answers}
-- {Risks that need monitoring}
-
-## Invalidation Triggers
-- If {assumption X} proves false → {response}
-- If {constraint Y} changes → {response}
-```
-
-### Location
-
-`docs/preparation/environment-model-{feature}.md`
-
-Created during PREPARE phase, referenced during S4 checkpoints.
-
-### Update Protocol
-
-| Event | Action |
-|-------|--------|
-| Assumption invalidated | Update model, note in S4 checkpoint |
-| New constraint discovered | Add to model, assess impact |
-| Unknown resolved | Move from Unknowns to appropriate section |
-| Model significantly outdated | Consider returning to PREPARE |
-
-### Relationship to S4 Checkpoints
-
-The Environment Model is the baseline against which S4 checkpoints assess:
-- "Environment shifted" → Compare current state to Environment Model
-- "Model diverged" → Assumptions in model no longer hold
-- "Plan viable" → Constraints in model still valid for current approach
-
----
-
-## S3/S4 Tension Detection and Resolution
-
-S3 (operational control) and S4 (strategic intelligence) are in constant tension. This is healthy—but unrecognized tension leads to poor decisions.
-
-### Tension Indicators
-
-S3/S4 tension exists when:
-- **Schedule vs Quality**: Pressure to skip phases vs need for thorough work
-- **Execute vs Investigate**: Urge to code vs need to understand
-- **Commit vs Adapt**: Investment in current approach vs signals to change
-- **Efficiency vs Safety**: Speed of parallel execution vs coordination overhead
-
-### Detection Phrases
-
-When you find yourself thinking:
+**Detection phrases** — if you think these, pause:
 - "We're behind, let's skip PREPARE" → S3 pushing
 - "Requirements seem unclear, we should dig deeper" → S4 pulling
 - "Let's just code it and see" → S3 shortcutting
 - "This feels risky, we should plan more" → S4 cautioning
 
-### Resolution Protocol
-
-1. **Name the tension explicitly**:
-   > "S3/S4 tension detected: [specific tension]"
-
-2. **Articulate trade-offs**:
-   > "S3 path: [action] — gains: [X], risks: [Y]"
-   > "S4 path: [action] — gains: [X], risks: [Y]"
-
-3. **Assess against project values**:
-   - Does CLAUDE.md favor speed or quality for this project?
-   - Is this a high-risk area requiring caution?
-   - What has the user expressed preference for?
-
-4. **If resolution is clear**: Decide and document
-5. **If resolution is unclear**: Escalate to user (S5)
-
-### Escalation Format
-
-When escalating S3/S4 tension to user, use S5 Decision Framing:
-
-> ⚖️ **S3/S4 Tension**: {One-line summary}
->
-> **Context**: [What's happening, why tension exists]
->
-> **Option A (S3 — Operational)**: [Action]
-> - Gains: [Benefits]
-> - Risks: [Costs]
->
-> **Option B (S4 — Strategic)**: [Action]
-> - Gains: [Benefits]
-> - Risks: [Costs]
->
-> **Recommendation**: [If you have one, with rationale]
-
-### Integration with S4 Checkpoints
-
-S4 Checkpoints are natural points to assess S3/S4 tension:
-- Checkpoint finds drift → S3 wants to continue, S4 wants to adapt → Tension
-- Checkpoint finds all-clear but behind schedule → S3 wants to skip phases, S4 wants thoroughness → Tension
-
-When a checkpoint surfaces tension, apply the Resolution Protocol above.
+**Resolution:** Name the tension, articulate trade-offs for each path, resolve based on project values. If unclear, escalate to user using S5 Decision Framing.
 
 ---
 
@@ -476,41 +353,6 @@ All agents operating in parallel must:
 | **"One agent can handle it" excuse** | Can ≠ should; missed efficiency | Capability is not justification for sequential |
 
 **Recovery**: If in doubt, default to parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
-
-### Rationalization Detection
-
-When you find yourself thinking these thoughts, STOP—you're rationalizing sequential dispatch:
-
-| Thought | Reality |
-|---------|---------|
-| "They're small tasks" | Small = cheap to invoke together. Split. |
-| "Coordination overhead" | QDCL takes 30 seconds. Split. |
-
-**Valid reasons to sequence** (cite explicitly when choosing sequential):
-- "File X is modified by both" → Sequence or define boundaries
-- "A's output feeds B's input" → Sequence them
-- "Shared interface undefined" → Define interface first, then parallel
-
-### Anti-Oscillation Protocol
-
-If agents produce contradictory outputs (each "fixing" the other's work):
-
-1. **Detect**: Outputs conflict OR agents undo each other's work
-2. **Pause**: Stop both agents immediately
-3. **Diagnose**: Root cause—technical disagreement or requirements ambiguity?
-4. **Resolve**:
-   - Technical disagreement → Architect arbitrates
-   - Requirements ambiguity → User (S5) clarifies
-5. **Document**: Note resolution in handoff for future reference
-6. **Resume**: Only after documented resolution
-
-**Detection Signals**:
-- Agent A modifies what Agent B just created
-- Both agents claim ownership of same interface
-- Output contradicts established convention
-- Repeated "fix" cycles in same file/component
-
-**Heuristic**: Consider it oscillation if the same file is modified by different agents 2+ times in rapid succession.
 
 ### Routine Information Sharing
 
