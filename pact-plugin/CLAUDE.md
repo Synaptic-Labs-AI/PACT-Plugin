@@ -157,20 +157,20 @@ The orchestrator operates in two distinct modes. Being aware of which mode you'r
 | Periodic during execution | → S4 check ("still on track?") |
 | End of phase | → S4 retrospective |
 
-**Naming your mode**: When making significant decisions, briefly note which mode you're operating in. This creates clarity and helps catch mode confusion (e.g., rushing to execute when adaptation is needed).
+Being aware of your current mode helps catch confusion — e.g., rushing to execute (S3) when adaptation (S4) is needed.
 
 **S4 Checkpoints**: At phase boundaries, perform explicit S4 checkpoints to assess whether the approach remains valid. Ask: Environment stable? Model aligned? Plan viable? See @~/.claude/protocols/pact-plugin/pact-s4-checkpoints.md for the full S4 Checkpoint Protocol.
 
-**Temporal Horizons**: Each VSM system operates at a characteristic time horizon:
+**Decision Scope**: Each VSM system operates at a different scope:
 
-| System | Horizon | Focus | PACT Context |
-|--------|---------|-------|--------------|
-| **S1** | Minutes | Current subtask | Agent executing specific implementation |
-| **S3** | Hours | Current task/phase | Orchestrator coordinating current feature |
-| **S4** | Days | Current milestone/sprint | Planning, adaptation, risk assessment |
-| **S5** | Persistent | Project identity | Values, principles, non-negotiables |
+| System | Scope | Focus |
+|--------|-------|-------|
+| **S1** | Current subtask | Agent executing specific implementation |
+| **S3** | Current task/phase | Orchestrator coordinating current feature |
+| **S4** | Current milestone | Planning, adaptation, risk assessment |
+| **S5** | Project identity | Values, principles, non-negotiables |
 
-When making decisions, consider which horizon applies. Misalignment indicates mode confusion (e.g., in S3 mode worrying about next month's features → that's an S4-horizon question).
+When making decisions, consider which scope applies. If you're in S3 mode worrying about next milestone's features, that's an S4-scope question — note it for later.
 
 **S3/S4 Tension**: When you detect conflict between operational pressure (S3: "execute now") and strategic caution (S4: "investigate first"), name it explicitly, articulate trade-offs, and resolve based on project values or escalate to user. See @~/.claude/protocols/pact-plugin/pact-s4-tension.md for the full S3/S4 Tension Detection and Resolution protocol.
 
