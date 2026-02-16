@@ -58,20 +58,13 @@
 
 ### S3* — Audit Channel
 
-**VSM Definition**: A sporadic audit channel that allows S3 to directly monitor S1, bypassing S2's filters. Catches what routine coordination might miss. The "sporadic" aspect refers to unpredictability (preventing gaming), not real-time concurrent monitoring.
+**VSM Definition**: A sporadic audit channel that allows S3 to directly monitor S1, bypassing S2's filters. The unpredictability prevents S1 from gaming the audit.
 
-**In PACT**: Independent observation mechanisms:
-- **Risk-tiered testing** — Higher scrutiny for security-sensitive, novel, or complex code
-- **Mandatory uncertainty coverage** — Coder-flagged concerns MUST be tested
-- **Automated checks** — Lint, type checking, security scans (static tooling)
-- **Direct quality signals** — Test engineer reports GREEN/YELLOW/RED to orchestrator
+**In PACT**: Not currently implemented as a distinct mechanism. The TEST phase provides independent verification (different agent reviews the work), and mandatory uncertainty coverage ensures coder-flagged concerns are tested. However, TEST is sequential and predictable — it lacks the sporadic, unpredictable quality that defines Beer's S3*.
 
-**Architectural Note**: Due to Claude Code's agent isolation (agents run in separate 200K-token context windows), S3* cannot be realized as parallel real-time monitoring. Instead, PACT implements S3* through:
-1. Strengthened sequential TEST phase with risk-based rigor
-2. Mandatory coverage of uncertainty areas flagged by coders
-3. Static analysis tools that can run independently
+**Future Enhancement**: Real S3*-like behavior could include post-merge spot-checks, rotating reviewer assignments, or random independent code reviews. See the design document for exploration notes.
 
-**Key Point**: S3* is about *independent observation and ground truth*, not timing. While not achieving real-time monitoring, this sequential approach provides independent ground-truth observation. The test engineer's independence from coders (sequential execution) and mandatory uncertainty coverage approximate the audit function that S3* represents in classical VSM. In PACT's sequential model, the VSM concept of "unpredictability" (which prevents gaming the audit) is approximated through mandatory uncertainty coverage: coders cannot predict which of their flagged uncertainties the test engineer will scrutinize most heavily, preserving the audit's independence.
+**Key Point**: Independent verification is valuable regardless of label. PACT's TEST phase achieves separation of concerns between development and testing, even though it doesn't achieve the sporadic audit that S3* represents.
 
 ---
 
@@ -136,36 +129,9 @@
 
 ---
 
-### Cohesion
-
-**VSM Definition**: The property of the whole system acting as a unified entity despite autonomous parts. Achieved through S2-S5 functions, not through eliminating S1 autonomy.
-
-**In PACT**: Maintained through:
-- S5 policy constraints (non-negotiables)
-- S2 coordination protocols (shared language, conflict resolution)
-- S3 operational management (sequencing, resource allocation)
-- Common goals and identity
-
-**Key Point**: The goal is autonomy WITH cohesion, not autonomy OR cohesion.
-
----
-
 ### Cybernetic Isomorphism
 
 See: **Recursion**
-
----
-
-### Homeostasis
-
-**VSM Definition**: The dynamic equilibrium maintained by a viable system. Not static balance, but continuous adjustment to maintain stability.
-
-**In PACT**: Maintained through:
-- S3/S4 tension (operations vs adaptation) balanced by S5
-- Feedback loops (test results, blocker reports, audit signals)
-- Variety management (matching response capacity to task complexity)
-
-**Key Point**: Homeostasis isn't the absence of change—it's stability through continuous adaptation.
 
 ---
 
@@ -278,6 +244,8 @@ These terms are specific to PACT's implementation of VSM concepts.
 
 **Key Point**: The Environment Model makes implicit assumptions explicit. S4 checkpoints compare current reality against this baseline to detect divergence.
 
+**Status**: The formal environment model artifact (`docs/preparation/environment-model-*.md`) has been retired. Key assumptions are now documented directly in HANDOFF output and checked at S4 checkpoints. The concept remains valid — the delivery mechanism changed.
+
 ---
 
 ### Decision Log
@@ -374,20 +342,20 @@ These terms are specific to PACT's implementation of VSM concepts.
 
 ---
 
-### Temporal Horizon
+### Decision Scope
 
-**Definition**: The characteristic time scale at which each VSM system operates. Different systems naturally focus on different planning and decision horizons.
+**Definition**: The characteristic scope at which each VSM system operates. Different systems naturally focus on different levels of decision-making.
 
 **In PACT**:
 
-| System | Horizon | Focus |
-|--------|---------|-------|
-| **S1** | Minutes | Current subtask (agent implementation) |
-| **S3** | Hours | Current task/phase (orchestrator coordination) |
-| **S4** | Days | Current milestone/sprint (planning, adaptation) |
-| **S5** | Persistent | Project identity (values, non-negotiables) |
+| System | Scope | Focus |
+|--------|-------|-------|
+| **S1** | Current subtask | Agent executing specific implementation |
+| **S3** | Current task/phase | Orchestrator coordinating current feature |
+| **S4** | Current milestone | Planning, adaptation, risk assessment |
+| **S5** | Project identity | Values, principles, non-negotiables |
 
-**Key Point**: When you find yourself in S3 mode asking S4-horizon questions ("will this scale next quarter?"), you're experiencing mode/horizon misalignment. Recognize it and either transition modes or note the question for later.
+**Key Point**: When making decisions, consider which scope applies. If you're in S3 mode worrying about next milestone's features, that's an S4-scope question — note it for later.
 
 ---
 
@@ -422,25 +390,23 @@ These terms are specific to PACT's implementation of VSM concepts.
 | S1 | Primary operations | Specialist agents |
 | S2 | Coordination between S1 units | Protocols, conflict resolution |
 | S3 | Operational control (inside-now) | Orchestrator execution mode |
-| S3* | Audit channel bypassing S2 | Independent quality observation |
+| S3* | Audit channel bypassing S2 | Not implemented; TEST provides independent verification (see entry) |
 | S4 | Intelligence (outside-future) | plan-mode, adaptation checks |
 | S5 | Policy/identity/values | User + CLAUDE.md principles |
 | Algedonic | Emergency bypass signal | HALT/ALERT to user |
 | Autonomy | Local adaptation authority | Agent autonomy charter |
-| Cohesion | System unity despite autonomy | Shared protocols, policy |
-| Homeostasis | Dynamic equilibrium | S3/S4 balance via S5 |
 | S3/S4 Tension | Operational vs strategic conflict | Name, trade-off, resolve/escalate |
 | Recursion | Viable systems within viable systems | Nested PACT cycles |
 | Requisite Variety | Controller needs matching complexity | Variety budget assessment |
 | Variety | Measure of complexity/possible states | Task complexity dimensions |
 | Viability | Capacity for ongoing existence | Adaptive, resilient workflow |
-| Environment Model | Explicit assumptions and constraints | `docs/preparation/environment-model-*` |
+| Environment Model | Explicit assumptions and constraints | Captured in HANDOFF output (artifact retired) |
 | Decision Log | Implementation documentation | `docs/decision-logs/` |
 | Orchestration Decision Log | S3-level orchestration audit trail | `docs/decision-logs/orchestration-*` |
 | META-BLOCK | 3+ imPACT cycles → ALERT | Escalation to user |
 | Override Protocol | HALT continuation procedure | Justified risk acceptance |
 | Research Spike | Extreme variety exploration | Pre-implementation recon |
-| Temporal Horizon | Time scale for each VSM system | S1=min, S3=hrs, S4=days, S5=persistent |
+| Decision Scope | Scope level for each VSM system | S1=subtask, S3=task, S4=milestone, S5=project |
 | Variety Score | 4-16 complexity assessment | Workflow ceremony selector |
 
 ---
