@@ -498,6 +498,8 @@ When evaluating a task, consider four dimensions:
 | **Uncertainty** | Clear requirements | Ambiguous or unknown |
 | **Risk** | Low impact if wrong | Critical impact |
 
+**Before selecting a workflow, explicitly consider all four dimensions.** A task that looks simple on scope may be high on uncertainty.
+
 ### Workflow Selection
 
 | Task Profile | Workflow |

@@ -112,6 +112,8 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 
 Before running orchestration, assess task variety using the protocol in [pact-variety.md](../protocols/pact-variety.md).
 
+**Before selecting a workflow, explicitly consider all four dimensions.** A task that looks simple on scope may be high on uncertainty.
+
 **Quick Assessment Table**:
 
 | If task appears... | Complexity | Action |
