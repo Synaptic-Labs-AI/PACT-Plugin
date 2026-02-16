@@ -680,14 +680,14 @@ def create_agent_teams_orchestrate_transcript(
             timestamp="2025-01-22T10:02:00Z",
         ))
 
-    # SendMessage handoff from coder
+    # Completion summary from coder (metadata-first HANDOFF)
     if phase in ["code", "test"]:
         lines.append(make_assistant_message(
             content=[
-                {"type": "text", "text": "Received HANDOFF from backend-coder via SendMessage."},
+                {"type": "text", "text": "Received completion summary from backend-coder. Full HANDOFF stored in task metadata."},
                 make_send_message_call(
                     recipient="lead",
-                    content="HANDOFF:\n1. Produced: src/auth.py\n2. Key decisions: Used JWT\n3. Areas of uncertainty: None\n4. Integration points: None\n5. Open questions: None",
+                    content="Task complete. Implemented auth endpoint using JWT tokens. No HIGH uncertainties.",
                     summary="Task complete: auth endpoint",
                     tool_use_id="sendmsg-handoff",
                 ),
