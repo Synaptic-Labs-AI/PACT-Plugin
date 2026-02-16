@@ -62,7 +62,7 @@
 
 **In PACT**: Not currently implemented as a distinct mechanism. The TEST phase provides independent verification (different agent reviews the work), and mandatory uncertainty coverage ensures coder-flagged concerns are tested. However, TEST is sequential and predictable — it lacks the sporadic, unpredictable quality that defines Beer's S3*.
 
-**Future Enhancement**: Real S3*-like behavior could include post-merge spot-checks, rotating reviewer assignments, or random independent code reviews. See the design document for exploration notes.
+**Future Enhancement**: Real S3*-like behavior (post-merge spot-checks, rotating reviewers, random code reviews) may be explored in future iterations.
 
 **Key Point**: Independent verification is valuable regardless of label. PACT's TEST phase achieves separation of concerns between development and testing, even though it doesn't achieve the sporadic audit that S3* represents.
 
@@ -226,25 +226,11 @@ These terms are specific to PACT's implementation of VSM concepts.
 
 ### Environment Model
 
-**Definition**: An explicit documentation of the assumptions, constraints, and context that inform S4's assessment of plan validity. Created during PREPARE phase, referenced during S4 checkpoints.
-
-**Location**: `docs/preparation/environment-model-{feature}.md`
-
-**Contents**:
-- Tech stack assumptions (language, framework, dependencies)
-- External dependencies (APIs, services, data sources)
-- Constraints (performance, security, time, resources)
-- Unknowns (acknowledged gaps, questions needing answers)
-- Invalidation triggers (what would force approach changes)
-
-**When Required**:
-- Variety 11+: Required (high complexity demands explicit tracking)
-- Variety 7-10: Recommended (document key assumptions)
-- Variety 4-6: Optional (implicit model often sufficient)
-
-**Key Point**: The Environment Model makes implicit assumptions explicit. S4 checkpoints compare current reality against this baseline to detect divergence.
+**Definition**: An explicit documentation of the assumptions, constraints, and context that inform S4's assessment of plan validity.
 
 **Status**: The formal environment model artifact (`docs/preparation/environment-model-*.md`) has been retired. Key assumptions are now documented directly in HANDOFF output and checked at S4 checkpoints. The concept remains valid — the delivery mechanism changed.
+
+**Key Point**: The Environment Model makes implicit assumptions explicit. S4 checkpoints compare current reality against this baseline to detect divergence.
 
 ---
 
