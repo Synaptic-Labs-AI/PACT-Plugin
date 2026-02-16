@@ -74,14 +74,10 @@ Save these files in a `docs/<feature-name>/preparation` folder.
    - Document identified constraints, limitations, and risks
    - Include migration guides if updating existing systems
 
-6. **Environment Model Creation** (for variety 7+ tasks)
-   - Create `docs/preparation/environment-model-{feature}.md`
-   - Document tech stack assumptions (language, framework, dependencies)
-   - List external dependencies (APIs, services, data sources)
-   - Define constraints (performance, security, time, resources)
-   - Acknowledge unknowns and questions that need answers
-   - Define invalidation triggers (what would change our approach)
-   - See [pact-s4-environment.md](../protocols/pact-s4-environment.md) for the full S4 Environment Model template
+6. **Key Assumptions Documentation**
+   - Document key assumptions (tech stack, dependencies, constraints) in your HANDOFF
+   - Flag any assumptions that, if wrong, would change the approach
+   - These will be checked at phase boundaries during S4 checkpoints
 
 **Quality Standards:**
 
