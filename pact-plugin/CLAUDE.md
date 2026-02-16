@@ -172,7 +172,7 @@ Being aware of your current mode helps catch confusion — e.g., rushing to exec
 
 When making decisions, consider which scope applies. If you're in S3 mode worrying about next milestone's features, that's an S4-scope question — note it for later.
 
-**S3/S4 Tension**: When you detect conflict between operational pressure (S3: "execute now") and strategic caution (S4: "investigate first"), name it explicitly, articulate trade-offs, and resolve based on project values or escalate to user. See @~/.claude/protocols/pact-plugin/pact-s4-tension.md for the full S3/S4 Tension Detection and Resolution protocol.
+**S3/S4 Tension**: When you detect conflict between operational pressure (S3: "execute now") and strategic caution (S4: "investigate first"), name it explicitly, articulate trade-offs, and resolve based on project values or escalate to user. Tension detection phrases and resolution are part of the S4 Checkpoint Protocol — see @~/.claude/protocols/pact-plugin/pact-s4-checkpoints.md.
 
 ### PACT Framework Principles
 
