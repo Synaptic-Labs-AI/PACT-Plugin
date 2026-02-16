@@ -113,41 +113,6 @@ All agents operating in parallel must:
 
 **Recovery**: If in doubt, default to parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
 
-### Rationalization Detection
-
-When you find yourself thinking these thoughts, STOP—you're rationalizing sequential dispatch:
-
-| Thought | Reality |
-|---------|---------|
-| "They're small tasks" | Small = cheap to invoke together. Split. |
-| "Coordination overhead" | QDCL takes 30 seconds. Split. |
-
-**Valid reasons to sequence** (cite explicitly when choosing sequential):
-- "File X is modified by both" → Sequence or define boundaries
-- "A's output feeds B's input" → Sequence them
-- "Shared interface undefined" → Define interface first, then parallel
-
-### Anti-Oscillation Protocol
-
-If agents produce contradictory outputs (each "fixing" the other's work):
-
-1. **Detect**: Outputs conflict OR agents undo each other's work
-2. **Pause**: Stop both agents immediately
-3. **Diagnose**: Root cause—technical disagreement or requirements ambiguity?
-4. **Resolve**:
-   - Technical disagreement → Architect arbitrates
-   - Requirements ambiguity → User (S5) clarifies
-5. **Document**: Note resolution in handoff for future reference
-6. **Resume**: Only after documented resolution
-
-**Detection Signals**:
-- Agent A modifies what Agent B just created
-- Both agents claim ownership of same interface
-- Output contradicts established convention
-- Repeated "fix" cycles in same file/component
-
-**Heuristic**: Consider it oscillation if the same file is modified by different agents 2+ times in rapid succession.
-
 ### Routine Information Sharing
 
 After each specialist completes work:
