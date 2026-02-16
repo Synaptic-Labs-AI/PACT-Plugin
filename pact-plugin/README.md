@@ -99,7 +99,7 @@ After installing this plugin, use these commands:
 
 ## Key Features (v2.0+)
 
-- **Variety Management**: Tasks scored on complexity; ceremony scales accordingly
+- **Variety Management**: Tasks assessed on complexity dimensions; ceremony scales accordingly
 - **Viability Sensing**: Agents emit HALT/ALERT signals for security, data, ethics issues
 - **Adaptive Workflow**: From quick fixes to full orchestration based on task complexity
 - **Risk-Tiered Testing**: Quality rigor scales with code sensitivity

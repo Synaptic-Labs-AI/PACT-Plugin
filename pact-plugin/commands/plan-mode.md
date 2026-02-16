@@ -54,13 +54,13 @@ The output—an approved plan—bridges S4 intelligence to S3 execution. When `/
 
 ---
 
-## Variety Context
+## Complexity Context
 
-plan-mode is the recommended entry point for **high-variety tasks** (variety score 11-14). It builds understanding before committing to execution.
+plan-mode is the recommended entry point for **complex tasks** — novel, uncertain, or high-risk work where upfront alignment prevents rework.
 
-If variety assessment suggests:
-- **Low/Medium variety (4-10)**: Consider recommending `/PACT:comPACT` or direct `/PACT:orchestrate` instead
-- **Extreme variety (15-16)**: Consider recommending a research spike first (run PREPARE phase alone)
+If complexity assessment suggests:
+- **Simple or moderate task**: Consider recommending `/PACT:comPACT` or direct `/PACT:orchestrate` instead
+- **Unprecedented across all dimensions**: Consider recommending a research spike first (run PREPARE phase alone)
 
 See [pact-variety.md](../protocols/pact-variety.md) for the Variety Management assessment protocol.
 

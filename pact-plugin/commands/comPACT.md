@@ -226,18 +226,18 @@ Recommend `/PACT:orchestrate` instead if:
 - Architectural decisions affect multiple components
 - Full preparation/architecture documentation is needed
 
-### Variety-Aware Escalation
+### Complexity-Aware Escalation
 
 During comPACT execution, if you discover the task is more complex than expected:
 
-| Discovery | Variety Signal | Action |
-|-----------|----------------|--------|
-| Task spans multiple domains | Medium+ (7+) | Escalate to `/PACT:orchestrate` |
-| Significant ambiguity/uncertainty | High (11+) | Escalate; may need PREPARE phase |
-| Architectural decisions required | High (11+) | Escalate; need ARCHITECT phase |
-| Higher risk than expected | High (11+) | Consider `/PACT:plan-mode` first |
+| Discovery | Complexity Signal | Action |
+|-----------|-------------------|--------|
+| Task spans multiple domains | Multi-concern | Escalate to `/PACT:orchestrate` |
+| Significant ambiguity/uncertainty | Complex | Escalate; may need PREPARE phase |
+| Architectural decisions required | Complex | Escalate; need ARCHITECT phase |
+| Higher risk than expected | Complex | Consider `/PACT:plan-mode` first |
 
-**Heuristic**: If re-assessing variety would now score Medium+ (7+), escalate.
+**Heuristic**: If the task is no longer simple and routine, escalate.
 
 **Conversely**, if the specialist reports the task is simpler than expected:
 - Note in handoff to orchestrator

@@ -86,7 +86,7 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 
 | Internal (don't show) | External (show) |
 |----------------------|-----------------|
-| Variety dimension scores, full tables | One-line summary: `Variety: Low (5) — proceeding with orchestrate` |
+| Variety analysis, full assessment | One-line summary: `Variety: Low — proceeding with orchestrate` |
 | QDCL checklist, dependency analysis | Decision only: `Invoking 2 backend coders in parallel` |
 | Phase skip reasoning details | Brief: `Skipping PREPARE/ARCHITECT (approved plan exists)` |
 
@@ -96,7 +96,7 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 
 **Exceptions warranting more detail**:
 - Error conditions, blockers, or unexpected issues — proactively explain what went wrong
-- High-variety tasks (11+) — visible reasoning helps user track complex orchestration
+- Complex tasks (novel, multi-domain, or high-risk) — visible reasoning helps user track complex orchestration
 
 | Verbose (avoid) | Concise (prefer) |
 |-----------------|------------------|
@@ -114,29 +114,29 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 
 **Quick Assessment Table**:
 
-| If task appears... | Variety Level | Action |
-|-------------------|---------------|--------|
-| Single file, one domain, routine | Low (4-6) | Offer comPACT using `AskUserQuestion` tool (see below) |
+| If task appears... | Complexity | Action |
+|-------------------|------------|--------|
+| Single file, one domain, routine | Simple | Offer comPACT using `AskUserQuestion` tool (see below) |
 | Multiple files, one domain, familiar | Low-Medium | Proceed with orchestrate, consider skipping PREPARE |
-| Multiple domains, some ambiguity | Medium (7-10) | Standard orchestrate with all phases |
-| Greenfield, architectural decisions, unknowns | High (11-14) | Recommend plan-mode first |
-| Novel technology, unclear requirements, critical stakes | Extreme (15-16) | Recommend research spike before planning |
+| Multiple domains, some ambiguity | Medium | Standard orchestrate with all phases |
+| Greenfield, architectural decisions, unknowns | Complex | Recommend plan-mode first |
+| Novel technology, unclear requirements, critical stakes | Unprecedented | Recommend research spike before planning |
 
-**Variety Dimensions** (score 1-4 each, sum for total):
-- **Novelty**: Routine (1) → Unprecedented (4)
-- **Scope**: Single concern (1) → Cross-cutting (4)
-- **Uncertainty**: Clear (1) → Unknown (4)
-- **Risk**: Low impact (1) → Critical (4)
+**Complexity Dimensions** (consider each):
+- **Novelty**: Routine → Unprecedented
+- **Scope**: Single concern → Cross-cutting
+- **Uncertainty**: Clear → Unknown
+- **Risk**: Low impact → Critical
 
-**Output format**: One-line summary only. Example: `Variety: Medium (8) — standard orchestrate with all phases`
+**Output format**: One-line summary only. Example: `Variety: Medium — standard orchestrate with all phases`
 
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
 **User override**: User can always specify their preferred workflow regardless of assessment.
 
-### Offering comPACT for Low-Variety Tasks
+### Offering comPACT for Simple Tasks
 
-When variety is Low (4-6), offer the user a choice using `AskUserQuestion` tool:
+When the task is simple and routine, offer the user a choice using `AskUserQuestion` tool:
 
 ```
 AskUserQuestion(
@@ -516,4 +516,4 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — orchestrator never merges (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **High-variety audit trail** (variety 10+ only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned
+7. **Complexity audit trail** (complex tasks only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned
