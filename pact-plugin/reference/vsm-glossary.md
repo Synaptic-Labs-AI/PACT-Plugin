@@ -342,44 +342,44 @@ These terms are specific to PACT's implementation of VSM concepts.
 
 ---
 
-### Temporal Horizon
+### Decision Scope
 
-**Definition**: The characteristic time scale at which each VSM system operates. Different systems naturally focus on different planning and decision horizons.
+**Definition**: The characteristic scope at which each VSM system operates. Different systems naturally focus on different levels of decision-making.
 
 **In PACT**:
 
-| System | Horizon | Focus |
-|--------|---------|-------|
-| **S1** | Minutes | Current subtask (agent implementation) |
-| **S3** | Hours | Current task/phase (orchestrator coordination) |
-| **S4** | Days | Current milestone/sprint (planning, adaptation) |
-| **S5** | Persistent | Project identity (values, non-negotiables) |
+| System | Scope | Focus |
+|--------|-------|-------|
+| **S1** | Current subtask | Agent executing specific implementation |
+| **S3** | Current task/phase | Orchestrator coordinating current feature |
+| **S4** | Current milestone | Planning, adaptation, risk assessment |
+| **S5** | Project identity | Values, principles, non-negotiables |
 
-**Key Point**: When you find yourself in S3 mode asking S4-horizon questions ("will this scale next quarter?"), you're experiencing mode/horizon misalignment. Recognize it and either transition modes or note the question for later.
+**Key Point**: When making decisions, consider which scope applies. If you're in S3 mode worrying about next milestone's features, that's an S4-scope question — note it for later.
 
 ---
 
-### Variety Score
+### Variety Assessment
 
-**Definition**: A 4-16 numeric assessment of task complexity used to select the appropriate workflow ceremony level.
+**Definition**: A qualitative evaluation of task complexity across four dimensions, used to select the appropriate workflow.
 
-**Dimensions** (each scored 1-4):
-| Dimension | 1 (Low) | 4 (Extreme) |
-|-----------|---------|-------------|
-| Novelty | Routine | Unprecedented |
-| Scope | Single concern | Cross-cutting |
-| Uncertainty | Clear | Unknown |
-| Risk | Low impact | Critical |
+**Dimensions**:
+| Dimension | Low | High |
+|-----------|-----|------|
+| Novelty | Routine, done before | Novel or unprecedented |
+| Scope | Single concern | Cross-cutting, many concerns |
+| Uncertainty | Clear requirements | Ambiguous or unknown |
+| Risk | Low impact if wrong | Critical impact |
 
-**Thresholds**:
-| Score | Level | Workflow |
-|-------|-------|----------|
-| 4-6 | Low | comPACT |
-| 7-10 | Medium | orchestrate |
-| 11-14 | High | plan-mode → orchestrate |
-| 15-16 | Extreme | Research spike → Reassess |
+**Workflow Selection**:
+| Task Profile | Workflow |
+|-------------|----------|
+| Simple, routine, clear, low-risk | comPACT |
+| Multi-concern, some novelty or uncertainty | orchestrate |
+| Complex, novel, uncertain, or high-risk | plan-mode → orchestrate |
+| Unprecedented across all dimensions | Research spike → Reassess |
 
-**Key Point**: Variety score guides ceremony level—higher variety needs more preparation and coordination.
+**Key Point**: Higher complexity means more preparation and coordination. The dimensions are a thinking tool, not a scoring formula.
 
 ---
 
@@ -406,8 +406,8 @@ These terms are specific to PACT's implementation of VSM concepts.
 | META-BLOCK | 3+ imPACT cycles → ALERT | Escalation to user |
 | Override Protocol | HALT continuation procedure | Justified risk acceptance |
 | Research Spike | Extreme variety exploration | Pre-implementation recon |
-| Temporal Horizon | Time scale for each VSM system | S1=min, S3=hrs, S4=days, S5=persistent |
-| Variety Score | 4-16 complexity assessment | Workflow ceremony selector |
+| Decision Scope | Scope level for each VSM system | S1=subtask, S3=task, S4=milestone, S5=project |
+| Variety Assessment | Qualitative complexity evaluation | Workflow selector (4 dimensions) |
 
 ---
 

@@ -229,7 +229,7 @@ When making decisions, consider which scope applies. If you're in S3 mode worryi
 
 ### Communication
 - Start every response with "🛠️:" to maintain consistent identity
-- **Be concise**: State decisions, not reasoning process. Internal analysis (variety scoring, QDCL, dependency checking) runs silently. Exceptions: errors and high-variety (11+) tasks warrant more visible reasoning.
+- **Be concise**: State decisions, not reasoning process. Internal analysis (variety assessment, QDCL, dependency checking) runs silently. Exceptions: errors and high-variety (11+) tasks warrant more visible reasoning.
 - Explain which PACT phase you're operating in and why
 - Reference specific principles being applied
 - Name specific specialist agents being invoked
