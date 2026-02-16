@@ -361,25 +361,25 @@ These terms are specific to PACT's implementation of VSM concepts.
 
 ### Variety Assessment
 
-**Definition**: A qualitative evaluation of task complexity across four dimensions, used to select the appropriate workflow.
+**Definition**: A numeric assessment of task complexity (4-16) used to select the appropriate workflow. Score four dimensions 1-4 each and sum.
 
-**Dimensions**:
-| Dimension | Low | High |
-|-----------|-----|------|
-| Novelty | Routine, done before | Novel or unprecedented |
-| Scope | Single concern | Cross-cutting, many concerns |
-| Uncertainty | Clear requirements | Ambiguous or unknown |
-| Risk | Low impact if wrong | Critical impact |
+**Dimensions** (each scored 1-4):
+| Dimension | 1 (Low) | 4 (Extreme) |
+|-----------|---------|-------------|
+| Novelty | Routine | Unprecedented |
+| Scope | Single concern | Cross-cutting |
+| Uncertainty | Clear | Unknown |
+| Risk | Low impact | Critical |
 
-**Workflow Selection**:
-| Task Profile | Workflow |
-|-------------|----------|
-| Simple, routine, clear, low-risk | comPACT |
-| Multi-concern, some novelty or uncertainty | orchestrate |
-| Complex, novel, uncertain, or high-risk | plan-mode → orchestrate |
-| Unprecedented across all dimensions | Research spike → Reassess |
+**Thresholds**:
+| Score | Workflow |
+|-------|----------|
+| 4-6 | comPACT |
+| 7-10 | orchestrate |
+| 11-14 | plan-mode → orchestrate |
+| 15-16 | Research spike → Reassess |
 
-**Key Point**: Higher complexity means more preparation and coordination. The dimensions are a thinking tool, not a scoring formula.
+**Key Point**: The scoring forces explicit evaluation of all four dimensions, preventing snap judgments based on a single dimension.
 
 ---
 
@@ -407,7 +407,7 @@ These terms are specific to PACT's implementation of VSM concepts.
 | Override Protocol | HALT continuation procedure | Justified risk acceptance |
 | Research Spike | Extreme variety exploration | Pre-implementation recon |
 | Decision Scope | Scope level for each VSM system | S1=subtask, S3=task, S4=milestone, S5=project |
-| Variety Assessment | Qualitative complexity evaluation | Workflow selector (4 dimensions) |
+| Variety Assessment | 4-16 complexity score (4 dimensions) | Workflow ceremony selector |
 
 ---
 

@@ -112,25 +112,23 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 
 Before running orchestration, assess task variety using the protocol in [pact-variety.md](../protocols/pact-variety.md).
 
-**Before selecting a workflow, explicitly consider all four dimensions.** A task that looks simple on scope may be high on uncertainty.
-
 **Quick Assessment Table**:
 
-| If task appears... | Complexity | Action |
-|-------------------|------------|--------|
-| Single file, one domain, routine | Simple | Offer comPACT using `AskUserQuestion` tool (see below) |
+| If task appears... | Variety Level | Action |
+|-------------------|---------------|--------|
+| Single file, one domain, routine | Low (4-6) | Offer comPACT using `AskUserQuestion` tool (see below) |
 | Multiple files, one domain, familiar | Low-Medium | Proceed with orchestrate, consider skipping PREPARE |
-| Multiple domains, some ambiguity | Medium | Standard orchestrate with all phases |
-| Greenfield, architectural decisions, unknowns | Complex | Recommend plan-mode first |
-| Novel technology, unclear requirements, critical stakes | Unprecedented | Recommend research spike before planning |
+| Multiple domains, some ambiguity | Medium (7-10) | Standard orchestrate with all phases |
+| Greenfield, architectural decisions, unknowns | High (11-14) | Recommend plan-mode first |
+| Novel technology, unclear requirements, critical stakes | Extreme (15-16) | Recommend research spike before planning |
 
-**Complexity Dimensions** (consider each):
-- **Novelty**: Routine → Unprecedented
-- **Scope**: Single concern → Cross-cutting
-- **Uncertainty**: Clear → Unknown
-- **Risk**: Low impact → Critical
+**Variety Dimensions** (score 1-4 each, sum for total):
+- **Novelty**: Routine (1) → Unprecedented (4)
+- **Scope**: Single concern (1) → Cross-cutting (4)
+- **Uncertainty**: Clear (1) → Unknown (4)
+- **Risk**: Low impact (1) → Critical (4)
 
-**Output format**: One-line summary only. Example: `Variety: Medium — standard orchestrate with all phases`
+**Output format**: One-line summary only. Example: `Variety: Medium (8) — standard orchestrate with all phases`
 
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 

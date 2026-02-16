@@ -4,25 +4,34 @@ Variety = task complexity. Assess before choosing a workflow.
 
 ### Complexity Dimensions
 
-When evaluating a task, consider four dimensions:
+Score each dimension 1-4:
 
-| Dimension | Low | High |
-|-----------|-----|------|
-| **Novelty** | Routine, done before | Novel or unprecedented |
-| **Scope** | Single concern | Cross-cutting, many concerns |
-| **Uncertainty** | Clear requirements | Ambiguous or unknown |
-| **Risk** | Low impact if wrong | Critical impact |
-
-**Before selecting a workflow, explicitly consider all four dimensions.** A task that looks simple on scope may be high on uncertainty.
+| Dimension | 1 (Low) | 2 (Medium) | 3 (High) | 4 (Extreme) |
+|-----------|---------|------------|----------|-------------|
+| **Novelty** | Routine (done before) | Familiar (similar to past) | Novel (new territory) | Unprecedented |
+| **Scope** | Single concern | Few concerns | Many concerns | Cross-cutting |
+| **Uncertainty** | Clear requirements | Mostly clear | Ambiguous | Unknown |
+| **Risk** | Low impact if wrong | Medium impact | High impact | Critical |
 
 ### Workflow Selection
 
-| Task Profile | Workflow |
-|-------------|----------|
-| Simple, routine, clear, low-risk | `/PACT:comPACT` |
-| Multi-concern, some novelty or uncertainty | `/PACT:orchestrate` |
-| Complex, novel, uncertain, or high-risk | `/PACT:plan-mode` → `/PACT:orchestrate` |
-| Unprecedented across all dimensions | Research spike → Reassess |
+Sum the four scores:
+
+| Score | Workflow |
+|-------|----------|
+| **4-6** | `/PACT:comPACT` |
+| **7-10** | `/PACT:orchestrate` |
+| **11-14** | `/PACT:plan-mode` → `/PACT:orchestrate` |
+| **15-16** | Research spike → Reassess |
+
+**Calibration Examples**:
+
+| Task | N | S | U | R | Score | Workflow |
+|------|---|---|---|---|-------|----------|
+| Add pagination to existing list endpoint | 1 | 1 | 1 | 2 | **5** | comPACT |
+| Add new CRUD endpoints following existing patterns | 1 | 2 | 1 | 2 | **6** | comPACT |
+| Implement OAuth with new identity provider | 3 | 3 | 3 | 3 | **12** | plan-mode → orchestrate |
+| Rewrite auth system with unfamiliar framework | 4 | 4 | 4 | 4 | **16** | Research spike |
 
 ### Complexity Strategies
 
