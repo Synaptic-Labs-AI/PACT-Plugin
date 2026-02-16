@@ -85,7 +85,7 @@ When waiting for teammates to complete their tasks, **do not narrate waiting** �
 
 If context was compacted, reconstruct state from the shared whiteboard:
 1. `TaskList` — see all tasks, their status, owners, and blockers
-2. `TaskGet` on in-progress/completed tasks — read HANDOFF metadata for decisions and progress
+2. `TaskGet` on tasks by priority: in-progress first (active work), then most-recent completed phase (current decisions), then earlier phases only if needed
 3. Resume orchestration from current state
 
 The Task system survives compaction. Your context window doesn't.
