@@ -129,36 +129,9 @@
 
 ---
 
-### Cohesion
-
-**VSM Definition**: The property of the whole system acting as a unified entity despite autonomous parts. Achieved through S2-S5 functions, not through eliminating S1 autonomy.
-
-**In PACT**: Maintained through:
-- S5 policy constraints (non-negotiables)
-- S2 coordination protocols (shared language, conflict resolution)
-- S3 operational management (sequencing, resource allocation)
-- Common goals and identity
-
-**Key Point**: The goal is autonomy WITH cohesion, not autonomy OR cohesion.
-
----
-
 ### Cybernetic Isomorphism
 
 See: **Recursion**
-
----
-
-### Homeostasis
-
-**VSM Definition**: The dynamic equilibrium maintained by a viable system. Not static balance, but continuous adjustment to maintain stability.
-
-**In PACT**: Maintained through:
-- S3/S4 tension (operations vs adaptation) balanced by S5
-- Feedback loops (test results, blocker reports, audit signals)
-- Variety management (matching response capacity to task complexity)
-
-**Key Point**: Homeostasis isn't the absence of change—it's stability through continuous adaptation.
 
 ---
 
@@ -270,6 +243,8 @@ These terms are specific to PACT's implementation of VSM concepts.
 - Variety 4-6: Optional (implicit model often sufficient)
 
 **Key Point**: The Environment Model makes implicit assumptions explicit. S4 checkpoints compare current reality against this baseline to detect divergence.
+
+**Status**: The formal environment model artifact (`docs/preparation/environment-model-*.md`) has been retired. Key assumptions are now documented directly in HANDOFF output and checked at S4 checkpoints. The concept remains valid — the delivery mechanism changed.
 
 ---
 
@@ -420,14 +395,12 @@ These terms are specific to PACT's implementation of VSM concepts.
 | S5 | Policy/identity/values | User + CLAUDE.md principles |
 | Algedonic | Emergency bypass signal | HALT/ALERT to user |
 | Autonomy | Local adaptation authority | Agent autonomy charter |
-| Cohesion | System unity despite autonomy | Shared protocols, policy |
-| Homeostasis | Dynamic equilibrium | S3/S4 balance via S5 |
 | S3/S4 Tension | Operational vs strategic conflict | Name, trade-off, resolve/escalate |
 | Recursion | Viable systems within viable systems | Nested PACT cycles |
 | Requisite Variety | Controller needs matching complexity | Variety budget assessment |
 | Variety | Measure of complexity/possible states | Task complexity dimensions |
 | Viability | Capacity for ongoing existence | Adaptive, resilient workflow |
-| Environment Model | Explicit assumptions and constraints | `docs/preparation/environment-model-*` |
+| Environment Model | Explicit assumptions and constraints | Captured in HANDOFF output (artifact retired) |
 | Decision Log | Implementation documentation | `docs/decision-logs/` |
 | Orchestration Decision Log | S3-level orchestration audit trail | `docs/decision-logs/orchestration-*` |
 | META-BLOCK | 3+ imPACT cycles → ALERT | Escalation to user |
