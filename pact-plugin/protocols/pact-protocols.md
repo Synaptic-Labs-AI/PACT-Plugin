@@ -227,10 +227,12 @@ At checkpoints, watch for tension between operational pressure (S3) and strategi
 - Schedule vs Quality (skip phases vs thorough work)
 - Execute vs Investigate (code now vs understand first)
 - Commit vs Adapt (stay course vs change approach)
+- Efficiency vs Safety (parallel execution speed vs coordination overhead)
 
 **Detection phrases** — if you think these, pause:
 - "We're behind, let's skip PREPARE" → S3 pushing
 - "Let's just code it and see" → S3 shortcutting
+- "Requirements seem unclear, we should dig deeper" → S4 pulling
 - "This feels risky, we should plan more" → S4 cautioning
 
 **Resolution:** Name the tension, articulate trade-offs for each path, resolve based on project values. If unclear, escalate to user using S5 Decision Framing.
