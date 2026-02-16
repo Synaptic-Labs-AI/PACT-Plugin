@@ -127,8 +127,9 @@ Invoke multiple specialists of the same type when:
 ### After Specialist Completes
 
 1. **Receive handoff** from specialist(s)
-2. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
-3. **Create atomic commit(s)** — stage and commit before proceeding
+2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
+3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
+4. **Create atomic commit(s)** — stage and commit before proceeding
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`

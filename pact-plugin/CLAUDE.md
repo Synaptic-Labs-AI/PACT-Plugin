@@ -467,7 +467,7 @@ When delegating tasks to agents, remind them of their blocker-handling protocol
 
 ### Agent Workflow
 
-**Before starting**: Create a feature branch.
+**Before starting**: Create a feature branch **in a worktree** (invoke `/PACT:worktree-setup`). All agent work targets the worktree path.
 
 **Optional**: Run `/PACT:plan-mode` first for complex tasks. Creates plan in `docs/plans/` with specialist consultation. When `/PACT:orchestrate` runs, it checks for approved plans and passes relevant sections to each phase.
 
