@@ -2,8 +2,6 @@
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See `CLAUDE.md > Temporal Horizons` for the full horizon model.
-
 ### Trigger Points
 
 - After PREPARE phase completes
@@ -67,5 +65,21 @@ S4 Checkpoints complement Variety Checkpoints (see Variety Management):
 - **S4 Checkpoints**: "Is our understanding of the situation still valid?"
 
 Both occur at phase transitions but ask different questions.
+
+### S3/S4 Tension Detection
+
+At checkpoints, watch for tension between operational pressure (S3) and strategic caution (S4):
+
+**Common tensions:**
+- Schedule vs Quality (skip phases vs thorough work)
+- Execute vs Investigate (code now vs understand first)
+- Commit vs Adapt (stay course vs change approach)
+
+**Detection phrases** — if you think these, pause:
+- "We're behind, let's skip PREPARE" → S3 pushing
+- "Let's just code it and see" → S3 shortcutting
+- "This feels risky, we should plan more" → S4 cautioning
+
+**Resolution:** Name the tension, articulate trade-offs for each path, resolve based on project values. If unclear, escalate to user using S5 Decision Framing.
 
 ---
