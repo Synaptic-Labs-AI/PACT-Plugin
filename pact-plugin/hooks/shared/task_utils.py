@@ -151,9 +151,12 @@ def find_active_agents(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "pact-backend-coder:",
         "pact-frontend-coder:",
         "pact-database-engineer:",
+        "pact-devops-engineer:",
         "pact-test-engineer:",
         "pact-memory-agent:",
         "pact-n8n:",
+        "pact-security-engineer:",
+        "pact-qa-engineer:",
     )
 
     active = []

@@ -34,9 +34,11 @@ CODE_PHASE_INDICATORS = [
     "pact-backend-coder",
     "pact-frontend-coder",
     "pact-database-engineer",
+    "pact-devops-engineer",
     "pact_backend_coder",
     "pact_frontend_coder",
     "pact_database_engineer",
+    "pact_devops_engineer",
 ]
 
 # Terms indicating decision log was mentioned or created

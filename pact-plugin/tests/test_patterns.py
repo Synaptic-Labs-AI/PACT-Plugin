@@ -429,6 +429,9 @@ class TestRegexPatternEdgeCases:
         assert PACT_AGENT_PATTERN.search("pact-preparer") is not None
         assert PACT_AGENT_PATTERN.search("pact-memory") is not None
         assert PACT_AGENT_PATTERN.search("pact-n8n") is not None
+        assert PACT_AGENT_PATTERN.search("pact-devops-engineer") is not None
+        assert PACT_AGENT_PATTERN.search("pact-security-engineer") is not None
+        assert PACT_AGENT_PATTERN.search("pact-qa-engineer") is not None
 
         # Should not match
         assert PACT_AGENT_PATTERN.search("other-agent") is None

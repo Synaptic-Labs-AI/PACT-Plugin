@@ -27,8 +27,11 @@ PACT_AGENTS = [
     "pact-backend-coder",
     "pact-frontend-coder",
     "pact-database-engineer",
+    "pact-devops-engineer",
     "pact-test-engineer",
     "pact-n8n",
+    "pact-security-engineer",
+    "pact-qa-engineer",
     "pact-memory-agent",
 ]
 
