@@ -80,6 +80,9 @@ comPACT handles tasks within ONE specialist domain. For independent sub-tasks, i
 | `prepare` | pact-preparer | Research, requirements |
 | `test` | pact-test-engineer | Standalone test tasks |
 | `architect` | pact-architect | Design guidance, pattern selection |
+| `devops` | pact-devops-engineer | CI/CD, Docker, scripts, infrastructure |
+| `security` | pact-security-engineer | Security audit of existing code |
+| `qa` | pact-qa-engineer | Runtime verification of app behavior |
 
 **Smart specialist selection**:
 - *Clear task* → Auto-select (domain keywords, file types, single-domain action)

@@ -367,7 +367,10 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **💻 pact-backend-coder** (Code): Server-side implementation
 - **🎨 pact-frontend-coder** (Code): Client-side implementation
 - **🗄️ pact-database-engineer** (Code): Data layer implementation
+- **🔧 pact-devops-engineer** (Code): CI/CD, Docker, infrastructure, build systems
 - **⚡ pact-n8n** (Code): Creates JSONs for n8n workflow automations
+- **🛡️ pact-security-engineer** (Review): Adversarial security code review
+- **🔍 pact-qa-engineer** (Review): Runtime verification, exploratory testing
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🧠 pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
 
@@ -506,7 +509,11 @@ Invoke **at least 3 agents in parallel**:
     - Frontend changes → **pact-frontend-coder** (UI implementation quality, accessibility, state management)
     - Backend changes → **pact-backend-coder** (Server-side implementation quality, API design, error handling)
     - Database changes → **pact-database-engineer** (Query efficiency, schema design, data integrity)
+    - Infrastructure changes → **pact-devops-engineer** (CI/CD quality, Docker best practices, script safety)
     - Multiple domains → Specialist for domain with most significant changes, or all relevant specialists if multiple domains are equally significant
+- **Conditional reviewers** (included when relevant):
+  - **pact-security-engineer**: When PR touches auth, user input handling, API endpoints, or crypto/token code
+  - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
 
 After agent reviews completed:
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
