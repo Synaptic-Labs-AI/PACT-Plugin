@@ -62,7 +62,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 
 ### Relationship to Variety Checkpoints
 
-S4 Checkpoints complement Variety Checkpoints (see Variety Management):
+S4 Checkpoints complement Variety Checkpoints (see [Variety Management](pact-variety.md)):
 - **Variety Checkpoints**: "Do we have enough response capacity for this complexity?"
 - **S4 Checkpoints**: "Is our understanding of the situation still valid?"
 

@@ -74,7 +74,8 @@ class TestCheckPinnedStaleness:
         """Should return None when CLAUDE.md does not exist."""
         from session_init import check_pinned_staleness
 
-        with patch("session_init._get_project_claude_md_path", return_value=None):
+        with patch("session_init._get_project_claude_md_path", return_value=None), \
+             patch("staleness._get_project_claude_md_path", return_value=None):
             result = check_pinned_staleness()
 
         assert result is None

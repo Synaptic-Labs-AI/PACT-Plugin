@@ -141,7 +141,7 @@ When you detect a viability threat (security, data integrity, ethics):
    ```
 3. Provide a partial HANDOFF with whatever work you completed
 
-These bypass normal triage. See the algedonic protocol for trigger categories and severity guidance.
+These bypass normal triage. See the [algedonic protocol](../../protocols/algedonic.md) for trigger categories and severity guidance.
 
 ## Variety Signals
 

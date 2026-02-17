@@ -266,7 +266,7 @@ See [pact-scope-contract.md](../protocols/pact-scope-contract.md) for the contra
 
 ## Relationship to Specialist Autonomy
 
-Specialists can invoke nested cycles autonomously (see Autonomy Charter).
+Specialists can invoke nested cycles autonomously (see [Autonomy Charter](../protocols/pact-s1-autonomy.md#autonomy-charter)).
 `/PACT:rePACT` is for **orchestrator-initiated** nested cycles.
 
 | Initiator | Mechanism |

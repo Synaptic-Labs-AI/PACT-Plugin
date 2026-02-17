@@ -1,6 +1,6 @@
 # PACT Framework Plugin
 
-> **Version**: 3.1.0
+> **Version**: 3.1.1
 > **License**: MIT
 
 VSM-enhanced orchestration framework for AI-assisted software development with Claude Code.
@@ -111,6 +111,6 @@ https://github.com/ProfSynapse/PACT-prompt
 
 ## Reference
 
-- pact-protocols.md - Source of truth (see granular pact-*.md files for imports)
-- `algedonic.md` - Emergency signal protocol
-- `vsm-glossary.md` - VSM terminology in PACT context
+- [pact-protocols.md](protocols/pact-protocols.md) - Source of truth (see granular pact-*.md files for imports)
+- [algedonic.md](protocols/algedonic.md) - Emergency signal protocol
+- [vsm-glossary.md](reference/vsm-glossary.md) - VSM terminology in PACT context

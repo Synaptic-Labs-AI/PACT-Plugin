@@ -18,7 +18,7 @@ All specialists must escalate when:
 
 ### Self-Coordination
 
-When working in parallel (see S2 Coordination):
+When working in parallel (see [S2 Coordination](pact-s2-coordination.md#s2-coordination-layer)):
 - Check S2 protocols before starting if multiple agents are active
 - Respect assigned file/component boundaries
 - First agent's conventions become standard for the batch

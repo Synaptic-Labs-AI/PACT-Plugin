@@ -103,7 +103,7 @@ rePACT implements the executor interface as follows:
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
 | **Input: branch** | Uses the current feature branch (no new branch created) |
 | **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
-| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see rePACT After Completion) |
+| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
 | **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
 | **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |

@@ -354,8 +354,8 @@ Use JavaScript instead when:
 ## Support
 
 **Questions?**
-- Check ERROR_PATTERNS.md for common issues
-- Review COMMON_PATTERNS.md for examples
+- Check [ERROR_PATTERNS.md](ERROR_PATTERNS.md) for common issues
+- Review [COMMON_PATTERNS.md](COMMON_PATTERNS.md) for examples
 - Consider using JavaScript instead
 
 **Related Skills**:

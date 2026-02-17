@@ -96,7 +96,7 @@ When "first agent's choice becomes standard," subsequent agents need to discover
 
 All agents operating in parallel must:
 - Use project glossary and established terminology
-- Use standardized handoff structure (see Phase Handoffs)
+- Use standardized handoff structure (see [Phase Handoffs](pact-phase-transitions.md#phase-handoffs))
 
 ### Parallelization Anti-Patterns
 
