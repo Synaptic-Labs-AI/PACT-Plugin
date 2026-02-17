@@ -359,6 +359,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - `pact-backend-coder` — server-side logic, APIs
 - `pact-frontend-coder` — UI, client-side
 - `pact-database-engineer` — schema, queries, migrations
+- `pact-devops-engineer` — CI/CD, Docker, infrastructure, build systems
 
 #### Invoke Concurrently by Default
 
