@@ -215,7 +215,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 
 ### Relationship to Variety Checkpoints
 
-S4 Checkpoints complement Variety Checkpoints (see Variety Management):
+S4 Checkpoints complement Variety Checkpoints (see [Variety Management](pact-variety.md)):
 - **Variety Checkpoints**: "Do we have enough response capacity for this complexity?"
 - **S4 Checkpoints**: "Is our understanding of the situation still valid?"
 
@@ -460,7 +460,7 @@ When "first agent's choice becomes standard," subsequent agents need to discover
 
 All agents operating in parallel must:
 - Use project glossary and established terminology
-- Use standardized handoff structure (see Phase Handoffs)
+- Use standardized handoff structure (see [Phase Handoffs](pact-phase-transitions.md#phase-handoffs))
 
 ### Parallelization Anti-Patterns
 
@@ -543,7 +543,7 @@ All specialists must escalate when:
 
 ### Self-Coordination
 
-When working in parallel (see S2 Coordination):
+When working in parallel (see [S2 Coordination](pact-s2-coordination.md#s2-coordination-layer)):
 - Check S2 protocols before starting if multiple agents are active
 - Respect assigned file/component boundaries
 - First agent's conventions become standard for the batch
@@ -785,6 +785,9 @@ comPACT handles tasks within ONE specialist domain. For independent sub-tasks, i
 | `prepare` | pact-preparer | Research, requirements |
 | `test` | pact-test-engineer | Standalone test tasks |
 | `architect` | pact-architect | Design guidance, pattern selection |
+| `devops` | pact-devops-engineer | CI/CD, Docker, scripts, infrastructure |
+| `security` | pact-security-engineer | Security audit of existing code |
+| `qa` | pact-qa-engineer | Runtime verification of app behavior |
 
 **Smart specialist selection**:
 - *Clear task* → Auto-select (domain keywords, file types, single-domain action)
@@ -832,8 +835,9 @@ Invoke multiple specialists of the same type when:
 ### After Specialist Completes
 
 1. **Receive handoff** from specialist(s)
-2. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
-3. **Create atomic commit(s)** — stage and commit before proceeding
+2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
+3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
+4. **Create atomic commit(s)** — stage and commit before proceeding
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`
@@ -1249,7 +1253,7 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 ### Bypass Rules
 
-- **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes). Scoped sub-scopes cannot themselves trigger scope detection -- this bypass rule is the primary architectural mechanism; the 1-level nesting limit (see S1 Autonomy & Recursion constraints) serves as the safety net.
+- **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes). Scoped sub-scopes cannot themselves trigger scope detection -- this bypass rule is the primary architectural mechanism; the 1-level nesting limit (see [S1 Autonomy & Recursion](pact-s1-autonomy.md#s1-autonomy--recursion)) serves as the safety net.
 - **comPACT** bypasses scope detection entirely — it is inherently single-domain
 - **Manual `/rePACT`** bypasses detection — user has already decided to decompose
 
