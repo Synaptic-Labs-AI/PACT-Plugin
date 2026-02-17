@@ -4,7 +4,7 @@
 
 ## What is PACT?
 
-PACT turns a single AI assistant into **8 specialist agents** that work together systematically:
+PACT turns a single AI assistant into **11 specialist agents** that work together systematically:
 
 | Agent | Role |
 |-------|------|
@@ -13,8 +13,11 @@ PACT turns a single AI assistant into **8 specialist agents** that work together
 | **Backend Coder** | Implement server-side logic |
 | **Frontend Coder** | Build user interfaces |
 | **Database Engineer** | Design schemas, optimize queries |
+| **DevOps Engineer** | CI/CD, Docker, infrastructure, build systems |
 | **n8n Specialist** | Build workflow automations |
 | **Test Engineer** | Write comprehensive tests |
+| **Security Engineer** | Adversarial security code review |
+| **QA Engineer** | Runtime verification, exploratory testing |
 | **Memory Agent** | Persist context, recover from compaction |
 
 Instead of "vibe coding" (letting AI guess), PACT ensures **preparation before coding**, **architecture before implementation**, and **testing as integral**.
@@ -268,7 +271,7 @@ PACT-prompt/
 ├── pact-plugin/                # Plugin source (canonical)
 │   ├── .claude-plugin/
 │   │   └── plugin.json         # Plugin definition
-│   ├── agents/                 # 8 specialist agents
+│   ├── agents/                 # 11 specialist agents
 │   ├── commands/               # 8 PACT workflow commands
 │   ├── skills/                 # 13 domain knowledge skills
 │   ├── hooks/                  # Automation hooks
