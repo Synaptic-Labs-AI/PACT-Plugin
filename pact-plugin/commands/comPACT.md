@@ -65,9 +65,9 @@ If the first word isn't a recognized shorthand, treat the entire argument as the
   - Test: Jest, test, spec, coverage
   - Prepare: research, investigate, requirements, explore, compare
   - Architect: pattern, singleton, factory, structure, architecture
-  - DevOps: CI/CD, Docker, Dockerfile, pipeline, deploy, infrastructure, Terraform, Makefile
-  - Security: vulnerability, CVE, injection, XSS, auth bypass, security audit
-  - QA: runtime, exploratory, browser, Playwright, visual, smoke test, manual test
+  - DevOps: CI/CD, Docker, Dockerfile, pipeline, deploy, infrastructure, Terraform, Makefile, GitHub Actions, workflow, container, Pulumi, CloudFormation
+  - Security: vulnerability, CVE, injection, XSS, auth bypass, security audit, penetration, OWASP, secrets, credential
+  - QA: runtime, exploratory, browser, Playwright, visual, smoke test, manual test, visual regression, user flow
 - Task mentions specific file types (.tsx, .jsx, .sql, .spec.ts, .yml, .yaml, Dockerfile, .sh, etc.)
 - Proceed immediately: "Delegating to [specialist]..."
 

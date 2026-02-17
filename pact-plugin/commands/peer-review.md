@@ -109,7 +109,10 @@ Standard reviewer combination (always included):
 - **Domain specialist coder** (selected below): Implementation quality specific to the domain
 
 Conditional reviewers (included when relevant):
-- **pact-security-engineer**: When PR touches auth/authorization, user input handling, API endpoints, data serialization, or crypto/token code
+- **pact-security-engineer**: When PR touches auth/authorization, user input handling, API endpoints, data serialization, or crypto/token code. File-pattern heuristics:
+  - Path segments: `auth`, `login`, `password`, `token`, `encrypt`, `crypto`, `session`, `permission`, `middleware/auth`, `security`
+  - Input handling: files processing user input, form data, request bodies, query parameters
+  - Config: files with CORS settings, CSP headers, security headers, secrets management
 - **pact-qa-engineer**: When project has a runnable dev server and PR includes UI or user-facing changes
 
 Select the domain coder based on PR focus:
