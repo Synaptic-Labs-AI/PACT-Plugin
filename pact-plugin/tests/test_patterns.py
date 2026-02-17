@@ -553,9 +553,9 @@ class TestAgentListConsistency:
             "pact-database-engineer",
             "pact-devops-engineer",
             "pact-n8n",
+            "pact-test-engineer",
             "pact-security-engineer",
             "pact-qa-engineer",
-            "pact-test-engineer",
             "pact-memory-agent",
         ]
         assert PACT_AGENTS == lifecycle_order, (
@@ -574,9 +574,9 @@ class TestAgentListConsistency:
             "pact-database-engineer",
             "pact-devops-engineer",
             "pact-n8n",
+            "pact-test-engineer",
             "pact-security-engineer",
             "pact-qa-engineer",
-            "pact-test-engineer",
         ]
         assert PACT_WORK_AGENTS == lifecycle_order_no_memory, (
             f"PACT_WORK_AGENTS not in lifecycle order.\n"

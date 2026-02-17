@@ -29,9 +29,9 @@ PACT_AGENTS = [
     "pact-database-engineer",
     "pact-devops-engineer",
     "pact-n8n",
+    "pact-test-engineer",
     "pact-security-engineer",
     "pact-qa-engineer",
-    "pact-test-engineer",
     "pact-memory-agent",
 ]
 
