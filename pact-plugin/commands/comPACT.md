@@ -1,6 +1,6 @@
 ---
 description: Delegate within a single domain—concurrent agents for independent sub-tasks
-argument-hint: [backend|frontend|database|prepare|test|architect] <task>
+argument-hint: [backend|frontend|database|prepare|test|architect|devops|security|qa] <task>
 ---
 Delegate this focused task within a single PACT domain: $ARGUMENTS
 
@@ -49,6 +49,9 @@ Create a simpler Task hierarchy than full orchestrate:
 | `prepare` | pact-preparer | Research, requirements gathering |
 | `test` | pact-test-engineer | Standalone test tasks |
 | `architect` | pact-architect | Design guidance, pattern selection |
+| `devops` | pact-devops-engineer | CI/CD, Docker, scripts, infrastructure |
+| `security` | pact-security-engineer | Security audit of existing code |
+| `qa` | pact-qa-engineer | Runtime verification of app behavior |
 
 ### If specialist not specified or unrecognized
 
@@ -62,7 +65,10 @@ If the first word isn't a recognized shorthand, treat the entire argument as the
   - Test: Jest, test, spec, coverage
   - Prepare: research, investigate, requirements, explore, compare
   - Architect: pattern, singleton, factory, structure, architecture
-- Task mentions specific file types (.tsx, .jsx, .sql, .spec.ts, etc.)
+  - DevOps: CI/CD, Docker, Dockerfile, pipeline, deploy, infrastructure, Terraform, Makefile
+  - Security: vulnerability, CVE, injection, XSS, auth bypass, security audit
+  - QA: runtime, exploratory, browser, Playwright, visual, smoke test, manual test
+- Task mentions specific file types (.tsx, .jsx, .sql, .spec.ts, .yml, .yaml, Dockerfile, .sh, etc.)
 - Proceed immediately: "Delegating to [specialist]..."
 
 **Ask when ambiguous**:

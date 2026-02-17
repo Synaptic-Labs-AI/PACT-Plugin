@@ -1,6 +1,6 @@
 ---
 description: Recursive nested PACT cycle for complex sub-tasks
-argument-hint: [backend|frontend|database|prepare|test|architect] <sub-task description>
+argument-hint: [backend|frontend|database|prepare|test|architect|devops|security|qa] <sub-task description>
 ---
 Run a recursive PACT cycle for this sub-task: $ARGUMENTS
 
@@ -113,6 +113,9 @@ This runs a mini-orchestration:
 | `prepare` | pact-preparer | Research-only nested cycles |
 | `test` | pact-test-engineer | Test infrastructure sub-tasks |
 | `architect` | pact-architect | Design-only nested cycles |
+| `devops` | pact-devops-engineer | Infrastructure sub-components |
+| `security` | pact-security-engineer | Security review nested cycles |
+| `qa` | pact-qa-engineer | Runtime verification sub-tasks |
 
 **If no specialist specified**: Assess the sub-task and determine which specialists are needed (multi-domain mode).
 
