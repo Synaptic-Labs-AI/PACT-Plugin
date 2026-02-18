@@ -6,9 +6,6 @@ description: |
 color: "#DC143C"
 permissionMode: acceptEdits
 memory: user
-maxTurns: 20
-disallowedTools:
-  - Task
 skills:
   - pact-agent-teams
 ---

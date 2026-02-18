@@ -29,7 +29,6 @@ description: |
 color: "#708090"
 permissionMode: acceptEdits
 memory: user
-maxTurns: 20
 skills:
   - pact-agent-teams
 ---
