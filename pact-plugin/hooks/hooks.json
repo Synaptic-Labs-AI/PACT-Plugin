@@ -52,6 +52,15 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/team_guard.py\""
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree_guard.py\""
+          }
+        ]
       }
     ],
     "SubagentStop": [
@@ -64,6 +73,17 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_enforce.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "pact-preparer|pact-architect|pact-backend-coder|pact-frontend-coder|pact-database-engineer|pact-devops-engineer|pact-n8n|pact-test-engineer|pact-security-engineer|pact-qa-engineer|pact-memory-agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/peer_inject.py\""
           }
         ]
       }
@@ -96,6 +116,16 @@
         ]
       }
     ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/handoff_gate.py\""
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit",
@@ -107,6 +137,10 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_size_check.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_tracker.py\""
           }
         ]
       },
@@ -120,6 +154,10 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_size_check.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_tracker.py\""
           }
         ]
       }
