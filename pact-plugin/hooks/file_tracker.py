@@ -102,7 +102,7 @@ def check_conflict(
 
 
 def main():
-    team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "")
+    team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
     if not team_name:
         sys.exit(0)
 

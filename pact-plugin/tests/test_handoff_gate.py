@@ -161,7 +161,7 @@ class TestReadTaskMetadata:
     def test_reads_metadata_from_team_dir(self, tmp_path):
         from handoff_gate import read_task_metadata
 
-        team_dir = tmp_path / "PACT-test"
+        team_dir = tmp_path / "pact-test"
         team_dir.mkdir(parents=True)
         task_data = {
             "subject": "test task",
@@ -169,7 +169,7 @@ class TestReadTaskMetadata:
         }
         (team_dir / "42.json").write_text(json.dumps(task_data))
 
-        result = read_task_metadata("42", "PACT-test", tasks_base_dir=str(tmp_path))
+        result = read_task_metadata("42", "pact-test", tasks_base_dir=str(tmp_path))
 
         assert "handoff" in result
         assert result["handoff"]["produced"] == ["src/auth.ts"]
@@ -177,24 +177,24 @@ class TestReadTaskMetadata:
     def test_returns_empty_for_missing_task(self, tmp_path):
         from handoff_gate import read_task_metadata
 
-        result = read_task_metadata("999", "PACT-test", tasks_base_dir=str(tmp_path))
+        result = read_task_metadata("999", "pact-test", tasks_base_dir=str(tmp_path))
 
         assert result == {}
 
     def test_returns_empty_for_empty_task_id(self):
         from handoff_gate import read_task_metadata
 
-        result = read_task_metadata("", "PACT-test")
+        result = read_task_metadata("", "pact-test")
         assert result == {}
 
     def test_returns_empty_for_corrupted_json(self, tmp_path):
         from handoff_gate import read_task_metadata
 
-        team_dir = tmp_path / "PACT-test"
+        team_dir = tmp_path / "pact-test"
         team_dir.mkdir(parents=True)
         (team_dir / "42.json").write_text("not valid json{{{")
 
-        result = read_task_metadata("42", "PACT-test", tasks_base_dir=str(tmp_path))
+        result = read_task_metadata("42", "pact-test", tasks_base_dir=str(tmp_path))
 
         assert result == {}
 
@@ -206,7 +206,7 @@ class TestReadTaskMetadata:
         task_data = {"metadata": {"handoff": VALID_HANDOFF}}
         (tmp_path / "42.json").write_text(json.dumps(task_data))
 
-        result = read_task_metadata("42", "PACT-nonexistent", tasks_base_dir=str(tmp_path))
+        result = read_task_metadata("42", "pact-nonexistent", tasks_base_dir=str(tmp_path))
 
         assert "handoff" in result
 
@@ -221,7 +221,7 @@ class TestMainEntryPoint:
             "task_id": "1",
             "task_subject": "CODE: auth",
             "teammate_name": "backend-coder",
-            "team_name": "PACT-test"
+            "team_name": "pact-test"
         })
 
         with patch("handoff_gate.read_task_metadata", return_value={"handoff": VALID_HANDOFF}), \
@@ -238,7 +238,7 @@ class TestMainEntryPoint:
             "task_id": "1",
             "task_subject": "CODE: auth",
             "teammate_name": "backend-coder",
-            "team_name": "PACT-test"
+            "team_name": "pact-test"
         })
 
         with patch("handoff_gate.read_task_metadata", return_value={}), \

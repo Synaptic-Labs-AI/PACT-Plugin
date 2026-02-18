@@ -1,6 +1,6 @@
 # PACT Framework Plugin
 
-> **Version**: 3.3.1
+> **Version**: 3.3.2
 > **License**: MIT
 
 VSM-enhanced orchestration framework for AI-assisted software development with Claude Code.

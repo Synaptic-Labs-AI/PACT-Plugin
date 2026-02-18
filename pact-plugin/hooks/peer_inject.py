@@ -80,7 +80,7 @@ def main():
 
     agent_type = input_data.get("agent_type", "")
     agent_name = input_data.get("agent_name", "") or input_data.get("agent_id", "")
-    team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "")
+    team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
 
     context = get_peer_context(
         agent_type=agent_type,

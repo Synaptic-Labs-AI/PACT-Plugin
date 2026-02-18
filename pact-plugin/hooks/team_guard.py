@@ -31,6 +31,7 @@ def check_team_exists(tool_input: dict, teams_dir: str | None = None) -> str | N
     team_name = tool_input.get("team_name")
     if not team_name:
         return None  # No team_name = not a team dispatch, allow
+    team_name = team_name.lower()
 
     if teams_dir is None:
         teams_dir = str(Path.home() / ".claude" / "teams")

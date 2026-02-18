@@ -69,14 +69,14 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
 
     Uses the first 8 characters of the session_id from the SessionStart hook
     input (or CLAUDE_SESSION_ID env var) to create a unique team name like
-    "PACT-0001639f". Falls back to a random 8-character hex suffix if neither
+    "pact-0001639f". Falls back to a random 8-character hex suffix if neither
     source provides a session_id.
 
     Args:
         input_data: Parsed JSON from stdin (SessionStart hook input)
 
     Returns:
-        Team name string like "PACT-0001639f"
+        Team name string like "pact-0001639f"
     """
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else os.environ.get("CLAUDE_SESSION_ID", "")
@@ -84,7 +84,7 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
         suffix = session_id[:8]
     else:
         suffix = secrets.token_hex(4)
-    return f"PACT-{suffix}"
+    return f"pact-{suffix}"
 
 
 def setup_plugin_symlinks() -> str | None:

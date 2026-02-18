@@ -132,11 +132,11 @@ class TestMainEntryPoint:
         })
 
         tracking_path = str(tmp_path / "file-edits.json")
-        teams_dir = tmp_path / "PACT-test"
+        teams_dir = tmp_path / "pact-test"
         teams_dir.mkdir(parents=True)
 
         env = {
-            "CLAUDE_CODE_TEAM_NAME": "PACT-test",
+            "CLAUDE_CODE_TEAM_NAME": "pact-test",
             "CLAUDE_CODE_AGENT_NAME": "backend-coder",
         }
 
@@ -152,7 +152,7 @@ class TestMainEntryPoint:
     def test_main_exits_0_on_invalid_json(self):
         from file_tracker import main
 
-        env = {"CLAUDE_CODE_TEAM_NAME": "PACT-test"}
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
         with patch.dict("os.environ", env, clear=True), \
              patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
@@ -165,7 +165,7 @@ class TestMainEntryPoint:
 
         input_data = json.dumps({"tool_input": {}})
 
-        env = {"CLAUDE_CODE_TEAM_NAME": "PACT-test"}
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
         with patch.dict("os.environ", env, clear=True), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -182,7 +182,7 @@ class TestMainEntryPoint:
         })
 
         env = {
-            "CLAUDE_CODE_TEAM_NAME": "PACT-test",
+            "CLAUDE_CODE_TEAM_NAME": "pact-test",
             "CLAUDE_CODE_AGENT_NAME": "frontend-coder",
         }
 

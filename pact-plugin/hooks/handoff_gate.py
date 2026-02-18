@@ -137,7 +137,7 @@ def main():
     task_id = input_data.get("task_id", "")
     task_subject = input_data.get("task_subject", "")
     teammate_name = input_data.get("teammate_name")
-    team_name = input_data.get("team_name") or os.environ.get("CLAUDE_CODE_TEAM_NAME", "")
+    team_name = (input_data.get("team_name") or os.environ.get("CLAUDE_CODE_TEAM_NAME", "")).lower()
 
     # TaskCompleted input doesn't include metadata — read from task file
     task_metadata = read_task_metadata(task_id, team_name)

@@ -29,7 +29,7 @@ class TestPeerInject:
     def test_injects_peer_names(self, tmp_path):
         from peer_inject import get_peer_context
 
-        team_dir = tmp_path / "teams" / "PACT-test"
+        team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
         config = {
             "members": [
@@ -42,7 +42,7 @@ class TestPeerInject:
 
         result = get_peer_context(
             agent_type="pact-backend-coder",
-            team_name="PACT-test",
+            team_name="pact-test",
             teams_dir=str(tmp_path / "teams")
         )
 
@@ -53,7 +53,7 @@ class TestPeerInject:
     def test_excludes_spawning_agent(self, tmp_path):
         from peer_inject import get_peer_context
 
-        team_dir = tmp_path / "teams" / "PACT-test"
+        team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
         config = {
             "members": [
@@ -65,7 +65,7 @@ class TestPeerInject:
 
         result = get_peer_context(
             agent_type="pact-architect",
-            team_name="PACT-test",
+            team_name="pact-test",
             teams_dir=str(tmp_path / "teams")
         )
 
@@ -77,7 +77,7 @@ class TestPeerInject:
 
         result = get_peer_context(
             agent_type="pact-backend-coder",
-            team_name="PACT-nonexistent",
+            team_name="pact-nonexistent",
             teams_dir=str(tmp_path / "teams")
         )
 
@@ -86,7 +86,7 @@ class TestPeerInject:
     def test_alone_message_when_only_member(self, tmp_path):
         from peer_inject import get_peer_context
 
-        team_dir = tmp_path / "teams" / "PACT-test"
+        team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
         config = {
             "members": [
@@ -97,7 +97,7 @@ class TestPeerInject:
 
         result = get_peer_context(
             agent_type="pact-backend-coder",
-            team_name="PACT-test",
+            team_name="pact-test",
             teams_dir=str(tmp_path / "teams")
         )
 
@@ -118,13 +118,13 @@ class TestPeerInject:
         """Corrupted config.json should return None gracefully."""
         from peer_inject import get_peer_context
 
-        team_dir = tmp_path / "teams" / "PACT-test"
+        team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text("not valid json{{{")
 
         result = get_peer_context(
             agent_type="pact-backend-coder",
-            team_name="PACT-test",
+            team_name="pact-test",
             teams_dir=str(tmp_path / "teams")
         )
 
@@ -143,7 +143,7 @@ class TestMainEntryPoint:
 
         peer_context = "Active teammates on your team: frontend-coder"
         with patch("peer_inject.get_peer_context", return_value=peer_context), \
-             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "PACT-test"}), \
+             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -157,7 +157,7 @@ class TestMainEntryPoint:
     def test_main_exits_0_on_invalid_json(self):
         from peer_inject import main
 
-        with patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "PACT-test"}), \
+        with patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
              patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -182,7 +182,7 @@ class TestMainEntryPoint:
         input_data = json.dumps({"agent_type": "pact-backend-coder"})
 
         with patch("peer_inject.get_peer_context", return_value=None), \
-             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "PACT-test"}), \
+             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
