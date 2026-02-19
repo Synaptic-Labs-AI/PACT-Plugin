@@ -11,6 +11,7 @@ Tests cover:
 """
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -157,14 +158,29 @@ class TestSessionPrefix:
         with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/home/user/my-project"}):
             assert _get_project_name() == "my-project"
 
-    def test_get_project_name_fallback(self):
-        """Should return 'unknown' when CLAUDE_PROJECT_DIR is not set."""
-        with patch.dict("os.environ", {}, clear=True):
-            assert _get_project_name() == "unknown"
+    def test_get_project_name_fallback_to_cwd(self):
+        """Should fall back to cwd basename when CLAUDE_PROJECT_DIR is not set."""
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("os.getcwd", return_value="/home/user/fallback-project"):
+            assert _get_project_name() == "fallback-project"
 
     def test_get_project_name_empty_string(self):
-        """Should return 'unknown' when CLAUDE_PROJECT_DIR is empty."""
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": ""}):
+        """Should fall back to cwd when CLAUDE_PROJECT_DIR is empty."""
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": ""}, clear=True), \
+             patch("os.getcwd", return_value="/home/user/my-cwd-project"):
+            assert _get_project_name() == "my-cwd-project"
+
+    def test_get_project_name_cwd_fallback(self):
+        """Should return cwd basename when CLAUDE_PROJECT_DIR is not set."""
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("os.getcwd", return_value="/tmp/some-project"):
+            assert _get_project_name() == "some-project"
+
+    def test_get_project_name_cwd_is_home(self):
+        """Should return 'unknown' when cwd is the home directory."""
+        home = os.path.expanduser("~")
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("os.getcwd", return_value=home):
             assert _get_project_name() == "unknown"
 
     def test_prepend_session_prefix(self):
@@ -174,8 +190,10 @@ class TestSessionPrefix:
         assert result == "<b>[MyApp]</b>\nHello world"
 
     def test_prepend_session_prefix_unknown(self):
-        """Should use 'unknown' when project dir not set."""
-        with patch.dict("os.environ", {}, clear=True):
+        """Should use 'unknown' when project dir not set and cwd is home."""
+        home = os.path.expanduser("~")
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("os.getcwd", return_value=home):
             result = _prepend_session_prefix("Hello")
         assert result == "<b>[unknown]</b>\nHello"
 
