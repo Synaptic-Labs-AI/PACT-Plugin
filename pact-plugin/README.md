@@ -77,7 +77,7 @@ After restart, test with:
 | Component | Description |
 |-----------|-------------|
 | **11 Specialist Agents** | Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test Engineer, Security Engineer, QA Engineer, Memory Agent |
-| **8 Commands** | orchestrate, comPACT, rePACT, plan-mode, imPACT, peer-review, pin-memory, wrap-up |
+| **9 Commands** | orchestrate, comPACT, rePACT, plan-mode, imPACT, peer-review, pin-memory, wrap-up, telegram-setup |
 | **13 Skills** | Domain knowledge for architecture, coding, testing, security, n8n workflows |
 | **Protocols** | VSM-based coordination, algedonic signals, variety management |
 
@@ -103,6 +103,31 @@ After installing this plugin, use these commands:
 - **Viability Sensing**: Agents emit HALT/ALERT signals for security, data, ethics issues
 - **Adaptive Workflow**: From quick fixes to full orchestration based on task complexity
 - **Risk-Tiered Testing**: Quality rigor scales with code sensitivity
+
+## Telegram Bridge
+
+PACT includes an optional Telegram integration that lets you interact with Claude Code sessions from your phone. The bridge runs as an MCP server and provides three tools:
+
+| Tool | Description |
+|------|-------------|
+| `telegram_notify` | Send a one-way notification (supports HTML/Markdown formatting) |
+| `telegram_ask` | Send a blocking question with optional inline keyboard buttons; supports text and voice replies |
+| `telegram_status` | Health check showing connection status, mode, uptime, and feature availability |
+
+**Key capabilities:**
+- Session prefix (`[ProjectName]`) on all messages for multi-session support
+- Voice note transcription via OpenAI Whisper (optional)
+- Inline keyboard buttons for quick-reply options on `telegram_ask`
+- Rate limiting and concurrent question caps for safety
+- Passive mode (tools available but no automatic notifications) or active mode
+
+### Quick Setup
+
+```
+/PACT:telegram-setup
+```
+
+This interactive command walks you through creating a Telegram bot, detecting your chat ID, and registering the MCP server. See [telegram-setup.md](commands/telegram-setup.md) for full details.
 
 ## Documentation
 

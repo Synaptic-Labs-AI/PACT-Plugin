@@ -148,6 +148,7 @@ Then use natural language or commands:
 | `/PACT:peer-review` | Commit, PR, multi-agent review | Ready to merge |
 | `/PACT:pin-memory` | Pin critical context permanently | Gotchas, key decisions to preserve |
 | `/PACT:wrap-up` | End-of-session cleanup | Ending a work session |
+| `/PACT:telegram-setup` | Set up Telegram notifications | Interact with sessions from mobile |
 
 ### comPACT Examples
 
@@ -218,6 +219,20 @@ memory.search("rate limiting")
 - Auto-prompts to save after significant work
 
 **Storage:** `~/.claude/pact-memory/` (persists across projects)
+
+---
+
+## Telegram Bridge (Optional)
+
+Stay connected to your Claude Code sessions from Telegram. The bridge runs as an MCP server and provides three tools:
+
+- **`telegram_notify`** -- Send one-way notifications (HTML/Markdown)
+- **`telegram_ask`** -- Ask a blocking question with inline keyboard buttons; accepts text or voice replies
+- **`telegram_status`** -- Health check (connection, uptime, voice availability)
+
+Messages are prefixed with `[ProjectName]` so you can track multiple sessions. Voice replies are transcribed via OpenAI Whisper (optional).
+
+**Setup:** Run `/PACT:telegram-setup` and follow the interactive prompts. See [telegram-setup.md](pact-plugin/commands/telegram-setup.md) for details.
 
 ---
 
