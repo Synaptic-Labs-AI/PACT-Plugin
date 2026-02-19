@@ -64,6 +64,59 @@ def is_application_code(file_path: str) -> bool:
     return suffix in APP_CODE_EXTENSIONS
 
 
+def _suggest_worktree_path(file_path: str, worktree_path: str) -> str | None:
+    """
+    Compute the corrected worktree path for a file outside the worktree.
+
+    Attempts to find the project root by looking for common root indicators,
+    then replaces that prefix with the worktree path.
+
+    Args:
+        file_path: Path of the file being edited (outside worktree)
+        worktree_path: Active worktree path
+
+    Returns:
+        Suggested corrected path, or None if unable to compute
+    """
+    try:
+        resolved_file = str(Path(file_path).resolve())
+        resolved_worktree = str(Path(worktree_path).resolve())
+
+        # The worktree is typically at <project>/.worktrees/<branch>
+        # The project root is the parent of .worktrees
+        worktree_p = Path(resolved_worktree)
+        # Walk up to find .worktrees parent (project root)
+        for parent in worktree_p.parents:
+            worktrees_dir = parent / ".worktrees"
+            if worktrees_dir.is_dir() or str(worktree_p).startswith(str(parent / ".worktrees")):
+                project_root = str(parent)
+                if resolved_file.startswith(project_root + "/"):
+                    relative = resolved_file[len(project_root) + 1:]
+                    return str(Path(resolved_worktree) / relative)
+                break
+
+        # Fallback: try to find common path segments between file and worktree
+        # If worktree is /a/b/.worktrees/feat/x and file is /a/b/src/foo.py,
+        # the relative part after the common ancestor is src/foo.py
+        file_parts = Path(resolved_file).parts
+        wt_parts = Path(resolved_worktree).parts
+        # Find longest common prefix
+        common_len = 0
+        for i, (fp, wp) in enumerate(zip(file_parts, wt_parts)):
+            if fp == wp:
+                common_len = i + 1
+            else:
+                break
+
+        if common_len > 0:
+            relative = str(Path(*file_parts[common_len:]))
+            return str(Path(resolved_worktree) / relative)
+    except (ValueError, OSError):
+        pass
+
+    return None
+
+
 def check_worktree_boundary(file_path: str, worktree_path: str) -> str | None:
     """
     Check if a file edit is within the worktree boundary.
@@ -93,11 +146,14 @@ def check_worktree_boundary(file_path: str, worktree_path: str) -> str | None:
 
     # Outside worktree — only block if it's application code
     if is_application_code(file_path):
-        return (
-            f"File is outside worktree boundary: {file_path}\n"
-            f"Expected prefix: {worktree_path}\n"
-            f"Edit application code only within the worktree."
+        suggestion = _suggest_worktree_path(file_path, worktree_path)
+        msg = (
+            f"Edit blocked: {file_path} is outside the active worktree "
+            f"at {worktree_path}."
         )
+        if suggestion:
+            msg += f"\nDid you mean: {suggestion}"
+        return msg
 
     return None  # Non-app-code outside worktree is fine
 
