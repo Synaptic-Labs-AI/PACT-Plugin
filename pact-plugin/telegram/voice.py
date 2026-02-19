@@ -24,7 +24,9 @@ Security controls:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import tempfile
 from pathlib import Path
 
@@ -155,6 +157,12 @@ class VoiceTranscriber:
         Raises:
             VoiceTranscriptionError: If download fails or file exceeds size limit.
         """
+        # Validate file_path to prevent path traversal or injection in URL
+        if not re.match(r'^[a-zA-Z0-9/_.\-]+$', file_path) or '..' in file_path:
+            raise VoiceTranscriptionError(
+                "Invalid file_path from Telegram (unexpected characters)"
+            )
+
         client = await self._get_client()
         url = TELEGRAM_FILE_URL.format(token=self._bot_token, file_path=file_path)
 
@@ -211,16 +219,18 @@ class VoiceTranscriber:
                 tmp.write(audio_data)
                 tmp_path = Path(tmp.name)
 
+            # Read file bytes outside of async context to avoid blocking
+            audio_bytes = await asyncio.to_thread(tmp_path.read_bytes)
+
             # Send to Whisper API
             client = await self._get_client()
-            with open(tmp_path, "rb") as audio_file:
-                response = await client.post(
-                    WHISPER_API_URL,
-                    headers={"Authorization": f"Bearer {self._openai_api_key}"},
-                    files={"file": (filename, audio_file, "audio/ogg")},
-                    data={"model": "whisper-1"},
-                    timeout=60.0,
-                )
+            response = await client.post(
+                WHISPER_API_URL,
+                headers={"Authorization": f"Bearer {self._openai_api_key}"},
+                files={"file": (filename, audio_bytes, "audio/ogg")},
+                data={"model": "whisper-1"},
+                timeout=60.0,
+            )
 
             try:
                 response.raise_for_status()

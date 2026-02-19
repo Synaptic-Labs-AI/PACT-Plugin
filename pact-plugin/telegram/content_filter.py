@@ -32,9 +32,6 @@ _CREDENTIAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # AWS access keys (AKIA...)
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED:aws_key]"),
 
-    # AWS secret keys (40 char base64)
-    (re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])"), "[REDACTED:aws_secret]"),
-
     # OpenAI API keys (sk-...)
     (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED:openai_key]"),
 
@@ -82,14 +79,25 @@ _CREDENTIAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # JWT tokens (three base64 segments separated by dots)
     (re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_\-+=]+"), "[REDACTED:jwt]"),
 
-    # Hex strings that look like secrets (32+ hex chars)
-    (re.compile(r"(?<![A-Fa-f0-9])[0-9a-f]{32,}(?![A-Fa-f0-9])"), "[REDACTED:hex_secret]"),
+    # Hex strings that look like secrets (48+ hex chars to avoid matching git SHAs)
+    (re.compile(r"(?<![A-Fa-f0-9])[0-9a-f]{48,}(?![A-Fa-f0-9])"), "[REDACTED:hex_secret]"),
 ]
+
+# Zero-width and invisible Unicode characters to strip before credential
+# scanning. These can be inserted to bypass regex-based redaction.
+_ZERO_WIDTH_PATTERN = re.compile(
+    "[\u200b\u200c\u200d\ufeff\u200e\u200f]"
+)
 
 # Control characters to strip from inbound Telegram text.
 # Keeps printable ASCII, common whitespace, and Unicode text.
+# Also strips Unicode bidi overrides and zero-width chars that could be
+# used for injection or terminal rendering attacks.
 _CONTROL_CHAR_PATTERN = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+    "|[\u200b-\u200f\ufeff]"
+    "|[\u202a-\u202e]"
+    "|[\u2066-\u2069]"
 )
 
 # Maximum inbound message length (prevent abuse)
@@ -113,7 +121,10 @@ def filter_outbound(message: str) -> str:
     if not message:
         return message
 
-    filtered = message
+    # Strip zero-width characters before credential scanning so attackers
+    # cannot insert invisible chars to bypass redaction patterns.
+    filtered = _ZERO_WIDTH_PATTERN.sub("", message)
+
     for pattern, replacement in _CREDENTIAL_PATTERNS:
         filtered = pattern.sub(replacement, filtered)
 

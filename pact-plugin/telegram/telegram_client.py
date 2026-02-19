@@ -292,6 +292,18 @@ class TelegramClient:
                 json=params,
                 timeout=timeout + 10,
             )
+
+            # Handle rate limiting (429) — back off and return empty
+            if response.status_code == 429:
+                try:
+                    retry_data = response.json()
+                    retry_after = retry_data.get("parameters", {}).get("retry_after", 5)
+                except Exception:
+                    retry_after = 5
+                logger.warning("getUpdates rate limited, backing off %ds", retry_after)
+                await asyncio.sleep(retry_after)
+                return []
+
             response.raise_for_status()
             data = response.json()
 

@@ -44,15 +44,58 @@ HTTP_TIMEOUT = 5
 # Credential patterns for inline content filter (self-contained, no imports).
 # Mirrors content_filter.py patterns but kept here for zero-dep independence.
 _REDACT_PATTERNS = [
-    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
-    (re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"), "[REDACTED]"),
+    # AWS access keys
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED]"),
+
+    # OpenAI API keys
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+
+    # Telegram bot tokens
+    (re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"), "[REDACTED]"),
+
+    # GitHub tokens
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{36,}"), "[REDACTED]"),
-    (re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_\-+=]+"), "[REDACTED]"),
+
+    # Generic API key/secret/token assignments
     (re.compile(
-        r"(?i)(?:password|passwd|pwd|secret|api[_-]?key|token)"
+        r"(?i)(?:api[_-]?key|apikey|api[_-]?secret|api[_-]?token)"
+        r"[\s]*[=:]\s*['\"]?([A-Za-z0-9_\-/.+=]{16,})['\"]?"
+    ), "[REDACTED]"),
+
+    # Bearer tokens
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-/.+=]{16,}"), "[REDACTED]"),
+
+    # Authorization headers
+    (re.compile(r"(?i)authorization[\s]*[=:]\s*['\"]?[A-Za-z0-9_\-/.+=\s]{16,}['\"]?"), "[REDACTED]"),
+
+    # Password/secret/token assignments
+    (re.compile(
+        r"(?i)(?:password|passwd|pwd|secret|token)"
         r"[\s]*[=:]\s*['\"]?([^\s'\"]{8,})['\"]?"
     ), "[REDACTED]"),
+
+    # Connection strings with credentials
+    (re.compile(
+        r"(?i)(?:postgres|mysql|mongodb|redis|amqp)(?:ql)?://"
+        r"[^:]+:[^@]+@"
+    ), "[REDACTED]://"),
+
+    # Private key blocks
+    (re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"), "[REDACTED]"),
+
+    # .env file content patterns
+    (re.compile(
+        r"(?i)^(?:TELEGRAM_BOT_TOKEN|OPENAI_API_KEY|AWS_SECRET|DB_PASSWORD|"
+        r"SECRET_KEY|PRIVATE_KEY|AUTH_TOKEN)"
+        r"\s*=\s*.+$",
+        re.MULTILINE,
+    ), "[REDACTED]"),
+
+    # JWT tokens
+    (re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_\-+=]+"), "[REDACTED]"),
+
+    # Hex strings that look like secrets (48+ hex chars, avoids git SHAs)
+    (re.compile(r"(?<![A-Fa-f0-9])[0-9a-f]{48,}(?![A-Fa-f0-9])"), "[REDACTED]"),
 ]
 
 

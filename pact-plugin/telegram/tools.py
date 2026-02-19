@@ -25,6 +25,7 @@ Interface contracts follow the plan's MCP Tool Schemas exactly.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import time
 from typing import Any
@@ -40,6 +41,16 @@ DEFAULT_ASK_TIMEOUT = 300
 
 # Maximum number of inline keyboard buttons
 MAX_BUTTONS = 10
+
+# Rate limiting: max notifications per minute
+NOTIFY_RATE_LIMIT = 20
+NOTIFY_RATE_WINDOW = 60  # seconds
+
+# Maximum concurrent pending telegram_ask questions
+MAX_PENDING_REPLIES = 10
+
+# Buffer beyond timeout before considering a pending Future stale (seconds)
+STALE_FUTURE_BUFFER = 60
 
 
 class ToolContext:
@@ -61,6 +72,12 @@ class ToolContext:
         # Pending telegram_ask replies: {message_id: asyncio.Future}
         self.pending_replies: dict[int, asyncio.Future[str]] = {}
 
+        # Track when each pending reply was registered (for stale cleanup)
+        self._pending_timestamps: dict[int, float] = {}
+
+        # Rate limiter: deque of timestamps for recent notify calls
+        self._notify_timestamps: collections.deque[float] = collections.deque()
+
     def initialize(self, config: dict[str, Any]) -> None:
         """
         Initialize the tool context with loaded configuration.
@@ -81,6 +98,52 @@ class ToolContext:
             openai_api_key=config.get("openai_api_key"),
         )
 
+    def check_notify_rate_limit(self) -> bool:
+        """
+        Check if sending a notification would exceed the rate limit.
+
+        Returns:
+            True if the call is allowed, False if rate limited.
+        """
+        now = time.time()
+        # Evict timestamps older than the rate window
+        while self._notify_timestamps and self._notify_timestamps[0] < now - NOTIFY_RATE_WINDOW:
+            self._notify_timestamps.popleft()
+
+        if len(self._notify_timestamps) >= NOTIFY_RATE_LIMIT:
+            return False
+
+        self._notify_timestamps.append(now)
+        return True
+
+    def cleanup_stale_futures(self) -> int:
+        """
+        Remove pending Futures that have exceeded timeout + buffer.
+
+        Prevents memory leaks from Futures that were never resolved
+        (e.g., if the polling loop missed a reply).
+
+        Returns:
+            Number of stale entries removed.
+        """
+        now = time.time()
+        stale_ids = []
+        for msg_id, timestamp in self._pending_timestamps.items():
+            # Use DEFAULT_ASK_TIMEOUT as max expected lifetime + buffer
+            if now - timestamp > DEFAULT_ASK_TIMEOUT + STALE_FUTURE_BUFFER:
+                stale_ids.append(msg_id)
+
+        for msg_id in stale_ids:
+            future = self.pending_replies.pop(msg_id, None)
+            if future is not None and not future.done():
+                future.cancel()
+            self._pending_timestamps.pop(msg_id, None)
+
+        if stale_ids:
+            logger.info("Cleaned up %d stale pending replies", len(stale_ids))
+
+        return len(stale_ids)
+
     def resolve_reply(self, message_id: int, text: str) -> bool:
         """
         Resolve a pending telegram_ask reply.
@@ -98,6 +161,7 @@ class ToolContext:
         future = self.pending_replies.get(message_id)
         if future is not None and not future.done():
             future.set_result(text)
+            self._pending_timestamps.pop(message_id, None)
             return True
         return False
 
@@ -113,6 +177,7 @@ class ToolContext:
             if not future.done():
                 future.cancel()
         self.pending_replies.clear()
+        self._pending_timestamps.clear()
 
 
 # Global tool context (initialized by server.py)
@@ -142,6 +207,13 @@ async def tool_telegram_notify(
         return (
             "pact-telegram is not configured. "
             "Run /PACT:telegram-setup to set up the Telegram bridge."
+        )
+
+    # Rate limiting: max NOTIFY_RATE_LIMIT messages per minute
+    if not _ctx.check_notify_rate_limit():
+        return (
+            f"Rate limited: max {NOTIFY_RATE_LIMIT} notifications per minute. "
+            f"Please wait before sending more."
         )
 
     try:
@@ -195,6 +267,16 @@ async def tool_telegram_ask(
     # Clamp timeout
     timeout_seconds = max(10, min(timeout_seconds, 600))
 
+    # Clean up stale futures before checking cap
+    _ctx.cleanup_stale_futures()
+
+    # Enforce concurrent pending replies cap
+    if len(_ctx.pending_replies) >= MAX_PENDING_REPLIES:
+        return (
+            f"Too many pending questions ({MAX_PENDING_REPLIES}). "
+            f"Wait for existing questions to be answered first."
+        )
+
     try:
         # Send the question
         if options:
@@ -213,6 +295,7 @@ async def tool_telegram_ask(
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         _ctx.pending_replies[sent_message_id] = future
+        _ctx._pending_timestamps[sent_message_id] = time.time()
 
         try:
             # Block until reply received or timeout
@@ -224,8 +307,9 @@ async def tool_telegram_ask(
                 f"The user may not be available on Telegram."
             )
         finally:
-            # Clean up the pending entry
+            # Clean up the pending entry and its timestamp
             _ctx.pending_replies.pop(sent_message_id, None)
+            _ctx._pending_timestamps.pop(sent_message_id, None)
 
     except TelegramAPIError as e:
         logger.error("telegram_ask failed: %s", e)
