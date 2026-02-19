@@ -62,11 +62,17 @@ def _get_project_name() -> str:
     Get the project name from CLAUDE_PROJECT_DIR environment variable.
 
     Returns the basename of the project directory (e.g. 'PACT-prompt'),
-    falling back to 'unknown' if the variable is not set.
+    falling back to the basename of the current working directory when
+    CLAUDE_PROJECT_DIR is not available (e.g. in MCP server processes),
+    and finally to 'unknown' if neither yields a useful name.
     """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if project_dir:
         return os.path.basename(project_dir)
+    # MCP servers don't get CLAUDE_PROJECT_DIR but may inherit project cwd
+    cwd = os.getcwd()
+    if cwd and cwd != os.path.expanduser("~"):
+        return os.path.basename(cwd)
     return "unknown"
 
 

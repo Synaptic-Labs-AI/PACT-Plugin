@@ -12,6 +12,7 @@ Tests cover:
 
 import io
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -153,9 +154,17 @@ class TestGetProjectNameNotify:
         with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/home/user/my-project"}):
             assert _get_project_name() == "my-project"
 
-    def test_returns_unknown_when_not_set(self):
-        """Should return 'unknown' when env var is missing."""
-        with patch.dict("os.environ", {}, clear=True):
+    def test_returns_cwd_basename_when_env_not_set(self):
+        """Should fall back to cwd basename when env var is missing."""
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("os.getcwd", return_value="/home/user/fallback-project"):
+            assert _get_project_name() == "fallback-project"
+
+    def test_returns_unknown_when_cwd_is_home(self):
+        """Should return 'unknown' when cwd is the home directory."""
+        home = os.path.expanduser("~")
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("os.getcwd", return_value=home):
             assert _get_project_name() == "unknown"
 
 
