@@ -71,7 +71,15 @@ def find_teammate_task(
             in_progress = task
         elif status == "completed":
             # Keep the highest-ID completed task (most recent)
-            if completed is None or task.get("id", "") > completed.get("id", ""):
+            # Task IDs are numeric strings — compare as int to avoid
+            # lexicographic errors (e.g., "3" > "20" in string comparison)
+            try:
+                task_id_num = int(task.get("id", "0"))
+                completed_id_num = int(completed.get("id", "0")) if completed else -1
+            except (ValueError, TypeError):
+                task_id_num = 0
+                completed_id_num = -1 if completed is None else 0
+            if completed is None or task_id_num > completed_id_num:
                 completed = task
 
     return in_progress or completed
@@ -152,8 +160,12 @@ def write_idle_counts(idle_counts_path: str, counts: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if HAS_FLOCK:
-        with open(path, "w") as f:
+        # Open for append to avoid truncation before lock is acquired,
+        # then lock, truncate, and write atomically
+        with open(path, "a+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            f.truncate()
             f.write(json.dumps(counts))
             fcntl.flock(f, fcntl.LOCK_UN)
     else:

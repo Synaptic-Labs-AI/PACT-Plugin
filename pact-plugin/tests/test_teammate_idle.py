@@ -91,6 +91,32 @@ class TestFindTeammateTask:
         result = find_teammate_task(tasks, "coder-a")
         assert result["id"] == "7"
 
+    def test_returns_highest_id_with_double_digit_ids(self):
+        """Regression: IDs are numeric strings. "20" > "3" numerically,
+        but "3" > "20" lexicographically. Must compare as int."""
+        from teammate_idle import find_teammate_task
+
+        tasks = [
+            make_task(task_id="3", status="completed", owner="coder-a"),
+            make_task(task_id="20", status="completed", owner="coder-a"),
+            make_task(task_id="10", status="completed", owner="coder-a"),
+        ]
+        result = find_teammate_task(tasks, "coder-a")
+        assert result["id"] == "20"
+
+    def test_handles_non_numeric_ids_gracefully(self):
+        """Non-numeric task IDs should not crash — falls back safely."""
+        from teammate_idle import find_teammate_task
+
+        tasks = [
+            make_task(task_id="abc", status="completed", owner="coder-a"),
+            make_task(task_id="xyz", status="completed", owner="coder-a"),
+        ]
+        # Should not raise — just returns one of the tasks
+        result = find_teammate_task(tasks, "coder-a")
+        assert result is not None
+        assert result["status"] == "completed"
+
 
 class TestDetectStall:
     """Tests for teammate_idle.detect_stall()."""
@@ -444,15 +470,18 @@ class TestMain:
             "CLAUDE_CODE_TEAM_NAME": "pact-test",
         }
 
+        # Patch Path.home() so idle_counts.json uses tmp_path instead of real home
+        # (prevents cross-test pollution from persisted idle count files)
         with patch.dict(os.environ, env, clear=True), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks):
+             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("teammate_idle.Path.home", return_value=tmp_path):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        # No output expected below threshold
+        # No output expected below threshold (first idle event, count=1)
         assert captured.out.strip() == "" or "systemMessage" not in captured.out
 
     def test_exits_0_on_invalid_json(self):
