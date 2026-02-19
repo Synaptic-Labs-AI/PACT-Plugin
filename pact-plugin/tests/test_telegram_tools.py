@@ -26,6 +26,9 @@ from telegram.tools import (
     tool_telegram_notify,
     tool_telegram_ask,
     tool_telegram_status,
+    _get_project_name,
+    _prepend_session_prefix,
+    ASK_REPLY_HINT,
     DEFAULT_ASK_TIMEOUT,
     MAX_BUTTONS,
     NOTIFY_RATE_LIMIT,
@@ -143,6 +146,41 @@ class TestGetContext:
 
 
 # =============================================================================
+# Session Prefix Tests
+# =============================================================================
+
+class TestSessionPrefix:
+    """Tests for _get_project_name and _prepend_session_prefix."""
+
+    def test_get_project_name_from_env(self):
+        """Should return basename of CLAUDE_PROJECT_DIR."""
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/home/user/my-project"}):
+            assert _get_project_name() == "my-project"
+
+    def test_get_project_name_fallback(self):
+        """Should return 'unknown' when CLAUDE_PROJECT_DIR is not set."""
+        with patch.dict("os.environ", {}, clear=True):
+            assert _get_project_name() == "unknown"
+
+    def test_get_project_name_empty_string(self):
+        """Should return 'unknown' when CLAUDE_PROJECT_DIR is empty."""
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": ""}):
+            assert _get_project_name() == "unknown"
+
+    def test_prepend_session_prefix(self):
+        """Should prepend bold project name header."""
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/path/to/MyApp"}):
+            result = _prepend_session_prefix("Hello world")
+        assert result == "<b>[MyApp]</b>\nHello world"
+
+    def test_prepend_session_prefix_unknown(self):
+        """Should use 'unknown' when project dir not set."""
+        with patch.dict("os.environ", {}, clear=True):
+            result = _prepend_session_prefix("Hello")
+        assert result == "<b>[unknown]</b>\nHello"
+
+
+# =============================================================================
 # tool_telegram_notify Tests
 # =============================================================================
 
@@ -208,12 +246,30 @@ class TestToolTelegramNotify:
         ctx.client = AsyncMock()
         ctx.client.send_message.return_value = {"message_id": 1}
 
-        with patch("telegram.tools._ctx", ctx):
+        with patch("telegram.tools._ctx", ctx), \
+             patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/path/to/proj"}):
             await tool_telegram_notify("test", parse_mode="Markdown")
 
-        ctx.client.send_message.assert_awaited_once_with(
-            text="test", parse_mode="Markdown"
-        )
+        call_args = ctx.client.send_message.call_args
+        assert call_args.kwargs["parse_mode"] == "Markdown"
+        assert "<b>[proj]</b>" in call_args.kwargs["text"]
+        assert "test" in call_args.kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_notify_includes_session_prefix(self):
+        """Should prepend session prefix to outgoing notification."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {"message_id": 1}
+
+        with patch("telegram.tools._ctx", ctx), \
+             patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/home/user/MyProject"}):
+            await tool_telegram_notify("Build done!")
+
+        sent_text = ctx.client.send_message.call_args.kwargs["text"]
+        assert sent_text.startswith("<b>[MyProject]</b>\n")
+        assert "Build done!" in sent_text
 
 
 # =============================================================================
@@ -250,6 +306,29 @@ class TestToolTelegramAsk:
             await task
 
         assert result == "user answer"
+
+    @pytest.mark.asyncio
+    async def test_ask_includes_session_prefix_and_reply_hint(self):
+        """Should prepend session prefix and append reply hint to question."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {"message_id": 60}
+
+        async def resolve_quickly():
+            await asyncio.sleep(0.05)
+            ctx.resolve_reply(60, "yes")
+
+        with patch("telegram.tools._ctx", ctx), \
+             patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/home/user/TestProj"}):
+            task = asyncio.create_task(resolve_quickly())
+            await tool_telegram_ask("Approve deploy?", timeout_seconds=10)
+            await task
+
+        sent_text = ctx.client.send_message.call_args.kwargs["text"]
+        assert sent_text.startswith("<b>[TestProj]</b>\n")
+        assert "Approve deploy?" in sent_text
+        assert ASK_REPLY_HINT in sent_text
 
     @pytest.mark.asyncio
     async def test_returns_timeout_message(self):

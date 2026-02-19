@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from telegram.notify import (
     _filter_message,
+    _get_project_name,
     _parse_env,
     _build_session_summary,
     send_notification,
@@ -144,14 +145,35 @@ class TestParseEnv:
 # _build_session_summary Tests
 # =============================================================================
 
+class TestGetProjectNameNotify:
+    """Tests for _get_project_name in notify.py (stdlib-only version)."""
+
+    def test_returns_basename_from_env(self):
+        """Should return basename of CLAUDE_PROJECT_DIR."""
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/home/user/my-project"}):
+            assert _get_project_name() == "my-project"
+
+    def test_returns_unknown_when_not_set(self):
+        """Should return 'unknown' when env var is missing."""
+        with patch.dict("os.environ", {}, clear=True):
+            assert _get_project_name() == "unknown"
+
+
 class TestBuildSessionSummary:
     """Tests for _build_session_summary -- notification message formatting."""
 
     def test_includes_session_id(self):
         """Should include truncated session ID."""
-        result = _build_session_summary({"session_id": "abcdef1234567890"})
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/path/to/Proj"}):
+            result = _build_session_summary({"session_id": "abcdef1234567890"})
         assert "abcdef12" in result
         assert "<b>Session ended</b>" in result
+
+    def test_includes_project_name_prefix(self):
+        """Should include bold project name prefix."""
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/path/to/MyApp"}):
+            result = _build_session_summary({"session_id": "test"})
+        assert result.startswith("<b>[MyApp]</b>\n")
 
     def test_handles_missing_session_id(self):
         """Should use 'unknown' when session_id is missing."""
@@ -174,7 +196,7 @@ class TestBuildSessionSummary:
             "transcript": long_line,
         })
         # Find the activity part and check length
-        assert len(result) < 300
+        assert len(result) < 350  # prefix + truncated content
 
     def test_handles_empty_transcript(self):
         """Should handle empty transcript gracefully."""

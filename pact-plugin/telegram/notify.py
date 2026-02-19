@@ -137,21 +137,39 @@ def _parse_env() -> dict[str, str]:
     return result
 
 
+def _get_project_name() -> str:
+    """
+    Get the project name from CLAUDE_PROJECT_DIR environment variable.
+
+    Returns the basename of the project directory (e.g. 'PACT-prompt'),
+    falling back to 'unknown' if the variable is not set.
+    Stdlib-only implementation (mirrors tools._get_project_name).
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir:
+        return os.path.basename(project_dir)
+    return "unknown"
+
+
 def _build_session_summary(input_data: dict) -> str:
     """
     Build a notification message from the Stop hook input data.
+
+    Includes a session identifier prefix so the user knows which project
+    instance sent the notification.
 
     Args:
         input_data: Parsed JSON from stdin.
 
     Returns:
-        Formatted notification message.
+        Formatted notification message with project name prefix.
     """
+    project_name = _get_project_name()
     session_id = input_data.get("session_id", "unknown")
     # Show only first 8 chars of session ID for brevity
     short_id = str(session_id)[:8] if session_id else "unknown"
 
-    parts = [f"<b>Session ended</b> ({short_id})"]
+    parts = [f"<b>[{project_name}]</b>\n<b>Session ended</b> ({short_id})"]
 
     # Extract a brief summary from transcript if available
     transcript = input_data.get("transcript", "")

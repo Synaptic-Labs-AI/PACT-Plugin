@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import os
 import time
 from typing import Any
 
@@ -51,6 +52,32 @@ MAX_PENDING_REPLIES = 10
 
 # Buffer beyond timeout before considering a pending Future stale (seconds)
 STALE_FUTURE_BUFFER = 60
+
+# Reply hint appended to telegram_ask messages
+ASK_REPLY_HINT = "\n\n↩️ Reply to this message to respond"
+
+
+def _get_project_name() -> str:
+    """
+    Get the project name from CLAUDE_PROJECT_DIR environment variable.
+
+    Returns the basename of the project directory (e.g. 'PACT-prompt'),
+    falling back to 'unknown' if the variable is not set.
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir:
+        return os.path.basename(project_dir)
+    return "unknown"
+
+
+def _prepend_session_prefix(text: str) -> str:
+    """
+    Prepend a bold session identifier header line to a message.
+
+    Format: **[ProjectName]** as the first line, then the original content.
+    """
+    project_name = _get_project_name()
+    return f"<b>[{project_name}]</b>\n{text}"
 
 
 class ToolContext:
@@ -216,9 +243,12 @@ async def tool_telegram_notify(
             f"Please wait before sending more."
         )
 
+    # Prepend session identifier so user knows which instance sent this
+    prefixed_message = _prepend_session_prefix(message)
+
     try:
         result = await _ctx.client.send_message(
-            text=message,
+            text=prefixed_message,
             parse_mode=parse_mode,
         )
         msg_id = result.get("message_id", "?")
@@ -277,15 +307,18 @@ async def tool_telegram_ask(
             f"Wait for existing questions to be answered first."
         )
 
+    # Prepend session identifier and append reply hint
+    prefixed_question = _prepend_session_prefix(question) + ASK_REPLY_HINT
+
     try:
         # Send the question
         if options:
             result = await _ctx.client.send_message_with_buttons(
-                text=question,
+                text=prefixed_question,
                 buttons=options,
             )
         else:
-            result = await _ctx.client.send_message(text=question)
+            result = await _ctx.client.send_message(text=prefixed_question)
 
         sent_message_id = result.get("message_id")
         if sent_message_id is None:
