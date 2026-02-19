@@ -470,3 +470,268 @@ class TestMain:
 
 # Required for patch.dict
 import os
+
+
+# =============================================================================
+# Edge Case Tests — Stall/Idle Interaction, Concurrent Tracking
+# =============================================================================
+
+class TestStallIdleInteraction:
+    """Verify that stalled agents get stall detection, NOT idle cleanup.
+    This is the key invariant: a stalled agent (in_progress task + idle)
+    should receive a stall warning, and should NOT be tracked for idle cleanup."""
+
+    def test_stall_prevents_idle_count_increment(self, tmp_path):
+        """When stall is detected, idle count should NOT be incremented."""
+        from teammate_idle import detect_stall, check_idle_cleanup, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+        tasks = [make_task(status="in_progress", owner="coder-a")]
+
+        # Stall IS detected
+        stall_msg = detect_stall(tasks, "coder-a")
+        assert stall_msg is not None
+
+        # Idle cleanup returns nothing (task not completed)
+        msg, shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert msg is None
+        assert shutdown is False
+
+        # Idle count should NOT have been set
+        counts = read_idle_counts(counts_path)
+        assert "coder-a" not in counts
+
+    def test_main_exclusive_stall_or_cleanup(self, capsys, tmp_path):
+        """main() should emit stall OR cleanup message, never both.
+        The code has 'else' branch: if stall, skip cleanup check."""
+        import io
+        from teammate_idle import main
+
+        # Agent with in_progress task (stall case)
+        tasks = [make_task(status="in_progress", owner="coder-a")]
+
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
+             patch("teammate_idle.get_task_list", return_value=tasks):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        if captured.out.strip():
+            output = json.loads(captured.out)
+            msg = output.get("systemMessage", "")
+            # Should have stall message, NOT cleanup/shutdown message
+            assert "stall" in msg.lower()
+            assert "shutdown" not in msg.lower()
+
+    def test_completed_then_new_work_resets_idle(self, tmp_path):
+        """Agent completes task (starts idle tracking), then gets new work
+        (in_progress). Idle count should be reset."""
+        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+
+        # First: agent has completed task, idle count accumulates
+        completed_tasks = [make_task(status="completed", owner="coder-a")]
+        write_idle_counts(counts_path, {"coder-a": 4})
+
+        # Now: agent gets a new in_progress task
+        new_tasks = [
+            make_task(task_id="2", status="in_progress", owner="coder-a"),
+            make_task(task_id="1", status="completed", owner="coder-a"),
+        ]
+
+        # check_idle_cleanup should reset because find_teammate_task returns
+        # the in_progress task (not completed)
+        msg, shutdown = check_idle_cleanup(new_tasks, "coder-a", counts_path)
+        assert msg is None
+        assert shutdown is False
+
+        counts = read_idle_counts(counts_path)
+        assert "coder-a" not in counts
+
+
+class TestConcurrentIdleTracking:
+    """Test idle tracking with multiple agents being tracked simultaneously."""
+
+    def test_multiple_agents_tracked_independently(self, tmp_path):
+        """Each agent's idle count should be independent."""
+        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+
+        tasks = [
+            make_task(task_id="1", status="completed", owner="coder-a"),
+            make_task(task_id="2", status="completed", owner="coder-b"),
+        ]
+
+        # coder-a idles 3 times
+        write_idle_counts(counts_path, {"coder-a": 2})
+        msg_a, _ = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert msg_a is not None  # Suggest at 3
+        assert "coder-a" in msg_a
+
+        # coder-b idles once (count starts at 0)
+        msg_b, _ = check_idle_cleanup(tasks, "coder-b", counts_path)
+        assert msg_b is None  # Below threshold
+
+        counts = read_idle_counts(counts_path)
+        assert counts["coder-a"] == 3
+        assert counts["coder-b"] == 1
+
+    def test_one_agent_shutdown_doesnt_affect_others(self, tmp_path):
+        """Force-shutdown of one agent should not affect others' counts."""
+        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+
+        tasks = [
+            make_task(task_id="1", status="completed", owner="coder-a"),
+            make_task(task_id="2", status="completed", owner="coder-b"),
+        ]
+
+        write_idle_counts(counts_path, {"coder-a": 4, "coder-b": 1})
+
+        # coder-a hits force threshold (5)
+        msg_a, shutdown_a = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert shutdown_a is True
+
+        # coder-b still at count 2, no action
+        msg_b, shutdown_b = check_idle_cleanup(tasks, "coder-b", counts_path)
+        assert shutdown_b is False
+        assert msg_b is None
+
+        counts = read_idle_counts(counts_path)
+        assert counts["coder-a"] == 5
+        assert counts["coder-b"] == 2
+
+
+class TestFindTeammateTaskEdgeCases:
+    """Additional edge cases for find_teammate_task()."""
+
+    def test_pending_task_not_returned(self):
+        """Pending tasks (not yet started) should NOT be returned."""
+        from teammate_idle import find_teammate_task
+
+        tasks = [make_task(status="pending", owner="coder-a")]
+        result = find_teammate_task(tasks, "coder-a")
+        assert result is None
+
+    def test_deleted_task_not_returned(self):
+        """Deleted tasks should NOT be returned."""
+        from teammate_idle import find_teammate_task
+
+        tasks = [make_task(status="deleted", owner="coder-a")]
+        result = find_teammate_task(tasks, "coder-a")
+        assert result is None
+
+    def test_mixed_statuses_returns_in_progress(self):
+        """With pending + in_progress + completed, returns in_progress."""
+        from teammate_idle import find_teammate_task
+
+        tasks = [
+            make_task(task_id="1", status="pending", owner="coder-a"),
+            make_task(task_id="2", status="in_progress", owner="coder-a"),
+            make_task(task_id="3", status="completed", owner="coder-a"),
+        ]
+        result = find_teammate_task(tasks, "coder-a")
+        assert result["id"] == "2"
+
+    def test_owner_matching_is_exact(self):
+        """Owner matching should be exact, not substring."""
+        from teammate_idle import find_teammate_task
+
+        tasks = [make_task(status="in_progress", owner="coder-a-backend")]
+        result = find_teammate_task(tasks, "coder-a")
+        assert result is None
+
+
+class TestDetectStallEdgeCases:
+    """Additional edge cases for detect_stall()."""
+
+    def test_empty_metadata_still_detects_stall(self):
+        """Task with empty metadata dict should still trigger stall."""
+        from teammate_idle import detect_stall
+
+        tasks = [make_task(
+            status="in_progress", owner="coder-a",
+            metadata={}
+        )]
+        result = detect_stall(tasks, "coder-a")
+        assert result is not None
+
+    def test_no_metadata_key_still_detects_stall(self):
+        """Task without metadata key at all should still trigger stall."""
+        from teammate_idle import detect_stall
+
+        task = {"id": "1", "subject": "work", "status": "in_progress", "owner": "coder-a"}
+        result = detect_stall([task], "coder-a")
+        assert result is not None
+
+    def test_stalled_false_value_still_detects_stall(self):
+        """metadata.stalled=False should NOT suppress stall detection."""
+        from teammate_idle import detect_stall
+
+        tasks = [make_task(
+            status="in_progress", owner="coder-a",
+            metadata={"stalled": False}
+        )]
+        result = detect_stall(tasks, "coder-a")
+        assert result is not None  # False != truthy, so stall should fire
+
+
+class TestMainEdgeCases:
+    """Additional edge cases for main() entry point."""
+
+    def test_team_name_lowercased(self):
+        """CLAUDE_CODE_TEAM_NAME should be lowercased per v3.3.2 convention."""
+        import io
+        from teammate_idle import main
+
+        # Use uppercase team name — should work (lowercased internally)
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "PACT-TEST"}, clear=True), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": ""}))):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0  # Empty teammate_name exits cleanly
+
+    def test_get_task_list_returns_none(self):
+        """Should exit cleanly when get_task_list() returns None."""
+        import io
+        from teammate_idle import main
+
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
+             patch("teammate_idle.get_task_list", return_value=None):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+    def test_shutdown_message_includes_action_required(self, capsys, tmp_path):
+        """When force shutdown threshold hit, output should include ACTION REQUIRED."""
+        import io
+        from teammate_idle import main, write_idle_counts
+
+        tasks = [make_task(status="completed", owner="coder-a")]
+
+        # Pre-set count to 4 (will become 5 = force threshold)
+        idle_dir = tmp_path / "teams" / "pact-test"
+        idle_dir.mkdir(parents=True)
+        write_idle_counts(str(idle_dir / "idle_counts.json"), {"coder-a": 4})
+
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
+             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        if captured.out.strip():
+            output = json.loads(captured.out)
+            msg = output.get("systemMessage", "")
+            assert "ACTION REQUIRED" in msg
+            assert "shutdown_request" in msg

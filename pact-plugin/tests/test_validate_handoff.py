@@ -270,3 +270,168 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         assert captured.out == ""
+
+
+# =============================================================================
+# Edge Case Tests — Field Preference, Boundary Conditions
+# =============================================================================
+
+class TestLastAssistantMessagePreference:
+    """Detailed tests for the last_assistant_message vs transcript preference logic."""
+
+    def test_prefers_last_assistant_message_over_transcript_content(self, capsys):
+        """When both fields have content, last_assistant_message wins.
+        Verified by: last_assistant_message has good handoff, transcript has bad.
+        If transcript were used, we'd get a warning — no warning = correct field used."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",
+            "last_assistant_message": GOOD_HANDOFF,
+            "transcript": "x" * 200,  # Long enough to trigger validation, but no handoff
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""  # No warning = used good handoff from last_assistant_message
+
+    def test_last_assistant_message_none_falls_back(self, capsys):
+        """When last_assistant_message is explicitly None, falls back to transcript."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",
+            "last_assistant_message": None,
+            "transcript": GOOD_HANDOFF,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""  # Fallback to transcript succeeded
+
+    def test_both_fields_missing_exits_cleanly(self, capsys):
+        """When both fields are missing, transcript is empty string, exits 0."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""  # Short transcript (< 100 chars) skips validation
+
+
+class TestValidateHandoffEdgeCases:
+    """Edge cases for validate_handoff() function."""
+
+    def test_handoff_section_with_hash_header(self):
+        """Section header with # or ## should be detected."""
+        from validate_handoff import validate_handoff
+
+        text = "# Handoff\nHere is what I did."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is True
+
+    def test_handoff_section_with_colon(self):
+        """'Handoff:' followed by newline should be detected."""
+        from validate_handoff import validate_handoff
+
+        text = "Handoff:\nProduced files."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is True
+
+    def test_deliverables_section_detected(self):
+        """'## Deliverables' section header should count as structured handoff."""
+        from validate_handoff import validate_handoff
+
+        text = "## Deliverables\nCreated auth module."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is True
+
+    def test_summary_section_detected(self):
+        """'## Summary' section header should count as structured handoff."""
+        from validate_handoff import validate_handoff
+
+        text = "## Summary\nDid the work."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is True
+
+    def test_output_section_detected(self):
+        """'## Output' section header should count as structured handoff."""
+        from validate_handoff import validate_handoff
+
+        text = "## Output\nFiles produced."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is True
+
+    def test_empty_string_is_invalid(self):
+        """Empty string has no handoff elements."""
+        from validate_handoff import validate_handoff
+
+        is_valid, missing = validate_handoff("")
+        assert is_valid is False
+        assert len(missing) == 3  # All 3 elements missing
+
+    def test_exactly_at_boundary_one_missing(self):
+        """With exactly 1 out of 3 missing, should still be valid."""
+        from validate_handoff import validate_handoff
+
+        # Has "produced" (what_produced) and "decided to" (key_decisions)
+        # Missing next_steps entirely
+        text = "I produced the auth module. I decided to use JWT tokens."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is True
+        assert len(missing) <= 1
+
+    def test_exactly_at_boundary_two_missing(self):
+        """With exactly 2 out of 3 missing, should be invalid."""
+        from validate_handoff import validate_handoff
+
+        # Only has "produced" (what_produced)
+        # Missing key_decisions and next_steps
+        text = "I produced the auth module and it works great and is ready."
+        is_valid, missing = validate_handoff(text)
+        assert is_valid is False
+        assert len(missing) >= 2
+
+
+class TestIsPactAgentEdgeCases:
+    """Edge cases for is_pact_agent()."""
+
+    def test_pact_in_middle_not_matched(self):
+        """'my-pact-agent' should NOT match (prefix check only)."""
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("my-pact-agent") is False
+
+    def test_just_pact_prefix_matched(self):
+        """Just 'pact-' should match."""
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("pact-") is True
+
+    def test_empty_string_not_matched(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("") is False
+
+    def test_integer_input_raises(self):
+        """Non-string input raises AttributeError (startswith not on int).
+        This is acceptable — main() wraps in try/except."""
+        from validate_handoff import is_pact_agent
+
+        with pytest.raises(AttributeError):
+            is_pact_agent(123)
