@@ -444,6 +444,24 @@ class TestGetUpdates:
         assert updates == []
 
     @pytest.mark.asyncio
+    async def test_returns_empty_on_rate_limit(self, telegram_client, mock_http_client):
+        """Should return empty and back off when getUpdates gets 429."""
+        response = MagicMock()
+        response.status_code = 429
+        response.json.return_value = {
+            "ok": False,
+            "parameters": {"retry_after": 1},
+        }
+        response.raise_for_status = MagicMock()
+        mock_http_client.post.return_value = response
+
+        with patch("telegram.telegram_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            updates = await telegram_client.get_updates(timeout=1)
+
+        assert updates == []
+        mock_sleep.assert_awaited_once_with(1)
+
+    @pytest.mark.asyncio
     async def test_filters_callback_query_by_chat_id(self, telegram_client, mock_http_client):
         """Should filter callback queries by chat_id too (security)."""
         response = MagicMock()
@@ -476,6 +494,53 @@ class TestGetUpdates:
 
         assert len(updates) == 1
         assert updates[0]["callback_query"]["data"] == "Yes"
+
+
+# =============================================================================
+# get_file Tests
+# =============================================================================
+
+class TestGetFile:
+    """Tests for get_file -- file metadata retrieval for voice note downloads."""
+
+    @pytest.mark.asyncio
+    async def test_returns_file_metadata(self, telegram_client, mock_http_client):
+        """Should return file metadata from Telegram API."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "ok": True,
+            "result": {
+                "file_id": "voice_abc",
+                "file_unique_id": "unique123",
+                "file_size": 12345,
+                "file_path": "voice/file_0.oga",
+            },
+        }
+        response.raise_for_status = MagicMock()
+        mock_http_client.post.return_value = response
+
+        result = await telegram_client.get_file("voice_abc")
+
+        assert result["file_path"] == "voice/file_0.oga"
+        assert result["file_size"] == 12345
+        mock_http_client.post.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_on_api_error(self, telegram_client, mock_http_client):
+        """Should raise TelegramAPIError on API failure."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "ok": False,
+            "error_code": 400,
+            "description": "Bad Request: invalid file_id",
+        }
+        response.raise_for_status = MagicMock()
+        mock_http_client.post.return_value = response
+
+        with pytest.raises(TelegramAPIError, match="invalid file_id"):
+            await telegram_client.get_file("bad_file_id")
 
 
 # =============================================================================

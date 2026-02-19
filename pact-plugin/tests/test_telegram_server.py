@@ -48,6 +48,7 @@ from telegram.server import (
     _process_update,
     _polling_loop,
     create_server,
+    lifespan,
     POLL_INTERVAL,
     ERROR_BACKOFF,
 )
@@ -346,3 +347,216 @@ class TestPollingLoop:
 
         with pytest.raises(asyncio.CancelledError):
             await _polling_loop(tool_context)
+
+
+# =============================================================================
+# lifespan Tests
+# =============================================================================
+
+class TestLifespan:
+    """Tests for lifespan -- MCP server startup/shutdown lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_lifespan_configured_starts_polling(self):
+        """Should start polling task when config is available."""
+        fake_config = {
+            "bot_token": "123:ABC",
+            "chat_id": "456",
+            "mode": "passive",
+            "openai_api_key": None,
+        }
+
+        with patch("telegram.server.load_config_safe", return_value=fake_config), \
+             patch("telegram.server.get_context") as mock_get_ctx, \
+             patch("telegram.server._polling_loop", new_callable=AsyncMock) as mock_poll:
+            ctx = MagicMock()
+            ctx.close = AsyncMock()
+            mock_get_ctx.return_value = ctx
+
+            server = MagicMock()
+            async with lifespan(server) as state:
+                assert state == {}
+                ctx.initialize.assert_called_once_with(fake_config)
+
+    @pytest.mark.asyncio
+    async def test_lifespan_unconfigured_no_polling(self):
+        """Should not start polling when config is None (graceful no-op)."""
+        with patch("telegram.server.load_config_safe", return_value=None), \
+             patch("telegram.server.get_context") as mock_get_ctx:
+            ctx = MagicMock()
+            ctx.close = AsyncMock()
+            mock_get_ctx.return_value = ctx
+
+            server = MagicMock()
+            async with lifespan(server) as state:
+                assert state == {}
+                ctx.initialize.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_cleans_up_on_shutdown(self):
+        """Should call ctx.close on shutdown."""
+        with patch("telegram.server.load_config_safe", return_value=None), \
+             patch("telegram.server.get_context") as mock_get_ctx:
+            ctx = MagicMock()
+            ctx.close = AsyncMock()
+            mock_get_ctx.return_value = ctx
+
+            server = MagicMock()
+            async with lifespan(server):
+                pass
+
+            ctx.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_creates_polling_task(self):
+        """Should create an asyncio task for the polling loop when configured."""
+        fake_config = {
+            "bot_token": "123:ABC",
+            "chat_id": "456",
+            "mode": "passive",
+            "openai_api_key": None,
+        }
+
+        with patch("telegram.server.load_config_safe", return_value=fake_config), \
+             patch("telegram.server.get_context") as mock_get_ctx, \
+             patch("telegram.server._polling_loop", new_callable=AsyncMock), \
+             patch("telegram.server.asyncio.create_task", wraps=asyncio.create_task) as mock_create_task:
+            ctx = MagicMock()
+            ctx.close = AsyncMock()
+            mock_get_ctx.return_value = ctx
+
+            server = MagicMock()
+            async with lifespan(server):
+                mock_create_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_cancels_polling_on_shutdown(self):
+        """Should cancel the polling task when the lifespan context exits."""
+        fake_config = {
+            "bot_token": "123:ABC",
+            "chat_id": "456",
+            "mode": "passive",
+            "openai_api_key": None,
+        }
+
+        # Use a real polling coroutine that blocks until cancelled
+        async def blocking_poll(ctx):
+            try:
+                await asyncio.sleep(999)
+            except asyncio.CancelledError:
+                raise
+
+        with patch("telegram.server.load_config_safe", return_value=fake_config), \
+             patch("telegram.server.get_context") as mock_get_ctx, \
+             patch("telegram.server._polling_loop", side_effect=blocking_poll):
+            ctx = MagicMock()
+            ctx.close = AsyncMock()
+            mock_get_ctx.return_value = ctx
+
+            server = MagicMock()
+            async with lifespan(server):
+                pass  # Exit triggers shutdown
+
+            # If we reached here, the polling task was cancelled and
+            # CancelledError was handled without propagating
+            ctx.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_unconfigured_skips_cancel(self):
+        """Should not attempt to cancel when no polling task was created."""
+        with patch("telegram.server.load_config_safe", return_value=None), \
+             patch("telegram.server.get_context") as mock_get_ctx:
+            ctx = MagicMock()
+            ctx.close = AsyncMock()
+            mock_get_ctx.return_value = ctx
+
+            server = MagicMock()
+            async with lifespan(server):
+                pass
+
+            # Should complete without error even though no polling task exists
+            ctx.close.assert_awaited_once()
+
+
+# =============================================================================
+# Additional _process_update Edge Cases
+# =============================================================================
+
+class TestProcessUpdateEdgeCases:
+    """Additional edge case tests for _process_update."""
+
+    @pytest.fixture
+    def tool_context(self):
+        """Create a ToolContext with mocked client and voice."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.config = {"mode": "passive", "warnings": []}
+
+        client = MagicMock()
+        client.get_updates = AsyncMock(return_value=[])
+        client.send_message = AsyncMock(return_value={"message_id": 1})
+        client.answer_callback_query = AsyncMock(return_value=True)
+        client.close = AsyncMock()
+        ctx.client = client
+
+        voice = MagicMock()
+        voice.is_available.return_value = True
+        voice.transcribe_voice_message = AsyncMock(return_value="Transcribed text")
+        voice.close = AsyncMock()
+        ctx.voice = voice
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_voice_without_file_id_skips_transcription(self, tool_context):
+        """Should skip transcription when voice note has no file_id."""
+        future = asyncio.get_event_loop().create_future()
+        tool_context.pending_replies[60] = future
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = 60
+        tool_context.client.extract_text.return_value = None
+        # Voice metadata without file_id
+        tool_context.client.extract_voice.return_value = {
+            "duration": 5,
+        }
+
+        update = {
+            "message": {
+                "voice": {"duration": 5},
+                "reply_to_message": {"message_id": 60},
+            }
+        }
+
+        await _process_update(tool_context, update)
+
+        # Transcription should not be attempted (no file_id)
+        tool_context.voice.transcribe_voice_message.assert_not_awaited()
+        # Future should not be resolved (no content extracted)
+        assert not future.done()
+
+    @pytest.mark.asyncio
+    async def test_voice_with_voice_none_on_context(self, tool_context):
+        """Should return not-configured message when ctx.voice is None."""
+        future = asyncio.get_event_loop().create_future()
+        tool_context.pending_replies[70] = future
+        tool_context.voice = None
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = 70
+        tool_context.client.extract_text.return_value = None
+        tool_context.client.extract_voice.return_value = {
+            "file_id": "voice_abc",
+            "duration": 3,
+        }
+
+        update = {
+            "message": {
+                "voice": {"file_id": "voice_abc", "duration": 3},
+                "reply_to_message": {"message_id": 70},
+            }
+        }
+
+        await _process_update(tool_context, update)
+
+        assert future.done()
+        assert "not configured" in future.result()

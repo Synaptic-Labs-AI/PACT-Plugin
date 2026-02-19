@@ -227,6 +227,30 @@ class TestDownloadFile:
         with pytest.raises(VoiceTranscriptionError, match="status 404"):
             await transcriber.download_file("voice/missing.ogg")
 
+    @pytest.mark.asyncio
+    async def test_rejects_path_traversal_in_file_path(self, transcriber, mock_http_client):
+        """Security: should reject file paths with path traversal characters."""
+        with pytest.raises(VoiceTranscriptionError, match="unexpected characters"):
+            await transcriber.download_file("../../../etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_rejects_special_chars_in_file_path(self, transcriber, mock_http_client):
+        """Security: should reject file paths with shell injection chars."""
+        with pytest.raises(VoiceTranscriptionError, match="unexpected characters"):
+            await transcriber.download_file("voice/file.ogg; rm -rf /")
+
+    @pytest.mark.asyncio
+    async def test_accepts_valid_file_path(self, transcriber, mock_http_client):
+        """Should accept valid Telegram file paths."""
+        response = MagicMock()
+        response.content = b"audio data"
+        response.raise_for_status = MagicMock()
+        mock_http_client.get.return_value = response
+
+        # Valid paths should not raise the validation error
+        data = await transcriber.download_file("voice/file_0.oga")
+        assert data == b"audio data"
+
 
 # =============================================================================
 # transcribe Tests

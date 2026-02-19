@@ -28,6 +28,10 @@ from telegram.tools import (
     tool_telegram_status,
     DEFAULT_ASK_TIMEOUT,
     MAX_BUTTONS,
+    NOTIFY_RATE_LIMIT,
+    NOTIFY_RATE_WINDOW,
+    MAX_PENDING_REPLIES,
+    STALE_FUTURE_BUFFER,
 )
 from telegram.telegram_client import TelegramAPIError
 
@@ -116,6 +120,27 @@ class TestToolContext:
         ctx = ToolContext()
         await ctx.close()  # Should not raise
 
+    @pytest.mark.asyncio
+    async def test_close_closes_voice(self):
+        """Should close voice transcriber on close."""
+        ctx = ToolContext()
+        ctx.voice = AsyncMock()
+        ctx.client = AsyncMock()
+
+        await ctx.close()
+
+        ctx.voice.close.assert_awaited_once()
+        ctx.client.close.assert_awaited_once()
+
+
+class TestGetContext:
+    """Tests for get_context -- global context accessor."""
+
+    def test_returns_tool_context_instance(self):
+        """Should return the global ToolContext instance."""
+        ctx = get_context()
+        assert isinstance(ctx, ToolContext)
+
 
 # =============================================================================
 # tool_telegram_notify Tests
@@ -160,6 +185,20 @@ class TestToolTelegramNotify:
             result = await tool_telegram_notify("test")
 
         assert "Failed" in result
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_message_id_in_response(self):
+        """Should handle response with no message_id gracefully."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {}  # No message_id
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_notify("hello")
+
+        assert "sent" in result.lower()
+        assert "?" in result  # Falls back to "?" for unknown message_id
 
     @pytest.mark.asyncio
     async def test_passes_parse_mode(self):
@@ -275,6 +314,19 @@ class TestToolTelegramAsk:
 
         ctx.client.send_message_with_buttons.assert_awaited_once()
         assert result == "Yes"
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_no_message_id_in_response(self):
+        """Should return error message when send_message returns no message_id."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {}  # No message_id key
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_ask("question?", timeout_seconds=10)
+
+        assert "no message_id" in result
 
     @pytest.mark.asyncio
     async def test_clamps_timeout_minimum(self):
@@ -424,3 +476,138 @@ class TestToolTelegramStatus:
             result = await tool_telegram_status()
 
         assert "not configured" in result
+
+
+# =============================================================================
+# Rate Limiting Tests
+# =============================================================================
+
+class TestNotifyRateLimit:
+    """Tests for notification rate limiting."""
+
+    def test_allows_calls_within_limit(self):
+        """Should allow calls under the rate limit."""
+        ctx = ToolContext()
+        for _ in range(NOTIFY_RATE_LIMIT):
+            assert ctx.check_notify_rate_limit() is True
+
+    def test_blocks_calls_exceeding_limit(self):
+        """Should block calls exceeding rate limit."""
+        ctx = ToolContext()
+        for _ in range(NOTIFY_RATE_LIMIT):
+            ctx.check_notify_rate_limit()
+
+        assert ctx.check_notify_rate_limit() is False
+
+    def test_allows_calls_after_window_expires(self):
+        """Should allow calls after rate window expires."""
+        ctx = ToolContext()
+        # Fill the rate limit with old timestamps
+        old_time = time.time() - NOTIFY_RATE_WINDOW - 1
+        for _ in range(NOTIFY_RATE_LIMIT):
+            ctx._notify_timestamps.append(old_time)
+
+        # New call should be allowed (old timestamps evicted)
+        assert ctx.check_notify_rate_limit() is True
+
+    @pytest.mark.asyncio
+    async def test_tool_returns_rate_limit_message(self):
+        """Should return rate limit message when limit exceeded."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {"message_id": 1}
+
+        # Fill the rate limit
+        for _ in range(NOTIFY_RATE_LIMIT):
+            ctx.check_notify_rate_limit()
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_notify("test")
+
+        assert "Rate limited" in result
+        ctx.client.send_message.assert_not_awaited()
+
+
+# =============================================================================
+# Stale Future Cleanup Tests
+# =============================================================================
+
+class TestStaleFutureCleanup:
+    """Tests for stale pending reply cleanup."""
+
+    def test_removes_stale_futures(self):
+        """Should remove futures that exceeded timeout + buffer."""
+        ctx = ToolContext()
+        loop = asyncio.new_event_loop()
+
+        future = loop.create_future()
+        ctx.pending_replies[42] = future
+        # Set timestamp far enough in the past to be stale
+        ctx._pending_timestamps[42] = time.time() - DEFAULT_ASK_TIMEOUT - STALE_FUTURE_BUFFER - 1
+
+        removed = ctx.cleanup_stale_futures()
+
+        assert removed == 1
+        assert 42 not in ctx.pending_replies
+        assert 42 not in ctx._pending_timestamps
+        assert future.cancelled()
+        loop.close()
+
+    def test_keeps_fresh_futures(self):
+        """Should not remove futures within the timeout window."""
+        ctx = ToolContext()
+        loop = asyncio.new_event_loop()
+
+        future = loop.create_future()
+        ctx.pending_replies[42] = future
+        ctx._pending_timestamps[42] = time.time()  # Just now
+
+        removed = ctx.cleanup_stale_futures()
+
+        assert removed == 0
+        assert 42 in ctx.pending_replies
+        loop.close()
+
+    def test_handles_already_done_futures(self):
+        """Should handle cleanup when future is already done."""
+        ctx = ToolContext()
+        loop = asyncio.new_event_loop()
+
+        future = loop.create_future()
+        future.set_result("done")
+        ctx.pending_replies[42] = future
+        ctx._pending_timestamps[42] = time.time() - DEFAULT_ASK_TIMEOUT - STALE_FUTURE_BUFFER - 1
+
+        removed = ctx.cleanup_stale_futures()
+
+        assert removed == 1
+        assert 42 not in ctx.pending_replies
+        loop.close()
+
+
+# =============================================================================
+# Max Pending Replies Tests
+# =============================================================================
+
+class TestMaxPendingReplies:
+    """Tests for max concurrent pending questions limit."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_at_max_pending(self):
+        """Should reject new questions when at MAX_PENDING_REPLIES."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+
+        # Fill pending replies to capacity
+        loop = asyncio.get_event_loop()
+        for i in range(MAX_PENDING_REPLIES):
+            ctx.pending_replies[i] = loop.create_future()
+            ctx._pending_timestamps[i] = time.time()
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_ask("one more?")
+
+        assert "Too many pending questions" in result
+        ctx.client.send_message.assert_not_awaited()
