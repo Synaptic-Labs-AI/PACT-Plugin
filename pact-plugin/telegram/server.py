@@ -1,0 +1,286 @@
+"""
+Location: pact-plugin/telegram/server.py
+Summary: FastMCP server setup for the pact-telegram bridge (stdio transport).
+Used by: __main__.py (entry point spawned by Claude Code via .mcp.json).
+
+Creates the MCP server with three tools (telegram_notify, telegram_ask,
+telegram_status) and manages the background Telegram polling loop.
+
+Architecture:
+- Server starts and loads config (graceful no-op if unconfigured)
+- Background asyncio task polls Telegram via getUpdates
+- Incoming replies are routed to pending telegram_ask Futures
+- Voice note replies are transcribed before resolving Futures
+
+Graceful no-op behavior:
+- If config is missing, server starts but only telegram_status is functional
+- telegram_notify and telegram_ask return "not configured" messages
+- This allows the MCP server to be registered without breaking on startup
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+from mcp.server.fastmcp import FastMCP
+
+from telegram.config import load_config_safe
+from telegram.telegram_client import TelegramClient
+from telegram.tools import (
+    get_context,
+    tool_telegram_notify,
+    tool_telegram_ask,
+    tool_telegram_status,
+)
+from telegram.voice import VoiceTranscriptionError
+
+logger = logging.getLogger("pact-telegram.server")
+
+# Polling interval when no updates received (seconds)
+POLL_INTERVAL = 1
+
+# Minimum delay between poll errors to prevent tight loops
+ERROR_BACKOFF = 5
+
+
+@asynccontextmanager
+async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
+    """
+    MCP server lifespan manager.
+
+    Handles startup (config loading, polling loop start) and shutdown
+    (polling loop cancellation, resource cleanup).
+
+    Yields:
+        Empty dict (no lifespan state needed by tools).
+    """
+    ctx = get_context()
+    polling_task: asyncio.Task | None = None
+
+    try:
+        # Load configuration (graceful no-op if missing)
+        config = load_config_safe()
+
+        if config is not None:
+            ctx.initialize(config)
+            logger.info(
+                "pact-telegram initialized (mode=%s, voice=%s)",
+                config.get("mode", "unknown"),
+                "yes" if config.get("openai_api_key") else "no",
+            )
+
+            # Start background polling loop
+            polling_task = asyncio.create_task(
+                _polling_loop(ctx),
+                name="telegram-polling",
+            )
+        else:
+            logger.info("pact-telegram: not configured (graceful no-op mode)")
+
+        yield {}
+
+    finally:
+        # Shutdown: cancel polling and clean up
+        if polling_task is not None:
+            polling_task.cancel()
+            try:
+                await polling_task
+            except asyncio.CancelledError:
+                pass
+
+        await ctx.close()
+        logger.info("pact-telegram shut down")
+
+
+async def _polling_loop(ctx) -> None:
+    """
+    Background task that polls Telegram for incoming messages.
+
+    Routes replies to pending telegram_ask Futures based on
+    reply_to_message_id matching. Handles voice note transcription
+    for voice replies.
+
+    Args:
+        ctx: The shared ToolContext from tools.py.
+    """
+    client: TelegramClient = ctx.client
+    logger.info("Telegram polling loop started")
+
+    while True:
+        try:
+            updates = await client.get_updates(timeout=30)
+
+            for update in updates:
+                await _process_update(ctx, update)
+
+        except asyncio.CancelledError:
+            logger.info("Polling loop cancelled")
+            raise
+        except Exception as e:
+            logger.error("Polling error: %s", e)
+            await asyncio.sleep(ERROR_BACKOFF)
+
+
+async def _process_update(ctx, update: dict) -> None:
+    """
+    Process a single Telegram update.
+
+    Routes the update to a pending telegram_ask Future if applicable.
+    Handles callback queries (inline keyboard button presses) and
+    voice note transcription.
+
+    Args:
+        ctx: The shared ToolContext.
+        update: A Telegram update object (already filtered by chat_id).
+    """
+    client: TelegramClient = ctx.client
+
+    # Handle callback queries (inline keyboard button presses)
+    callback_query_id = client.extract_callback_query_id(update)
+    if callback_query_id:
+        await client.answer_callback_query(callback_query_id)
+
+    # Determine which question this reply is for
+    reply_to_id = client.extract_reply_to_message_id(update)
+    if reply_to_id is None:
+        # Not a reply to a known question; route to first pending if any
+        if ctx.pending_replies:
+            reply_to_id = next(iter(ctx.pending_replies))
+        else:
+            logger.debug("Received update with no pending question to route to")
+            return
+
+    # Check if we have a pending Future for this message
+    if reply_to_id not in ctx.pending_replies:
+        logger.debug("No pending question for message_id %d", reply_to_id)
+        return
+
+    # Try to extract text reply
+    text = client.extract_text(update)
+
+    # If no text, check for voice note
+    if text is None:
+        voice = client.extract_voice(update)
+        if voice and ctx.voice and ctx.voice.is_available():
+            file_id = voice.get("file_id")
+            if file_id:
+                try:
+                    text = await ctx.voice.transcribe_voice_message(file_id)
+                    logger.info("Voice note transcribed for reply to %d", reply_to_id)
+                except VoiceTranscriptionError as e:
+                    logger.warning("Voice transcription failed: %s", e)
+                    text = "[Voice note received but transcription failed]"
+        elif voice:
+            text = "[Voice note received but transcription not configured]"
+
+    if text is None:
+        logger.debug("Could not extract reply content from update")
+        return
+
+    # Resolve the pending Future
+    resolved = ctx.resolve_reply(reply_to_id, text)
+    if resolved:
+        logger.info("Reply resolved for message_id %d", reply_to_id)
+    else:
+        logger.debug("Future for message_id %d already resolved or missing", reply_to_id)
+
+
+def create_server() -> FastMCP:
+    """
+    Create and configure the MCP server with all tools.
+
+    Returns:
+        Configured FastMCP instance ready to run.
+    """
+    server = FastMCP(
+        "pact-telegram",
+        lifespan=lifespan,
+    )
+
+    # Register tools with the MCP server
+    @server.tool(
+        name="telegram_notify",
+        description=(
+            "Send a one-way notification to the user's Telegram. "
+            "Use for status updates, completions, and alerts when the user "
+            "may be away from the terminal."
+        ),
+    )
+    async def telegram_notify(
+        message: str,
+        parse_mode: str = "HTML",
+    ) -> str:
+        """
+        Send a one-way notification to the user's Telegram.
+
+        Args:
+            message: Message text (supports HTML formatting).
+            parse_mode: Formatting mode - "HTML" (default), "Markdown", or "plain".
+        """
+        return await tool_telegram_notify(message=message, parse_mode=parse_mode)
+
+    @server.tool(
+        name="telegram_ask",
+        description=(
+            "Send a question to Telegram and BLOCK until user replies. "
+            "Use when user is away from terminal and you need their input. "
+            "Supports quick-reply buttons via the options parameter."
+        ),
+    )
+    async def telegram_ask(
+        question: str,
+        options: list[str] | None = None,
+        timeout_seconds: int = 300,
+    ) -> str:
+        """
+        Send a question to Telegram and wait for user reply.
+
+        Args:
+            question: The question to ask the user.
+            options: Optional quick-reply button labels (inline keyboard).
+            timeout_seconds: Maximum seconds to wait (default: 300, max: 600).
+        """
+        return await tool_telegram_ask(
+            question=question,
+            options=options,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @server.tool(
+        name="telegram_status",
+        description="Get pact-telegram bridge status, configuration, and health.",
+    )
+    async def telegram_status() -> str:
+        """Get pact-telegram bridge status and health."""
+        return await tool_telegram_status()
+
+    return server
+
+
+def main() -> None:
+    """
+    Direct-execution entry point.
+
+    Used when server.py is run directly via .mcp.json registration:
+        python3 ${CLAUDE_PLUGIN_ROOT}/telegram/server.py
+
+    Sets up logging to stderr (stdout is reserved for MCP stdio transport)
+    and starts the server.
+    """
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(name)s %(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    server = create_server()
+    server.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

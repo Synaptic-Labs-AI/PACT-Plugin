@@ -20,7 +20,8 @@
     "testing",
     "multi-agent",
     "n8n",
-    "workflow"
+    "workflow",
+    "telegram"
   ],
   "commands": [
     "./commands/orchestrate.md",
@@ -30,7 +31,8 @@
     "./commands/peer-review.md",
     "./commands/plan-mode.md",
     "./commands/wrap-up.md",
-    "./commands/pin-memory.md"
+    "./commands/pin-memory.md",
+    "./commands/telegram-setup.md"
   ],
   "agents": [
     "./agents/pact-preparer.md",

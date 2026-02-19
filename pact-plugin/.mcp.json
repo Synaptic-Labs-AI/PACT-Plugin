@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pact-telegram": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/telegram/server.py"]
+    }
+  }
+}
