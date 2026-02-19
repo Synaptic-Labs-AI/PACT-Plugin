@@ -54,7 +54,7 @@ MAX_PENDING_REPLIES = 10
 STALE_FUTURE_BUFFER = 60
 
 # Reply hint appended to telegram_ask messages
-ASK_REPLY_HINT = "\n\n↩️ Reply to this message to respond"
+ASK_REPLY_HINT = "\n\n💬 Tap a button, or swipe-reply with text or a voice note"
 
 
 def _get_project_name() -> str:
