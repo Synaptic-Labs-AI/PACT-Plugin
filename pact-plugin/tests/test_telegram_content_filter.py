@@ -229,6 +229,58 @@ class TestFilterOutbound:
         # "sk" appears in "skeleton" but it's not "sk-..." pattern
         assert "skeleton" in result
 
+    def test_redacts_long_hex_string(self):
+        """Should redact hex strings that look like secrets (48+ hex chars)."""
+        hex_secret = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6"  # 48 hex chars
+        text = f"Secret hash: {hex_secret}"
+        result = filter_outbound(text)
+        assert hex_secret not in result
+        assert "[REDACTED:hex_secret]" in result
+
+    def test_does_not_redact_git_sha(self):
+        """Should not redact git commit hashes (40 hex chars)."""
+        git_sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"  # 40 hex chars
+        text = f"Commit: {git_sha}"
+        result = filter_outbound(text)
+        assert git_sha in result
+
+    def test_does_not_redact_short_hex(self):
+        """Should not redact hex strings shorter than 48 chars."""
+        short_hex = "a1b2c3d4e5f6"  # 12 hex chars
+        text = f"Short hash: {short_hex}"
+        result = filter_outbound(text)
+        assert short_hex in result
+
+    # --- Zero-Width Character Bypass Tests ---
+
+    def test_strips_zero_width_chars_before_scanning(self):
+        """Should strip zero-width chars to prevent credential bypass."""
+        # Insert zero-width spaces into an OpenAI key to try to bypass
+        key_with_zwsp = "sk-\u200babcdefghijklmnopqrstuvwxyz"
+        text = f"Key: {key_with_zwsp}"
+        result = filter_outbound(text)
+        assert "sk-" not in result
+        assert "[REDACTED:openai_key]" in result
+
+    def test_strips_zero_width_joiner_in_credential(self):
+        """Should strip zero-width joiner that could break pattern matching."""
+        # ZWNJ inside AWS key
+        text = "AKIA\u200cIOSFODNN7EXAMPLE"
+        result = filter_outbound(text)
+        assert "AKIA" not in result
+
+    def test_strips_bom_character(self):
+        """Should strip BOM (byte order mark) character."""
+        text = "\ufeffsk-abcdefghijklmnopqrstuvwxyz"
+        result = filter_outbound(text)
+        assert "sk-" not in result
+
+    def test_normal_text_unaffected_by_zero_width_stripping(self):
+        """Zero-width stripping should not affect normal text."""
+        text = "Hello world, this is a normal message."
+        result = filter_outbound(text)
+        assert result == text
+
 
 # =============================================================================
 # truncate_message Tests
@@ -338,6 +390,28 @@ class TestSanitizeInbound:
         """Should strip \\x7f (DEL) character."""
         text = "hello\x7fworld"
         assert sanitize_inbound(text) == "helloworld"
+
+    def test_strips_zero_width_space(self):
+        """Should strip zero-width space characters."""
+        text = "hello\u200bworld"
+        assert sanitize_inbound(text) == "helloworld"
+
+    def test_strips_bidi_override_characters(self):
+        """Should strip Unicode bidi override characters (security control)."""
+        # LRE, RLE, PDF, LRO, RLO
+        text = "hello\u202a\u202b\u202c\u202d\u202eworld"
+        assert sanitize_inbound(text) == "helloworld"
+
+    def test_strips_bidi_isolate_characters(self):
+        """Should strip Unicode bidi isolate characters."""
+        # LRI, RLI, FSI, PDI
+        text = "hello\u2066\u2067\u2068\u2069world"
+        assert sanitize_inbound(text) == "helloworld"
+
+    def test_strips_bom_inbound(self):
+        """Should strip BOM (byte order mark) from inbound text."""
+        text = "\ufeffhello"
+        assert sanitize_inbound(text) == "hello"
 
 
 # =============================================================================
