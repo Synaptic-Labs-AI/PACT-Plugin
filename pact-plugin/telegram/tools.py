@@ -3,9 +3,10 @@ Location: pact-plugin/telegram/tools.py
 Summary: MCP tool definitions for the pact-telegram bridge.
 Used by: server.py (registers these tools with the FastMCP server).
 
-Defines three MCP tools:
+Defines four MCP tools:
 - telegram_notify: One-way notification to the user's Telegram
 - telegram_ask: Blocking question that waits for user reply via Telegram
+- telegram_check_replies: Non-blocking poll for queued replies to notifications
 - telegram_status: Bridge status and health check
 
 The telegram_ask tool uses an asyncio.Future pattern:
@@ -26,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from telegram.config import load_config_safe
@@ -55,6 +58,35 @@ STALE_FUTURE_BUFFER = 60
 
 # Reply hint appended to telegram_ask messages
 ASK_REPLY_HINT = "\n\n💬 Tap a button, or swipe-reply with text or a voice note"
+
+# Reply queue capacity (oldest dropped on overflow)
+REPLY_QUEUE_MAX_SIZE = 50
+
+# Reply queue TTL: replies older than this are pruned (seconds)
+REPLY_QUEUE_TTL = 600  # 10 minutes
+
+# Maximum tracked sent notifications (bounded dict)
+MAX_SENT_NOTIFICATIONS = 100
+
+# Snippet length for notification context in reply queue
+NOTIFICATION_SNIPPET_LENGTH = 80
+
+
+@dataclass
+class QueuedReply:
+    """
+    A user reply to a notification, buffered in the reply queue.
+
+    When a user replies to a telegram_notify message on Telegram, the reply
+    is captured here instead of being dropped. Agents can poll the queue
+    via the telegram_check_replies tool.
+    """
+
+    text: str
+    message_id: int
+    reply_to_message_id: int
+    timestamp: float
+    source: str  # "text" | "voice" | "callback"
 
 
 def _get_project_name() -> str:
@@ -111,6 +143,16 @@ class ToolContext:
         # Rate limiter: deque of timestamps for recent notify calls
         self._notify_timestamps: collections.deque[float] = collections.deque()
 
+        # Reply queue: buffered replies to notifications (FIFO, bounded)
+        self.reply_queue: collections.deque[QueuedReply] = collections.deque(
+            maxlen=REPLY_QUEUE_MAX_SIZE,
+        )
+
+        # Sent notification tracking: {message_id: snippet of original text}
+        self._sent_notifications: collections.OrderedDict[int, str] = (
+            collections.OrderedDict()
+        )
+
     def initialize(self, config: dict[str, Any]) -> None:
         """
         Initialize the tool context with loaded configuration.
@@ -149,15 +191,126 @@ class ToolContext:
         self._notify_timestamps.append(now)
         return True
 
+    def track_notification(self, message_id: int, text: str) -> None:
+        """
+        Record a sent notification's message_id and text snippet.
+
+        Used by telegram_notify so that telegram_check_replies can include
+        context about which notification the user was replying to.
+
+        Args:
+            message_id: Telegram message_id of the sent notification.
+            text: The original notification text (will be truncated to snippet).
+        """
+        # Strip the session prefix for a cleaner snippet
+        snippet = text[:NOTIFICATION_SNIPPET_LENGTH]
+        if len(text) > NOTIFICATION_SNIPPET_LENGTH:
+            snippet += "..."
+        self._sent_notifications[message_id] = snippet
+
+        # Evict oldest entries if over capacity
+        while len(self._sent_notifications) > MAX_SENT_NOTIFICATIONS:
+            self._sent_notifications.popitem(last=False)
+
+    def enqueue_reply(
+        self,
+        text: str,
+        message_id: int,
+        reply_to_message_id: int,
+        source: str = "text",
+    ) -> None:
+        """
+        Add a user reply to the reply queue.
+
+        Called by _process_update when a reply doesn't match any pending
+        telegram_ask Future (i.e., it's a reply to a notification).
+
+        The deque's maxlen handles overflow automatically (drops oldest).
+
+        Args:
+            text: Reply text (or transcribed voice note).
+            message_id: Telegram message_id of the reply.
+            reply_to_message_id: The notification message_id being replied to.
+            source: Reply source type ("text", "voice", or "callback").
+        """
+        entry = QueuedReply(
+            text=text,
+            message_id=message_id,
+            reply_to_message_id=reply_to_message_id,
+            timestamp=time.time(),
+            source=source,
+        )
+        self.reply_queue.append(entry)
+        logger.info(
+            "Reply queued (message_id=%d, reply_to=%d, source=%s, queue_depth=%d)",
+            message_id,
+            reply_to_message_id,
+            source,
+            len(self.reply_queue),
+        )
+
+    def drain_replies(self, clear: bool = True) -> list[dict[str, Any]]:
+        """
+        Return all queued replies, optionally draining the queue.
+
+        Prunes expired entries (older than REPLY_QUEUE_TTL) before returning.
+        Returns replies in FIFO order (oldest first).
+
+        Args:
+            clear: If True, remove returned items from the queue.
+
+        Returns:
+            List of reply dicts with text, context, source, timestamp, and age.
+        """
+        self._prune_expired_replies()
+
+        now = time.time()
+        results = []
+        for entry in self.reply_queue:
+            context = self._sent_notifications.get(
+                entry.reply_to_message_id, "(unknown notification)"
+            )
+            results.append({
+                "text": entry.text,
+                "context": context,
+                "source": entry.source,
+                "timestamp": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.timestamp)
+                ),
+                "age_seconds": int(now - entry.timestamp),
+            })
+
+        if clear:
+            self.reply_queue.clear()
+
+        return results
+
+    def _prune_expired_replies(self) -> int:
+        """
+        Remove replies older than REPLY_QUEUE_TTL from the queue.
+
+        Returns:
+            Number of expired entries removed.
+        """
+        now = time.time()
+        pruned = 0
+        while self.reply_queue and (now - self.reply_queue[0].timestamp > REPLY_QUEUE_TTL):
+            self.reply_queue.popleft()
+            pruned += 1
+        if pruned:
+            logger.info("Pruned %d expired replies from queue", pruned)
+        return pruned
+
     def cleanup_stale_futures(self) -> int:
         """
-        Remove pending Futures that have exceeded timeout + buffer.
+        Remove pending Futures that have exceeded timeout + buffer,
+        and prune expired reply queue entries.
 
         Prevents memory leaks from Futures that were never resolved
         (e.g., if the polling loop missed a reply).
 
         Returns:
-            Number of stale entries removed.
+            Number of stale Future entries removed.
         """
         now = time.time()
         stale_ids = []
@@ -174,6 +327,9 @@ class ToolContext:
 
         if stale_ids:
             logger.info("Cleaned up %d stale pending replies", len(stale_ids))
+
+        # Also prune expired reply queue entries
+        self._prune_expired_replies()
 
         return len(stale_ids)
 
@@ -211,6 +367,10 @@ class ToolContext:
                 future.cancel()
         self.pending_replies.clear()
         self._pending_timestamps.clear()
+
+        # Clear reply queue state
+        self.reply_queue.clear()
+        self._sent_notifications.clear()
 
 
 # Global tool context (initialized by server.py)
@@ -257,8 +417,10 @@ async def tool_telegram_notify(
             text=prefixed_message,
             parse_mode=parse_mode,
         )
-        msg_id = result.get("message_id", "?")
-        return f"Notification sent (message_id: {msg_id})"
+        msg_id = result.get("message_id")
+        if msg_id is not None:
+            _ctx.track_notification(msg_id, message)
+        return f"Notification sent (message_id: {msg_id or '?'})"
 
     except TelegramAPIError as e:
         logger.error("telegram_notify failed: %s", e)
@@ -355,6 +517,43 @@ async def tool_telegram_ask(
         return f"Failed to send question: {e}"
 
 
+async def tool_telegram_check_replies(
+    clear: bool = True,
+) -> str:
+    """
+    Check for queued user replies to notifications.
+
+    Returns any replies the user sent to telegram_notify messages.
+    This is a non-blocking poll — returns immediately with whatever
+    is in the queue (or empty if nothing).
+
+    Args:
+        clear: If True (default), drain the queue after reading.
+               If False, peek without removing items.
+
+    Returns:
+        JSON-formatted string with queued replies and metadata.
+    """
+    if not _ctx.configured:
+        return (
+            "pact-telegram is not configured. "
+            "Run /PACT:telegram-setup to set up the Telegram bridge."
+        )
+
+    queue_depth_before = len(_ctx.reply_queue)
+    replies = _ctx.drain_replies(clear=clear)
+    queue_depth_after = len(_ctx.reply_queue)
+
+    result = {
+        "replies": replies,
+        "count": len(replies),
+        "queue_depth_before": queue_depth_before,
+        "queue_depth_after": queue_depth_after,
+    }
+
+    return json.dumps(result, indent=2)
+
+
 async def tool_telegram_status() -> str:
     """
     Get pact-telegram bridge status and health.
@@ -377,6 +576,7 @@ async def tool_telegram_status() -> str:
 
     voice_available = _ctx.voice.is_available() if _ctx.voice else False
     pending_count = len(_ctx.pending_replies)
+    queue_depth = len(_ctx.reply_queue)
 
     lines = [
         "pact-telegram status: CONNECTED",
@@ -384,6 +584,7 @@ async def tool_telegram_status() -> str:
         f"  Uptime: {uptime_str}",
         f"  Voice transcription: {'available' if voice_available else 'not configured (no OpenAI key)'}",
         f"  Pending questions: {pending_count}",
+        f"  Reply queue depth: {queue_depth}",
     ]
 
     warnings = config.get("warnings", [])

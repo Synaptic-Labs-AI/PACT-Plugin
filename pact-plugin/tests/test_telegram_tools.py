@@ -23,9 +23,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from telegram.tools import (
     ToolContext,
+    QueuedReply,
     get_context,
     tool_telegram_notify,
     tool_telegram_ask,
+    tool_telegram_check_replies,
     tool_telegram_status,
     _get_project_name,
     _prepend_session_prefix,
@@ -36,6 +38,10 @@ from telegram.tools import (
     NOTIFY_RATE_WINDOW,
     MAX_PENDING_REPLIES,
     STALE_FUTURE_BUFFER,
+    REPLY_QUEUE_MAX_SIZE,
+    REPLY_QUEUE_TTL,
+    MAX_SENT_NOTIFICATIONS,
+    NOTIFICATION_SNIPPET_LENGTH,
 )
 from telegram.telegram_client import TelegramAPIError
 
@@ -708,3 +714,395 @@ class TestMaxPendingReplies:
 
         assert "Too many pending questions" in result
         ctx.client.send_message.assert_not_awaited()
+
+
+# =============================================================================
+# Reply Queue Tests
+# =============================================================================
+
+class TestReplyQueue:
+    """Tests for reply queue infrastructure on ToolContext."""
+
+    def test_initial_queue_is_empty(self):
+        """Should start with an empty reply queue."""
+        ctx = ToolContext()
+        assert len(ctx.reply_queue) == 0
+
+    def test_enqueue_reply_adds_to_queue(self):
+        """Should add a QueuedReply entry to the queue."""
+        ctx = ToolContext()
+        ctx.enqueue_reply(
+            text="hello",
+            message_id=100,
+            reply_to_message_id=50,
+            source="text",
+        )
+        assert len(ctx.reply_queue) == 1
+        entry = ctx.reply_queue[0]
+        assert entry.text == "hello"
+        assert entry.message_id == 100
+        assert entry.reply_to_message_id == 50
+        assert entry.source == "text"
+
+    def test_enqueue_dequeue_fifo_ordering(self):
+        """Should maintain FIFO order when draining the queue."""
+        ctx = ToolContext()
+        for i in range(5):
+            ctx.enqueue_reply(
+                text=f"msg-{i}",
+                message_id=100 + i,
+                reply_to_message_id=50,
+                source="text",
+            )
+
+        results = ctx.drain_replies(clear=True)
+        assert len(results) == 5
+        for i, r in enumerate(results):
+            assert r["text"] == f"msg-{i}"
+
+    def test_queue_capacity_drops_oldest_on_overflow(self):
+        """Should drop oldest entries when queue exceeds maxlen."""
+        ctx = ToolContext()
+        # Fill beyond capacity
+        for i in range(REPLY_QUEUE_MAX_SIZE + 10):
+            ctx.enqueue_reply(
+                text=f"msg-{i}",
+                message_id=i,
+                reply_to_message_id=1,
+                source="text",
+            )
+
+        assert len(ctx.reply_queue) == REPLY_QUEUE_MAX_SIZE
+        # Oldest entries (0..9) should have been dropped
+        first = ctx.reply_queue[0]
+        assert first.text == "msg-10"
+
+    def test_ttl_expiry_prunes_stale_replies(self):
+        """Should prune replies older than REPLY_QUEUE_TTL."""
+        ctx = ToolContext()
+        # Add an entry with a timestamp far in the past
+        old_entry = QueuedReply(
+            text="old",
+            message_id=1,
+            reply_to_message_id=2,
+            timestamp=time.time() - REPLY_QUEUE_TTL - 10,
+            source="text",
+        )
+        ctx.reply_queue.append(old_entry)
+
+        # Add a fresh entry
+        ctx.enqueue_reply(
+            text="fresh",
+            message_id=3,
+            reply_to_message_id=4,
+            source="text",
+        )
+
+        results = ctx.drain_replies(clear=True)
+        assert len(results) == 1
+        assert results[0]["text"] == "fresh"
+
+    def test_prune_expired_replies_returns_count(self):
+        """Should return number of pruned entries."""
+        ctx = ToolContext()
+        for i in range(3):
+            old_entry = QueuedReply(
+                text=f"old-{i}",
+                message_id=i,
+                reply_to_message_id=1,
+                timestamp=time.time() - REPLY_QUEUE_TTL - 10,
+                source="text",
+            )
+            ctx.reply_queue.append(old_entry)
+
+        pruned = ctx._prune_expired_replies()
+        assert pruned == 3
+        assert len(ctx.reply_queue) == 0
+
+    def test_drain_replies_with_clear_true_empties_queue(self):
+        """Should empty the queue when clear=True."""
+        ctx = ToolContext()
+        ctx.enqueue_reply(text="a", message_id=1, reply_to_message_id=2, source="text")
+        ctx.enqueue_reply(text="b", message_id=3, reply_to_message_id=4, source="text")
+
+        results = ctx.drain_replies(clear=True)
+        assert len(results) == 2
+        assert len(ctx.reply_queue) == 0
+
+    def test_drain_replies_with_clear_false_preserves_queue(self):
+        """Should preserve queue items when clear=False."""
+        ctx = ToolContext()
+        ctx.enqueue_reply(text="a", message_id=1, reply_to_message_id=2, source="text")
+        ctx.enqueue_reply(text="b", message_id=3, reply_to_message_id=4, source="text")
+
+        results = ctx.drain_replies(clear=False)
+        assert len(results) == 2
+        assert len(ctx.reply_queue) == 2  # Still there
+
+    def test_drain_replies_includes_notification_context(self):
+        """Should include original notification snippet in drain results."""
+        ctx = ToolContext()
+        ctx.track_notification(50, "Build completed successfully for module X")
+        ctx.enqueue_reply(
+            text="thanks",
+            message_id=100,
+            reply_to_message_id=50,
+            source="text",
+        )
+
+        results = ctx.drain_replies(clear=True)
+        assert len(results) == 1
+        assert results[0]["context"] == "Build completed successfully for module X"
+
+    def test_drain_replies_unknown_notification_context(self):
+        """Should use fallback context for replies to untracked notifications."""
+        ctx = ToolContext()
+        ctx.enqueue_reply(
+            text="hello",
+            message_id=100,
+            reply_to_message_id=999,
+            source="text",
+        )
+
+        results = ctx.drain_replies(clear=True)
+        assert results[0]["context"] == "(unknown notification)"
+
+    def test_drain_replies_includes_age_seconds(self):
+        """Should include age_seconds in drain results."""
+        ctx = ToolContext()
+        old_entry = QueuedReply(
+            text="msg",
+            message_id=1,
+            reply_to_message_id=2,
+            timestamp=time.time() - 30,
+            source="text",
+        )
+        ctx.reply_queue.append(old_entry)
+
+        results = ctx.drain_replies(clear=True)
+        assert results[0]["age_seconds"] >= 29
+
+    def test_drain_replies_includes_source(self):
+        """Should include source type in drain results."""
+        ctx = ToolContext()
+        ctx.enqueue_reply(text="voice msg", message_id=1, reply_to_message_id=2, source="voice")
+
+        results = ctx.drain_replies(clear=True)
+        assert results[0]["source"] == "voice"
+
+    def test_cleanup_stale_futures_also_prunes_reply_queue(self):
+        """Should prune expired reply queue entries during stale future cleanup."""
+        ctx = ToolContext()
+        old_entry = QueuedReply(
+            text="stale",
+            message_id=1,
+            reply_to_message_id=2,
+            timestamp=time.time() - REPLY_QUEUE_TTL - 10,
+            source="text",
+        )
+        ctx.reply_queue.append(old_entry)
+
+        ctx.cleanup_stale_futures()
+        assert len(ctx.reply_queue) == 0
+
+    @pytest.mark.asyncio
+    async def test_close_clears_reply_queue(self):
+        """Should clear reply queue and sent notifications on close."""
+        ctx = ToolContext()
+        ctx.client = AsyncMock()
+        ctx.voice = AsyncMock()
+        ctx.enqueue_reply(text="a", message_id=1, reply_to_message_id=2, source="text")
+        ctx.track_notification(10, "test notification")
+
+        await ctx.close()
+
+        assert len(ctx.reply_queue) == 0
+        assert len(ctx._sent_notifications) == 0
+
+
+# =============================================================================
+# Notification Tracking Tests
+# =============================================================================
+
+class TestNotificationTracking:
+    """Tests for notification message_id tracking on ToolContext."""
+
+    def test_track_notification_stores_snippet(self):
+        """Should store a snippet of the notification text."""
+        ctx = ToolContext()
+        ctx.track_notification(42, "Hello world")
+        assert ctx._sent_notifications[42] == "Hello world"
+
+    def test_track_notification_truncates_long_text(self):
+        """Should truncate text longer than NOTIFICATION_SNIPPET_LENGTH."""
+        ctx = ToolContext()
+        long_text = "A" * (NOTIFICATION_SNIPPET_LENGTH + 20)
+        ctx.track_notification(42, long_text)
+
+        snippet = ctx._sent_notifications[42]
+        assert len(snippet) == NOTIFICATION_SNIPPET_LENGTH + 3  # +3 for "..."
+        assert snippet.endswith("...")
+
+    def test_track_notification_evicts_oldest_on_overflow(self):
+        """Should evict oldest entries when exceeding MAX_SENT_NOTIFICATIONS."""
+        ctx = ToolContext()
+        for i in range(MAX_SENT_NOTIFICATIONS + 5):
+            ctx.track_notification(i, f"msg-{i}")
+
+        assert len(ctx._sent_notifications) == MAX_SENT_NOTIFICATIONS
+        # Oldest entries (0..4) should be evicted
+        assert 0 not in ctx._sent_notifications
+        assert 4 not in ctx._sent_notifications
+        assert 5 in ctx._sent_notifications
+
+    @pytest.mark.asyncio
+    async def test_notify_tracks_sent_message_id(self):
+        """Should track notification message_id after successful send."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {"message_id": 77}
+
+        with patch("telegram.tools._ctx", ctx):
+            await tool_telegram_notify("Test notification message")
+
+        assert 77 in ctx._sent_notifications
+
+    @pytest.mark.asyncio
+    async def test_notify_does_not_track_when_no_message_id(self):
+        """Should not track when send returns no message_id."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.client = AsyncMock()
+        ctx.client.send_message.return_value = {}
+
+        with patch("telegram.tools._ctx", ctx):
+            await tool_telegram_notify("test")
+
+        assert len(ctx._sent_notifications) == 0
+
+
+# =============================================================================
+# tool_telegram_check_replies Tests
+# =============================================================================
+
+class TestToolTelegramCheckReplies:
+    """Tests for tool_telegram_check_replies -- non-blocking queue poll."""
+
+    @pytest.mark.asyncio
+    async def test_returns_not_configured_when_unconfigured(self):
+        """Should return 'not configured' when context is not initialized."""
+        ctx = ToolContext()
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_check_replies()
+
+        assert "not configured" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_queue_empty(self):
+        """Should return empty replies list when queue is empty."""
+        ctx = ToolContext()
+        ctx.configured = True
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_check_replies()
+
+        import json
+        data = json.loads(result)
+        assert data["replies"] == []
+        assert data["count"] == 0
+        assert data["queue_depth_before"] == 0
+        assert data["queue_depth_after"] == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_queued_items_and_drains(self):
+        """Should return all queued replies and drain the queue by default."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.track_notification(50, "Build complete")
+        ctx.enqueue_reply(text="got it", message_id=100, reply_to_message_id=50, source="text")
+        ctx.enqueue_reply(text="thanks", message_id=101, reply_to_message_id=50, source="text")
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_check_replies()
+
+        import json
+        data = json.loads(result)
+        assert data["count"] == 2
+        assert data["queue_depth_before"] == 2
+        assert data["queue_depth_after"] == 0
+        assert data["replies"][0]["text"] == "got it"
+        assert data["replies"][1]["text"] == "thanks"
+        assert data["replies"][0]["context"] == "Build complete"
+
+    @pytest.mark.asyncio
+    async def test_clear_false_preserves_queue(self):
+        """Should preserve queue when clear=False."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.enqueue_reply(text="msg", message_id=1, reply_to_message_id=2, source="text")
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_check_replies(clear=False)
+
+        import json
+        data = json.loads(result)
+        assert data["count"] == 1
+        assert data["queue_depth_before"] == 1
+        assert data["queue_depth_after"] == 1  # Preserved
+
+    @pytest.mark.asyncio
+    async def test_check_replies_reports_queue_depths(self):
+        """Should report accurate before and after queue depths."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.enqueue_reply(text="a", message_id=1, reply_to_message_id=2, source="text")
+        ctx.enqueue_reply(text="b", message_id=3, reply_to_message_id=4, source="voice")
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_check_replies(clear=True)
+
+        import json
+        data = json.loads(result)
+        assert data["queue_depth_before"] == 2
+        assert data["queue_depth_after"] == 0
+
+
+# =============================================================================
+# telegram_status Reply Queue Depth Tests
+# =============================================================================
+
+class TestStatusReplyQueueDepth:
+    """Tests for reply queue depth in telegram_status output."""
+
+    @pytest.mark.asyncio
+    async def test_status_shows_queue_depth(self):
+        """Should display reply queue depth in status output."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.config = {"mode": "passive", "warnings": []}
+        ctx.start_time = time.time()
+        ctx.voice = MagicMock()
+        ctx.voice.is_available.return_value = False
+        ctx.enqueue_reply(text="a", message_id=1, reply_to_message_id=2, source="text")
+        ctx.enqueue_reply(text="b", message_id=3, reply_to_message_id=4, source="text")
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_status()
+
+        assert "Reply queue depth: 2" in result
+
+    @pytest.mark.asyncio
+    async def test_status_shows_zero_queue_depth(self):
+        """Should show queue depth 0 when queue is empty."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.config = {"mode": "passive", "warnings": []}
+        ctx.start_time = time.time()
+        ctx.voice = MagicMock()
+        ctx.voice.is_available.return_value = False
+
+        with patch("telegram.tools._ctx", ctx):
+            result = await tool_telegram_status()
+
+        assert "Reply queue depth: 0" in result

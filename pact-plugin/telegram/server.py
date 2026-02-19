@@ -3,14 +3,16 @@ Location: pact-plugin/telegram/server.py
 Summary: FastMCP server setup for the pact-telegram bridge (stdio transport).
 Used by: __main__.py (entry point spawned by Claude Code via .mcp.json).
 
-Creates the MCP server with three tools (telegram_notify, telegram_ask,
-telegram_status) and manages the background Telegram polling loop.
+Creates the MCP server with four tools (telegram_notify, telegram_ask,
+telegram_check_replies, telegram_status) and manages the background
+Telegram polling loop.
 
 Architecture:
 - Server starts and loads config (graceful no-op if unconfigured)
 - Background asyncio task polls Telegram via getUpdates
 - Incoming replies are routed to pending telegram_ask Futures
-- Voice note replies are transcribed before resolving Futures
+- Unmatched replies (e.g., to notifications) are queued for telegram_check_replies
+- Voice note replies are transcribed before resolving Futures or queuing
 
 Graceful no-op behavior:
 - If config is missing, server starts but only telegram_status is functional
@@ -33,6 +35,7 @@ from telegram.tools import (
     get_context,
     tool_telegram_notify,
     tool_telegram_ask,
+    tool_telegram_check_replies,
     tool_telegram_status,
 )
 from telegram.voice import VoiceTranscriptionError
@@ -153,13 +156,12 @@ async def _process_update(ctx, update: dict) -> None:
             logger.debug("Received update with no pending question to route to")
             return
 
-    # Check if we have a pending Future for this message
-    if reply_to_id not in ctx.pending_replies:
-        logger.debug("No pending question for message_id %d", reply_to_id)
-        return
-
     # Try to extract text reply
     text = client.extract_text(update)
+    source = "text"
+
+    # Determine the reply message_id (for queue tracking)
+    reply_message_id = _extract_message_id(update)
 
     # If no text, check for voice note
     if text is None:
@@ -169,23 +171,59 @@ async def _process_update(ctx, update: dict) -> None:
             if file_id:
                 try:
                     text = await ctx.voice.transcribe_voice_message(file_id)
+                    source = "voice"
                     logger.info("Voice note transcribed for reply to %d", reply_to_id)
                 except VoiceTranscriptionError as e:
                     logger.warning("Voice transcription failed: %s", e)
                     text = "[Voice note received but transcription failed]"
+                    source = "voice"
         elif voice:
             text = "[Voice note received but transcription not configured]"
+            source = "voice"
+
+    # Detect callback source
+    if callback_query_id:
+        source = "callback"
 
     if text is None:
         logger.debug("Could not extract reply content from update")
         return
 
-    # Resolve the pending Future
-    resolved = ctx.resolve_reply(reply_to_id, text)
-    if resolved:
-        logger.info("Reply resolved for message_id %d", reply_to_id)
-    else:
+    # Check if we have a pending Future for this message (telegram_ask)
+    if reply_to_id in ctx.pending_replies:
+        resolved = ctx.resolve_reply(reply_to_id, text)
+        if resolved:
+            logger.info("Reply resolved for message_id %d", reply_to_id)
+            return
         logger.debug("Future for message_id %d already resolved or missing", reply_to_id)
+
+    # No pending Future matched — enqueue as a reply to a notification
+    ctx.enqueue_reply(
+        text=text,
+        message_id=reply_message_id or 0,
+        reply_to_message_id=reply_to_id,
+        source=source,
+    )
+
+
+def _extract_message_id(update: dict) -> int | None:
+    """
+    Extract the message_id of the incoming message itself (not reply_to).
+
+    Args:
+        update: A Telegram update object.
+
+    Returns:
+        The message_id of this message, or None.
+    """
+    message = update.get("message", {})
+    msg_id = message.get("message_id")
+    if msg_id is not None:
+        return msg_id
+
+    callback_query = update.get("callback_query", {})
+    cb_message = callback_query.get("message", {})
+    return cb_message.get("message_id")
 
 
 def create_server() -> FastMCP:
@@ -248,6 +286,26 @@ def create_server() -> FastMCP:
             options=options,
             timeout_seconds=timeout_seconds,
         )
+
+    @server.tool(
+        name="telegram_check_replies",
+        description=(
+            "Check for queued user replies to telegram_notify messages. "
+            "Non-blocking poll — returns immediately with any buffered replies. "
+            "Use periodically to see if the user responded to a notification."
+        ),
+    )
+    async def telegram_check_replies(
+        clear: bool = True,
+    ) -> str:
+        """
+        Check for queued user replies to notifications.
+
+        Args:
+            clear: If True (default), drain the queue after reading.
+                   If False, peek without removing items.
+        """
+        return await tool_telegram_check_replies(clear=clear)
 
     @server.tool(
         name="telegram_status",

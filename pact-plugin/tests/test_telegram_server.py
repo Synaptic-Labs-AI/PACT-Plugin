@@ -46,6 +46,7 @@ if "mcp" not in sys.modules:
 
 from telegram.server import (
     _process_update,
+    _extract_message_id,
     _polling_loop,
     create_server,
     lifespan,
@@ -279,17 +280,24 @@ class TestProcessUpdate:
         assert not future.done()
 
     @pytest.mark.asyncio
-    async def test_ignores_reply_to_unknown_message_id(self, tool_context):
-        """Should ignore reply to a message_id with no pending Future."""
+    async def test_enqueues_reply_to_unknown_message_id(self, tool_context):
+        """Should enqueue reply when reply_to_message_id has no pending Future."""
         tool_context.pending_replies = {}
 
         tool_context.client.extract_callback_query_id.return_value = None
         tool_context.client.extract_reply_to_message_id.return_value = 999
+        tool_context.client.extract_text.return_value = "reply to unknown"
+        tool_context.client.extract_voice.return_value = None
 
-        update = {"message": {"text": "reply to unknown"}}
+        update = {"message": {"message_id": 200, "text": "reply to unknown"}}
 
-        # Should not raise
         await _process_update(tool_context, update)
+
+        assert len(tool_context.reply_queue) == 1
+        entry = tool_context.reply_queue[0]
+        assert entry.text == "reply to unknown"
+        assert entry.reply_to_message_id == 999
+        assert entry.source == "text"
 
 
 # =============================================================================
@@ -560,3 +568,224 @@ class TestProcessUpdateEdgeCases:
 
         assert future.done()
         assert "not configured" in future.result()
+
+
+# =============================================================================
+# _extract_message_id Tests
+# =============================================================================
+
+class TestExtractMessageId:
+    """Tests for _extract_message_id -- extracting message_id from updates."""
+
+    def test_extracts_from_regular_message(self):
+        """Should extract message_id from a regular message update."""
+        update = {"message": {"message_id": 42, "text": "hello"}}
+        assert _extract_message_id(update) == 42
+
+    def test_extracts_from_callback_query(self):
+        """Should extract message_id from a callback query update."""
+        update = {
+            "callback_query": {
+                "id": "cq_1",
+                "message": {"message_id": 55},
+                "data": "Yes",
+            }
+        }
+        assert _extract_message_id(update) == 55
+
+    def test_returns_none_for_empty_update(self):
+        """Should return None when update has no message or callback."""
+        update = {}
+        assert _extract_message_id(update) is None
+
+    def test_returns_none_for_message_without_id(self):
+        """Should return None when message has no message_id."""
+        update = {"message": {"text": "no id"}}
+        assert _extract_message_id(update) is None
+
+
+# =============================================================================
+# Reply Queue Routing Tests (server-side)
+# =============================================================================
+
+class TestReplyQueueRouting:
+    """Tests for reply queue routing in _process_update."""
+
+    @pytest.fixture
+    def tool_context(self):
+        """Create a ToolContext with mocked client and voice."""
+        ctx = ToolContext()
+        ctx.configured = True
+        ctx.config = {"mode": "passive", "warnings": []}
+
+        client = MagicMock()
+        client.get_updates = AsyncMock(return_value=[])
+        client.send_message = AsyncMock(return_value={"message_id": 1})
+        client.answer_callback_query = AsyncMock(return_value=True)
+        client.close = AsyncMock()
+        ctx.client = client
+
+        voice = MagicMock()
+        voice.is_available.return_value = True
+        voice.transcribe_voice_message = AsyncMock(return_value="Transcribed text")
+        voice.close = AsyncMock()
+        ctx.voice = voice
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_reply_to_notification_enqueued_not_dropped(self, tool_context):
+        """Should enqueue reply to a notification (no pending Future) instead of dropping."""
+        tool_context.pending_replies = {}
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = 50
+        tool_context.client.extract_text.return_value = "Use PostgreSQL"
+        tool_context.client.extract_voice.return_value = None
+
+        update = {"message": {"message_id": 200, "text": "Use PostgreSQL", "reply_to_message": {"message_id": 50}}}
+
+        await _process_update(tool_context, update)
+
+        assert len(tool_context.reply_queue) == 1
+        entry = tool_context.reply_queue[0]
+        assert entry.text == "Use PostgreSQL"
+        assert entry.reply_to_message_id == 50
+        assert entry.message_id == 200
+        assert entry.source == "text"
+
+    @pytest.mark.asyncio
+    async def test_ask_reply_routes_to_future_not_queue(self, tool_context):
+        """Should route reply to pending Future, not to reply queue."""
+        future = asyncio.get_event_loop().create_future()
+        tool_context.pending_replies[42] = future
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = 42
+        tool_context.client.extract_text.return_value = "user answer"
+        tool_context.client.extract_voice.return_value = None
+
+        update = {"message": {"message_id": 300, "text": "user answer", "reply_to_message": {"message_id": 42}}}
+
+        await _process_update(tool_context, update)
+
+        assert future.result() == "user answer"
+        assert len(tool_context.reply_queue) == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ask_and_notification_reply(self, tool_context):
+        """Should route ask reply to Future and notification reply to queue."""
+        # Set up a pending ask Future
+        future = asyncio.get_event_loop().create_future()
+        tool_context.pending_replies[42] = future
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_voice.return_value = None
+
+        # First update: reply to the pending ask (message_id 42)
+        tool_context.client.extract_reply_to_message_id.return_value = 42
+        tool_context.client.extract_text.return_value = "ask answer"
+        update1 = {"message": {"message_id": 300, "text": "ask answer", "reply_to_message": {"message_id": 42}}}
+        await _process_update(tool_context, update1)
+
+        # Second update: reply to a notification (message_id 99, no pending Future)
+        tool_context.client.extract_reply_to_message_id.return_value = 99
+        tool_context.client.extract_text.return_value = "notification reply"
+        update2 = {"message": {"message_id": 301, "text": "notification reply", "reply_to_message": {"message_id": 99}}}
+        await _process_update(tool_context, update2)
+
+        # Ask reply went to Future
+        assert future.result() == "ask answer"
+        # Notification reply went to queue
+        assert len(tool_context.reply_queue) == 1
+        assert tool_context.reply_queue[0].text == "notification reply"
+
+    @pytest.mark.asyncio
+    async def test_voice_reply_to_notification_transcribed_and_queued(self, tool_context):
+        """Should transcribe voice reply to notification and enqueue it."""
+        tool_context.pending_replies = {}
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = 50
+        tool_context.client.extract_text.return_value = None
+        tool_context.client.extract_voice.return_value = {
+            "file_id": "voice_xyz",
+            "duration": 5,
+        }
+        tool_context.voice.transcribe_voice_message.return_value = "Transcribed reply"
+
+        update = {
+            "message": {
+                "message_id": 400,
+                "voice": {"file_id": "voice_xyz", "duration": 5},
+                "reply_to_message": {"message_id": 50},
+            }
+        }
+
+        await _process_update(tool_context, update)
+
+        assert len(tool_context.reply_queue) == 1
+        entry = tool_context.reply_queue[0]
+        assert entry.text == "Transcribed reply"
+        assert entry.source == "voice"
+        assert entry.reply_to_message_id == 50
+
+    @pytest.mark.asyncio
+    async def test_callback_reply_to_notification_queued(self, tool_context):
+        """Should enqueue callback button press when no pending Future."""
+        tool_context.pending_replies = {}
+
+        tool_context.client.extract_callback_query_id.return_value = "cq_456"
+        tool_context.client.extract_reply_to_message_id.return_value = 50
+        tool_context.client.extract_text.return_value = "Approve"
+        tool_context.client.extract_voice.return_value = None
+
+        update = {
+            "callback_query": {
+                "id": "cq_456",
+                "message": {"message_id": 50},
+                "data": "Approve",
+            }
+        }
+
+        await _process_update(tool_context, update)
+
+        tool_context.client.answer_callback_query.assert_awaited_once_with("cq_456")
+        assert len(tool_context.reply_queue) == 1
+        entry = tool_context.reply_queue[0]
+        assert entry.text == "Approve"
+        assert entry.source == "callback"
+
+    @pytest.mark.asyncio
+    async def test_unmatched_reply_with_already_done_future_enqueues(self, tool_context):
+        """Should enqueue when Future exists but is already done."""
+        future = asyncio.get_event_loop().create_future()
+        future.set_result("first")
+        tool_context.pending_replies[42] = future
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = 42
+        tool_context.client.extract_text.return_value = "second reply"
+        tool_context.client.extract_voice.return_value = None
+
+        update = {"message": {"message_id": 500, "text": "second reply", "reply_to_message": {"message_id": 42}}}
+
+        await _process_update(tool_context, update)
+
+        # Should have fallen through to enqueue since Future was already done
+        assert len(tool_context.reply_queue) == 1
+        assert tool_context.reply_queue[0].text == "second reply"
+
+    @pytest.mark.asyncio
+    async def test_no_pending_and_no_reply_to_enqueues_with_zero_reply_to(self, tool_context):
+        """Update with no reply_to and no pending should be ignored (return early)."""
+        tool_context.pending_replies = {}
+
+        tool_context.client.extract_callback_query_id.return_value = None
+        tool_context.client.extract_reply_to_message_id.return_value = None
+
+        update = {"message": {"message_id": 600, "text": "standalone"}}
+
+        await _process_update(tool_context, update)
+
+        # No pending replies and no reply_to_id means early return
+        assert len(tool_context.reply_queue) == 0
