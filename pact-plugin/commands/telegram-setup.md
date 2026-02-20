@@ -20,7 +20,7 @@ test -f ~/.claude/pact-telegram/.env && echo "EXISTS" || echo "MISSING"
 
 - If **EXISTS**: Tell the user "pact-telegram is already configured." Use AskUserQuestion to ask: "Would you like to (A) reconfigure from scratch, (B) test the existing setup, or (C) cancel?"
   - A: Continue to Step 2 (will overwrite existing config)
-  - B: Skip to Step 8 (send test notification)
+  - B: Skip to Step 7 (send test notification)
   - C: Stop -- tell user setup cancelled
 - If **MISSING**: Continue to Step 2.
 
@@ -109,38 +109,11 @@ sys.exit(0 if ok else 1)
 
 - If installation fails, show the error and suggest manual installation: `pip install mcp httpx`
 
-## Step 8: Register MCP Server
+## Step 8: Enable MCP Server
 
-Register the pact-telegram MCP server so it starts automatically on every Claude Code session.
+Tell the user: "The pact-telegram MCP server is bundled with the PACT plugin. To enable it, run `/plugin`, find **PACT** in the Installed list, expand it, and toggle **pact-telegram MCP** on. You can toggle it off anytime from the same view."
 
-1. Check if the server is already registered:
-   ```bash
-   claude mcp list 2>/dev/null | grep -q "pact-telegram" && echo "REGISTERED" || echo "NOT_REGISTERED"
-   ```
-
-2. If **NOT_REGISTERED**, detect the plugin cache path and register:
-   ```bash
-   # Detect plugin cache path
-   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-     PLUGIN_CACHE_PATH="$(dirname "$CLAUDE_PLUGIN_ROOT")"
-   else
-     PLUGIN_CACHE_PATH="$(ls -d ~/.claude/plugins/cache/pact-marketplace/PACT/*/telegram 2>/dev/null | sort -V | tail -1 | xargs dirname)"
-   fi
-
-   if [ -z "$PLUGIN_CACHE_PATH" ]; then
-     echo "ERROR: Could not detect plugin cache path"
-   else
-     claude mcp add -s user -e "PYTHONPATH=$PLUGIN_CACHE_PATH" pact-telegram -- python3 -m telegram
-     echo "MCP server registered successfully"
-   fi
-   ```
-
-3. If registration fails, tell the user the manual command:
-   `claude mcp add -s user -e PYTHONPATH=<path-to-plugin-cache> pact-telegram -- python3 -m telegram`
-
-4. If **REGISTERED**: Tell the user "pact-telegram MCP server is already registered." and continue.
-
-This ensures the MCP server starts on every Claude Code session without relying on `.mcp.json` auto-start.
+Use AskUserQuestion to confirm the user has enabled the MCP server before proceeding.
 
 ## Step 9: Send Test Notification
 
@@ -154,19 +127,20 @@ curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
 
 1. Check the API response for `"ok": true`.
 2. Ask the user: "Did you receive the test message in Telegram?" (AskUserQuestion)
-3. If **yes**: Continue to Step 9.
+3. If **yes**: Continue to Step 10.
 4. If **no**: Troubleshoot -- check token, chat ID, internet connectivity. Offer to retry or reconfigure.
 
 ## Step 10: Finalize
 
 Tell the user:
 
-> **Setup complete!** The pact-telegram MCP server is registered and will start automatically on every Claude Code session.
+> **Setup complete!** The pact-telegram MCP server is enabled and ready to use.
 >
 > - **Passive mode** (default): You will receive a Telegram notification when a Claude Code session ends, summarizing what was accomplished.
 > - **Active mode**: The orchestrator can send you questions via Telegram and wait for your reply. Enable by changing `PACT_TELEGRAM_MODE=active` in `~/.claude/pact-telegram/.env`.
 > - **MCP tools**: The tools `telegram_notify`, `telegram_ask`, and `telegram_status` are available to agents.
 > - **Multi-session support**: Each message includes the project name so you can tell which Claude Code instance sent it. When replying to questions, use swipe-reply (mobile) or click-reply (desktop) to route your answer to the correct session.
+> - **Toggle**: You can enable/disable the MCP server anytime via `/plugin` → PACT → pact-telegram MCP.
 >
 > **Restart Claude Code now** to activate the pact-telegram MCP server.
 
