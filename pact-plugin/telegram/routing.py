@@ -244,8 +244,10 @@ class FileBasedRouter(UpdateRouter):
         """
         Initialize multi-session coordination.
 
-        Creates coordinator directory structure, registers this session,
-        attempts to acquire the polling lock, and starts heartbeat.
+        Creates coordinator directory structure, attempts to acquire the
+        polling lock, and starts heartbeat. Session registration is handled
+        by the standalone register_session() function called before router
+        selection in server.py.
 
         Args:
             session_id: Unique identifier for this session.
@@ -253,13 +255,10 @@ class FileBasedRouter(UpdateRouter):
         self._session_id = session_id
         self._running = True
 
-        # Ensure directory structure
+        # Ensure directory structure (updates/ dir may not exist yet)
         self._ensure_coordinator_dirs()
 
-        # Register this session
-        self._write_session_file()
-
-        # Clean up stale sessions
+        # Clean up stale sessions (session already registered by register_session())
         self._cleanup_stale_sessions()
 
         # Try to acquire the polling lock
@@ -346,8 +345,9 @@ class FileBasedRouter(UpdateRouter):
         """
         Shut down the router.
 
-        Cancels heartbeat, removes session file, releases lock, and
-        cleans up inbox file.
+        Cancels heartbeat, releases lock, and cleans up inbox file.
+        Session file removal is handled by the standalone unregister_session()
+        function called in server.py's finally block.
         """
         self._running = False
 
@@ -358,13 +358,6 @@ class FileBasedRouter(UpdateRouter):
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
-
-        # Remove session file
-        session_file = self._session_file()
-        try:
-            session_file.unlink(missing_ok=True)
-        except OSError:
-            pass
 
         # Release lock
         self._release_lock()
@@ -745,6 +738,63 @@ class FileBasedRouter(UpdateRouter):
                 raise
         except OSError as e:
             logger.warning("Atomic write failed for %s: %s", path, e)
+
+
+def register_session(
+    session_id: str, coordinator_dir: Path | None = None
+) -> None:
+    """
+    Register a session in the coordinator directory BEFORE router selection.
+
+    Creates the coordinator/sessions/ directory structure and writes the
+    session file so that count_active_sessions() can detect this session.
+    Must be called before count_active_sessions() to avoid the chicken-and-egg
+    problem where the directory doesn't exist yet.
+
+    Args:
+        session_id: Unique identifier for this MCP server session.
+        coordinator_dir: Override for coordinator directory (testing).
+    """
+    base = coordinator_dir or COORDINATOR_DIR
+    sessions_dir = base / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        sessions_dir.chmod(0o700)
+    except OSError:
+        pass
+
+    data = {
+        "pid": os.getpid(),
+        "project": os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()),
+        "registered_at": time.time(),
+        "last_heartbeat": time.time(),
+    }
+    session_file = sessions_dir / f"{session_id}.json"
+    FileBasedRouter._atomic_write_json(session_file, data)
+    logger.info("Session registered: %s", session_id)
+
+
+def unregister_session(
+    session_id: str, coordinator_dir: Path | None = None
+) -> None:
+    """
+    Unregister a session from the coordinator directory during cleanup.
+
+    Removes the session file so that count_active_sessions() no longer
+    counts this session. Called in the server.py lifespan finally block
+    regardless of which router type was used.
+
+    Args:
+        session_id: Unique identifier for this MCP server session.
+        coordinator_dir: Override for coordinator directory (testing).
+    """
+    base = coordinator_dir or COORDINATOR_DIR
+    session_file = base / "sessions" / f"{session_id}.json"
+    try:
+        session_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+    logger.info("Session unregistered: %s", session_id)
 
 
 def count_active_sessions(coordinator_dir: Path | None = None) -> int:

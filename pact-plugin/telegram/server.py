@@ -30,7 +30,14 @@ from typing import AsyncIterator
 from mcp.server.fastmcp import FastMCP
 
 from telegram.config import get_or_create_session_id, load_config_safe
-from telegram.routing import DirectRouter, FileBasedRouter, UpdateRouter, count_active_sessions
+from telegram.routing import (
+    DirectRouter,
+    FileBasedRouter,
+    UpdateRouter,
+    count_active_sessions,
+    register_session,
+    unregister_session,
+)
 from telegram.telegram_client import TelegramClient
 from telegram.tools import (
     get_context,
@@ -68,6 +75,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     ctx = get_context()
     polling_task: asyncio.Task | None = None
     router: UpdateRouter | None = None
+    session_id: str | None = None
 
     try:
         # Load configuration (graceful no-op if missing)
@@ -79,9 +87,13 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
             # Generate a session ID for this MCP server instance
             session_id = get_or_create_session_id()
 
+            # Register session BEFORE counting so this session is visible
+            register_session(session_id)
+
             # Select router based on active session count
+            # count includes this session (registered above), so >1 means others exist
             active_sessions = count_active_sessions()
-            if active_sessions > 0:
+            if active_sessions > 1:
                 # Other sessions exist -- use FileBasedRouter for coordination
                 router = FileBasedRouter(ctx.client, session_id=session_id)
                 logger.info(
@@ -128,6 +140,10 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
 
         if router is not None:
             await router.stop()
+
+        # Unregister session regardless of router type
+        if session_id is not None:
+            unregister_session(session_id)
 
         await ctx.close()
         logger.info("pact-telegram shut down")

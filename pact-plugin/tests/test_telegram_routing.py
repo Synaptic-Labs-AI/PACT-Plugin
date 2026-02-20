@@ -36,6 +36,8 @@ from telegram.routing import (
     FileBasedRouter,
     UpdateRouter,
     count_active_sessions,
+    register_session,
+    unregister_session,
 )
 
 
@@ -191,21 +193,17 @@ class TestFileBasedRouterLifecycle:
         await router.stop()
 
     @pytest.mark.asyncio
-    async def test_start_writes_session_file(self, mock_client, coordinator_dir):
-        """Should write a session registration file on start."""
+    async def test_start_does_not_write_session_file(self, mock_client, coordinator_dir):
+        """Session file is written by register_session(), not start()."""
         router = FileBasedRouter(
             mock_client, session_id="sess-1", coordinator_dir=coordinator_dir
         )
 
         await router.start("sess-1")
 
+        # start() no longer writes session file -- register_session() does
         session_file = coordinator_dir / "sessions" / "sess-1.json"
-        assert session_file.exists()
-
-        data = json.loads(session_file.read_text())
-        assert data["pid"] == os.getpid()
-        assert "registered_at" in data
-        assert "last_heartbeat" in data
+        assert not session_file.exists()
 
         await router.stop()
 
@@ -221,14 +219,15 @@ class TestFileBasedRouterLifecycle:
         await router.start("start-id")
 
         assert router._session_id == "start-id"
-        session_file = coordinator_dir / "sessions" / "start-id.json"
-        assert session_file.exists()
 
         await router.stop()
 
     @pytest.mark.asyncio
-    async def test_stop_removes_session_file(self, mock_client, coordinator_dir):
-        """Should remove session file on stop."""
+    async def test_stop_does_not_remove_session_file(self, mock_client, coordinator_dir):
+        """Session file removal is handled by unregister_session(), not stop()."""
+        # Pre-register the session (as server.py would)
+        register_session("sess-1", coordinator_dir=coordinator_dir)
+
         router = FileBasedRouter(
             mock_client, session_id="sess-1", coordinator_dir=coordinator_dir
         )
@@ -239,6 +238,11 @@ class TestFileBasedRouterLifecycle:
 
         await router.stop()
 
+        # stop() no longer removes session file -- unregister_session() does
+        assert session_file.exists()
+
+        # Clean up via standalone function
+        unregister_session("sess-1", coordinator_dir=coordinator_dir)
         assert not session_file.exists()
 
     @pytest.mark.asyncio
@@ -435,6 +439,9 @@ class TestFileBasedRouterPolling:
             {"update_id": 1, "message": {"text": "hello"}}
         ]
         mock_client._update_offset = 2
+
+        # Register session first (as server.py would) so routing can find it
+        register_session("sess-1", coordinator_dir=coordinator_dir)
 
         router = FileBasedRouter(
             mock_client, session_id="sess-1", coordinator_dir=coordinator_dir
