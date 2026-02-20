@@ -239,13 +239,15 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 **Remember**: `CLAUDE.md` is your single source of truth for understanding the project. Keep it updated and comprehensive to maintain effective development continuity
   - To make updates, execute `/PACT:pin-memory`
 
-### Telegram Notifications (Optional)
+### Telegram Notifications (Optional — but MANDATORY when available)
 
 Telegram is an **optional** add-on. Not all PACT users have it installed. **Before using any telegram tool, check if it exists in your available tools.** If `telegram_notify` is not listed, do NOT attempt to call it — skip all Telegram functionality silently with no errors or warnings to the user.
 
 **How to check**: If `telegram_notify` appears in your tool list, the bridge is active. If not, ignore this entire section.
 
-**Available tools** (only when bridge is active):
+**When the bridge IS active, notifications are NOT optional — they are REQUIRED.** The user expects to be kept informed via Telegram. Failing to send notifications is a failure to communicate.
+
+**Available tools:**
 | Tool | Purpose | Blocking? |
 |------|---------|-----------|
 | `telegram_notify` | Send one-way notification (completions, deployments, alerts) | No |
@@ -253,20 +255,23 @@ Telegram is an **optional** add-on. Not all PACT users have it installed. **Befo
 | `telegram_check_replies` | Poll for queued replies to notifications | No |
 | `telegram_status` | Health check (connection, mode, queue depth) | No |
 
-**When to notify** (target ~3-5 per session):
-- Task or phase completions
-- Blockers found or algedonic signals
-- PR ready for review or merged
-- Deployments pushed
+**You MUST send `telegram_notify`** for these events (target ~3-5 per session):
+- Task or phase completions — "Phase X complete: [summary]"
+- Blockers found or algedonic signals — "Blocked: [issue]"
+- PR created, ready for review, or merged — "PR #N: [title]"
+- Deployments or pushes to production — "Deployed: [what]"
+- Long-running operations started — "Starting: [task], will notify when done"
 
-**When to use `telegram_ask`**:
-- Blocking decisions where user may be away from terminal
-- Scope clarifications that can't proceed without input
+**You MUST use `telegram_ask`** when:
+- User input is needed and they may be away from the terminal
+- Scope clarifications that block progress
 
-**When to check replies** (`telegram_check_replies`):
+**You MUST check `telegram_check_replies`**:
 - Between tasks or phases — check if user reacted to any notification
 - After sending important notifications — user may reply with corrections or new instructions
 - Replies include context snippet of the original notification
+
+**Do NOT notify** for routine internal steps (agent spawning, file reads, minor progress).
 
 **Multi-session behavior**:
 - Messages are prefixed with `[ProjectName]` for session identification
