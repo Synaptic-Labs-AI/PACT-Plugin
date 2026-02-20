@@ -2,7 +2,7 @@
 """
 Location: pact-plugin/telegram/__main__.py
 Summary: Entry point for running the pact-telegram MCP server via `python -m telegram`.
-Used by: Claude Code MCP registration (.mcp.json) to spawn the server process.
+Used by: Claude Code MCP registration (via `claude mcp add`) to spawn the server process.
 
 Performs dependency checking before starting the MCP server. If required
 dependencies (mcp, httpx) are missing, prints a user-friendly error and

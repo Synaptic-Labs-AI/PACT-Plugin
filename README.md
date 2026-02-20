@@ -224,10 +224,11 @@ memory.search("rate limiting")
 
 ## Telegram Bridge (Optional)
 
-Stay connected to your Claude Code sessions from Telegram. The bridge runs as an MCP server and provides three tools:
+Stay connected to your Claude Code sessions from Telegram. The bridge runs as an opt-in MCP server and provides four tools:
 
 - **`telegram_notify`** -- Send one-way notifications (HTML/Markdown)
 - **`telegram_ask`** -- Ask a blocking question with inline keyboard buttons; accepts text or voice replies
+- **`telegram_check_replies`** -- Poll for queued replies to notifications (non-blocking)
 - **`telegram_status`** -- Health check (connection, uptime, voice availability)
 
 Messages are prefixed with `[ProjectName]` so you can track multiple sessions. Voice replies are transcribed via OpenAI Whisper (optional).
@@ -249,7 +250,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-marketplace/
 │           └── PACT/
-│               └── 3.4.0/      # Plugin version
+│               └── 3.4.1/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

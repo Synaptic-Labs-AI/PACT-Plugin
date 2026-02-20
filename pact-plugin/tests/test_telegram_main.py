@@ -27,6 +27,7 @@ if "mcp" not in sys.modules:
         def __init__(self, name, **kwargs):
             self.name = name
             self._lifespan = kwargs.get("lifespan")
+            self.instructions = kwargs.get("instructions")
         def tool(self, **kwargs):
             def decorator(fn):
                 return fn

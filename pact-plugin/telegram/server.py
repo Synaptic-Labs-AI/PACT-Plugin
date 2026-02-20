@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/telegram/server.py
 Summary: FastMCP server setup for the pact-telegram bridge (stdio transport).
-Used by: __main__.py (entry point spawned by Claude Code via .mcp.json).
+Used by: __main__.py (entry point spawned by Claude Code MCP registration).
 
 Creates the MCP server with four tools (telegram_notify, telegram_ask,
 telegram_check_replies, telegram_status) and manages the background
@@ -278,6 +278,29 @@ def create_server() -> FastMCP:
     """
     server = FastMCP(
         "pact-telegram",
+        instructions=(
+            "pact-telegram bridges Claude Code sessions to the user's Telegram chat.\n\n"
+            "## Orchestrator Usage\n\n"
+            "Use these tools proactively:\n"
+            "- telegram_notify: Send one-way notifications (task/phase completions, blockers, "
+            "algedonic signals, PR ready, deployments). Non-blocking. Target ~3-5 per session.\n"
+            "- telegram_ask: Ask blocking questions with optional quick-reply buttons when the "
+            "user may be away from terminal. Supports text and voice replies.\n"
+            "- telegram_check_replies: Poll for queued replies to previous notifications between "
+            "tasks or phases. Replies include context snippet of the original notification.\n"
+            "- telegram_status: Health check (connection, mode, queue depth).\n\n"
+            "Multi-session behavior:\n"
+            "- Messages are prefixed with [ProjectName] for session identification\n"
+            "- Multiple sessions coordinate via file-based polling — replies route to the "
+            "correct session\n\n"
+            "## Agent Dispatch Guidance\n\n"
+            "When dispatching specialist agent teammates, include in their task description:\n"
+            "- Agents should use telegram_notify to report significant progress, completion, "
+            "or blockers\n"
+            "- Agents should use telegram_ask when they hit a blocking decision and the user "
+            "may not be watching the terminal\n"
+            "- Keep agent notifications concise — the orchestrator handles session-level summaries"
+        ),
         lifespan=lifespan,
     )
 
@@ -365,8 +388,8 @@ def main() -> None:
     """
     Direct-execution entry point.
 
-    Used when server.py is run directly via .mcp.json registration:
-        python3 ${CLAUDE_PLUGIN_ROOT}/telegram/server.py
+    Used when server.py is run directly:
+        python3 telegram/server.py
 
     Sets up logging to stderr (stdout is reserved for MCP stdio transport)
     and starts the server.

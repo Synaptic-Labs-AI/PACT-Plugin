@@ -1,7 +1,0 @@
-{
-  "pact-telegram": {
-    "command": "python3",
-    "args": ["-m", "telegram"],
-    "cwd": "${CLAUDE_PLUGIN_ROOT}"
-  }
-}

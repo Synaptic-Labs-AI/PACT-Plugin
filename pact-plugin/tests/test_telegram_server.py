@@ -30,6 +30,7 @@ if "mcp" not in sys.modules:
         def __init__(self, name, **kwargs):
             self.name = name
             self._lifespan = kwargs.get("lifespan")
+            self.instructions = kwargs.get("instructions")
         def tool(self, **kwargs):
             def decorator(fn):
                 return fn
@@ -99,10 +100,14 @@ class TestCreateServer:
     """Tests for create_server -- MCP server setup."""
 
     def test_creates_server(self):
-        """Should return a FastMCP server instance."""
+        """Should return a FastMCP server instance with instructions."""
         server = create_server()
         assert server is not None
         assert server.name == "pact-telegram"
+        assert server.instructions is not None
+        # All 4 tool names must appear in the instructions
+        for tool_name in ("telegram_notify", "telegram_ask", "telegram_check_replies", "telegram_status"):
+            assert tool_name in server.instructions, f"{tool_name} missing from instructions"
 
 
 # =============================================================================

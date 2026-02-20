@@ -239,38 +239,6 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 **Remember**: `CLAUDE.md` is your single source of truth for understanding the project. Keep it updated and comprehensive to maintain effective development continuity
   - To make updates, execute `/PACT:pin-memory`
 
-### Telegram Notifications
-
-When `telegram_notify` and related tools are available (pact-telegram MCP server running), use them proactively. Both orchestrator AND specialist agents should use these tools.
-
-**Available tools:**
-| Tool | Purpose | Blocking? |
-|------|---------|-----------|
-| `telegram_notify` | Send one-way notification (completions, deployments, alerts) | No |
-| `telegram_ask` | Ask a blocking question with optional buttons; supports text/voice replies | Yes |
-| `telegram_check_replies` | Poll for queued replies to notifications | No |
-| `telegram_status` | Health check (connection, mode, queue depth) | No |
-
-**When to notify** (target ~3-5 per session):
-- Task or phase completions
-- Blockers found or algedonic signals
-- PR ready for review or merged
-- Deployments pushed
-
-**When to use `telegram_ask`**:
-- Blocking decisions where user may be away from terminal
-- Scope clarifications that can't proceed without input
-
-**When to check replies** (`telegram_check_replies`):
-- Between tasks or phases — check if user reacted to any notification
-- After sending important notifications — user may reply with corrections or new instructions
-- Replies include context snippet of the original notification
-
-**Multi-session behavior**:
-- Messages are prefixed with `[ProjectName]` for session identification
-- Multiple sessions coordinate via file-based polling — replies route to the correct session
-- If telegram tools aren't available, skip silently (not all users have the bridge)
-
 ## PACT AGENT ORCHESTRATION
 
 ### Always Be Delegating
