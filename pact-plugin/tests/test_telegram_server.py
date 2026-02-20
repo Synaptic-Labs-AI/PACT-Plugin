@@ -378,9 +378,16 @@ class TestLifespan:
             "openai_api_key": None,
         }
 
+        mock_router = AsyncMock()
+
         with patch("telegram.server.load_config_safe", return_value=fake_config), \
              patch("telegram.server.get_context") as mock_get_ctx, \
-             patch("telegram.server._polling_loop", new_callable=AsyncMock) as mock_poll:
+             patch("telegram.server._polling_loop", new_callable=AsyncMock) as mock_poll, \
+             patch("telegram.server.get_or_create_session_id", return_value="test-session"), \
+             patch("telegram.server.register_session"), \
+             patch("telegram.server.count_active_sessions", return_value=1), \
+             patch("telegram.server.FileBasedRouter", return_value=mock_router), \
+             patch("telegram.server.unregister_session"):
             ctx = MagicMock()
             ctx.close = AsyncMock()
             mock_get_ctx.return_value = ctx
@@ -429,10 +436,17 @@ class TestLifespan:
             "openai_api_key": None,
         }
 
+        mock_router = AsyncMock()
+
         with patch("telegram.server.load_config_safe", return_value=fake_config), \
              patch("telegram.server.get_context") as mock_get_ctx, \
              patch("telegram.server._polling_loop", new_callable=AsyncMock), \
-             patch("telegram.server.asyncio.create_task", wraps=asyncio.create_task) as mock_create_task:
+             patch("telegram.server.asyncio.create_task", wraps=asyncio.create_task) as mock_create_task, \
+             patch("telegram.server.get_or_create_session_id", return_value="test-session"), \
+             patch("telegram.server.register_session"), \
+             patch("telegram.server.count_active_sessions", return_value=1), \
+             patch("telegram.server.FileBasedRouter", return_value=mock_router), \
+             patch("telegram.server.unregister_session"):
             ctx = MagicMock()
             ctx.close = AsyncMock()
             mock_get_ctx.return_value = ctx
@@ -458,9 +472,16 @@ class TestLifespan:
             except asyncio.CancelledError:
                 raise
 
+        mock_router = AsyncMock()
+
         with patch("telegram.server.load_config_safe", return_value=fake_config), \
              patch("telegram.server.get_context") as mock_get_ctx, \
-             patch("telegram.server._polling_loop", side_effect=blocking_poll):
+             patch("telegram.server._polling_loop", side_effect=blocking_poll), \
+             patch("telegram.server.get_or_create_session_id", return_value="test-session"), \
+             patch("telegram.server.register_session"), \
+             patch("telegram.server.count_active_sessions", return_value=1), \
+             patch("telegram.server.FileBasedRouter", return_value=mock_router), \
+             patch("telegram.server.unregister_session"):
             ctx = MagicMock()
             ctx.close = AsyncMock()
             mock_get_ctx.return_value = ctx

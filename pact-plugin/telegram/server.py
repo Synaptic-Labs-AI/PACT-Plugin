@@ -31,7 +31,6 @@ from mcp.server.fastmcp import FastMCP
 
 from telegram.config import get_or_create_session_id, load_config_safe
 from telegram.routing import (
-    DirectRouter,
     FileBasedRouter,
     UpdateRouter,
     count_active_sessions,
@@ -62,12 +61,12 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
     """
     MCP server lifespan manager.
 
-    Handles startup (config loading, router selection, polling loop start)
+    Handles startup (config loading, router creation, polling loop start)
     and shutdown (polling loop cancellation, router cleanup, resource cleanup).
 
-    Router selection:
-    - Single session (or first session): DirectRouter (zero overhead)
-    - Multiple sessions detected: FileBasedRouter (file-based coordination)
+    Always uses FileBasedRouter for update routing. This ensures that even the
+    first session can detect and coordinate with sessions that appear later,
+    avoiding a race condition where DirectRouter would consume all updates.
 
     Yields:
         Empty dict (no lifespan state needed by tools).
@@ -90,28 +89,18 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
             # Register session BEFORE counting so this session is visible
             register_session(session_id)
 
-            # Select router based on active session count
-            # count includes this session (registered above), so >1 means others exist
+            # Always use FileBasedRouter for coordination.
+            # Even with a single session, FileBasedRouter allows detecting and
+            # coordinating with new sessions that appear later.
             active_sessions = count_active_sessions()
-            if active_sessions > 1:
-                # Other sessions exist -- use FileBasedRouter for coordination
-                router = FileBasedRouter(ctx.client, session_id=session_id)
-                logger.info(
-                    "pact-telegram initialized with FileBasedRouter "
-                    "(mode=%s, voice=%s, active_sessions=%d)",
-                    config.get("mode", "unknown"),
-                    "yes" if config.get("openai_api_key") else "no",
-                    active_sessions,
-                )
-            else:
-                # Single session -- use DirectRouter (zero overhead)
-                router = DirectRouter(ctx.client)
-                logger.info(
-                    "pact-telegram initialized with DirectRouter "
-                    "(mode=%s, voice=%s)",
-                    config.get("mode", "unknown"),
-                    "yes" if config.get("openai_api_key") else "no",
-                )
+            router = FileBasedRouter(ctx.client, session_id=session_id)
+            logger.info(
+                "pact-telegram initialized with FileBasedRouter "
+                "(mode=%s, voice=%s, active_sessions=%d)",
+                config.get("mode", "unknown"),
+                "yes" if config.get("openai_api_key") else "no",
+                active_sessions,
+            )
 
             # Store router in context for tools.py to access
             ctx.router = router
@@ -153,9 +142,8 @@ async def _polling_loop(ctx, router: UpdateRouter) -> None:
     """
     Background task that polls Telegram for incoming messages.
 
-    Uses the provided UpdateRouter to get updates. For DirectRouter,
-    this calls client.get_updates() directly. For FileBasedRouter,
-    updates are coordinated across multiple sessions.
+    Uses the provided UpdateRouter to get updates. Updates are
+    coordinated across sessions via the FileBasedRouter.
 
     Routes replies to pending telegram_ask Futures based on
     reply_to_message_id matching. Handles voice note transcription
