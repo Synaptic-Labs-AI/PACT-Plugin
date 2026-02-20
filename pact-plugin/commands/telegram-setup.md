@@ -20,7 +20,7 @@ test -f ~/.claude/pact-telegram/.env && echo "EXISTS" || echo "MISSING"
 
 - If **EXISTS**: Tell the user "pact-telegram is already configured." Use AskUserQuestion to ask: "Would you like to (A) reconfigure from scratch, (B) test the existing setup, or (C) cancel?"
   - A: Continue to Step 2 (will overwrite existing config)
-  - B: Skip to Step 7 (send test notification)
+  - B: Skip to Step 9 (send test notification)
   - C: Stop -- tell user setup cancelled
 - If **MISSING**: Continue to Step 2.
 
@@ -111,9 +111,15 @@ sys.exit(0 if ok else 1)
 
 ## Step 8: Enable MCP Server
 
-Tell the user: "The pact-telegram MCP server is bundled with the PACT plugin. To enable it, run `/plugin`, find **PACT** in the Installed list, expand it, and toggle **pact-telegram MCP** on. You can toggle it off anytime from the same view."
+1. First, check if the user has an old user-scope MCP registration from a previous setup:
+   ```bash
+   claude mcp list 2>/dev/null | grep -q "pact-telegram" && echo "OLD_REGISTRATION" || echo "CLEAN"
+   ```
+   If **OLD_REGISTRATION**: Tell the user: "You have an old pact-telegram MCP registration from a previous setup. Remove it to avoid running duplicate servers:" and run `claude mcp remove pact-telegram`.
 
-Use AskUserQuestion to confirm the user has enabled the MCP server before proceeding.
+2. Tell the user: "The pact-telegram MCP server is bundled with the PACT plugin. To enable it, run `/plugin`, find **PACT** in the Installed list, expand it, and toggle **pact-telegram MCP** on. You can toggle it off anytime from the same view."
+
+3. Use AskUserQuestion to confirm the user has enabled the MCP server before proceeding.
 
 ## Step 9: Send Test Notification
 
