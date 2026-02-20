@@ -144,7 +144,7 @@ Tell the user:
 >
 > - **Passive mode** (default): You will receive a Telegram notification when a Claude Code session ends, summarizing what was accomplished.
 > - **Active mode**: The orchestrator can send you questions via Telegram and wait for your reply. Enable by changing `PACT_TELEGRAM_MODE=active` in `~/.claude/pact-telegram/.env`.
-> - **MCP tools**: The tools `telegram_notify`, `telegram_ask`, and `telegram_status` are available to agents.
+> - **MCP tools**: The tools `telegram_notify`, `telegram_ask`, `telegram_check_replies`, and `telegram_status` are available to agents.
 > - **Multi-session support**: Each message includes the project name so you can tell which Claude Code instance sent it. When replying to questions, use swipe-reply (mobile) or click-reply (desktop) to route your answer to the correct session.
 > - **Toggle**: You can enable/disable the MCP server anytime via `/plugin` → PACT → pact-telegram MCP.
 >
