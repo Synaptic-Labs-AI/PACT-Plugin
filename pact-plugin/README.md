@@ -106,12 +106,13 @@ After installing this plugin, use these commands:
 
 ## Telegram Bridge
 
-PACT includes an optional Telegram integration that lets you interact with Claude Code sessions from your phone. The bridge runs as an MCP server and provides three tools:
+PACT includes an optional Telegram integration that lets you interact with Claude Code sessions from your phone. The bridge runs as an opt-in MCP server (via `/PACT:telegram-setup`) and provides four tools:
 
 | Tool | Description |
 |------|-------------|
 | `telegram_notify` | Send a one-way notification (supports HTML/Markdown formatting) |
 | `telegram_ask` | Send a blocking question with optional inline keyboard buttons; supports text and voice replies |
+| `telegram_check_replies` | Poll for queued replies to notifications (non-blocking) |
 | `telegram_status` | Health check showing connection status, mode, uptime, and feature availability |
 
 **Key capabilities:**
