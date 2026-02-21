@@ -122,16 +122,7 @@ If the blocker reveals that a sub-task is more complex than expected and needs i
 /PACT:rePACT backend "implement the OAuth2 token refresh that's blocking us"
 ```
 
-**When to terminate**:
-Terminate is a last resort when the agent cannot be productively resumed:
-- Agent was already resumed once and stalled again on the same issue
-- Agent is looping on the same error after 3+ attempts
-- Agent's context is exhausted (near capacity, responses becoming incoherent)
-- TeammateIdle hook reported stall and resume did not resolve it
-
-**Note**: `TaskStop` is a **force-stop** -- it terminates the agent immediately without giving it a chance to finish current work or save state. For cooperative shutdown (letting the agent complete current work), use `SendMessage(type="shutdown_request")` instead.
-
-After termination, spawn a fresh agent with the partial handoff context from the terminated agent's task metadata. The fresh agent gets a clean context window without the failed approaches.
+**When to terminate**: Last resort — agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle stall unresolved by resume. `TaskStop` is a force-stop (immediate, non-cooperative); use `SendMessage(type="shutdown_request")` for cooperative shutdown. After termination, spawn a fresh agent with partial handoff from the terminated agent's task metadata.
 
 ---
 
