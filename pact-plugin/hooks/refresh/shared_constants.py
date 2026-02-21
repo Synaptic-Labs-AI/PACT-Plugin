@@ -218,7 +218,21 @@ def _prose_selecting_agents(ctx: dict) -> str:
 def _prose_resolution_path(ctx: dict) -> str:
     """Generate prose for resolution-path step."""
     outcome = ctx.get("outcome", "")
-    if outcome == "redo_solo":
+    # v3.5.0 outcome names (authoritative, from imPACT.md)
+    if outcome == "redo_prior_phase":
+        return "Resolution: redo prior phase."
+    elif outcome == "augment_present_phase":
+        return "Resolution: augment present phase with additional agents."
+    elif outcome == "invoke_repact":
+        return "Resolution: invoke rePACT for nested cycle."
+    elif outcome == "terminate_agent":
+        return "Resolution: terminate unrecoverable agent."
+    elif outcome == "not_truly_blocked":
+        return "Resolution: not truly blocked, continue with guidance."
+    elif outcome == "escalate_to_user":
+        return "Resolution: escalate to user for input."
+    # v3.4 outcome names (kept for backwards compatibility with old transcripts)
+    elif outcome == "redo_solo":
         return "Resolution: redo prior phase solo."
     elif outcome == "redo_with_help":
         return "Resolution: redo prior phase with agent assistance."

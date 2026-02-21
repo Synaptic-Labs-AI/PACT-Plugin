@@ -293,6 +293,40 @@ class TestImPACTProseTemplates:
         result = _prose_selecting_agents({})
         assert "agent" in result.lower()
 
+    # --- v3.5.0 outcome names ---
+
+    def test_prose_resolution_path_redo_prior_phase(self):
+        """Test resolution-path with v3.5.0 redo_prior_phase outcome."""
+        result = _prose_resolution_path({"outcome": "redo_prior_phase"})
+        assert "redo prior phase" in result.lower()
+
+    def test_prose_resolution_path_augment_present_phase(self):
+        """Test resolution-path with v3.5.0 augment_present_phase outcome."""
+        result = _prose_resolution_path({"outcome": "augment_present_phase"})
+        assert "augment" in result.lower()
+
+    def test_prose_resolution_path_invoke_repact(self):
+        """Test resolution-path with v3.5.0 invoke_repact outcome."""
+        result = _prose_resolution_path({"outcome": "invoke_repact"})
+        assert "repact" in result.lower()
+
+    def test_prose_resolution_path_terminate_agent(self):
+        """Test resolution-path with v3.5.0 terminate_agent outcome."""
+        result = _prose_resolution_path({"outcome": "terminate_agent"})
+        assert "terminate" in result.lower()
+
+    def test_prose_resolution_path_not_truly_blocked(self):
+        """Test resolution-path with v3.5.0 not_truly_blocked outcome."""
+        result = _prose_resolution_path({"outcome": "not_truly_blocked"})
+        assert "not truly blocked" in result.lower()
+
+    def test_prose_resolution_path_escalate_to_user(self):
+        """Test resolution-path with v3.5.0 escalate_to_user outcome."""
+        result = _prose_resolution_path({"outcome": "escalate_to_user"})
+        assert "escalate" in result.lower()
+
+    # --- v3.4 outcome names (backwards compat) ---
+
     def test_prose_resolution_path_redo_solo(self):
         """Test resolution-path step prose with redo_solo outcome."""
         result = _prose_resolution_path({"outcome": "redo_solo"})
