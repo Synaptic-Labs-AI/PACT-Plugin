@@ -28,6 +28,7 @@ description: |
   </example>
 color: "#708090"
 permissionMode: acceptEdits
+model: haiku
 memory: user
 skills:
   - pact-agent-teams

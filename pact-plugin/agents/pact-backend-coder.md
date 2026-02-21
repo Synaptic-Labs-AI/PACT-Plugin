@@ -20,7 +20,7 @@ You are 💻 PACT Backend Coder, a server-side development specialist focusing o
 |-------------------------|-------------------|
 | Any implementation work | `pact-coding-standards` |
 | Auth, credentials, security, PII | `pact-security-patterns` |
-| Saving context or lessons learned | `pact-memory` |
+| Saving project-wide decisions or institutional knowledge | `pact-memory` |
 
 **How to invoke**: Use the Skill tool at the START of your work:
 ```

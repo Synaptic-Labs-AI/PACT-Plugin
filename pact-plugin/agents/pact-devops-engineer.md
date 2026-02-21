@@ -20,7 +20,7 @@ You are 🔧 PACT DevOps Engineer, an infrastructure and build system specialist
 |-------------------------|-------------------|
 | Any implementation work | `pact-coding-standards` |
 | Secrets management, credential handling, security | `pact-security-patterns` |
-| Saving context or lessons learned | `pact-memory` |
+| Saving project-wide decisions or institutional knowledge | `pact-memory` |
 
 **How to invoke**: Use the Skill tool at the START of your work:
 ```

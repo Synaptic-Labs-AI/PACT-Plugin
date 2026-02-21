@@ -132,6 +132,8 @@ Orchestrator creates algedonic Task + blocks agent's task (addBlockedBy)
     ↓
 Orchestrator amplifies scope (blocks phase or feature Task)
     ↓
+[HALT only] Orchestrator broadcasts stop to all teammates
+    ↓
 Orchestrator IMMEDIATELY presents to user (no other work continues)
     ↓
 User responds
@@ -146,14 +148,19 @@ Work resumes (or stops) based on user decision
 On receiving an algedonic signal:
 
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
-2. For **HALT**: Stop ALL agents, await user acknowledgment
+2. For **HALT**: Broadcast stop to all teammates, then await user acknowledgment:
+   ```
+   SendMessage(type="broadcast",
+     content="⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+     summary="HALT: {category}")
+   ```
 3. For **ALERT**: Pause current work, present options to user
 4. **Log** the signal in session record
 
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Stop all agents immediately** — no agent continues work
+1. **Broadcast stop** — `SendMessage(type="broadcast", ...)` ensures all teammates receive the HALT simultaneously (see step 2 above)
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress

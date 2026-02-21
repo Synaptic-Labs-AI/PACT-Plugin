@@ -99,10 +99,11 @@ This context informs whether the blocker is isolated or systemic.
 
 ## Triage
 
-Answer two questions:
+Answer three questions:
 
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
 2. **Additional agents needed?** — Do we need help beyond the blocked agent's scope/specialty?
+3. **Is the agent recoverable?** — Can the blocked agent be resumed or helped, or is it unrecoverable (looping, stalled, context exhausted)?
 
 ## Outcomes
 
@@ -111,6 +112,7 @@ Answer two questions:
 | **Redo prior phase** | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
 | **Augment present phase** | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
 | **Invoke rePACT** | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
+| **Terminate agent** | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop: terminates immediately, non-cooperative) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` |
 | **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
@@ -119,6 +121,17 @@ If the blocker reveals that a sub-task is more complex than expected and needs i
 ```
 /PACT:rePACT backend "implement the OAuth2 token refresh that's blocking us"
 ```
+
+**When to terminate**:
+Terminate is a last resort when the agent cannot be productively resumed:
+- Agent was already resumed once and stalled again on the same issue
+- Agent is looping on the same error after 3+ attempts
+- Agent's context is exhausted (near capacity, responses becoming incoherent)
+- TeammateIdle hook reported stall and resume did not resolve it
+
+**Note**: `TaskStop` is a **force-stop** -- it terminates the agent immediately without giving it a chance to finish current work or save state. For cooperative shutdown (letting the agent complete current work), use `SendMessage(type="shutdown_request")` instead.
+
+After termination, spawn a fresh agent with the partial handoff context from the terminated agent's task metadata. The fresh agent gets a clean context window without the failed approaches.
 
 ---
 

@@ -19,7 +19,7 @@ You are 📚 PACT Preparer, a documentation and research specialist focusing on 
 | When Your Task Involves | Invoke This Skill |
 |-------------------------|-------------------|
 | Technology research, API docs, comparisons | `pact-prepare-research` |
-| Saving context or lessons learned | `pact-memory` |
+| Saving project-wide decisions or institutional knowledge | `pact-memory` |
 
 **How to invoke**: Use the Skill tool at the START of your work:
 ```

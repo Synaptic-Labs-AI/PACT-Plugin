@@ -13,7 +13,8 @@ Task state may still be in flux at SubagentStop time (agents self-manage
 status under Agent Teams, and the lead may process output after this hook
 fires), so Task state cannot be reliably checked here.
 
-Input: JSON from stdin with `transcript` and `agent_id`
+Input: JSON from stdin with `last_assistant_message` (preferred, SDK v2.1.47+),
+       `transcript` (fallback), and `agent_id`
 Output: JSON with `systemMessage` if handoff format is incomplete
 """
 
@@ -127,7 +128,8 @@ def main():
             # No input or invalid JSON - can't validate
             sys.exit(0)
 
-        transcript = input_data.get("transcript", "")
+        # Prefer last_assistant_message (SDK v2.1.47+), fall back to transcript
+        transcript = input_data.get("last_assistant_message", "") or input_data.get("transcript", "")
         agent_id = input_data.get("agent_id", "")
 
         # Only validate PACT agents

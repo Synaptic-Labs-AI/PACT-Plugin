@@ -61,3 +61,13 @@ Before other cleanup, audit and optionally clean up Task state:
     - Status: READY FOR COMMIT / REVIEW
 
 If no actions were needed, state "Workspace is clean and docs are in sync."
+
+## 4. Team Cleanup
+
+Clean up the session team to free resources:
+
+1. **Shut down remaining teammates**: Send `shutdown_request` to each active teammate and wait for responses.
+2. **Delete the team**: Call `TeamDelete` to remove the team directory (`~/.claude/teams/{team_name}/`).
+3. **Handle failures**: If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them.
+
+> Note: `hooks/session_end.py` also performs best-effort cleanup of stale team directories from prior sessions. This manual step ensures the *current* session's team is cleanly shut down.
