@@ -143,6 +143,7 @@ def write_session_snapshot(
 def cleanup_stale_teams(
     team_name: str | None = None,
     teams_dir: str | None = None,
+    tasks_dir: str | None = None,
 ) -> list[str]:
     """
     Remove the current session's team directory on session end.
@@ -156,6 +157,8 @@ def cleanup_stale_teams(
     Args:
         team_name: Team name to clean up (defaults to CLAUDE_CODE_TEAM_NAME env var)
         teams_dir: Override for teams base directory (for testing)
+        tasks_dir: Override for tasks base directory (for testing).
+                   Defaults to sibling "tasks" directory of teams_dir.
 
     Returns:
         List of team names that were cleaned up.
@@ -181,7 +184,10 @@ def cleanup_stale_teams(
         pass
 
     # Also clean corresponding task directory
-    tasks_base = teams_path.parent / "tasks"
+    if tasks_dir is None:
+        tasks_base = teams_path.parent / "tasks"
+    else:
+        tasks_base = Path(tasks_dir)
     if tasks_base.is_dir():
         task_dir = tasks_base / team_name
         if task_dir.is_dir():
@@ -194,14 +200,18 @@ def main():
     try:
         project_slug = get_project_slug()
 
-        # Write last-session snapshot for cross-session continuity
+        # Snapshot MUST run before cleanup: snapshot reads from the task list
+        # (keyed by task_list_id in ~/.claude/tasks/), while cleanup removes
+        # the team directory (keyed by team_name in ~/.claude/teams/) and its
+        # corresponding task directory. If cleanup ran first, get_task_list()
+        # would return empty results and the snapshot would be blank.
         tasks = get_task_list()
         write_session_snapshot(
             tasks=tasks,
             project_slug=project_slug,
         )
 
-        # Best-effort cleanup of stale team directories from prior sessions
+        # Best-effort cleanup of current session's team and task directories
         cleanup_stale_teams()
 
         sys.exit(0)

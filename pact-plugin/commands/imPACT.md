@@ -112,7 +112,7 @@ Answer three questions:
 | **Redo prior phase** | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
 | **Augment present phase** | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
 | **Invoke rePACT** | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
-| **Terminate agent** | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` |
+| **Terminate agent** | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop: terminates immediately, non-cooperative) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` |
 | **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
@@ -128,6 +128,8 @@ Terminate is a last resort when the agent cannot be productively resumed:
 - Agent is looping on the same error after 3+ attempts
 - Agent's context is exhausted (near capacity, responses becoming incoherent)
 - TeammateIdle hook reported stall and resume did not resolve it
+
+**Note**: `TaskStop` is a **force-stop** -- it terminates the agent immediately without giving it a chance to finish current work or save state. For cooperative shutdown (letting the agent complete current work), use `SendMessage(type="shutdown_request")` instead.
 
 After termination, spawn a fresh agent with the partial handoff context from the terminated agent's task metadata. The fresh agent gets a clean context window without the failed approaches.
 

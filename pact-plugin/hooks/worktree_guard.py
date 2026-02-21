@@ -77,7 +77,7 @@ def _find_project_root(worktree_path: str) -> str | None:
     worktree_p = Path(worktree_path)
     for parent in worktree_p.parents:
         worktrees_dir = parent / ".worktrees"
-        if worktrees_dir.is_dir() or worktree_path.startswith(str(parent / ".worktrees")):
+        if worktrees_dir.is_dir():
             return str(parent)
     return None
 

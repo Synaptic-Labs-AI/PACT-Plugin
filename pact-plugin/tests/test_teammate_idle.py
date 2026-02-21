@@ -505,6 +505,56 @@ import os
 # Edge Case Tests — Stall/Idle Interaction, Concurrent Tracking
 # =============================================================================
 
+class TestLegacyIdleCountMigration:
+    """Tests for the int-to-structured-dict migration in check_idle_cleanup().
+
+    Legacy idle_counts.json files stored plain ints per teammate (e.g., {"coder-a": 3}).
+    The current format uses structured dicts (e.g., {"coder-a": {"count": 3, "task_id": "1"}}).
+    The migration logic in _increment() must handle both formats transparently."""
+
+    def test_legacy_int_migrated_to_structured_dict(self, tmp_path):
+        """When idle_counts.json has a plain int, check_idle_cleanup should
+        migrate it to structured format and continue counting correctly."""
+        from teammate_idle import check_idle_cleanup, read_idle_counts, write_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+        # Write legacy format: plain int
+        write_idle_counts(counts_path, {"coder-a": 2})
+        tasks = [make_task(task_id="5", status="completed", owner="coder-a")]
+
+        # Should migrate the int (2) to {"count": 2, "task_id": ""} then
+        # increment to 3, which hits the suggest threshold
+        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert msg is not None
+        assert "idle" in msg.lower()
+        assert should_shutdown is False
+
+        # Verify the file now contains structured format
+        counts = read_idle_counts(counts_path)
+        entry = counts["coder-a"]
+        assert isinstance(entry, dict)
+        assert entry["count"] == 3
+        assert entry["task_id"] == "5"
+
+    def test_legacy_int_zero_migrated_correctly(self, tmp_path):
+        """Edge case: legacy count of 0 should migrate and increment to 1."""
+        from teammate_idle import check_idle_cleanup, read_idle_counts, write_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+        write_idle_counts(counts_path, {"coder-a": 0})
+        tasks = [make_task(task_id="1", status="completed", owner="coder-a")]
+
+        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
+        # Count goes from 0 -> 1, below threshold
+        assert msg is None
+        assert should_shutdown is False
+
+        counts = read_idle_counts(counts_path)
+        entry = counts["coder-a"]
+        assert isinstance(entry, dict)
+        assert entry["count"] == 1
+
+
 class TestStallIdleInteraction:
     """Verify that stalled agents get stall detection, NOT idle cleanup.
     This is the key invariant: a stalled agent (in_progress task + idle)

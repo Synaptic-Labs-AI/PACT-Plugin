@@ -62,11 +62,11 @@
 | Redo with help | Prior phase broken, need specialist | Loop back with subagent assistance |
 | Proceed with help | Current phase correct, blocked on execution | Invoke subagents to help forward |
 | Resume | Blocker resolved, agent had partial work | `Task(resume="{agent_id}", prompt="Blocker resolved: {details}. Continue.")` |
-| Terminate | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` + fresh spawn with partial handoff context |
+| Terminate | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop: terminates immediately, non-cooperative) + fresh spawn with partial handoff context |
 
 **Resume** is the default when blocker is resolved and the original agent had significant partial work. Read `agent_id` from task metadata: `TaskGet(taskId).metadata.agent_id`. Use fresh spawn instead when the agent's approach was wrong, it hit `maxTurns`, or its context is stale.
 
-**Terminate** is a last resort: agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle reported stall that resume did not resolve. After `TaskStop`, spawn fresh agent with partial handoff from terminated agent's task metadata.
+**Terminate** is a last resort: agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle reported stall that resume did not resolve. `TaskStop` is a force-stop (terminates immediately, non-cooperative); for cooperative shutdown use `SendMessage(type="shutdown_request")` instead. After `TaskStop`, spawn fresh agent with partial handoff from terminated agent's task metadata.
 
 If none of the questions yield "Yes," you're not blocked—continue.
 
