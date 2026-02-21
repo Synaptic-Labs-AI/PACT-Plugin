@@ -629,6 +629,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
+- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(type="broadcast")`, preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT
@@ -755,18 +756,20 @@ At phase transitions, briefly assess:
 
 **Trigger when**: Blocked; get similar errors repeatedly; or prior phase output is wrong.
 
-**Two questions**:
+**Three questions**:
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
-2. **Additional agents needed?** — Do I need subagents to assist?
+2. **Additional agents needed?** — Do we need help beyond the blocked agent's scope/specialty?
+3. **Is the agent recoverable?** — Can the blocked agent be resumed or helped, or is it unrecoverable (looping, stalled, context exhausted)?
 
-**Three outcomes**:
+**Six outcomes**:
 | Outcome | When | Action |
 |---------|------|--------|
-| Redo solo | Prior phase broken, I can fix it | Loop back and fix yourself |
-| Redo with help | Prior phase broken, need specialist | Loop back with subagent assistance |
-| Proceed with help | Current phase correct, blocked on execution | Invoke subagents to help forward |
-
-If neither question is "Yes," you're not blocked—continue.
+| Redo prior phase | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
+| Augment present phase | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
+| Invoke rePACT | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
+| Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
+| Not truly blocked | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
+| Escalate to user | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
 ---
 
