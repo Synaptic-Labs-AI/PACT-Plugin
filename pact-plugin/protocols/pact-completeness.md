@@ -4,7 +4,7 @@
 > Used by `plan-mode` (producer) to populate the Phase Requirements table,
 > and by `orchestrate` (consumer) to verify phase-skip decisions.
 
-A plan section may exist without being complete. Before skipping a phase, the orchestrator checks the corresponding plan section for these 6 incompleteness signals. **Any signal present means the phase should run.**
+A plan section may exist without being complete. Before skipping a phase, the orchestrator checks the corresponding plan section for these 7 incompleteness signals. **Any signal present means the phase should run.**
 
 ---
 
@@ -18,6 +18,7 @@ A plan section may exist without being complete. Before skipping a phase, the or
 | 4 | **Unchecked questions** | `- [ ]` checkboxes in "Questions to Resolve" sections | `- [ ] Which caching layer to use?` |
 | 5 | **Empty or placeholder sections** | Template text still present, or sections with no substantive content | `{Description of architectural approach}` |
 | 6 | **Unresolved open questions** | `- [ ]` checkboxes in "Open Questions > Require Further Research" | `- [ ] Performance impact of encryption at rest` |
+| 7 | **Research/investigation tasks in implementation plan** | Go/no-go items, feasibility studies, audit tasks, or items explicitly requiring PREPARE-phase runtime execution | `- Investigate whether Redis Streams can replace Kafka for our throughput needs` |
 
 ### Detection Guidance
 
@@ -25,11 +26,12 @@ A plan section may exist without being complete. Before skipping a phase, the or
 - **Signal 2**: Scan table cells for the literal string "TBD" (case-insensitive).
 - **Signal 3**: Search for the exact prefix `⚠️ Handled during`. Informal variants ("deferred to", "will be addressed in") are non-standard but should also raise suspicion.
 - **Signal 5**: Look for curly-brace placeholders (`{...}`) or sections containing only headings with no content beneath them.
+- **Signal 7**: Scan the implementation plan (e.g., "Implementation Sequence", "Code Phase") for tasks that involve research, investigation, feasibility assessment, or go/no-go decisions. These require PREPARE-phase runtime execution even if the plan's Preparation section appears complete. Common indicators: "investigate", "research", "evaluate", "assess feasibility", "determine whether", "audit", "spike".
 
 ### Usage
 
 **In `plan-mode` (Phase 2 synthesis)**: Check each phase's plan section for these signals to populate the Phase Requirements table.
 
-**In `orchestrate` (Context Assessment)**: Before skipping a phase, verify its plan section passes the completeness check — all 6 signals absent. Use skip reason `"plan_section_complete"` when the check passes.
+**In `orchestrate` (Context Assessment)**: Before skipping a phase, verify its plan section passes the completeness check — all 7 signals absent. Use skip reason `"plan_section_complete"` when the check passes.
 
 ---
