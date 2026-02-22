@@ -58,7 +58,7 @@ When your work is done:
 2. **Notify lead with summary only**:
    ```
    SendMessage(type="message", recipient="lead",
-     content="Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
+     content="[{your-name}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
      summary="Task complete: [brief]")
    ```
 3. **Mark task completed**:
@@ -92,6 +92,10 @@ Use `SendMessage(type="message", recipient="teammate-name")` for direct coordina
 Discover teammates via `~/.claude/teams/{team-name}/config.json` or from peer names
 in your task description.
 
+### Message Prefix Convention
+
+**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+
 **Message a peer when:**
 - Your work produces something an active peer needs (API schema, interface contract, shared config)
 - You have a question another specialist can answer better than the lead
@@ -122,7 +126,7 @@ If you cannot proceed:
 2. **SendMessage** the blocker to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+     content="[{your-name}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -138,7 +142,7 @@ When you detect a viability threat (security, data integrity, ethics):
 2. **SendMessage** the signal to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     content="[{your-name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
