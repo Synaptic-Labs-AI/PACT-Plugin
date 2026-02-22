@@ -29,6 +29,13 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
    - Adapt the approach?
    - Escalate to user for direction?
 
+4. **Shared Understanding (CT)**: Do we and the completing specialist agree?
+   - Orchestrator's understanding matches specialist's handoff?
+   - Key decisions interpreted consistently?
+   - No misunderstandings disguised as agreement?
+
+   *Verification*: SendMessage the completing specialist with your understanding of their key decisions. Specialist confirms or corrects. See [pact-ct-teachback.md](pact-ct-teachback.md) for the agreement verification protocol.
+
 ### Checkpoint Outcomes
 
 | Finding | Action |
@@ -44,6 +51,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Environment: [stable / shifted: {what}]
 > - Model: [aligned / diverged: {what}]
 > - Plan: [viable / adapt: {how} / escalate: {why}]
+> - Agreement: [verified / corrected: {what}]
 
 ### Output Behavior
 
