@@ -90,8 +90,6 @@ All five items are required. Not all priority levels need to be present in Areas
 
 **Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
 
-Example broadcast: `SendMessage(type="broadcast", content="[{your-name}→all] Shared config updated at src/config.ts — please pull latest.", summary="Shared config updated")`
-
 ## Peer Communication
 
 Use `SendMessage(type="message", recipient="teammate-name")` for direct coordination.
