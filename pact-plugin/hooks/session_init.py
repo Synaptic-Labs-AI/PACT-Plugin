@@ -6,13 +6,16 @@ Used by: Claude Code settings.json SessionStart hook
 
 Performs:
 1. Creates plugin symlinks for @reference resolution
-2. Detects active plans and notifies user
-3. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
-4. Ensures project CLAUDE.md exists with memory sections
-5. Checks for stale pinned context (delegated to staleness.py)
-6. Generates session-unique PACT team name and reminds orchestrator to create it
-6b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
-7. Checks for in_progress Tasks (resumption context via Task integration)
+2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
+3. Ensures project CLAUDE.md exists with memory sections
+4. Checks for stale pinned context (delegated to staleness.py)
+5. Generates session-unique PACT team name and reminds orchestrator to create it
+5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
+6. Checks for in_progress Tasks (resumption context via Task integration)
+
+Note: Plan detection (scanning docs/plans/) was removed from session startup
+to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
+checks docs/plans/ when it actually needs plan context.
 
 Note: Memory-related initialization (dependency installation, embedding
 migration, pending embedding catch-up) is now lazy-loaded on first memory
@@ -159,55 +162,6 @@ def setup_plugin_symlinks() -> str | None:
     if not messages:
         return "PACT symlinks verified"
     return "PACT: " + ", ".join(messages)
-
-
-def find_active_plans(project_dir: str) -> list:
-    """
-    Find plans with IN_PROGRESS status or uncompleted items.
-
-    Args:
-        project_dir: The project root directory path
-
-    Returns:
-        List of plan filenames that appear to be in progress
-    """
-    plans_dir = Path(project_dir) / "docs" / "plans"
-    active_plans = []
-
-    if not plans_dir.is_dir():
-        return active_plans
-
-    for plan_file in plans_dir.glob("*-plan.md"):
-        try:
-            content = plan_file.read_text(encoding='utf-8')
-            in_progress_indicators = [
-                "Status: IN_PROGRESS",
-                "Status: In Progress",
-                "status: in_progress",
-                "Status: ACTIVE",
-                "Status: Active",
-            ]
-
-            has_in_progress_status = any(
-                indicator in content for indicator in in_progress_indicators
-            )
-            has_unchecked_items = "[ ] " in content
-            is_completed = any(
-                status in content for status in [
-                    "Status: COMPLETED",
-                    "Status: Completed",
-                    "Status: DONE",
-                    "Status: Done",
-                ]
-            )
-
-            if has_in_progress_status or (has_unchecked_items and not is_completed):
-                active_plans.append(plan_file.name)
-
-        except (IOError, UnicodeDecodeError):
-            continue
-
-    return active_plans
 
 
 def update_claude_md() -> str | None:
@@ -538,13 +492,12 @@ def main():
 
     Performs PACT environment initialization:
     1. Creates plugin symlinks for @reference resolution
-    2. Checks for active plans
-    3. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
-    4. Ensures project CLAUDE.md exists with memory sections
-    5. Checks for stale pinned context entries in project CLAUDE.md
-    6. Generates session-unique PACT team name and reminds orchestrator to create it
-    7. Checks for in_progress Tasks (resumption context via Task integration)
-    8. Restores last session snapshot for cross-session continuity
+    2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
+    3. Ensures project CLAUDE.md exists with memory sections
+    4. Checks for stale pinned context entries in project CLAUDE.md
+    5. Generates session-unique PACT team name and reminds orchestrator to create it
+    6. Checks for in_progress Tasks (resumption context via Task integration)
+    7. Restores last session snapshot for cross-session continuity
 
     Memory initialization (dependencies, migrations, embedding catch-up) is
     now lazy-loaded on first memory operation to reduce startup cost for
@@ -567,15 +520,7 @@ def main():
         elif symlink_result:
             context_parts.append(symlink_result)
 
-        # 2. Check for active plans
-        active_plans = find_active_plans(project_dir)
-        if active_plans:
-            plan_list = ", ".join(active_plans[:3])
-            if len(active_plans) > 3:
-                plan_list += f" (+{len(active_plans) - 3} more)"
-            context_parts.append(f"Active plans: {plan_list}")
-
-        # 3. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
+        # 2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
         claude_md_msg = update_claude_md()
         if claude_md_msg:
             if "failed" in claude_md_msg.lower() or "unmanaged" in claude_md_msg.lower():
@@ -583,7 +528,7 @@ def main():
             else:
                 context_parts.append(claude_md_msg)
 
-        # 4. Ensure project has CLAUDE.md with memory sections
+        # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
         if project_md_msg:
             if "failed" in project_md_msg.lower():
@@ -591,7 +536,7 @@ def main():
             else:
                 context_parts.append(project_md_msg)
 
-        # 5. Check for stale pinned context
+        # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()
         if staleness_msg:
             if "failed" in staleness_msg.lower():
@@ -599,11 +544,11 @@ def main():
             else:
                 context_parts.append(staleness_msg)
 
-        # 6. Remind orchestrator to create session-unique PACT team
+        # 5. Remind orchestrator to create session-unique PACT team
         team_name = generate_team_name(input_data)
         context_parts.insert(0, f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). Do not read files, explore code, or respond to the user until the team is created. Use the name `{team_name}` wherever {{team_name}} appears in commands.')
 
-        # 6b. Write session resume info to project CLAUDE.md
+        # 5b. Write session resume info to project CLAUDE.md
         raw_id = input_data.get("session_id")
         session_id = str(raw_id) if raw_id else os.environ.get("CLAUDE_SESSION_ID", "")
         if session_id:
@@ -614,7 +559,7 @@ def main():
                 else:
                     context_parts.append(session_msg)
 
-        # 7. Check for in_progress Tasks (resumption context via Task integration)
+        # 6. Check for in_progress Tasks (resumption context via Task integration)
         tasks = get_task_list()
         if tasks:
             resumption_msg = check_resumption_context(tasks)
@@ -625,7 +570,7 @@ def main():
                 else:
                     context_parts.append(resumption_msg)
 
-        # 8. Restore last session snapshot for cross-session continuity
+        # 7. Restore last session snapshot for cross-session continuity
         project_slug = Path(project_dir).name if project_dir else ""
         session_snapshot = restore_last_session(project_slug=project_slug)
         if session_snapshot:

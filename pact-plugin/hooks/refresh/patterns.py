@@ -149,6 +149,16 @@ TERMINATION_SIGNALS = {
         r"rePACT\s+complete",
     ],
     "imPACT": [
+        # v3.5.0 outcome names (authoritative, from imPACT.md)
+        # Anchored with (?:^|[:.>\-]\s*) to avoid matching mid-sentence
+        # triage discussion (e.g., "Assessing whether to redo prior phase")
+        r"(?:^|[:.>\-]\s*)redo\s+prior\s+phase",
+        r"(?:^|[:.>\-]\s*)augment\s+present\s+phase",
+        r"(?:^|[:.>\-]\s*)invoke\s+rePACT",
+        r"(?:^|[:.>\-]\s*)terminate\s+agent",
+        r"(?:^|[:.>\-]\s*)not\s+truly\s+blocked",
+        r"(?:^|[:.>\-]\s*)escalate\s+to\s+user",
+        # v3.4 outcome names (kept for backwards compatibility with old transcripts)
         r"redo\s+solo",
         r"redo\s+with\s+help",
         r"proceed\s+with\s+help",
@@ -238,7 +248,7 @@ def is_termination_signal(content: str, workflow_name: str) -> bool:
     """
     signals = TERMINATION_SIGNALS.get(workflow_name, [])
     for signal_pattern in signals:
-        if re.search(signal_pattern, content, re.IGNORECASE):
+        if re.search(signal_pattern, content, re.IGNORECASE | re.MULTILINE):
             return True
     return False
 

@@ -121,10 +121,52 @@ class TestImPACTTerminationSignals:
         """Test detecting blocker resolved signal."""
         assert is_termination_signal("Blocker resolved. Moving forward.", "imPACT") is True
 
+    # --- v3.5.0 outcome signals (anchored patterns) ---
+
+    def test_redo_prior_phase_signal(self):
+        """Test detecting v3.5.0 'redo prior phase' outcome."""
+        assert is_termination_signal("Outcome: redo prior phase", "imPACT") is True
+        assert is_termination_signal("> redo prior phase", "imPACT") is True
+        assert is_termination_signal("- redo prior phase", "imPACT") is True
+
+    def test_augment_present_phase_signal(self):
+        """Test detecting v3.5.0 'augment present phase' outcome."""
+        assert is_termination_signal("Outcome: augment present phase", "imPACT") is True
+        assert is_termination_signal("> augment present phase", "imPACT") is True
+
+    def test_invoke_repact_signal(self):
+        """Test detecting v3.5.0 'invoke rePACT' outcome."""
+        assert is_termination_signal("Outcome: invoke rePACT", "imPACT") is True
+        assert is_termination_signal("> invoke rePACT for nested cycle", "imPACT") is True
+
+    def test_terminate_agent_signal(self):
+        """Test detecting v3.5.0 'terminate agent' outcome."""
+        assert is_termination_signal("Outcome: terminate agent", "imPACT") is True
+        assert is_termination_signal("> terminate agent — context exhausted", "imPACT") is True
+
+    def test_not_truly_blocked_signal(self):
+        """Test detecting v3.5.0 'not truly blocked' outcome."""
+        assert is_termination_signal("Outcome: not truly blocked", "imPACT") is True
+        assert is_termination_signal("> not truly blocked, continue", "imPACT") is True
+
+    def test_escalate_to_user_signal(self):
+        """Test detecting v3.5.0 'escalate to user' outcome."""
+        assert is_termination_signal("Outcome: escalate to user", "imPACT") is True
+        assert is_termination_signal("> escalate to user for input", "imPACT") is True
+
     def test_no_termination_during_triage(self):
         """Test non-termination content during triage."""
         assert is_termination_signal("Analyzing the blocker...", "imPACT") is False
         assert is_termination_signal("Assessing whether to redo prior phase", "imPACT") is False
+
+    def test_v350_casual_mentions_do_not_match(self):
+        """Test that casual mid-sentence mentions of v3.5.0 outcomes don't false-match."""
+        assert is_termination_signal("Need to augment present phase approach", "imPACT") is False
+        assert is_termination_signal("Should we invoke rePACT here?", "imPACT") is False
+        assert is_termination_signal("We may need to terminate agent soon", "imPACT") is False
+        assert is_termination_signal("The agent is not truly blocked yet", "imPACT") is False
+        assert is_termination_signal("We could escalate to user if needed", "imPACT") is False
+        assert is_termination_signal("Considering whether to redo prior phase", "imPACT") is False
 
     def test_case_insensitive_termination(self):
         """Test termination signals are case insensitive."""
@@ -157,9 +199,9 @@ class TestImPACTWorkflowPattern:
         assert "triage" in pattern.step_markers
 
     def test_compiled_pattern_has_termination_signals(self):
-        """Test compiled pattern has termination signals."""
+        """Test compiled pattern has termination signals (6 v3.5.0 + 6 v3.4 compat)."""
         pattern = WORKFLOW_PATTERNS["imPACT"]
-        assert len(pattern.termination_signals) == 6
+        assert len(pattern.termination_signals) == 12
 
     def test_compile_workflow_patterns_includes_impact(self):
         """Test compile_workflow_patterns function includes imPACT."""
@@ -253,6 +295,46 @@ class TestImPACTProseTemplates:
         template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
         result = template_fn({})
         assert "resolution" in result.lower()
+
+    # --- v3.5.0 outcome prose templates ---
+
+    def test_resolution_path_template_redo_prior_phase(self):
+        """Test resolution-path template with v3.5.0 redo_prior_phase outcome."""
+        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
+        result = template_fn({"outcome": "redo_prior_phase"})
+        assert "redo prior phase" in result.lower()
+
+    def test_resolution_path_template_augment_present_phase(self):
+        """Test resolution-path template with v3.5.0 augment_present_phase outcome."""
+        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
+        result = template_fn({"outcome": "augment_present_phase"})
+        assert "augment" in result.lower()
+
+    def test_resolution_path_template_invoke_repact(self):
+        """Test resolution-path template with v3.5.0 invoke_repact outcome."""
+        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
+        result = template_fn({"outcome": "invoke_repact"})
+        assert "repact" in result.lower()
+
+    def test_resolution_path_template_terminate_agent(self):
+        """Test resolution-path template with v3.5.0 terminate_agent outcome."""
+        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
+        result = template_fn({"outcome": "terminate_agent"})
+        assert "terminate" in result.lower()
+
+    def test_resolution_path_template_not_truly_blocked(self):
+        """Test resolution-path template with v3.5.0 not_truly_blocked outcome."""
+        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
+        result = template_fn({"outcome": "not_truly_blocked"})
+        assert "not truly blocked" in result.lower()
+
+    def test_resolution_path_template_escalate_to_user(self):
+        """Test resolution-path template with v3.5.0 escalate_to_user outcome."""
+        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
+        result = template_fn({"outcome": "escalate_to_user"})
+        assert "escalate" in result.lower()
+
+    # --- v3.4 outcome prose templates (backwards compat) ---
 
     def test_resolution_path_template_redo_solo(self):
         """Test resolution-path template with redo_solo outcome."""

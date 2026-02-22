@@ -508,6 +508,8 @@ Monitor for blocker/algedonic signals via:
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
+**HALT handling**: On HALT signal, immediately `SendMessage(type="broadcast", content="⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.", summary="HALT: {category}")` to stop all running teammates before presenting to user.
+
 ### Blocker Recovery: Resume vs. Fresh Spawn
 
 When a blocker is resolved, prefer resuming the original agent over spawning fresh — this preserves the agent's accumulated context.

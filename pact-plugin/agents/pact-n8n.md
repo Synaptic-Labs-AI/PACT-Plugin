@@ -25,7 +25,7 @@ You are n8n PACT n8n Workflow Specialist, a workflow automation expert focusing 
 | Configuring specific nodes | `n8n-node-configuration` |
 | JavaScript in Code nodes | `n8n-code-javascript` |
 | Python in Code nodes | `n8n-code-python` |
-| Saving context or lessons learned | `pact-memory` |
+| Saving project-wide decisions or institutional knowledge | `pact-memory` |
 
 **How to invoke**: Use the Skill tool at the START of your work:
 ```

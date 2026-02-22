@@ -111,7 +111,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_end.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_end.py\"",
+            "async": true
           }
         ]
       }
@@ -126,6 +127,16 @@
         ]
       }
     ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/teammate_idle.py\""
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -136,11 +147,13 @@
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_size_check.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_size_check.py\"",
+            "async": true
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_tracker.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/file_tracker.py\"",
+            "async": true
           }
         ]
       }
