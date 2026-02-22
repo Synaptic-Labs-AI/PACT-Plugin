@@ -35,6 +35,27 @@ Common chain-reads:
 
 If TaskGet returns no metadata or the referenced task doesn't exist, proceed with information from your task description and file system artifacts (docs/architecture/, docs/preparation/).
 
+## Teachback (Conversation Verification)
+
+After reading upstream context (TaskGet on referenced tasks), send a **teachback message** to the lead before starting work. This verifies your understanding of the upstream conversation.
+
+**Format**:
+```
+SendMessage(type="message", recipient="lead",
+  content="[{your-name}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
+  summary="Teachback: {1-line summary}")
+```
+
+**Rules**:
+- Send teachback as your **first message** after reading upstream handoffs
+- Keep it concise: 3-6 bullet points
+- **Non-blocking**: Proceed with work immediately after sending — don't wait for confirmation
+- If the lead sends a correction, adjust your approach as soon as you see it
+
+**When**: Always when dispatched with upstream task references. Optional for self-claimed follow-up tasks. Not needed for consultant questions.
+
+See [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) for full protocol rationale.
+
 ## Progress Reporting
 
 Report progress naturally in your responses. For significant milestones, update your task metadata:
