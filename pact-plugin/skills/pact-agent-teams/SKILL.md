@@ -96,6 +96,8 @@ in your task description.
 
 **Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
 
+Example broadcast: `SendMessage(type="broadcast", content="[{your-name}→all] Shared config updated at src/config.ts — please pull latest.", summary="Shared config updated")`
+
 **Message a peer when:**
 - Your work produces something an active peer needs (API schema, interface contract, shared config)
 - You have a question another specialist can answer better than the lead

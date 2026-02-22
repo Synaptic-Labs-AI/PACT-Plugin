@@ -92,7 +92,7 @@ Under Agent Teams, teammates have access to Task tools (TaskGet, TaskUpdate, Tas
 2. Send the signal to the lead via SendMessage (using the Signal Format above):
    ```
    SendMessage(type="message", recipient="lead",
-     content="⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     content="[{your-name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial handoff with whatever work was completed
@@ -151,7 +151,7 @@ On receiving an algedonic signal:
 2. For **HALT**: Broadcast stop to all teammates, then await user acknowledgment:
    ```
    SendMessage(type="broadcast",
-     content="⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+     content="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
      summary="HALT: {category}")
    ```
 3. For **ALERT**: Pause current work, present options to user

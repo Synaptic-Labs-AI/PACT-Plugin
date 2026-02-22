@@ -687,7 +687,7 @@ def create_agent_teams_orchestrate_transcript(
                 {"type": "text", "text": "Received completion summary from backend-coder. Full HANDOFF stored in task metadata."},
                 make_send_message_call(
                     recipient="lead",
-                    content="Task complete. Implemented auth endpoint using JWT tokens. No HIGH uncertainties.",
+                    content="[backend-coder→lead] Task complete. Implemented auth endpoint using JWT tokens. No HIGH uncertainties.",
                     summary="Task complete: auth endpoint",
                     tool_use_id="sendmsg-handoff",
                 ),
