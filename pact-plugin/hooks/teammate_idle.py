@@ -37,6 +37,8 @@ if str(_hooks_dir) not in sys.path:
 from shared.task_utils import get_task_list
 
 
+IDLE_PREAMBLE = "[System idle notification — no response needed] "
+
 IDLE_SUGGEST_THRESHOLD = 3
 IDLE_FORCE_THRESHOLD = 5
 
@@ -164,10 +166,12 @@ def write_idle_counts(idle_counts_path: str, counts: dict) -> None:
         # then lock, truncate, and write atomically
         with open(path, "a+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            f.seek(0)
-            f.truncate()
-            f.write(json.dumps(counts))
-            fcntl.flock(f, fcntl.LOCK_UN)
+            try:
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(counts))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
     else:
         path.write_text(json.dumps(counts), encoding="utf-8")
 
@@ -371,7 +375,7 @@ def main():
                     f"via SendMessage(type=\"shutdown_request\", recipient=\"{teammate_name}\")."
                 )
 
-            output = {"systemMessage": " | ".join(messages)}
+            output = {"systemMessage": IDLE_PREAMBLE + " | ".join(messages)}
             print(json.dumps(output))
 
         sys.exit(0)

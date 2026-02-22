@@ -174,3 +174,9 @@ When you receive a `shutdown_request`:
 | Mid-task, awaiting response, or remediation may need your input | Reject with reason |
 
 > **Save memory before approving**: If you haven't already saved project-wide knowledge via `pact-memory`, do so before approving — your process terminates on approval. Agent-level learnings in your persistent memory directory are saved automatically.
+
+## Completion Integrity (SACROSANCT)
+
+Only report work as completed if you actually performed the changes. Never fabricate
+a completion HANDOFF. If files don't exist, can't be edited, or tools fail, report
+a BLOCKER via SendMessage -- never invent results.
