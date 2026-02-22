@@ -194,7 +194,7 @@ Before executing phases, assess which are needed based on existing context:
 | Phase | Run if... | Skip if... |
 |-------|-----------|------------|
 | **PREPARE** | Requirements unclear, external APIs to research, dependencies unmapped | Plan section passes completeness check (see below); OR requirements explicit in task; OR existing `docs/preparation/` covers scope with no unresolved items |
-| **ARCHITECT** | New component or module, interface contracts undefined, architectural decisions required | Approved plan with complete Architecture section (passes completeness check below); OR following established patterns with no new components; OR `docs/architecture/` covers design with no open items |
+| **ARCHITECT** | New component or module, interface contracts undefined, architectural decisions required | Plan section passes completeness check (see below); OR following established patterns with no new components; OR `docs/architecture/` covers design with no open items |
 | **CODE** | Always run | Never skip |
 | **TEST** | Integration/E2E tests needed, complex component interactions, security/performance verification | ALL of the following are true: (1) trivial change with no new logic requiring tests, (2) no integration boundaries crossed, (3) isolated change with no meaningful test scenarios, AND (4) plan's Phase Requirements section does not mark TEST as REQUIRED (if plan exists) |
 
