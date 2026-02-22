@@ -74,6 +74,7 @@ When your work is done:
    TaskUpdate(taskId, metadata={"handoff": {
      "produced": [...],
      "decisions": [...],
+     "reasoning_chain": "...",  // optional
      "uncertainty": [...],
      "integration": [...],
      "open_questions": [...]
@@ -101,15 +102,16 @@ This HANDOFF must ALSO be stored in task metadata (see On Completion Step 1 abov
 HANDOFF:
 1. Produced: Files created/modified
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Areas of uncertainty (PRIORITIZED):
+3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z." Helps downstream agents reconstruct your understanding, not just your conclusions.
+4. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
    - [MEDIUM] {description}
    - [LOW] {description}
-4. Integration points: Other components touched
-5. Open questions: Unresolved items
+5. Integration points: Other components touched
+6. Open questions: Unresolved items
 ```
 
-All five items are required. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
 
 ## Peer Communication
 
