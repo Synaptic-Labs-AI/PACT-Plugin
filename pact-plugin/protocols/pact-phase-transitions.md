@@ -30,12 +30,13 @@ Coders provide handoff summaries to the orchestrator, who passes them to the tes
 ```
 1. Produced: Files created/modified
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Areas of uncertainty (PRIORITIZED):
+3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
+4. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
    - [MEDIUM] {description}
    - [LOW] {description}
-4. Integration points: Other components touched
-5. Open questions: Unresolved items
+5. Integration points: Other components touched
+6. Open questions: Unresolved items
 ```
 
 Note: Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).

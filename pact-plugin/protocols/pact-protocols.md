@@ -182,6 +182,13 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
    - Adapt the approach?
    - Escalate to user for direction?
 
+4. **Shared Understanding (CT)**: Do we and the completing specialist agree?
+   - Orchestrator's understanding matches specialist's handoff?
+   - Key decisions interpreted consistently?
+   - No misunderstandings disguised as agreement?
+
+   *Verification*: SendMessage the completing specialist with your understanding of their key decisions. Specialist confirms or corrects. See [pact-ct-teachback.md](pact-ct-teachback.md) for the agreement verification protocol.
+
 ### Checkpoint Outcomes
 
 | Finding | Action |
@@ -197,6 +204,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Environment: [stable / shifted: {what}]
 > - Model: [aligned / diverged: {what}]
 > - Plan: [viable / adapt: {how} / escalate: {why}]
+> - Agreement: [verified / corrected: {what}]
 
 ### Output Behavior
 
@@ -205,13 +213,14 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 **Examples**:
 
 *Silent (all clear)*:
-> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable → continue
+> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified → continue
 
 *Surfaces to user (issue detected)*:
 > **S4 Checkpoint** [PREPARE→ARCHITECT]:
 > - Environment: Shifted — API v2 deprecated, v3 has breaking changes
 > - Model: Diverged — Assumed backwards compatibility, now false
 > - Plan: Adapt — Need PREPARE extension to research v3 migration path
+> - Agreement: Corrected — Preparer assumed v2 compatibility; confirmed v3 migration needed
 
 ### Relationship to Variety Checkpoints
 
@@ -1028,25 +1037,27 @@ Coders provide handoff summaries to the orchestrator, who passes them to the tes
 ```
 1. Produced: Files created/modified
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Areas of uncertainty (PRIORITIZED):
+3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
+4. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
    - [MEDIUM] {description}
    - [LOW] {description}
-4. Integration points: Other components touched
-5. Open questions: Unresolved items
+5. Integration points: Other components touched
+6. Open questions: Unresolved items
 ```
 
-Note: Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
 
 **Example**:
 ```
 1. Produced: `src/auth/token-manager.ts`, `src/auth/token-manager.test.ts`
 2. Key decisions: Used JWT with 15min expiry (assumed acceptable for this app)
-3. Areas of uncertainty:
+3. Reasoning chain: Chose JWT because stateless auth required; 15min expiry because short-lived tokens reduce replay risk, which required a refresh mechanism
+4. Areas of uncertainty:
    - [HIGH] Token refresh race condition — concurrent requests may get stale tokens; test with parallel calls
    - [MEDIUM] Clock skew handling — assumed <5s drift; may fail with larger skew
-4. Integration points: Modified `src/middleware/auth.ts` to use new manager
-5. Open questions: Should refresh tokens be stored in httpOnly cookies?
+5. Integration points: Modified `src/middleware/auth.ts` to use new manager
+6. Open questions: Should refresh tokens be stored in httpOnly cookies?
 ```
 
 **Uncertainty Prioritization**:
@@ -1402,7 +1413,7 @@ Input:
   nesting_depth: {current nesting level, 0-based}
 
 Output:
-  handoff: {standard 5-item handoff + contract fulfillment section}
+  handoff: {standard 6-item handoff + contract fulfillment section}
   commits: {code committed to branch}
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
@@ -1417,7 +1428,7 @@ rePACT implements the executor interface as follows:
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
 | **Input: branch** | Uses the current feature branch (no new branch created) |
 | **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
-| **Output: handoff** | Standard 5-item handoff with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
+| **Output: handoff** | Standard 6-item handoff with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
 | **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
 | **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
@@ -1465,7 +1476,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 #### Design Constraints
 
 - **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (5-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
+- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (6-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
 - **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
 
 ---

@@ -358,9 +358,9 @@ When nested cycle completes:
 3. **Report** any decisions that affect the parent task
 4. **Continue** with parent orchestration (parent task now unblocked)
 
-**Handoff format**: Use the standard 5-item structure (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions).
+**Handoff format**: Use the standard 6-item structure (Produced, Key decisions, Reasoning chain [optional], Areas of uncertainty, Integration points, Open questions).
 
-**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard 5-item handoff:
+**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard 6-item handoff:
 
 ```
 Contract Fulfillment:

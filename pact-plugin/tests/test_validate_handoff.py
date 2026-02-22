@@ -32,10 +32,11 @@ GOOD_HANDOFF = """
 
 1. Produced: Created src/auth.py with JWT authentication middleware
 2. Key decisions: Chose JWT over session tokens for stateless design
-3. Areas of uncertainty:
+3. Reasoning chain: Chose JWT because stateless auth required; session tokens would need server-side storage
+4. Areas of uncertainty:
    - [HIGH] Token refresh logic untested with concurrent requests
-4. Integration points: Connects to user_service.py via get_user()
-5. Open questions: Should token expiry be configurable?
+5. Integration points: Connects to user_service.py via get_user()
+6. Open questions: Should token expiry be configurable?
 """
 
 PARTIAL_HANDOFF = "Implemented the auth module. Used JWT tokens for the approach."

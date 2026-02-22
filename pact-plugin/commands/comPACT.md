@@ -149,6 +149,8 @@ Before invoking multiple specialists concurrently, perform this coordination che
 2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
+> **Teachback**: Specialists dispatched with upstream task references will send a teachback message per the [agent-teams skill](../skills/pact-agent-teams/SKILL.md#teachback-conversation-verification). This applies in comPACT just as in full orchestrate — no additional orchestrator action needed.
+
 ---
 
 ## Invocation

@@ -42,7 +42,7 @@ After reading upstream context (TaskGet on referenced tasks), send a **teachback
 **Format**:
 ```
 SendMessage(type="message", recipient="lead",
-  content="[{your-name}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
+  content="[{name}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
   summary="Teachback: {1-line summary}")
 ```
 
@@ -149,7 +149,7 @@ If you cannot proceed:
 2. **SendMessage** the blocker to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="[{your-name}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+     content="[{name}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -165,7 +165,7 @@ When you detect a viability threat (security, data integrity, ethics):
 2. **SendMessage** the signal to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="[{your-name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     content="[{name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed

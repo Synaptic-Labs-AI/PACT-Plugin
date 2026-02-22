@@ -89,6 +89,14 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 
 User involved only if agreement check reveals significant mismatch.
 
+### Fallback: Specialist Unavailable
+
+If the specialist has been shut down or is unresponsive when agreement verification is attempted, treat the handoff as accepted and note it in the checkpoint:
+
+> - Agreement: [assumed — specialist unavailable for verification]
+
+This avoids blocking phase transitions when a specialist's process has already terminated. The downstream teachback still provides coverage from the receiving side.
+
 ## Relationship to Existing Protocols
 
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"

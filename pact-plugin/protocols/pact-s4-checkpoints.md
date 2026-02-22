@@ -60,13 +60,14 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 **Examples**:
 
 *Silent (all clear)*:
-> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable → continue
+> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified → continue
 
 *Surfaces to user (issue detected)*:
 > **S4 Checkpoint** [PREPARE→ARCHITECT]:
 > - Environment: Shifted — API v2 deprecated, v3 has breaking changes
 > - Model: Diverged — Assumed backwards compatibility, now false
 > - Plan: Adapt — Need PREPARE extension to research v3 migration path
+> - Agreement: Corrected — Preparer assumed v2 compatibility; confirmed v3 migration needed
 
 ### Relationship to Variety Checkpoints
 
