@@ -86,17 +86,17 @@ HANDOFF:
 
 All five items are required. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
 
+## Message Prefix Convention
+
+**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+
+Example broadcast: `SendMessage(type="broadcast", content="[{your-name}→all] Shared config updated at src/config.ts — please pull latest.", summary="Shared config updated")`
+
 ## Peer Communication
 
 Use `SendMessage(type="message", recipient="teammate-name")` for direct coordination.
 Discover teammates via `~/.claude/teams/{team-name}/config.json` or from peer names
 in your task description.
-
-### Message Prefix Convention
-
-**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
-
-Example broadcast: `SendMessage(type="broadcast", content="[{your-name}→all] Shared config updated at src/config.ts — please pull latest.", summary="Shared config updated")`
 
 **Message a peer when:**
 - Your work produces something an active peer needs (API schema, interface contract, shared config)
