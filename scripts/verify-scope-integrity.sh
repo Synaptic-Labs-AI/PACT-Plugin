@@ -393,6 +393,23 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "SendMessage"
 echo ""
 
+# --- 21. plan-mode inline checklist sync ---
+# Verify that plan-mode.md's inline incompleteness checklist has the same number
+# of signal items as pact-completeness.md's Signal Definitions table.
+echo "21. plan-mode inline checklist sync:"
+COMPLETENESS_COUNT=$(grep -c '^| [0-9]' "$PROTOCOLS_DIR/pact-completeness.md" 2>/dev/null || echo 0)
+PLANMODE_COUNT=$(grep -c '^ *- \[ \]' "$COMMANDS_DIR/plan-mode.md" 2>/dev/null | head -1 || echo 0)
+# The plan-mode checklist lives inside "Build Unified Roadmap" step — count only those lines
+PLANMODE_CHECKLIST_COUNT=$(sed -n '/Check each phase.*incompleteness signals/,/Any signal present/p' "$COMMANDS_DIR/plan-mode.md" | grep -c '^ *- \[ \]' 2>/dev/null || echo 0)
+if [ "$COMPLETENESS_COUNT" -eq "$PLANMODE_CHECKLIST_COUNT" ] && [ "$COMPLETENESS_COUNT" -gt 0 ]; then
+    echo "  ✓ plan-mode checklist ($PLANMODE_CHECKLIST_COUNT items) matches completeness signals ($COMPLETENESS_COUNT signals)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ plan-mode checklist ($PLANMODE_CHECKLIST_COUNT items) does not match completeness signals ($COMPLETENESS_COUNT signals)"
+    FAIL=$((FAIL + 1))
+fi
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"

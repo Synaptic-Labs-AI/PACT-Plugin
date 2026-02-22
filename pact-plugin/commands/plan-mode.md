@@ -348,6 +348,11 @@ If a plan already exists for this feature slug:
 #### Questions to Resolve
 - [ ] {Question}
 
+#### Research Tasks
+<!-- Go/no-go items, feasibility studies, and audit tasks that require PREPARE-phase runtime execution.
+     The orchestrator's skip logic checks for unchecked items here (Signal 7) to determine phase requirements. -->
+- [ ] {Task description} — {go/no-go criteria}
+
 ---
 
 ### 🏗️ Architecture Phase
