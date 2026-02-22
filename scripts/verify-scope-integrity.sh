@@ -378,11 +378,11 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-detection.md" \
 echo ""
 
 # --- 19. Completeness signals ---
-# Verify that the SSOT completeness section documents 6 incompleteness signals.
+# Verify that the SSOT completeness section documents 7 incompleteness signals.
 echo "19. Completeness signals:"
 check_pattern "$SSOT" \
-    "SSOT documents 6 incompleteness signals" \
-    "6 incompleteness signals"
+    "SSOT documents 7 incompleteness signals" \
+    "7 incompleteness signals"
 echo ""
 
 # --- 20. Agent Teams documentation (post-D2) ---

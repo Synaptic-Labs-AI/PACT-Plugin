@@ -243,6 +243,7 @@ After collecting all specialist outputs, use extended thinking to synthesize:
        - [ ] Unchecked questions to resolve
        - [ ] Empty/placeholder sections
        - [ ] Unresolved open questions
+       - [ ] Research/investigation tasks in implementation plan (go/no-go items, feasibility studies, audit tasks)
      - **Any signal present** → mark phase as REQUIRED
        - For more details on incompleteness signals, see [pact-completeness.md](../protocols/pact-completeness.md)
 
