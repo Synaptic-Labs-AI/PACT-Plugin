@@ -474,15 +474,16 @@ Every agent delivers a structured HANDOFF. Under Agent Teams, HANDOFFs are store
 HANDOFF:
 1. Produced: Files created/modified
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Areas of uncertainty (PRIORITIZED):
+3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
+4. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
    - [MEDIUM] {description}
    - [LOW] {description}
-4. Integration points: Other components touched
-5. Open questions: Unresolved items
+5. Integration points: Other components touched
+6. Open questions: Unresolved items
 ```
 
-All five items are always present. Use this to update Task metadata and inform subsequent phases.
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Use this to update Task metadata and inform subsequent phases.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 
