@@ -243,6 +243,7 @@ After collecting all specialist outputs, use extended thinking to synthesize:
        - [ ] Unchecked questions to resolve
        - [ ] Empty/placeholder sections
        - [ ] Unresolved open questions
+       - [ ] Research/investigation tasks in implementation plan (go/no-go items, feasibility studies, audit tasks)
      - **Any signal present** → mark phase as REQUIRED
        - For more details on incompleteness signals, see [pact-completeness.md](../protocols/pact-completeness.md)
 
@@ -346,6 +347,11 @@ If a plan already exists for this feature slug:
 
 #### Questions to Resolve
 - [ ] {Question}
+
+#### Research Tasks
+<!-- Go/no-go items, feasibility studies, and audit tasks that require PREPARE-phase runtime execution.
+     The orchestrator's skip logic checks for unchecked items here (Signal 7) to determine phase requirements. -->
+- [ ] {Task description} — {go/no-go criteria}
 
 ---
 
