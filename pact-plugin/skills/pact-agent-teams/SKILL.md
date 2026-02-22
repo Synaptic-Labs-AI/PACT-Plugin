@@ -40,6 +40,10 @@ If TaskGet returns no metadata or the referenced task doesn't exist, proceed wit
 Report progress naturally in your responses. For significant milestones, update your task metadata:
 `TaskUpdate(taskId, metadata={"progress": "brief status"})`
 
+## Message Prefix Convention
+
+**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+
 ## On Completion — HANDOFF (Required)
 
 When your work is done:
@@ -85,10 +89,6 @@ HANDOFF:
 ```
 
 All five items are required. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
-
-## Message Prefix Convention
-
-**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
 
 ## Peer Communication
 
