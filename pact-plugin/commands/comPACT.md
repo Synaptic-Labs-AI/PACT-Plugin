@@ -149,7 +149,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
-> **Teachback**: Specialists dispatched with upstream task references will send a teachback message per the [agent-teams skill](../skills/pact-agent-teams/SKILL.md#teachback-conversation-verification). This applies in comPACT just as in full orchestrate — no additional orchestrator action needed.
+> **Teachback**: Specialists dispatched with upstream task references will send a teachback message per the [agent-teams skill](../skills/pact-agent-teams/SKILL.md). This applies in comPACT just as in full orchestrate — no additional orchestrator action needed. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md) for protocol rationale.
 
 ---
 
@@ -199,9 +199,10 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 1. **Receive handoff** from specialist(s)
 2. Agent tasks marked `completed` (agents self-manage their task status via TaskUpdate)
-3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
-4. **Create atomic commit(s)** — stage and commit before proceeding
-5. **TaskUpdate**: Feature task status = "completed"
+3. **Agreement verification**: SendMessage specialist to confirm shared understanding of deliverables before committing. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+4. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
+5. **Create atomic commit(s)** — stage and commit before proceeding
+6. **TaskUpdate**: Feature task status = "completed"
 
 > ⚠️ **Specialist shutdown depends on the next step.** Do not shut down specialists preemptively — the next step determines their lifecycle.
 
