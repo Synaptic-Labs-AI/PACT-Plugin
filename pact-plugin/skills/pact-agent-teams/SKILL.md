@@ -40,6 +40,10 @@ If TaskGet returns no metadata or the referenced task doesn't exist, proceed wit
 Report progress naturally in your responses. For significant milestones, update your task metadata:
 `TaskUpdate(taskId, metadata={"progress": "brief status"})`
 
+## Message Prefix Convention
+
+**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+
 ## On Completion — HANDOFF (Required)
 
 When your work is done:
@@ -58,7 +62,7 @@ When your work is done:
 2. **Notify lead with summary only**:
    ```
    SendMessage(type="message", recipient="lead",
-     content="Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
+     content="[{your-name}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
      summary="Task complete: [brief]")
    ```
 3. **Mark task completed**:
@@ -122,7 +126,7 @@ If you cannot proceed:
 2. **SendMessage** the blocker to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+     content="[{your-name}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -138,7 +142,7 @@ When you detect a viability threat (security, data integrity, ethics):
 2. **SendMessage** the signal to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     content="[{your-name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
