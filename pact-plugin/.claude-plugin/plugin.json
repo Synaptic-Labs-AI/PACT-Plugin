@@ -1,7 +1,7 @@
 {
   "name": "PACT",
-  "version": "3.5.4",
-  "description": "PACT Framework - Prepare, Architect, Code, Test methodology with VSM-enhanced orchestration, specialist agents, and viability sensing for systematic AI-assisted development",
+  "version": "3.6.0",
+  "description": "PACT Framework - Prepare, Architect, Code, Test methodology with VSM structure, Conversation Theory dynamics, specialist agents, and viability sensing for systematic AI-assisted development",
   "author": {
     "name": "ProfSynapse",
     "url": "https://github.com/ProfSynapse/PACT-prompt"
@@ -21,7 +21,8 @@
     "multi-agent",
     "n8n",
     "workflow",
-    "telegram"
+    "telegram",
+    "conversation-theory"
   ],
   "commands": [
     "./commands/orchestrate.md",
