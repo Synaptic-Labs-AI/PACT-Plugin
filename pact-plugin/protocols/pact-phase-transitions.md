@@ -39,17 +39,18 @@ Coders provide handoff summaries to the orchestrator, who passes them to the tes
 6. Open questions: Unresolved items
 ```
 
-Note: Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
 
 **Example**:
 ```
 1. Produced: `src/auth/token-manager.ts`, `src/auth/token-manager.test.ts`
 2. Key decisions: Used JWT with 15min expiry (assumed acceptable for this app)
-3. Areas of uncertainty:
+3. Reasoning chain: Chose JWT because stateless auth required; 15min expiry because short-lived tokens reduce replay risk, which required a refresh mechanism
+4. Areas of uncertainty:
    - [HIGH] Token refresh race condition — concurrent requests may get stale tokens; test with parallel calls
    - [MEDIUM] Clock skew handling — assumed <5s drift; may fail with larger skew
-4. Integration points: Modified `src/middleware/auth.ts` to use new manager
-5. Open questions: Should refresh tokens be stored in httpOnly cookies?
+5. Integration points: Modified `src/middleware/auth.ts` to use new manager
+6. Open questions: Should refresh tokens be stored in httpOnly cookies?
 ```
 
 **Uncertainty Prioritization**:
