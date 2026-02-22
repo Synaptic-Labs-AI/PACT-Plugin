@@ -231,6 +231,7 @@ Verify the sub-component:
 Complete the nested cycle:
 1. **Verify**: Sub-component works within parent context
 2. **Handoff**: Return control to parent orchestration with summary
+3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope. SendMessage the nested cycle's lead specialist: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?" See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 
@@ -245,6 +246,8 @@ Nested cycles inherit from parent:
 Nested cycles produce:
 - Code committed to current branch
 - Handoff summary for parent orchestration
+
+**CT note**: Nested cycles are *conversations within conversations*. The parent scope's understanding provides context for the nested conversation. When the nested conversation completes, its understanding must be verified before reintegrating into the parent. Agreement verification at nested boundaries follows the same mechanism as phase boundaries in orchestrate — see [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 
