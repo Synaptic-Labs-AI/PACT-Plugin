@@ -267,6 +267,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
+- [ ] **Agreement verification (L0)**: SendMessage preparer to confirm shared understanding of WHAT we're building. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -340,6 +341,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
+- [ ] **Agreement verification (L1)**: SendMessage architect to confirm shared understanding of HOW we'll build it. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 **Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
 
@@ -434,6 +436,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
+- [ ] **Agreement verification (L1)**: SendMessage coder(s) to confirm implementation stayed coherent with design. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 #### Handling Complex Sub-Tasks During CODE
 
