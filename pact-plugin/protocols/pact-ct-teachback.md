@@ -86,6 +86,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 | PREPARE → ARCHITECT | L0 (topic) | "Do we share understanding of WHAT we're building?" |
 | ARCHITECT → CODE | L1 (procedure) | "Do we share understanding of HOW we'll build it?" |
 | CODE → TEST | L1 (procedure) | "Did the implementation stay coherent with the design?" |
+| TEST → PR | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
 
 User involved only if agreement check reveals significant mismatch.
 

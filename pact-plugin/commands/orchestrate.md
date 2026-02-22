@@ -494,6 +494,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
+- [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. SendMessage test engineer: "Does the tested implementation match the original requirements?" See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 **Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
 
