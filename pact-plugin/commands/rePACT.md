@@ -231,7 +231,9 @@ Verify the sub-component:
 Complete the nested cycle:
 1. **Verify**: Sub-component works within parent context
 2. **Handoff**: Return control to parent orchestration with summary
-3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope. SendMessage the nested cycle's lead specialist: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?" See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope.
+   - SendMessage each contributing specialist: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
+   - See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 
