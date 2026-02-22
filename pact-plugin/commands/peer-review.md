@@ -218,6 +218,8 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
 5. Present to user and **stop** — merging requires explicit user authorization (S5 policy)
 
+> ⚠️ **Do NOT shut down reviewers here.** Teammates persist until after user-authorized merge. They may be needed for post-merge questions or if the user requests changes.
+
 ---
 
 ## Signal Monitoring
