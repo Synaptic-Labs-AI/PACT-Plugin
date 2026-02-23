@@ -138,7 +138,7 @@ Each reviewer should state their understanding of the PR's intent before diving 
 **Mechanism**: Include in each reviewer's task description:
 > "Before reviewing, send a teachback message to the lead stating your understanding of what this PR is trying to accomplish and what you'll focus on in your domain. Format: `[{name}→lead] Teachback: I understand this PR is [intent]. Reviewing with focus on [domain focus]. Proceeding unless corrected.` Non-blocking — proceed with review after sending."
 
-This uses the same teachback mechanism as agent handoffs. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 

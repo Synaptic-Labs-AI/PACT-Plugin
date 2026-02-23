@@ -54,7 +54,7 @@ SendMessage(type="message", recipient="lead",
 
 **When**: Always when dispatched with upstream task references. Optional for self-claimed follow-up tasks. Not needed for consultant questions.
 
-See [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) for full protocol rationale.
+Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 
 ## Progress Reporting
 

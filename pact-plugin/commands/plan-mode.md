@@ -277,7 +277,7 @@ After synthesis passes validation, verify each specialist agrees with the synthe
 - **Correction provided**: Update synthesis, re-verify with the correcting specialist only. If the correction affects other specialists' sections (e.g., a changed interface), re-verify those specialists too.
 - **Specialist unavailable** (shut down): Treat synthesis as accepted for that perspective, note in plan's Limitations section
 
-This verifies the orchestrator's understanding matches what specialists actually recommended — preventing the plan from misrepresenting specialist input. Same agreement verification pattern as orchestrate phase boundaries. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+This verifies the orchestrator's understanding matches what specialists actually recommended — preventing the plan from misrepresenting specialist input. Same agreement verification pattern as orchestrate phase boundaries. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ### Phase 3: Plan Output
 
