@@ -1521,7 +1521,7 @@ Input:
   nesting_depth: {current nesting level, 0-based}
 
 Output:
-  handoff: {standard 6-item handoff + contract fulfillment section}
+  handoff: {standard handoff (6 fields, 5 required) + contract fulfillment section}
   commits: {code committed to branch}
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
@@ -1536,7 +1536,7 @@ rePACT implements the executor interface as follows:
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
 | **Input: branch** | Uses the current feature branch (no new branch created) |
 | **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
-| **Output: handoff** | Standard 6-item handoff with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
+| **Output: handoff** | Standard handoff (6 fields, 5 required) with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
 | **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
 | **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
@@ -1584,7 +1584,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 #### Design Constraints
 
 - **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (6-item handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
+- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (standard handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
 - **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
 
 ---
