@@ -20,6 +20,7 @@ import sys
 import os
 from pathlib import Path
 
+# reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
@@ -72,7 +73,7 @@ def validate_task_handoff(
     if missing:
         return (
             f"Task completion blocked: handoff metadata missing fields: {', '.join(missing)}. "
-            f"Update via TaskUpdate(metadata={{\"handoff\": {{...}}}}) with all 5 required fields."
+            f"Update via TaskUpdate(metadata={{\"handoff\": {{...}}}}) with all required fields."
         )
 
     # Check: produced is non-empty

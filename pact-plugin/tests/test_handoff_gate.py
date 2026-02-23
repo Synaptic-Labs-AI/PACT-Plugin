@@ -154,6 +154,35 @@ class TestHandoffGate:
         assert result is not None
         assert "handoff" in result.lower()
 
+    def test_allows_optional_reasoning_chain(self):
+        """Optional reasoning_chain field alongside required fields should not interfere."""
+        from handoff_gate import validate_task_handoff
+
+        handoff_with_reasoning = {
+            **VALID_HANDOFF,
+            "reasoning_chain": "Used JWT because stateless auth required"
+        }
+        result = validate_task_handoff(
+            task_subject="CODE: implement auth",
+            task_metadata={"handoff": handoff_with_reasoning},
+            teammate_name="backend-coder"
+        )
+        assert result is None
+
+    def test_blocks_missing_required_field_despite_reasoning_chain(self):
+        """reasoning_chain presence must not mask a missing required field."""
+        from handoff_gate import validate_task_handoff
+
+        incomplete = {k: v for k, v in VALID_HANDOFF.items() if k != "decisions"}
+        incomplete["reasoning_chain"] = "Used JWT because stateless auth required"
+        result = validate_task_handoff(
+            task_subject="CODE: implement auth",
+            task_metadata={"handoff": incomplete},
+            teammate_name="backend-coder"
+        )
+        assert result is not None
+        assert "decisions" in result
+
 
 class TestReadTaskMetadata:
     """Tests for handoff_gate.read_task_metadata()."""

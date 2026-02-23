@@ -265,6 +265,20 @@ After collecting all specialist outputs, use extended thinking to synthesize:
    - For unresolved blocking conflict → Present partial plan with BLOCKED status
    - For missing mandatory sections → Populate with "TBD - requires {specific input}"
 
+### Synthesis Agreement Verification
+
+After synthesis passes validation, verify each specialist agrees with the synthesis of their perspective.
+
+**Mechanism**: SendMessage to each specialist who contributed to verify:
+> "My synthesis of your perspective: [summary of their input as represented in the plan]. Does this accurately represent your input? Did I resolve conflicts involving your domain correctly?"
+
+**Handling responses**:
+- **Confirmed**: Proceed to Phase 3
+- **Correction provided**: Update synthesis, re-verify with the correcting specialist only. If the correction affects other specialists' sections (e.g., a changed interface), re-verify those specialists too.
+- **Specialist unavailable** (shut down): Treat synthesis as accepted for that perspective, note in plan's Limitations section
+
+This verifies the orchestrator's understanding matches what specialists actually recommended — preventing the plan from misrepresenting specialist input. Same agreement verification pattern as orchestrate phase boundaries. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+
 ### Phase 3: Plan Output
 
 **TaskUpdate**: Planning task completed with artifact path:

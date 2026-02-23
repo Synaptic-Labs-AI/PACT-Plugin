@@ -35,6 +35,27 @@ Common chain-reads:
 
 If TaskGet returns no metadata or the referenced task doesn't exist, proceed with information from your task description and file system artifacts (docs/architecture/, docs/preparation/).
 
+## Teachback (Conversation Verification)
+
+After reading upstream context (TaskGet on referenced tasks), send a **teachback message** to the lead before starting work. This verifies your understanding of the upstream conversation.
+
+**Format**:
+```
+SendMessage(type="message", recipient="lead",
+  content="[{sender}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
+  summary="Teachback: {1-line summary}")
+```
+
+**Rules**:
+- Send teachback as your **first message** after reading upstream handoffs
+- Keep it concise: 3-6 bullet points
+- **Non-blocking**: Proceed with work immediately after sending — don't wait for confirmation
+- If the lead sends a correction, adjust your approach as soon as you see it
+
+**When**: Always when dispatched with upstream task references. Optional for self-claimed follow-up tasks. Not needed for consultant questions.
+
+Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
+
 ## Progress Reporting
 
 Report progress naturally in your responses. For significant milestones, update your task metadata:
@@ -42,7 +63,7 @@ Report progress naturally in your responses. For significant milestones, update 
 
 ## Message Prefix Convention
 
-**Prefix all SendMessage `content`** with `[{your-name}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+**Prefix all SendMessage `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
 
 ## On Completion — HANDOFF (Required)
 
@@ -53,6 +74,7 @@ When your work is done:
    TaskUpdate(taskId, metadata={"handoff": {
      "produced": [...],
      "decisions": [...],
+     "reasoning_chain": "...",  // recommended — include unless task is trivial
      "uncertainty": [...],
      "integration": [...],
      "open_questions": [...]
@@ -62,7 +84,7 @@ When your work is done:
 2. **Notify lead with summary only**:
    ```
    SendMessage(type="message", recipient="lead",
-     content="[{your-name}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
+     content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
      summary="Task complete: [brief]")
    ```
 3. **Mark task completed**:
@@ -80,15 +102,16 @@ This HANDOFF must ALSO be stored in task metadata (see On Completion Step 1 abov
 HANDOFF:
 1. Produced: Files created/modified
 2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Areas of uncertainty (PRIORITIZED):
+3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z." Helps downstream agents reconstruct your understanding, not just your conclusions.
+4. Areas of uncertainty (PRIORITIZED):
    - [HIGH] {description} — Why risky, suggested test focus
    - [MEDIUM] {description}
    - [LOW] {description}
-4. Integration points: Other components touched
-5. Open questions: Unresolved items
+5. Integration points: Other components touched
+6. Open questions: Unresolved items
 ```
 
-All five items are required. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
 
 ## Peer Communication
 
@@ -126,7 +149,7 @@ If you cannot proceed:
 2. **SendMessage** the blocker to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="[{your-name}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+     content="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -142,7 +165,7 @@ When you detect a viability threat (security, data integrity, ethics):
 2. **SendMessage** the signal to the lead:
    ```
    SendMessage(type="message", recipient="lead",
-     content="[{your-name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed

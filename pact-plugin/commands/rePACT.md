@@ -231,6 +231,9 @@ Verify the sub-component:
 Complete the nested cycle:
 1. **Verify**: Sub-component works within parent context
 2. **Handoff**: Return control to parent orchestration with summary
+3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope.
+   - SendMessage to each contributing specialist to confirm: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
+   - Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 
@@ -245,6 +248,8 @@ Nested cycles inherit from parent:
 Nested cycles produce:
 - Code committed to current branch
 - Handoff summary for parent orchestration
+
+**CT note**: Nested cycles are *conversations within conversations*. The parent scope's understanding provides context for the nested conversation. When the nested conversation completes, its understanding must be verified before reintegrating into the parent. Agreement verification at nested boundaries follows the same mechanism as phase boundaries in orchestrate. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
 
@@ -358,9 +363,9 @@ When nested cycle completes:
 3. **Report** any decisions that affect the parent task
 4. **Continue** with parent orchestration (parent task now unblocked)
 
-**Handoff format**: Use the standard 5-item structure (Produced, Key decisions, Areas of uncertainty, Integration points, Open questions).
+**Handoff format**: Use the standard handoff structure (Produced, Key decisions, Reasoning chain [recommended], Areas of uncertainty, Integration points, Open questions — 5 required fields, 1 recommended).
 
-**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard 5-item handoff:
+**Contract-aware handoff** (when scope contract was provided): Append a Contract Fulfillment section after the standard handoff:
 
 ```
 Contract Fulfillment:

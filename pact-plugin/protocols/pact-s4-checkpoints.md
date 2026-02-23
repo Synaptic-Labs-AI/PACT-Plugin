@@ -29,6 +29,13 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
    - Adapt the approach?
    - Escalate to user for direction?
 
+4. **Shared Understanding (CT)**: Do we and the completing specialist agree?
+   - Orchestrator's understanding matches specialist's handoff?
+   - Key decisions interpreted consistently?
+   - No misunderstandings disguised as agreement?
+
+   *Verification*: SendMessage to the completing specialist to confirm your understanding of their key decisions. Specialist confirms or corrects. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
+
 ### Checkpoint Outcomes
 
 | Finding | Action |
@@ -44,6 +51,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Environment: [stable / shifted: {what}]
 > - Model: [aligned / diverged: {what}]
 > - Plan: [viable / adapt: {how} / escalate: {why}]
+> - Agreement: [verified / corrected: {what}]
 
 ### Output Behavior
 
@@ -52,13 +60,14 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 **Examples**:
 
 *Silent (all clear)*:
-> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable → continue
+> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified → continue
 
 *Surfaces to user (issue detected)*:
 > **S4 Checkpoint** [PREPARE→ARCHITECT]:
 > - Environment: Shifted — API v2 deprecated, v3 has breaking changes
 > - Model: Diverged — Assumed backwards compatibility, now false
 > - Plan: Adapt — Need PREPARE extension to research v3 migration path
+> - Agreement: Corrected — Preparer assumed v2 compatibility; confirmed v3 migration needed
 
 ### Relationship to Variety Checkpoints
 
