@@ -34,7 +34,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
    - Key decisions interpreted consistently?
    - No misunderstandings disguised as agreement?
 
-   *Verification*: SendMessage the completing specialist with your understanding of their key decisions. Specialist confirms or corrects. See [pact-ct-teachback.md](pact-ct-teachback.md) for the agreement verification protocol.
+   *Verification*: Verify with the completing specialist (via SendMessage) your understanding of their key decisions. Specialist confirms or corrects. See [pact-ct-teachback.md](pact-ct-teachback.md) for the agreement verification protocol.
 
 ### Checkpoint Outcomes
 
