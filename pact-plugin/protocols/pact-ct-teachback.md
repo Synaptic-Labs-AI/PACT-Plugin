@@ -74,7 +74,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 ```
 1. Phase specialist completes, delivers handoff
 2. Orchestrator reads handoff, forms understanding
-3. Orchestrator verifies with specialist (via SendMessage): "Confirming my understanding: [restates key decisions]. Correct?"
+3. Orchestrator SendMessages to specialist to verify: "Confirming my understanding: [restates key decisions]. Correct?"
 4. Specialist confirms or corrects
 5. Orchestrator dispatches next phase with verified understanding
 ```

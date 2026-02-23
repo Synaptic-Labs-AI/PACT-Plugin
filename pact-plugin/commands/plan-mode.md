@@ -269,7 +269,7 @@ After collecting all specialist outputs, use extended thinking to synthesize:
 
 After synthesis passes validation, verify each specialist agrees with the synthesis of their perspective.
 
-**Mechanism**: Verify with each specialist who contributed (via SendMessage):
+**Mechanism**: SendMessage to each specialist who contributed to verify:
 > "My synthesis of your perspective: [summary of their input as represented in the plan]. Does this accurately represent your input? Did I resolve conflicts involving your domain correctly?"
 
 **Handling responses**:

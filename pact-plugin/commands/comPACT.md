@@ -199,7 +199,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 1. **Receive handoff** from specialist(s)
 2. Agent tasks marked `completed` (agents self-manage their task status via TaskUpdate)
-3. **Agreement verification**: Verify with specialist (via SendMessage) that you share understanding of deliverables before committing. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+3. **Agreement verification**: SendMessage to specialist to confirm shared understanding of deliverables before committing. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 4. **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat from step 1).
 5. **Create atomic commit(s)** — stage and commit before proceeding
 6. **TaskUpdate**: Feature task status = "completed"
