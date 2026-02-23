@@ -1154,7 +1154,7 @@ Coders provide handoff summaries to the orchestrator, who passes them to the tes
 6. Open questions: Unresolved items
 ```
 
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
 
 **Example**:
 ```
