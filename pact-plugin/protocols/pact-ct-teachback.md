@@ -1,15 +1,15 @@
-# Conversation Theory: Teachback Protocol
+## Conversation Theory: Teachback Protocol
 
 > **Source**: Gordon Pask's Conversation Theory, applied to LLM multi-agent systems.
 > **Phase**: CT Phase 1 (v3.6.0) — additive, no existing mechanisms changed.
 
-## Core Principle
+### Core Principle
 
 For LLM agents, **conversation IS cognition**. Understanding doesn't exist inside an agent — it's constructed between agents through conversation. A handoff isn't information transfer; it's one side of a conversation that the receiver must complete.
 
 **Teachback** is the mechanism by which a receiving agent completes that conversation: restating their understanding of upstream work to verify the construction succeeded.
 
-## Vocabulary
+### Vocabulary
 
 | Term | Meaning |
 |------|---------|
@@ -20,11 +20,11 @@ For LLM agents, **conversation IS cognition**. Understanding doesn't exist insid
 | **Entailment mesh** | Network of connected concepts where understanding one entails understanding others. |
 | **Reasoning chain** | How decisions connect — "X because Y, which required Z." A fragment of the entailment mesh. |
 
-## Teachback Mechanism
+### Teachback Mechanism
 
 When a downstream agent receives an upstream handoff (via TaskGet), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
 
-### Flow
+#### Flow
 
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
@@ -35,11 +35,11 @@ When a downstream agent receives an upstream handoff (via TaskGet), their first 
 5. If orchestrator spots misunderstanding, they SendMessage a correction
 ```
 
-### Why Non-Blocking
+#### Why Non-Blocking
 
 Blocking teachback (wait for confirmation before working) would serialize everything. Non-blocking gives the orchestrator a window to catch misunderstandings while the agent starts work. Most teachbacks will be correct — we're catching exceptions, not gatekeeping the norm.
 
-### Teachback Format
+#### Teachback Format
 
 ```
 [{name}→lead] Teachback:
@@ -52,7 +52,7 @@ Proceeding unless corrected.
 
 Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderstandings, not to restate the entire handoff.
 
-### When to Teachback
+#### When to Teachback
 
 | Situation | Teachback? |
 |-----------|-----------|
@@ -61,15 +61,15 @@ Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderst
 | Self-claimed follow-up task | Optional — if task references upstream work you haven't read |
 | Consultant question (peer asks you something) | No — conversational exchange, not handoff |
 
-### Cost
+#### Cost
 
 One extra SendMessage per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
 
-## Agreement Verification (Orchestrator-Side)
+### Agreement Verification (Orchestrator-Side)
 
 Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent). Together they cover both sides of each phase boundary.
 
-### Flow
+#### Flow
 
 ```
 1. Phase specialist completes, delivers handoff
@@ -79,7 +79,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 5. Orchestrator dispatches next phase with verified understanding
 ```
 
-### Agreement Levels by Phase Transition
+#### Agreement Levels by Phase Transition
 
 | Transition | Level | Verification Question |
 |-----------|-------|----------------------|
@@ -90,7 +90,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 
 User involved only if agreement check reveals significant mismatch.
 
-### Fallback: Specialist Unavailable
+#### Fallback: Specialist Unavailable
 
 If the specialist has been shut down or is unresponsive when agreement verification is attempted, treat the handoff as accepted and note it in the checkpoint:
 
@@ -98,8 +98,10 @@ If the specialist has been shut down or is unresponsive when agreement verificat
 
 This avoids blocking phase transitions when a specialist's process has already terminated. The downstream teachback still provides coverage from the receiving side.
 
-## Relationship to Existing Protocols
+### Relationship to Existing Protocols
 
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
 - **SendMessage prefix convention**: Teachback messages follow the existing `[{name}→{recipient}]` prefix convention.
+
+---
