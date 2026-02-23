@@ -434,9 +434,9 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
+- [ ] **Agreement verification (L1)**: SendMessage to coder(s) to confirm implementation stayed coherent with design. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
-- [ ] **Agreement verification (L1)**: SendMessage to coder(s) to confirm implementation stayed coherent with design. See [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 #### Handling Complex Sub-Tasks During CODE
 

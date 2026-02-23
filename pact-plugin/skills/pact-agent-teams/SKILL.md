@@ -74,7 +74,7 @@ When your work is done:
    TaskUpdate(taskId, metadata={"handoff": {
      "produced": [...],
      "decisions": [...],
-     "reasoning_chain": "...",
+     "reasoning_chain": "...",  // optional — omit if straightforward
      "uncertainty": [...],
      "integration": [...],
      "open_questions": [...]

@@ -20,6 +20,7 @@ import sys
 import os
 from pathlib import Path
 
+# reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
