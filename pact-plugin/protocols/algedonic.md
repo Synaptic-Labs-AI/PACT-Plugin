@@ -92,7 +92,7 @@ Under Agent Teams, teammates have access to Task tools (TaskGet, TaskUpdate, Tas
 2. Send the signal to the lead via SendMessage (using the Signal Format above):
    ```
    SendMessage(type="message", recipient="lead",
-     content="[{your-name}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial handoff with whatever work was completed

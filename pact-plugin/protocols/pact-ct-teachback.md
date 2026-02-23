@@ -30,7 +30,7 @@ When a downstream agent receives an upstream handoff (via TaskGet), their first 
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via TaskGet(#5)
 3. Agent sends teachback to lead via SendMessage:
-   "[{name}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
+   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
 5. If orchestrator spots misunderstanding, they SendMessage a correction
 ```
@@ -42,7 +42,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 #### Teachback Format
 
 ```
-[{name}→lead] Teachback:
+[{sender}→lead] Teachback:
 - Building: {what I understand I'm building}
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
@@ -102,6 +102,6 @@ This avoids blocking phase transitions when a specialist's process has already t
 
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
-- **SendMessage prefix convention**: Teachback messages follow the existing `[{name}→{recipient}]` prefix convention.
+- **SendMessage prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
 
 ---
