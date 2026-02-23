@@ -74,7 +74,7 @@ When your work is done:
    TaskUpdate(taskId, metadata={"handoff": {
      "produced": [...],
      "decisions": [...],
-     "reasoning_chain": "...",  // optional — omit if straightforward
+     "reasoning_chain": "...",  // recommended — include unless task is trivial
      "uncertainty": [...],
      "integration": [...],
      "open_questions": [...]
@@ -111,7 +111,7 @@ HANDOFF:
 6. Open questions: Unresolved items
 ```
 
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Not all priority levels need to be present in Areas of uncertainty. If you have no uncertainties, explicitly state "No areas of uncertainty flagged."
 
 ## Peer Communication
 

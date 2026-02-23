@@ -465,6 +465,7 @@ A list of things that include the following:
 - [Constraints]
 - [Best Practices]
 - [Wisdom from lessons learned]
+- For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your handoff — explain how your key decisions connect" in the agent's GUIDELINES section.
 
 #### Expected Agent HANDOFF Format
 
@@ -483,7 +484,7 @@ HANDOFF:
 6. Open questions: Unresolved items
 ```
 
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is optional but recommended for complex work. Use this to update Task metadata and inform subsequent phases.
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 
