@@ -266,8 +266,8 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 - [ ] **Agreement verification (L0)**: SendMessage to preparer to confirm shared understanding of WHAT we're building. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -340,8 +340,8 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/architecture/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 - [ ] **Agreement verification (L1)**: SendMessage to architect to confirm shared understanding of HOW we'll build it. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
 
@@ -493,8 +493,8 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - [ ] All tests passing
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
 - [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. SendMessage to test engineer to verify: "Does the tested implementation match the original requirements?" Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
 
 **Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
 

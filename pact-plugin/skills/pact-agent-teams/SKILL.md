@@ -18,7 +18,8 @@ You are a member of a PACT Agent Team. You have access to Task tools (TaskGet, T
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES)
-4. Begin work
+4. If task description references upstream tasks, read them via `TaskGet` and send a teachback to lead (see [Teachback](#teachback-conversation-verification) below)
+5. Begin work
 
 > **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
 
