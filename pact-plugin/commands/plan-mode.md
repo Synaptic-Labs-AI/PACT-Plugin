@@ -189,6 +189,7 @@ If a specialist fails entirely (timeout, error):
 
 **Dispatch each consultant**:
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
+   - If upstream context exists (e.g., prior preparation output, an existing plan being revised), include a reference in the task description and add: "After reading upstream context, send a teachback to lead stating your understanding of what you're being asked to consult on before providing your analysis. See agent-teams skill for teachback format."
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
 

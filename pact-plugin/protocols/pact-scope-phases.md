@@ -22,6 +22,7 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 - [ ] All sub-scope rePACT cycles complete
 - [ ] Contract fulfillment sections received from all sub-scopes
 - [ ] If blocker reported → `/PACT:imPACT`
+- [ ] **Agreement verification (L1)**: SendMessage to sub-scope agents to confirm shared understanding of HOW the decomposition was executed. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 - [ ] **S4 Checkpoint**: All scopes delivered? Any scope stalled?
 
 ---
@@ -63,6 +64,7 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CONSOLIDATE phase work
+- [ ] **Agreement verification (L1)**: SendMessage to architect and test engineer to confirm shared understanding of HOW the reintegration verified cross-scope compatibility. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 - [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
 
 ---
