@@ -18,7 +18,7 @@ You are a member of a PACT Agent Team. You have access to Task tools (TaskGet, T
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES)
-4. If task description references upstream tasks, read them via `TaskGet` and send a teachback to lead (see [Teachback](#teachback-conversation-verification) below)
+4. Send a teachback to lead restating your understanding of the task. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
 5. Begin work
 
 > **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
@@ -38,7 +38,7 @@ If TaskGet returns no metadata or the referenced task doesn't exist, proceed wit
 
 ## Teachback (Conversation Verification)
 
-After reading upstream context (TaskGet on referenced tasks), send a **teachback message** to the lead before starting work. This verifies your understanding of the upstream conversation.
+Before starting work, send a **teachback message** to the lead restating your understanding of the task. If upstream tasks are referenced, read them via TaskGet first. This verifies that your understanding matches what the lead intended.
 
 **Format**:
 ```
@@ -48,12 +48,12 @@ SendMessage(type="message", recipient="lead",
 ```
 
 **Rules**:
-- Send teachback as your **first message** after reading upstream handoffs
+- Send teachback as your **first message** after reading your task description (and any upstream handoffs)
 - Keep it concise: 3-6 bullet points
 - **Non-blocking**: Proceed with work immediately after sending — don't wait for confirmation
 - If the lead sends a correction, adjust your approach as soon as you see it
 
-**When**: Always when dispatched with upstream task references. Optional for self-claimed follow-up tasks. Not needed for consultant questions.
+**When**: Always — every task dispatch. The only exception is consultant questions (peer asks you something). Even without upstream references, teachback verifies you understood the task description correctly.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 

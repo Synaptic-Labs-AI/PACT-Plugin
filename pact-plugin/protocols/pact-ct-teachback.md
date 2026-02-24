@@ -56,10 +56,10 @@ Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderst
 
 | Situation | Teachback? |
 |-----------|-----------|
-| Dispatched with upstream task reference | Yes — always |
+| Dispatched for any task | Yes — always restate your understanding of the task before starting |
 | Re-dispatched after blocker resolution | Yes — understanding may have shifted |
-| Self-claimed follow-up task | Optional — if task references upstream work you haven't read |
-| Consultant question (peer asks you something) | No — conversational exchange, not handoff |
+| Self-claimed follow-up task | Yes — restate understanding of the new task |
+| Consultant question (peer asks you something) | No — conversational exchange, not task dispatch |
 
 #### Cost
 

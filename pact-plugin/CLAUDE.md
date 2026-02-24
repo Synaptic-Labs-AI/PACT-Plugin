@@ -459,7 +459,7 @@ Use this structure in the `prompt` field to ensure agents have adequate context:
 1. [Step 1]
 2. [Step 2 - explicit skill usage if needed, e.g., "Use pact-security-patterns"]
 3. [Step 3]
-4. If upstream task references are provided, read them via TaskGet and send a teachback to lead before starting work (see agent-teams skill for format)
+4. Send a teachback to lead restating your understanding of the task before starting work. If upstream task references are provided, read them via TaskGet first. (See agent-teams skill for format)
 
 **GUIDELINES**
 A list of things that include the following:
