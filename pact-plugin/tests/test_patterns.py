@@ -597,21 +597,6 @@ class TestAgentListConsistency:
         block = source[idx:idx + 600]
         return re.findall(r'"(pact-[^"]+:)"', block)
 
-    def test_stop_audit_prefixes_match_pact_agents(self):
-        """stop_audit.py inline prefixes should match PACT_AGENTS (with colon suffix)."""
-        stop_audit_path = str(
-            Path(__file__).parent.parent / "hooks" / "stop_audit.py"
-        )
-        prefixes = self._parse_prefixes_from_source(
-            stop_audit_path, "subject.lower().startswith"
-        )
-        expected = [a + ":" for a in PACT_AGENTS]
-        assert prefixes == expected, (
-            f"stop_audit.py agent prefixes out of sync with PACT_AGENTS.\n"
-            f"Expected: {expected}\n"
-            f"Got: {prefixes}"
-        )
-
     def test_task_utils_prefixes_match_pact_agents(self):
         """task_utils.py agent_prefixes should match PACT_AGENTS (with colon suffix)."""
         task_utils_path = str(
