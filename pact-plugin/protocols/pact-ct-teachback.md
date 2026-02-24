@@ -67,26 +67,36 @@ One extra SendMessage per agent dispatch (~100-200 tokens). Cheap insurance agai
 
 ### Agreement Verification (Orchestrator-Side)
 
-Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent). Together they cover both sides of each phase boundary.
+Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent). Together they cover both sides of every handoff.
+
+#### When to Verify
+
+**Universal**: Every time a specialist reports completion, the lead verifies shared understanding before acting on deliverables (reviewing artifacts, committing, dispatching next phase). This applies to phase boundaries, comPACT completions, remediation fixes, re-dispatches — anywhere an agent says "done."
+
+**Exception**: Verify-only re-reviews (reviewer confirms "finding resolved / not resolved") are already a verification conversation — no additional agreement check needed.
 
 #### Flow
 
 ```
-1. Phase specialist completes, delivers handoff
+1. Specialist completes, delivers handoff
 2. Orchestrator reads handoff, forms understanding
 3. Orchestrator SendMessages to specialist to verify: "Confirming my understanding: [restates key decisions]. Correct?"
 4. Specialist confirms or corrects
-5. Orchestrator dispatches next phase with verified understanding
+5. Orchestrator proceeds with verified understanding (commit, dispatch, etc.)
 ```
 
-#### Agreement Levels by Phase Transition
+#### Agreement Levels
 
-| Transition | Level | Verification Question |
-|-----------|-------|----------------------|
-| PREPARE → ARCHITECT | L0 (topic) | "Do we share understanding of WHAT we're building?" |
-| ARCHITECT → CODE | L1 (procedure) | "Do we share understanding of HOW we'll build it?" |
-| CODE → TEST | L1 (procedure) | "Did the implementation stay coherent with the design?" |
-| TEST → PR | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
+Use the appropriate depth depending on context:
+
+| Context | Level | Verification Question |
+|---------|-------|----------------------|
+| After research/preparation | L0 (topic) | "Do we share understanding of WHAT we're building?" |
+| After design/architecture | L1 (procedure) | "Do we share understanding of HOW we'll build it?" |
+| After implementation | L1 (procedure) | "Did the implementation stay coherent with the design?" |
+| After testing / before PR | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
+| After remediation fix | L1 (procedure) | "Does the fix address the finding correctly?" |
+| After comPACT completion | L1 (procedure) | "Does the deliverable match what was requested?" |
 
 User involved only if agreement check reveals significant mismatch.
 
