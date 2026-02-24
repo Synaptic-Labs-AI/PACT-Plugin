@@ -204,12 +204,15 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 5. **Create atomic commit(s)** — stage and commit before proceeding
 6. **TaskUpdate**: Feature task status = "completed"
 
-> ⚠️ **Specialist shutdown depends on the next step.** Do not shut down specialists preemptively — the next step determines their lifecycle.
+> ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
-- **Yes (Recommended)** → invoke `/PACT:peer-review`. Keep specialists alive — review commonly surfaces issues requiring fixes, and the original specialist has the best context for remediation. Shut down after all remediation complete + user merge decision.
-- **Not yet** → worktree persists; user resumes later. Shut down specialists — their task is complete, no immediate follow-up expected.
-- **More work** → continue with `/PACT:comPACT` or `/PACT:orchestrate`. Keep specialists alive — apply Reuse vs. Spawn table for the follow-up task.
+
+| User's decision | Specialists | Next action |
+|----------------|-------------|-------------|
+| **Yes** / create PR (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. Shut down after all remediation complete + user merge decision. |
+| **Not yet** / pause work | **Shut down** — no immediate follow-up expected | Worktree persists; user resumes later. |
+| **More work** / continue | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Continue with `/PACT:comPACT` or `/PACT:orchestrate`. |
 
 **If blocker reported**:
 
