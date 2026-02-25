@@ -459,7 +459,7 @@ Use this structure in the `prompt` field to ensure agents have adequate context:
 1. [Step 1]
 2. [Step 2 - explicit skill usage if needed, e.g., "Use pact-security-patterns"]
 3. [Step 3]
-4. Send a teachback to lead restating your understanding of the task before starting work. If upstream task references are provided, read them via TaskGet first. (See agent-teams skill for format)
+4. Send a teachback to lead restating your understanding of the task before starting work. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
 
 **GUIDELINES**
 A list of things that include the following:
@@ -487,7 +487,7 @@ HANDOFF:
 
 Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
 
-> ⚠️ **On receiving a HANDOFF**: Your first action is **agreement verification** — SendMessage to the specialist to confirm your understanding of their key decisions before acting on deliverables. See [pact-ct-teachback.md](protocols/pact-ct-teachback.md) for agreement levels. Exception: verify-only re-reviews are already verification conversations.
+> ⚠️ **On receiving a HANDOFF**: Your first action is **agreement verification** — `SendMessage` to the specialist to confirm your understanding of their key decisions before acting on deliverables. See [pact-ct-teachback.md](protocols/pact-ct-teachback.md) for agreement levels. Exception: verify-only re-reviews are already verification conversations.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 

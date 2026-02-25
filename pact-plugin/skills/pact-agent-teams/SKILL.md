@@ -38,7 +38,7 @@ If TaskGet returns no metadata or the referenced task doesn't exist, proceed wit
 
 ## Teachback (Conversation Verification)
 
-Before starting work, send a **teachback message** to the lead restating your understanding of the task. If upstream tasks are referenced, read them via TaskGet first. This verifies that your understanding matches what the lead intended.
+Before starting work, send a **teachback message** to the lead restating your understanding of the task. If upstream tasks are referenced, read them via `TaskGet` first. This verifies that your understanding matches what the lead intended.
 
 **Format**:
 ```
