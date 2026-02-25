@@ -15,33 +15,33 @@ Review the current work: $ARGUMENTS
 Create a review Task hierarchy:
 
 ```
-1. TaskCreate: Review task "Review: {feature}"
-2. TaskUpdate: Review task status = "in_progress"
+1. `TaskCreate`: Review task "Review: {feature}"
+2. `TaskUpdate`: Review task status = "in_progress"
 3. Analyze PR: Which reviewers needed?
-4. TaskCreate: Reviewer agent tasks (architect, test-engineer, domain specialists)
-5. TaskUpdate: Reviewer tasks status = "in_progress"
-6. TaskUpdate: Review task addBlockedBy = [reviewer IDs]
+4. `TaskCreate`: Reviewer agent tasks (architect, test-engineer, domain specialists)
+5. `TaskUpdate`: Reviewer tasks status = "in_progress"
+6. `TaskUpdate`: Review task addBlockedBy = [reviewer IDs]
 7. Dispatch reviewers in parallel
 8. Monitor until reviewers complete
-9. TaskUpdate: Reviewer tasks status = "completed" (as each completes)
+9. `TaskUpdate`: Reviewer tasks status = "completed" (as each completes)
 10. Synthesize findings
 11. If major issues:
-    a. TaskCreate: Remediation agent tasks
-    b. TaskUpdate: Remediation tasks status = "in_progress"
+    a. `TaskCreate`: Remediation agent tasks
+    b. `TaskUpdate`: Remediation tasks status = "in_progress"
     c. Dispatch, monitor until complete
-    d. TaskUpdate: Remediation tasks status = "completed"
-12. TaskCreate: "User: review minor issues" step task
+    d. `TaskUpdate`: Remediation tasks status = "completed"
+12. `TaskCreate`: "User: review minor issues" step task
 13. Present minor issues to user, record decisions in step metadata
-14. TaskUpdate: Step task status = "completed"
+14. `TaskUpdate`: Step task status = "completed"
 15. If "fix now" decisions:
-    a. TaskCreate: Remediation agent tasks
-    b. TaskUpdate: Remediation tasks status = "in_progress"
+    a. `TaskCreate`: Remediation agent tasks
+    b. `TaskUpdate`: Remediation tasks status = "in_progress"
     c. Dispatch, monitor until complete
-    d. TaskUpdate: Remediation tasks status = "completed"
-16. TaskCreate: "Awaiting merge decision" approval task
+    d. `TaskUpdate`: Remediation tasks status = "completed"
+16. `TaskCreate`: "Awaiting merge decision" approval task
 17. Present to user, await approval
-18. On approval: TaskUpdate approval task status = "completed"
-19. TaskUpdate: Review task status = "completed", metadata.artifact = PR URL
+18. On approval: `TaskUpdate` approval task status = "completed"
+19. `TaskUpdate`: Review task status = "completed", metadata.artifact = PR URL
 ```
 
 > **Convention**: Synchronous user steps (step tasks, approval tasks) skip the `in_progress` transition — they go directly from `pending` to `completed` since the orchestrator handles them inline without background dispatch.
@@ -127,7 +127,7 @@ Select the domain coder based on PR focus:
 For each reviewer:
 1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
@@ -234,8 +234,8 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
-- **TaskList**: Check for tasks with blocker metadata or stalled status
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.

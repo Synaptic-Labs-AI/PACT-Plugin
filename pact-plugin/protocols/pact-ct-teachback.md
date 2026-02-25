@@ -22,17 +22,17 @@ For LLM agents, **conversation IS cognition**. Understanding doesn't exist insid
 
 ### Teachback Mechanism
 
-When a downstream agent receives an upstream handoff (via TaskGet), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
+When a downstream agent receives an upstream handoff (via `TaskGet`), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
 
 #### Flow
 
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
-2. Agent reads upstream handoff via TaskGet(#5)
-3. Agent sends teachback to lead via SendMessage:
+2. Agent reads upstream handoff via `TaskGet(#5)`
+3. Agent sends teachback to lead via `SendMessage`:
    "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they SendMessage a correction
+5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
 ```
 
 #### Why Non-Blocking
@@ -56,39 +56,40 @@ Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderst
 
 | Situation | Teachback? |
 |-----------|-----------|
-| Dispatched with upstream task reference | Yes — always |
+| Dispatched for any task | Yes — always restate your understanding of the task before starting |
 | Re-dispatched after blocker resolution | Yes — understanding may have shifted |
-| Self-claimed follow-up task | Optional — if task references upstream work you haven't read |
-| Consultant question (peer asks you something) | No — conversational exchange, not handoff |
+| Self-claimed follow-up task | Yes — restate understanding of the new task |
+| Consultant question (peer asks you something) | No — conversational exchange, not task dispatch |
 
 #### Cost
 
-One extra SendMessage per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
+One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
 
 ### Agreement Verification (Orchestrator-Side)
 
-Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent). Together they cover both sides of each phase boundary.
+Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent).
+
+#### When to Verify
+
+**Final gates only**: Verify at points where there is no downstream agent whose teachback would catch a misunderstanding. At intermediate phase boundaries (PREPARE→ARCHITECT, ARCHITECT→CODE, CODE→TEST), the downstream agent's teachback provides a safety net — if the orchestrator misreads a handoff, the next agent's teachback will surface the mismatch.
+
+| Gate | Level | Verification Question |
+|------|-------|----------------------|
+| TEST → PR (orchestrate) | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
+| comPACT completion | L1 (procedure) | "Does the deliverable match what was requested?" |
+| plan-mode synthesis | L1 (procedure) | "Does my synthesis accurately represent your input?" |
 
 #### Flow
 
 ```
-1. Phase specialist completes, delivers handoff
+1. Specialist completes, delivers handoff
 2. Orchestrator reads handoff, forms understanding
-3. Orchestrator SendMessages to specialist to verify: "Confirming my understanding: [restates key decisions]. Correct?"
+3. Orchestrator must `SendMessage` to specialist: "Confirming my understanding: [restates key decisions]. Correct?"
 4. Specialist confirms or corrects
-5. Orchestrator dispatches next phase with verified understanding
+5. Orchestrator proceeds with verified understanding (commit, create PR, etc.)
 ```
 
-#### Agreement Levels by Phase Transition
-
-| Transition | Level | Verification Question |
-|-----------|-------|----------------------|
-| PREPARE → ARCHITECT | L0 (topic) | "Do we share understanding of WHAT we're building?" |
-| ARCHITECT → CODE | L1 (procedure) | "Do we share understanding of HOW we'll build it?" |
-| CODE → TEST | L1 (procedure) | "Did the implementation stay coherent with the design?" |
-| TEST → PR | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
-
-User involved only if agreement check reveals significant mismatch.
+For multiple concurrent specialists: broadcast your understanding of all deliverables. Each specialist confirms their piece.
 
 #### Fallback: Specialist Unavailable
 
@@ -96,12 +97,10 @@ If the specialist has been shut down or is unresponsive when agreement verificat
 
 > - Agreement: [assumed — specialist unavailable for verification]
 
-This avoids blocking phase transitions when a specialist's process has already terminated. The downstream teachback still provides coverage from the receiving side.
-
 ### Relationship to Existing Protocols
 
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
-- **SendMessage prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
+- **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
 
 ---

@@ -26,8 +26,6 @@ VALID_HOOK_EVENTS = {
     "SessionStart",
     "SessionEnd",
     "PreCompact",
-    "PostCompact",
-    "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "SubagentStart",

@@ -2,7 +2,7 @@
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
 Used by: compaction_refresh.py, validate_handoff.py, phase_completion.py,
-         session_init.py, stop_audit.py
+         session_init.py
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json

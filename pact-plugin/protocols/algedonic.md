@@ -87,9 +87,9 @@ With PACT Task integration, algedonic signals create **signal Tasks** that persi
 
 **Agent behavior on algedonic signal:**
 
-Under Agent Teams, teammates have access to Task tools (TaskGet, TaskUpdate, TaskList) and messaging (SendMessage). When an agent detects a viability threat:
+Under Agent Teams, teammates have access to Task tools (`TaskGet`, `TaskUpdate`, `TaskList`) and messaging (`SendMessage`). When an agent detects a viability threat:
 1. Stop work immediately
-2. Send the signal to the lead via SendMessage (using the Signal Format above):
+2. Send the signal to the lead via `SendMessage` (using the Signal Format above):
    ```
    SendMessage(type="message", recipient="lead",
      content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
@@ -97,7 +97,7 @@ Under Agent Teams, teammates have access to Task tools (TaskGet, TaskUpdate, Tas
    ```
 3. Provide a partial handoff with whatever work was completed
 
-The lead receives the SendMessage signal and handles algedonic Task creation and scope amplification.
+The lead receives the `SendMessage` signal and handles algedonic Task creation and scope amplification.
 
 **Orchestrator creates and manages the algedonic Task:**
 1. `TaskCreate(subject="[HALT|ALERT]: {category}", metadata={"type": "algedonic", "level": "...", "category": "..."})` — creates the signal Task
@@ -112,12 +112,12 @@ The lead receives the SendMessage signal and handles algedonic Task creation and
 **Resolution:**
 ```
 1. User acknowledges/resolves the issue
-2. TaskUpdate(algedonic_task_id, status="completed")
+2. `TaskUpdate(algedonic_task_id, status="completed")`
 3. Blocked Tasks become unblocked automatically
 4. Work can resume
 ```
 
-This makes algedonic signals **visible in TaskList** and ensures they properly block affected work until resolved.
+This makes algedonic signals **visible in `TaskList`** and ensures they properly block affected work until resolved.
 
 ### Flow
 
@@ -126,7 +126,7 @@ Agent detects trigger condition
     ↓
 Agent stops work immediately
     ↓
-Agent sends algedonic signal via SendMessage to lead + provides partial handoff
+Agent sends algedonic signal via `SendMessage` to lead + provides partial handoff
     ↓
 Orchestrator creates algedonic Task + blocks agent's task (addBlockedBy)
     ↓

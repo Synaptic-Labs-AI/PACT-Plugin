@@ -10,7 +10,7 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 Before other cleanup, audit and optionally clean up Task state:
 
 ```
-1. TaskList: Review all session tasks
+1. `TaskList`: Review all session tasks
 2. For abandoned in_progress tasks: complete or document reason
 3. Verify Feature task reflects final state
 4. Archive key context to memory (via pact-memory-agent)
@@ -32,7 +32,7 @@ Before other cleanup, audit and optionally clean up Task state:
 
 **Why conservative:** Tasks are session-scoped by default (fresh on new session). Cleanup only matters for multi-session work, where user explicitly chose persistence via `CLAUDE_CODE_TASK_LIST_ID`.
 
-> Note: `hooks/stop_audit.py` performs automatic audit checks at session end. This table provides wrap-up command guidance for manual orchestrator-driven cleanup.
+> Note: `hooks/stop_audit.sh` performs automatic audit checks at session end. This table provides wrap-up command guidance for manual orchestrator-driven cleanup.
 
 ---
 

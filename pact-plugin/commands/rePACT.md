@@ -15,16 +15,16 @@ This command initiates a **nested P→A→C→T cycle** for a sub-task that is t
 Create a nested Task hierarchy as a child of the current context:
 
 ```
-1. TaskCreate: Sub-feature task "{verb} {sub-feature}" (child of parent context)
-2. TaskCreate: Nested phase tasks:
+1. `TaskCreate`: Sub-feature task "{verb} {sub-feature}" (child of parent context)
+2. `TaskCreate`: Nested phase tasks:
    - "PREPARE: {sub-feature-slug}"
    - "ARCHITECT: {sub-feature-slug}"
    - "CODE: {sub-feature-slug}"
    - "TEST: {sub-feature-slug}"
-3. TaskUpdate: Set dependencies:
+3. `TaskUpdate`: Set dependencies:
    - Phase-to-phase blockedBy chain (same as orchestrate)
    - Parent task addBlockedBy = [sub-feature task]
-4. TaskUpdate: Sub-feature task status = "in_progress"
+4. `TaskUpdate`: Sub-feature task status = "in_progress"
 5. Execute nested P→A→C→T cycle (same per-phase lifecycle as orchestrate: create phase task → `in_progress` → dispatch agents → agent tasks `in_progress` → `completed` → phase `completed`)
 6. On completion: Parent task unblocked
 ```
@@ -213,11 +213,11 @@ Implement the sub-component:
 For each specialist needed:
 1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
 2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
-3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
-Output: Code + HANDOFF in task metadata (summary via SendMessage to lead).
+Output: Code + HANDOFF in task metadata (summary via `SendMessage` to lead).
 
 ### Phase 4: Mini-Test
 
@@ -232,7 +232,7 @@ Complete the nested cycle:
 1. **Verify**: Sub-component works within parent context
 2. **Handoff**: Return control to parent orchestration with summary
 3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope.
-   - SendMessage to each contributing specialist to confirm: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
+   - `SendMessage` to each contributing specialist to confirm: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
    - Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
@@ -346,8 +346,8 @@ Consider using /PACT:orchestrate instead.
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
-- **TaskList**: Check for tasks with blocker metadata or stalled status
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
@@ -358,7 +358,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 ## After Completion
 
 When nested cycle completes:
-1. **TaskUpdate**: Sub-feature task status = "completed"
+1. **`TaskUpdate`**: Sub-feature task status = "completed"
 2. **Summarize** what was done in the nested cycle
 3. **Report** any decisions that affect the parent task
 4. **Continue** with parent orchestration (parent task now unblocked)
