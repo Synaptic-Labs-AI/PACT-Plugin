@@ -437,9 +437,6 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] **Agreement verification (L1)**: SendMessage to coder(s) to confirm implementation stayed coherent with design. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
-<!-- NOTE: CODE checklist ordering differs from PREPARE/ARCHITECT (which go agreement → S4).
-     Here it's agreement → commit → S4. Reason: S4 may decide to change direction, so we
-     commit first to preserve the coder's work before strategic re-assessment. -->
 
 #### Handling Complex Sub-Tasks During CODE
 
