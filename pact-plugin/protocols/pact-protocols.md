@@ -440,36 +440,35 @@ One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance ag
 
 ### Agreement Verification (Orchestrator-Side)
 
-Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent). Together they cover both sides of each phase boundary.
+Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent).
+
+#### When to Verify
+
+**Final gates only**: Verify at points where there is no downstream agent whose teachback would catch a misunderstanding. At intermediate phase boundaries (PREPARE→ARCHITECT, ARCHITECT→CODE, CODE→TEST), the downstream agent's teachback provides a safety net — if the orchestrator misreads a handoff, the next agent's teachback will surface the mismatch.
+
+| Gate | Level | Verification Question |
+|------|-------|----------------------|
+| TEST → PR (orchestrate) | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
+| comPACT completion | L1 (procedure) | "Does the deliverable match what was requested?" |
+| plan-mode synthesis | L1 (procedure) | "Does my synthesis accurately represent your input?" |
 
 #### Flow
 
 ```
-1. Phase specialist completes, delivers handoff
+1. Specialist completes, delivers handoff
 2. Orchestrator reads handoff, forms understanding
 3. Orchestrator must `SendMessage` to specialist: "Confirming my understanding: [restates key decisions]. Correct?"
 4. Specialist confirms or corrects
-5. Orchestrator dispatches next phase with verified understanding
+5. Orchestrator proceeds with verified understanding (commit, create PR, etc.)
 ```
 
-#### Agreement Levels by Phase Transition
-
-| Transition | Level | Verification Question |
-|-----------|-------|----------------------|
-| PREPARE → ARCHITECT | L0 (topic) | "Do we share understanding of WHAT we're building?" |
-| ARCHITECT → CODE | L1 (procedure) | "Do we share understanding of HOW we'll build it?" |
-| CODE → TEST | L1 (procedure) | "Did the implementation stay coherent with the design?" |
-| TEST → PR | L2 (purpose) | "Does the implementation fulfill the original purpose?" |
-
-User involved only if agreement check reveals significant mismatch.
+For multiple concurrent specialists: broadcast your understanding of all deliverables. Each specialist confirms their piece.
 
 #### Fallback: Specialist Unavailable
 
 If the specialist has been shut down or is unresponsive when agreement verification is attempted, treat the handoff as accepted and note it in the checkpoint:
 
 > - Agreement: [assumed — specialist unavailable for verification]
-
-This avoids blocking phase transitions when a specialist's process has already terminated. The downstream teachback still provides coverage from the receiving side.
 
 ### Relationship to Existing Protocols
 
@@ -1613,7 +1612,6 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 - [ ] All sub-scope rePACT cycles complete
 - [ ] Contract fulfillment sections received from all sub-scopes
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L1)**: `SendMessage` to sub-scope agents to confirm shared understanding of HOW the decomposition was executed. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 - [ ] **S4 Checkpoint**: All scopes delivered? Any scope stalled?
 
 ---
@@ -1655,7 +1653,6 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CONSOLIDATE phase work
-- [ ] **Agreement verification (L1)**: `SendMessage` to architect and test engineer to confirm shared understanding of HOW the reintegration verified cross-scope compatibility.
 - [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
 
 ---

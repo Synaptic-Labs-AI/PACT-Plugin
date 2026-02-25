@@ -266,7 +266,6 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L0)**: `SendMessage` to preparer to confirm shared understanding of WHAT we're building. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
@@ -340,7 +339,6 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/architecture/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L1)**: `SendMessage` to architect to confirm shared understanding of HOW we'll build it. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
@@ -434,7 +432,6 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L1)**: `SendMessage` to coder(s) to confirm implementation stayed coherent with design. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
