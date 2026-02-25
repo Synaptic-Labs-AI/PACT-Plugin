@@ -206,7 +206,7 @@ Design the sub-component:
 - May be skipped for simple sub-tasks
 - Output: Design notes in `-nested` architecture doc or inline
 
-**Before next mini-phase**: Agreement verification (L1) — confirm shared understanding of HOW the sub-component will be built. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+**Before next mini-phase**: Agreement verification (L1) — confirm shared understanding of HOW the sub-component will be built.
 
 ### Phase 3: Mini-Code
 
@@ -223,7 +223,7 @@ For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
 Output: Code + HANDOFF in task metadata (summary via SendMessage to lead).
 
-**Before next mini-phase**: Agreement verification (L1) — confirm implementation stayed coherent with the sub-component design. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+**Before next mini-phase**: Agreement verification (L1) — confirm implementation stayed coherent with the sub-component design.
 
 ### Phase 4: Mini-Test
 

@@ -64,7 +64,7 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CONSOLIDATE phase work
-- [ ] **Agreement verification (L1)**: SendMessage to architect and test engineer to confirm shared understanding of HOW the reintegration verified cross-scope compatibility. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
+- [ ] **Agreement verification (L1)**: SendMessage to architect and test engineer to confirm shared understanding of HOW the reintegration verified cross-scope compatibility.
 - [ ] **S4 Checkpoint**: Scopes compatible? Integration clean? Plan viable?
 
 ---
