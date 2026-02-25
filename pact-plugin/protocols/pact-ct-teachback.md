@@ -71,7 +71,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 
 #### When to Verify
 
-**Universal**: Every time a specialist reports completion, the lead verifies shared understanding before acting on deliverables (reviewing artifacts, committing, dispatching next phase). This applies to phase boundaries, comPACT completions, remediation fixes, re-dispatches — anywhere an agent says "done."
+**Universal**: Every time a specialist reports completion, the lead verifies shared understanding before acting on deliverables.
 
 **Exception**: Verify-only re-reviews (reviewer confirms "finding resolved / not resolved") are already a verification conversation — no additional agreement check needed.
 

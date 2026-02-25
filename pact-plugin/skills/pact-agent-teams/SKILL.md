@@ -53,7 +53,7 @@ SendMessage(type="message", recipient="lead",
 - **Non-blocking**: Proceed with work immediately after sending — don't wait for confirmation
 - If the lead sends a correction, adjust your approach as soon as you see it
 
-**When**: Always — every task dispatch. The only exception is consultant questions (peer asks you something). Even without upstream references, teachback verifies you understood the task description correctly.
+**When**: Always — every task dispatch. Only exception: consultant questions (peer asks you something).
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 
