@@ -34,7 +34,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
    - Key decisions interpreted consistently?
    - No misunderstandings disguised as agreement?
 
-   *Verification*: `SendMessage` to the completing specialist to confirm your understanding of their key decisions. Specialist confirms or corrects. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
+   *Verification*: At final gates (TEST→PR, comPACT, plan-mode), `SendMessage` to the completing specialist to confirm your understanding. At intermediate boundaries, the downstream agent's teachback verifies shared understanding. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 
 ### Checkpoint Outcomes
 
