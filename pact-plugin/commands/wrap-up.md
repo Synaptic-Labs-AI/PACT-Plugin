@@ -32,7 +32,7 @@ Before other cleanup, audit and optionally clean up Task state:
 
 **Why conservative:** Tasks are session-scoped by default (fresh on new session). Cleanup only matters for multi-session work, where user explicitly chose persistence via `CLAUDE_CODE_TASK_LIST_ID`.
 
-> Note: `hooks/stop_audit.py` performs automatic audit checks at session end. This table provides wrap-up command guidance for manual orchestrator-driven cleanup.
+> Note: `hooks/stop_audit.sh` performs automatic audit checks at session end. This table provides wrap-up command guidance for manual orchestrator-driven cleanup.
 
 ---
 
