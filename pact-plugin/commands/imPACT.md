@@ -140,4 +140,4 @@ When imPACT decides to redo a prior phase (e.g., "redo ARCHITECT because the des
 4. **Block the current phase** (the one that hit the blocker): `TaskUpdate(currentPhaseId, addBlockedBy=[retryPhaseId])`
 5. **Dispatch agent(s)** for the retry phase
 6. **On retry completion**: `TaskUpdate(retryPhaseId, status="completed")` — unblocks the current phase
-7. **Retry the current phase** with a new agent task using the updated outputs
+7. **Retry the current phase** with a new agent task using the updated outputs (re-dispatched agents will teachback per universal rule)
