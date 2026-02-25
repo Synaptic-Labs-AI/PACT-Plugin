@@ -13,12 +13,12 @@ imPACT operates on blocker Tasks reported by agents.
 These are orchestrator-side operations (agents report blockers via `SendMessage` to the lead; the orchestrator manages Tasks):
 
 ```
-1. TaskGet(blocker_id) — understand the blocker context
+1. `TaskGet(blocker_id)` — understand the blocker context
 2. Triage: redo prior phase? need specialist? need user?
 3. On resolution path chosen:
    - If delegating: `TaskCreate` resolution agent task
    - If self-resolving: proceed directly
-4. On resolution complete: TaskUpdate(blocker_id, status="completed")
+4. On resolution complete: `TaskUpdate(blocker_id, status="completed")`
 5. Blocked agent task is now unblocked
 ```
 

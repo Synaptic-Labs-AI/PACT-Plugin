@@ -39,7 +39,7 @@ c. `TaskCreate`: agent task(s) as children of phase
 d. `TaskUpdate`: agent tasks owner = "{agent-name}"
 e. `TaskUpdate`: next phase addBlockedBy = [agent IDs]
 f. Spawn teammates: Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="...")
-g. Store agent IDs: TaskUpdate(taskId, metadata={"agent_id": "{id_from_Task_return}"})
+g. Store agent IDs: `TaskUpdate(taskId, metadata={"agent_id": "{id_from_Task_return}"})`
 h. Monitor via `SendMessage` (completion summaries) and `TaskList` until agents complete
 i. `TaskUpdate`: phase status = "completed" (agents self-manage their task status)
 ```

@@ -112,7 +112,7 @@ The lead receives the `SendMessage` signal and handles algedonic Task creation a
 **Resolution:**
 ```
 1. User acknowledges/resolves the issue
-2. TaskUpdate(algedonic_task_id, status="completed")
+2. `TaskUpdate(algedonic_task_id, status="completed")`
 3. Blocked Tasks become unblocked automatically
 4. Work can resume
 ```
