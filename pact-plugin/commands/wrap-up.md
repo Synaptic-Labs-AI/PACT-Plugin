@@ -10,7 +10,7 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 Before other cleanup, audit and optionally clean up Task state:
 
 ```
-1. TaskList: Review all session tasks
+1. `TaskList`: Review all session tasks
 2. For abandoned in_progress tasks: complete or document reason
 3. Verify Feature task reflects final state
 4. Archive key context to memory (via pact-memory-agent)

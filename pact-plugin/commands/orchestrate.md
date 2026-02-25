@@ -11,17 +11,17 @@ Orchestrate specialist PACT agents through the PACT workflow to address: $ARGUME
 Create the full Task hierarchy upfront for workflow visibility:
 
 ```
-1. TaskCreate: Feature task "{verb} {feature}"
-2. TaskCreate: Phase tasks (all upfront):
+1. `TaskCreate`: Feature task "{verb} {feature}"
+2. `TaskCreate`: Phase tasks (all upfront):
    - "PREPARE: {feature-slug}"
    - "ARCHITECT: {feature-slug}"
    - "CODE: {feature-slug}"
    - "TEST: {feature-slug}"
-3. TaskUpdate: Set phase-to-phase blockedBy chain:
+3. `TaskUpdate`: Set phase-to-phase blockedBy chain:
    - ARCHITECT blockedBy PREPARE
    - CODE blockedBy ARCHITECT
    - TEST blockedBy CODE
-4. TaskUpdate: Feature task status = "in_progress"
+4. `TaskUpdate`: Feature task status = "in_progress"
 ```
 
 **Scoped PACT phases**: When decomposition fires after PREPARE, the standard ARCHITECT and CODE phases are skipped (`decomposition_active`) and replaced by scoped phases. Create retroactively (detection occurs after PREPARE):
@@ -33,15 +33,15 @@ The scoped flow is: **P**repare → **A**tomize → **C**onsolidate → **T**est
 
 For each phase execution:
 ```
-a. TaskUpdate: phase status = "in_progress"
+a. `TaskUpdate`: phase status = "in_progress"
 b. Analyze work needed (QDCL for CODE)
-c. TaskCreate: agent task(s) as children of phase
-d. TaskUpdate: agent tasks owner = "{agent-name}"
-e. TaskUpdate: next phase addBlockedBy = [agent IDs]
+c. `TaskCreate`: agent task(s) as children of phase
+d. `TaskUpdate`: agent tasks owner = "{agent-name}"
+e. `TaskUpdate`: next phase addBlockedBy = [agent IDs]
 f. Spawn teammates: Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="...")
 g. Store agent IDs: TaskUpdate(taskId, metadata={"agent_id": "{id_from_Task_return}"})
-h. Monitor via SendMessage (completion summaries) and TaskList until agents complete
-i. TaskUpdate: phase status = "completed" (agents self-manage their task status)
+h. Monitor via `SendMessage` (completion summaries) and `TaskList` until agents complete
+i. `TaskUpdate`: phase status = "completed" (agents self-manage their task status)
 ```
 
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).

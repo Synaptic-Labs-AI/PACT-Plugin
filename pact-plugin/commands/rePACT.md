@@ -15,16 +15,16 @@ This command initiates a **nested P→A→C→T cycle** for a sub-task that is t
 Create a nested Task hierarchy as a child of the current context:
 
 ```
-1. TaskCreate: Sub-feature task "{verb} {sub-feature}" (child of parent context)
-2. TaskCreate: Nested phase tasks:
+1. `TaskCreate`: Sub-feature task "{verb} {sub-feature}" (child of parent context)
+2. `TaskCreate`: Nested phase tasks:
    - "PREPARE: {sub-feature-slug}"
    - "ARCHITECT: {sub-feature-slug}"
    - "CODE: {sub-feature-slug}"
    - "TEST: {sub-feature-slug}"
-3. TaskUpdate: Set dependencies:
+3. `TaskUpdate`: Set dependencies:
    - Phase-to-phase blockedBy chain (same as orchestrate)
    - Parent task addBlockedBy = [sub-feature task]
-4. TaskUpdate: Sub-feature task status = "in_progress"
+4. `TaskUpdate`: Sub-feature task status = "in_progress"
 5. Execute nested P→A→C→T cycle (same per-phase lifecycle as orchestrate: create phase task → `in_progress` → dispatch agents → agent tasks `in_progress` → `completed` → phase `completed`)
 6. On completion: Parent task unblocked
 ```

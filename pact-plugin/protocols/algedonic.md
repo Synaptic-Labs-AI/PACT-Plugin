@@ -126,7 +126,7 @@ Agent detects trigger condition
     ↓
 Agent stops work immediately
     ↓
-Agent sends algedonic signal via SendMessage to lead + provides partial handoff
+Agent sends algedonic signal via `SendMessage` to lead + provides partial handoff
     ↓
 Orchestrator creates algedonic Task + blocks agent's task (addBlockedBy)
     ↓

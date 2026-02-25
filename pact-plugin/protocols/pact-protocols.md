@@ -402,10 +402,10 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via TaskGet(#5)
-3. Agent sends teachback to lead via SendMessage:
+3. Agent sends teachback to lead via `SendMessage`:
    "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they SendMessage a correction
+5. If orchestrator spots misunderstanding, they `SendMessage` a correction
 ```
 
 #### Why Non-Blocking
@@ -447,7 +447,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 ```
 1. Phase specialist completes, delivers handoff
 2. Orchestrator reads handoff, forms understanding
-3. Orchestrator SendMessages to specialist to verify: "Confirming my understanding: [restates key decisions]. Correct?"
+3. Orchestrator `SendMessage`s to specialist to verify: "Confirming my understanding: [restates key decisions]. Correct?"
 4. Specialist confirms or corrects
 5. Orchestrator dispatches next phase with verified understanding
 ```
@@ -497,10 +497,10 @@ With PACT Task integration, the `TaskList` serves as a **shared state mechanism*
 **Coordination via Tasks:**
 ```
 Before parallel dispatch:
-1. TaskList → check for in_progress agents on same files
+1. `TaskList` → check for in_progress agents on same files
 2. If conflict detected → sequence or assign boundaries
 3. Dispatch agents with Task IDs
-4. Monitor via TaskList for completion/blockers
+4. Monitor via `TaskList` for completion/blockers
 ```
 
 ### Information Flows

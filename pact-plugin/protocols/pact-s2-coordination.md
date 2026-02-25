@@ -16,10 +16,10 @@ With PACT Task integration, the `TaskList` serves as a **shared state mechanism*
 **Coordination via Tasks:**
 ```
 Before parallel dispatch:
-1. TaskList → check for in_progress agents on same files
+1. `TaskList` → check for in_progress agents on same files
 2. If conflict detected → sequence or assign boundaries
 3. Dispatch agents with Task IDs
-4. Monitor via TaskList for completion/blockers
+4. Monitor via `TaskList` for completion/blockers
 ```
 
 ### Information Flows
