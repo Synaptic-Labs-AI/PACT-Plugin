@@ -149,7 +149,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 3. **S2 coordination** (if concurrent) — Check for file conflicts, assign boundaries
 
-> **Teachback**: All dispatched specialists send a teachback before starting work (see [agent-teams skill](../skills/pact-agent-teams/SKILL.md)).
+> **Teachback**: All dispatched specialists send a teachback before starting work (see [pact-ct-teachback.md](../protocols/pact-ct-teachback.md)).
 
 ---
 
