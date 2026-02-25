@@ -258,7 +258,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 2. `TaskUpdate(taskId, owner="preparer")`
-3. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -266,7 +266,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L0)**: SendMessage to preparer to confirm shared understanding of WHAT we're building. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **Agreement verification (L0)**: `SendMessage` to preparer to confirm shared understanding of WHAT we're building. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
@@ -328,11 +328,11 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 **Dispatch `pact-architect`**:
 1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), and plan reference.
-   - Include upstream task reference: "Preparer task: #{taskId} — read via TaskGet for research decisions and context."
+   - Include upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
    - Do not read phase output files yourself or paste their content into the task description.
    - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
 2. `TaskUpdate(taskId, owner="architect")`
-3. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -340,7 +340,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/architecture/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L1)**: SendMessage to architect to confirm shared understanding of HOW we'll build it. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **Agreement verification (L1)**: `SendMessage` to architect to confirm shared understanding of HOW we'll build it. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
@@ -417,13 +417,13 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 For each coder needed:
 1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference.
-   - Include upstream task references: "Architect task: #{taskId} — read via TaskGet for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
+   - Include upstream task references: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
    - Do not read phase output files yourself or paste their content into the task description.
    - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
    - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
    - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
 2. `TaskUpdate(taskId, owner="{coder-name}")`
-3. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
@@ -434,7 +434,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L1)**: SendMessage to coder(s) to confirm implementation stayed coherent with design. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **Agreement verification (L1)**: `SendMessage` to coder(s) to confirm implementation stayed coherent with design. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
@@ -484,16 +484,16 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 
 **Dispatch `pact-test-engineer`**:
 1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
-   - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via TaskGet for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
+   - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
    - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
 2. `TaskUpdate(taskId, owner="test-engineer")`
-3. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 **Before completing**:
 - [ ] All tests passing
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. SendMessage to test engineer to verify: "Does the tested implementation match the original requirements?" Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
+- [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. `SendMessage` to test engineer to verify: "Does the tested implementation match the original requirements?" Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
 
 **Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
@@ -509,8 +509,8 @@ For stall detection indicators, recovery protocol, prevention, and non-happy-pat
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
-- **TaskList**: Check for tasks with blocker metadata or stalled status
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
@@ -534,7 +534,7 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 1. Read agent ID from task metadata: `TaskGet(taskId).metadata.agent_id`
 2. Resume with blocker context: `Task(resume="{agent_id}", prompt="Blocker resolved: {details}. Continue your task.")`
 
-**Fresh spawn pattern** (when resume is inappropriate): Follow the standard dispatch pattern (TaskCreate + TaskUpdate + Task with name/team_name/subagent_type).
+**Fresh spawn pattern** (when resume is inappropriate): Follow the standard dispatch pattern (`TaskCreate` + `TaskUpdate` + Task with name/team_name/subagent_type).
 
 ---
 
@@ -544,7 +544,7 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 
 1. **Update plan status** (if plan exists): IN_PROGRESS → IMPLEMENTED
 2. **Verify all work is committed** — CODE and TEST phase commits should already exist; if any uncommitted changes remain, commit them now
-3. **TaskUpdate**: Feature task status = "completed" (all phases done, all work committed)
+3. **`TaskUpdate`**: Feature task status = "completed" (all phases done, all work committed)
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — orchestrator never merges (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?

@@ -22,7 +22,7 @@ For LLM agents, **conversation IS cognition**. Understanding doesn't exist insid
 
 ### Teachback Mechanism
 
-When a downstream agent receives an upstream handoff (via TaskGet), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
+When a downstream agent receives an upstream handoff (via `TaskGet`), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
 
 #### Flow
 
@@ -63,7 +63,7 @@ Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderst
 
 #### Cost
 
-One extra SendMessage per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
+One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
 
 ### Agreement Verification (Orchestrator-Side)
 
@@ -112,6 +112,6 @@ This avoids blocking phase transitions when a specialist's process has already t
 
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
-- **SendMessage prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
+- **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
 
 ---

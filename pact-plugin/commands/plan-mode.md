@@ -191,7 +191,7 @@ If a specialist fails entirely (timeout, error):
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
    - Add to description: "Send a teachback to lead restating your understanding of the consultation task before providing your analysis."
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all consultants in parallel.
 
@@ -270,7 +270,7 @@ After collecting all specialist outputs, use extended thinking to synthesize:
 
 After synthesis passes validation, verify each specialist agrees with the synthesis of their perspective.
 
-**Mechanism**: SendMessage to each specialist who contributed to verify:
+**Mechanism**: `SendMessage` to each specialist who contributed to verify:
 > "My synthesis of your perspective: [summary of their input as represented in the plan]. Does this accurately represent your input? Did I resolve conflicts involving your domain correctly?"
 
 **Handling responses**:
@@ -282,7 +282,7 @@ This verifies the orchestrator's understanding matches what specialists actually
 
 ### Phase 3: Plan Output
 
-**TaskUpdate**: Planning task completed with artifact path:
+**`TaskUpdate`**: Planning task completed with artifact path:
 ```
 TaskUpdate(
   taskId=planning_task_id,
@@ -522,8 +522,8 @@ The orchestrator should reference this plan during execution.
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
-- **TaskList**: Check for tasks with blocker metadata or stalled status
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 

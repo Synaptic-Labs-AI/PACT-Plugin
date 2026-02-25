@@ -11,7 +11,7 @@ description: |
 
 ## You Are a Teammate
 
-You are a member of a PACT Agent Team. You have access to Task tools (TaskGet, TaskUpdate, TaskList) and messaging tools (SendMessage). Use them to coordinate with the team.
+You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`, `TaskUpdate`, `TaskList`) and messaging tools (`SendMessage`). Use them to coordinate with the team.
 
 ## On Start
 
@@ -34,7 +34,7 @@ Common chain-reads:
 - **Test engineers** → read coder tasks for what was built and flagged uncertainties
 - **Reviewers** → read prior phase tasks for full context
 
-If TaskGet returns no metadata or the referenced task doesn't exist, proceed with information from your task description and file system artifacts (docs/architecture/, docs/preparation/).
+If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed with information from your task description and file system artifacts (docs/architecture/, docs/preparation/).
 
 ## Teachback (Conversation Verification)
 
@@ -64,7 +64,7 @@ Report progress naturally in your responses. For significant milestones, update 
 
 ## Message Prefix Convention
 
-**Prefix all SendMessage `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+**Prefix all `SendMessage` `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
 
 ## On Completion — HANDOFF (Required)
 
@@ -81,7 +81,7 @@ When your work is done:
      "open_questions": [...]
    }})
    ```
-   If TaskUpdate fails, include the full HANDOFF in your SendMessage content as a fallback.
+   If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
 2. **Notify lead with summary only**:
    ```
    SendMessage(type="message", recipient="lead",
@@ -147,7 +147,7 @@ When your active task is done and no follow-up tasks are available:
 If you cannot proceed:
 
 1. **Stop work immediately**
-2. **SendMessage** the blocker to the lead:
+2. **`SendMessage`** the blocker to the lead:
    ```
    SendMessage(type="message", recipient="lead",
      content="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
@@ -163,7 +163,7 @@ Do not attempt to work around the blocker.
 When you detect a viability threat (security, data integrity, ethics):
 
 1. **Stop work immediately**
-2. **SendMessage** the signal to the lead:
+2. **`SendMessage`** the signal to the lead:
    ```
    SendMessage(type="message", recipient="lead",
      content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
@@ -207,4 +207,4 @@ When you receive a `shutdown_request`:
 
 Only report work as completed if you actually performed the changes. Never fabricate
 a completion HANDOFF. If files don't exist, can't be edited, or tools fail, report
-a BLOCKER via SendMessage -- never invent results.
+a BLOCKER via `SendMessage` -- never invent results.

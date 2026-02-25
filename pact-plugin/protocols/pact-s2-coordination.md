@@ -4,12 +4,12 @@ The coordination layer enables parallel agent operation without conflicts. S2 is
 
 ### Task System Integration
 
-With PACT Task integration, the TaskList serves as a **shared state mechanism** for coordination:
+With PACT Task integration, the `TaskList` serves as a **shared state mechanism** for coordination:
 
-| Use Case | How TaskList Helps |
+| Use Case | How `TaskList` Helps |
 |----------|-------------------|
-| **Conflict detection** | Query TaskList to see what files/components other agents are working on |
-| **Parallel agent visibility** | All in_progress agent Tasks visible via TaskList |
+| **Conflict detection** | Query `TaskList` to see what files/components other agents are working on |
+| **Parallel agent visibility** | All in_progress agent Tasks visible via `TaskList` |
 | **Convention propagation** | First agent's metadata (decisions, patterns) queryable by later agents |
 | **Resource claims** | Agent Tasks can include metadata about claimed resources |
 
@@ -31,7 +31,7 @@ S2 manages information flow between agents:
 | Earlier agent | Later agents | Conventions established, interfaces defined |
 | Orchestrator | All agents | Shared context, boundary assignments |
 | Any agent | Orchestrator → All others | Resource claims, conflict warnings |
-| TaskList | All agents | Current in_progress work, blockers, completed decisions |
+| `TaskList` | All agents | Current in_progress work, blockers, completed decisions |
 
 ### Pre-Parallel Coordination Check
 

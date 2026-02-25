@@ -187,7 +187,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
    - Key decisions interpreted consistently?
    - No misunderstandings disguised as agreement?
 
-   *Verification*: SendMessage to the completing specialist to confirm your understanding of their key decisions. Specialist confirms or corrects. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
+   *Verification*: `SendMessage` to the completing specialist to confirm your understanding of their key decisions. Specialist confirms or corrects. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 
 ### Checkpoint Outcomes
 
@@ -395,7 +395,7 @@ For LLM agents, **conversation IS cognition**. Understanding doesn't exist insid
 
 ### Teachback Mechanism
 
-When a downstream agent receives an upstream handoff (via TaskGet), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
+When a downstream agent receives an upstream handoff (via `TaskGet`), their first action is to send a teachback message — restating key decisions, constraints, and interfaces before proceeding.
 
 #### Flow
 
@@ -436,7 +436,7 @@ Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderst
 
 #### Cost
 
-One extra SendMessage per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
+One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance against the most dangerous failure mode: **misunderstanding disguised as agreement** — where an agent proceeds with wrong understanding, undetected until TEST phase.
 
 ### Agreement Verification (Orchestrator-Side)
 
@@ -475,7 +475,7 @@ This avoids blocking phase transitions when a specialist's process has already t
 
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
-- **SendMessage prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
+- **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
 
 ---
 
@@ -485,12 +485,12 @@ The coordination layer enables parallel agent operation without conflicts. S2 is
 
 ### Task System Integration
 
-With PACT Task integration, the TaskList serves as a **shared state mechanism** for coordination:
+With PACT Task integration, the `TaskList` serves as a **shared state mechanism** for coordination:
 
-| Use Case | How TaskList Helps |
+| Use Case | How `TaskList` Helps |
 |----------|-------------------|
-| **Conflict detection** | Query TaskList to see what files/components other agents are working on |
-| **Parallel agent visibility** | All in_progress agent Tasks visible via TaskList |
+| **Conflict detection** | Query `TaskList` to see what files/components other agents are working on |
+| **Parallel agent visibility** | All in_progress agent Tasks visible via `TaskList` |
 | **Convention propagation** | First agent's metadata (decisions, patterns) queryable by later agents |
 | **Resource claims** | Agent Tasks can include metadata about claimed resources |
 
@@ -512,7 +512,7 @@ S2 manages information flow between agents:
 | Earlier agent | Later agents | Conventions established, interfaces defined |
 | Orchestrator | All agents | Shared context, boundary assignments |
 | Any agent | Orchestrator → All others | Resource claims, conflict warnings |
-| TaskList | All agents | Current in_progress work, blockers, completed decisions |
+| `TaskList` | All agents | Current in_progress work, blockers, completed decisions |
 
 ### Pre-Parallel Coordination Check
 
@@ -1048,7 +1048,7 @@ When decomposition creates sub-scopes, tasks use naming and metadata conventions
 
 #### Naming Convention
 
-Prefix task subjects with `[scope:{scope_id}]` to make TaskList output scannable:
+Prefix task subjects with `[scope:{scope_id}]` to make `TaskList` output scannable:
 
 ```
 [scope:backend-api] ARCHITECT: backend-api
@@ -1232,15 +1232,15 @@ If work spans sessions, update CLAUDE.md with:
 ## Agent Stall Detection
 
 **Stalled indicators** (Agent Teams model):
-- TeammateIdle event received but no completion message or blocker was sent via SendMessage
-- Task status in TaskList shows `in_progress` but no SendMessage activity from the teammate
-- Teammate process terminated without sending a completion message or blocker via SendMessage
+- TeammateIdle event received but no completion message or blocker was sent via `SendMessage`
+- Task status in `TaskList` shows `in_progress` but no `SendMessage` activity from the teammate
+- Teammate process terminated without sending a completion message or blocker via `SendMessage`
 
-Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on SendMessage receipt). If a teammate goes idle without sending a completion message or blocker, treat as stalled immediately.
+Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on `SendMessage` receipt). If a teammate goes idle without sending a completion message or blocker, treat as stalled immediately.
 
 ### Recovery Protocol
 
-1. Check the teammate's TaskList status and any partial task metadata or SendMessage output for context on what happened
+1. Check the teammate's `TaskList` status and any partial task metadata or `SendMessage` output for context on what happened
 2. Mark the stalled agent task as `completed` with `metadata={"stalled": true, "reason": "{what happened}"}`
 3. Assess: Is the work partially done? Can it be continued from where it stopped?
 4. Create a new agent task and spawn a new teammate to retry or continue the work, passing any partial output as context
@@ -1248,7 +1248,7 @@ Detection is event-driven: check at signal monitoring points (after dispatch, on
 
 ### Prevention
 
-Include in agent prompts: "If you encounter an error that prevents completion, send a message via SendMessage describing what you completed and store a partial HANDOFF in task metadata rather than silently failing."
+Include in agent prompts: "If you encounter an error that prevents completion, send a message via `SendMessage` describing what you completed and store a partial HANDOFF in task metadata rather than silently failing."
 
 ### Non-Happy-Path Task Termination
 

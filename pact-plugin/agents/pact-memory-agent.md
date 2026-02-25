@@ -157,7 +157,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 
 If you encounter issues with the memory system:
 1. Check memory status with `get_status()`
-2. Report specific error to the lead via SendMessage
+2. Report specific error to the lead via `SendMessage`
 3. Suggest fallback (e.g., manual context capture in docs/)
 
 Common memory-specific issues:

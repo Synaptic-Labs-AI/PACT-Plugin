@@ -217,11 +217,11 @@ Implement the sub-component:
 For each specialist needed:
 1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
 2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
-3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
-Output: Code + HANDOFF in task metadata (summary via SendMessage to lead).
+Output: Code + HANDOFF in task metadata (summary via `SendMessage` to lead).
 
 **Before next mini-phase**: Agreement verification (L1) — confirm implementation stayed coherent with the sub-component design.
 
@@ -238,7 +238,7 @@ Complete the nested cycle:
 1. **Verify**: Sub-component works within parent context
 2. **Handoff**: Return control to parent orchestration with summary
 3. **Agreement verification**: Parent orchestrator verifies understanding of nested results before reintegrating into parent scope.
-   - SendMessage to each contributing specialist to confirm: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
+   - `SendMessage` to each contributing specialist to confirm: "Confirming my understanding of the nested results: [restates key deliverables and decisions]. Correct?"
    - Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
 ---
@@ -352,8 +352,8 @@ Consider using /PACT:orchestrate instead.
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
-- **TaskList**: Check for tasks with blocker metadata or stalled status
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
@@ -364,7 +364,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 ## After Completion
 
 When nested cycle completes:
-1. **TaskUpdate**: Sub-feature task status = "completed"
+1. **`TaskUpdate`**: Sub-feature task status = "completed"
 2. **Summarize** what was done in the nested cycle
 3. **Report** any decisions that affect the parent task
 4. **Continue** with parent orchestration (parent task now unblocked)

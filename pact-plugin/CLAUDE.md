@@ -113,7 +113,7 @@ Specialist agents (Coders, Architects) **cannot delegate** to other agents.
 
 #### How to Delegate
 
-Delegate to `pact-memory-agent` using the standard Agent Teams dispatch pattern (TaskCreate + TaskUpdate + Task with name/team_name). The memory agent uses the same dispatch model as all other specialists.
+Delegate to `pact-memory-agent` using the standard Agent Teams dispatch pattern (`TaskCreate` + `TaskUpdate` + Task with name/team_name). The memory agent uses the same dispatch model as all other specialists.
 
 - **Save**: Include in task description: `"Save memory: [context of what was done, decisions, lessons]"`
 - **Search**: Include in task description: `"Retrieve memories about: [topic/query]"`
@@ -323,7 +323,7 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 
 #### Agent Task Tracking
 
-> ⚠️ **AGENTS MUST HAVE TANDEM TRACKING TASKS**: Whenever invoking a specialist agent, you must also track what they are working on by using the Claude Code Task Management system (TaskCreate, TaskUpdate, TaskList, TaskGet).
+> ⚠️ **AGENTS MUST HAVE TANDEM TRACKING TASKS**: Whenever invoking a specialist agent, you must also track what they are working on by using the Claude Code Task Management system (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`).
 
 **Tracking Task lifecycle**:
 
@@ -337,10 +337,10 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
 | Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
 
-**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via SendMessage (HANDOFFs, blockers, algedonic signals). The orchestrator creates tasks and monitors via TaskList and incoming SendMessage signals.
+**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals). The orchestrator creates tasks and monitors via `TaskList` and incoming `SendMessage` signals.
 
 ##### Signal Task Handling
-When an agent reports a blocker or algedonic signal via SendMessage:
+When an agent reports a blocker or algedonic signal via `SendMessage`:
 1. Create a signal Task (blocker or algedonic type)
 2. Block the agent's task via `addBlockedBy`
 3. For algedonic signals, amplify scope:
@@ -410,16 +410,16 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 > ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 2. The `session_init` hook provides the specific team name in your session context.
 >
-> ⚠️ **NEVER** use plain `Task(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and SendMessage communication.
+> ⚠️ **NEVER** use plain `Task(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
 **Dispatch pattern**:
 1. `TaskCreate(subject, description)` — create the tracking task with full mission
 2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")` — spawn the teammate
+3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
 
 **Why Agent Teams?**
 - Teammates self-manage task status (claim, progress, complete)
-- Communication via SendMessage (HANDOFFs, blockers, algedonic signals)
+- Communication via `SendMessage` (HANDOFFs, blockers, algedonic signals)
 - Completed-phase teammates remain as consultants for questions
 - Multiple specialists run concurrently within the same team
 
@@ -449,7 +449,7 @@ Use this structure in the `prompt` field to ensure agents have adequate context:
 
 **CONTEXT**
 [Brief background, what phase we are in, and relevant state]
-[Upstream task references: "Architect task: #5 — read via TaskGet for design decisions"]
+[Upstream task references: "Architect task: #5 — read via `TaskGet` for design decisions"]
 [Peer names if concurrent: "Your peers on this phase: frontend-coder, database-engineer"]
 
 **MISSION**
@@ -470,7 +470,7 @@ A list of things that include the following:
 
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF. Under Agent Teams, HANDOFFs are stored in task metadata (via TaskUpdate). Agents send a brief summary via SendMessage — read the full HANDOFF with `TaskGet(taskId).metadata.handoff` when needed for decisions. Expect this format:
+Every agent delivers a structured HANDOFF. Under Agent Teams, HANDOFFs are stored in task metadata (via `TaskUpdate`). Agents send a brief summary via `SendMessage` — read the full HANDOFF with `TaskGet(taskId).metadata.handoff` when needed for decisions. Expect this format:
 
 ```
 HANDOFF:

@@ -127,7 +127,7 @@ Select the domain coder based on PR focus:
 For each reviewer:
 1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check TaskList for tasks assigned to you.")`
+3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
@@ -234,8 +234,8 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **SendMessage**: Teammates send blockers and algedonic signals directly to the lead
-- **TaskList**: Check for tasks with blocker metadata or stalled status
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.

@@ -64,7 +64,7 @@ When decomposition creates sub-scopes, tasks use naming and metadata conventions
 
 #### Naming Convention
 
-Prefix task subjects with `[scope:{scope_id}]` to make TaskList output scannable:
+Prefix task subjects with `[scope:{scope_id}]` to make `TaskList` output scannable:
 
 ```
 [scope:backend-api] ARCHITECT: backend-api
