@@ -32,7 +32,7 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 3. Agent sends teachback to lead via `SendMessage`:
    "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they `SendMessage` a correction
+5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
 ```
 
 #### Why Non-Blocking

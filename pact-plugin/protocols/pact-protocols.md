@@ -405,7 +405,7 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 3. Agent sends teachback to lead via `SendMessage`:
    "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they `SendMessage` a correction
+5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
 ```
 
 #### Why Non-Blocking
@@ -447,7 +447,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 ```
 1. Phase specialist completes, delivers handoff
 2. Orchestrator reads handoff, forms understanding
-3. Orchestrator `SendMessage`s to specialist to verify: "Confirming my understanding: [restates key decisions]. Correct?"
+3. Orchestrator must `SendMessage` to specialist: "Confirming my understanding: [restates key decisions]. Correct?"
 4. Specialist confirms or corrects
 5. Orchestrator dispatches next phase with verified understanding
 ```
