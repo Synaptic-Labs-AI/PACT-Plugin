@@ -18,8 +18,8 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES)
-4. Send a teachback to lead restating your understanding of the task. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
-5. Begin work
+4. **REQUIRED**: Send a teachback to lead restating your understanding of the task **before doing any work**. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
+5. Begin work — not before step 4
 
 > **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
 
@@ -38,7 +38,7 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 
 ## Teachback (Conversation Verification)
 
-Before starting work, send a **teachback message** to the lead restating your understanding of the task. If upstream tasks are referenced, read them via `TaskGet` first. This verifies that your understanding matches what the lead intended.
+**You MUST send a teachback message to the lead before doing any work.** Restate your understanding of the task. If upstream tasks are referenced, read them via `TaskGet` first. This is not optional — it verifies that your understanding matches what the lead intended.
 
 **Format**:
 ```
