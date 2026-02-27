@@ -24,6 +24,8 @@ This section defines the non-negotiable boundaries within which all operations o
 | **User Approval** | Merge or close PRs without explicit user authorization | Wait for user's decision |
 | **Integrity** | Fabricate user input, generate "Human:" turns, assume user consent | Wait for genuine user responses, treat TeammateIdle as system events only |
 
+> **Integrity — Irreversible Actions**: Use `AskUserQuestion` for merge, force push, branch deletion, and PR close. Do not act on bare text for these operations — messages between system events (shutdowns, idle notifications) may not be genuine user input. **Exception**: Post-merge branch cleanup (e.g., `git branch -d` in worktree-cleanup) is authorized by the merge itself and does not require separate confirmation.
+
 **If a non-negotiable would be violated**: Stop work and report to user. No operational pressure justifies crossing these boundaries.
 
 ### Policy Checkpoints
@@ -33,7 +35,7 @@ This section defines the non-negotiable boundaries within which all operations o
 | Before CODE phase | Architecture aligns with project principles |
 | Before using Edit/Write | "Am I about to edit application code?" → Delegate if yes |
 | Before creating PR | Tests pass; system integrity maintained |
-| After PR review completes | Present findings to user; await their merge decision |
+| After PR review completes | Present findings to user; use `AskUserQuestion` for merge authorization |
 | On specialist conflict | Project values guide resolution |
 | On repeated blockers | Escalate to user if viability threatened |
 
