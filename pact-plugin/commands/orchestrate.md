@@ -342,19 +342,17 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 ---
 
-### Post-PREPARE Re-assessment
+### PREPARE→ARCHITECT Coupling
 
-If PREPARE ran and ARCHITECT was marked "Skip," compare PREPARE's recommended approach to the skip rationale:
+When PREPARE runs, the orchestrator reviews PREPARE output before evaluating ARCHITECT's skip eligibility:
 
-- **Approach matches rationale** → Skip holds
-- **Novel approach** (new components, interfaces, expanded scope) → Override, run ARCHITECT
+- **PREPARE ran + ARCHITECT hard gates fire** (Scope ≥ 3 or Risk ≥ 3 or total ≥ 10) → Full ARCHITECT, no further analysis needed
+- **PREPARE ran + ARCHITECT hard gates don't fire** → Review PREPARE output: *"Did PREPARE reveal new components, interface changes, pattern decisions, or cross-module impact?"* If yes → full ARCHITECT. If no → proceed to structured analysis gate for ARCHITECT.
+- **PREPARE skipped** → ARCHITECT evaluated independently through its own gate (no coupling)
 
-**Deferred skip decisions**: When PREPARE is going to run (not skipped), do not pre-commit ARCHITECT's skip decision. PREPARE outcomes may reveal the need for architectural decisions that weren't apparent during Context Assessment. Defer the ARCHITECT skip/run decision until PREPARE results are available, then apply the re-assessment criteria above.
+**Deferred skip decisions**: When PREPARE runs, do not pre-commit ARCHITECT's skip decision during Context Assessment. Defer until PREPARE results are available, then apply the coupling rules above.
 
-**Example**:
-> Skip rationale: "following established pattern in `src/utils/`"
-> PREPARE recommends "add helper to existing utils" → Skip holds
-> PREPARE recommends "new ValidationService class" → Override, run ARCHITECT
+The outcome is binary: full ARCHITECT or skip. No "light ARCHITECT" execution mode.
 
 ---
 
