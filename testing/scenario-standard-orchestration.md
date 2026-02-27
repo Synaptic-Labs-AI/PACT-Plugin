@@ -64,15 +64,16 @@ git worktree list
 ```
 Should show the new worktree alongside the main working directory. The `.worktrees/` entry should exist in `.gitignore`.
 
-### Step 5: Observe Context Assessment and Plan Check
+### Step 5: Observe Phase Skip Decision Flow
 
-**What happens**: The orchestrator checks `docs/plans/` for an approved plan matching this task, then decides which phases to skip.
+**What happens**: The orchestrator evaluates the 3-layer phase-skip decision flow (variety hard gates → plan completeness → structured analysis) to determine which phases run. For each of PREPARE and ARCHITECT, all three layers must pass before the phase can be skipped.
 
 **Expected outcome** (no plan exists for this task):
-- PREPARE: Runs (no existing context)
-- ARCHITECT: Decision depends on whether the task is novel or follows existing patterns
+- Layer 1 (Variety Hard Gates): Checked first — if Novelty ≥ 3 or Uncertainty ≥ 3, PREPARE is locked to run; if Scope ≥ 3 or Risk ≥ 3, ARCHITECT is locked to run
+- Layer 2 (Plan Completeness): No approved plan exists, so this layer cannot grant a skip
+- Layer 3 (Structured Analysis): Orchestrator must answer concrete questions with specific, verifiable answers to earn a skip
 - CODE: Always runs
-- TEST: Runs unless the change is trivial
+- TEST: Runs unless all four skip conditions are met
 
 ### Step 6: Observe PREPARE Phase
 
@@ -90,11 +91,11 @@ ls {worktree_path}/docs/preparation/
 ```
 Should contain research output file(s).
 
-### Step 7: Observe Post-PREPARE Re-assessment
+### Step 7: Observe PREPARE→ARCHITECT Coupling
 
-**What happens**: The orchestrator evaluates whether ARCHITECT should still be skipped or overridden based on PREPARE findings.
+**What happens**: The orchestrator reviews PREPARE output before evaluating ARCHITECT's skip eligibility. Hard gates are checked first (Scope ≥ 3, Risk ≥ 3, or total ≥ 10), then PREPARE output is reviewed for new components, interface changes, or cross-module impact.
 
-**Expected outcome**: If PREPARE recommends new components or interfaces, ARCHITECT runs. If it follows existing patterns, ARCHITECT may be skipped.
+**Expected outcome**: If PREPARE reveals new components or interfaces, ARCHITECT runs. If hard gates don't fire and no new architectural concerns emerged, ARCHITECT proceeds to structured analysis gate or may be skipped.
 
 ### Step 8: Observe Scope Detection
 

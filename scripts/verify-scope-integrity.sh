@@ -438,6 +438,34 @@ check_pattern "$COMMANDS_DIR/comPACT.md" \
     'AskUserQuestion'
 echo ""
 
+# --- 23. 3-layer phase-skip protection ---
+# Verify that the phase-skip tightening concepts are present in orchestrate.md:
+# structured_gate_passed as valid skip reason, variety hard gate thresholds,
+# Variety Hard Gates section, and absence of deprecated skip reasons.
+echo "23. 3-layer phase-skip protection:"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "structured_gate_passed is a valid skip reason" \
+    "structured_gate_passed"
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Hard gate threshold present" \
+    '≥ 3'
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "Variety Hard Gates section exists" \
+    "Variety Hard Gates"
+check_absent "$COMMANDS_DIR/orchestrate.md" \
+    "No deprecated approved_plan_exists skip reason" \
+    "approved_plan_exists"
+check_absent "$COMMANDS_DIR/orchestrate.md" \
+    "No deprecated requirements_explicit skip reason" \
+    "requirements_explicit"
+check_absent "$COMMANDS_DIR/orchestrate.md" \
+    "No deprecated trivial_change skip reason" \
+    "trivial_change"
+check_absent "$COMMANDS_DIR/orchestrate.md" \
+    "No deprecated existing_docs_cover_scope skip reason" \
+    "existing_docs_cover_scope"
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"

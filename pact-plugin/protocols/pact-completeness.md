@@ -6,6 +6,8 @@
 
 A plan section may exist without being complete. Before skipping a phase, the orchestrator checks the corresponding plan section for these 7 incompleteness signals. **Any signal present means the phase should run.**
 
+> **Layer 2**: This protocol serves as Layer 2 of the phase-skip protection system. See orchestrate.md "Context Assessment: Phase Skip Decision Flow" for the full 3-layer gate model.
+
 ---
 
 ### Signal Definitions
@@ -32,6 +34,6 @@ A plan section may exist without being complete. Before skipping a phase, the or
 
 **In `plan-mode` (Phase 2 synthesis)**: Check each phase's plan section for these signals to populate the Phase Requirements table.
 
-**In `orchestrate` (Context Assessment)**: Before skipping a phase, verify its plan section passes the completeness check — all 7 signals absent. Use skip reason `"plan_section_complete"` when the check passes.
+**In `orchestrate` (Context Assessment: Phase Skip Decision Flow)**: The completeness check is Layer 2 of the 3-layer skip protection. Before skipping a phase via an approved plan, verify its plan section passes — all 7 signals absent. Use skip reason `"plan_section_complete"`. (Phases can also be skipped via Layer 3 structured analysis with reason `"structured_gate_passed"` — see orchestrate.md for the full decision flow.)
 
 ---

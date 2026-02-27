@@ -48,13 +48,10 @@ i. `TaskUpdate`: phase status = "completed" (agents self-manage their task statu
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "{reason}"})`
-Valid reasons: `"approved_plan_exists"`, `"plan_section_complete"`, `"requirements_explicit"`, `"existing_docs_cover_scope"`, `"trivial_change"`, `"decomposition_active"`, or custom.
+Valid reasons: `"plan_section_complete"`, `"structured_gate_passed"`, `"decomposition_active"`.
 <!-- Skip reason semantics:
-  - "approved_plan_exists": Plan exists but completeness not verified (legacy/weak)
-  - "plan_section_complete": Plan exists AND section passed completeness check (preferred)
-  - "requirements_explicit": Task description contains all needed context
-  - "existing_docs_cover_scope": docs/preparation/ or docs/architecture/ already complete
-  - "trivial_change": Change too small to warrant this phase
+  - "plan_section_complete": Plan exists AND section passed completeness check (Layer 2)
+  - "structured_gate_passed": All structured analysis questions answered concretely (Layer 3)
   - "decomposition_active": Scope detection triggered decomposition; sub-scopes handle this phase via rePACT
 -->
 
@@ -91,7 +88,7 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 |----------------------|-----------------|
 | Variety dimension scores, full tables | One-line summary: `Variety: Low (5) — proceeding with orchestrate` |
 | QDCL checklist, dependency analysis | Decision only: `Invoking 2 backend coders in parallel` |
-| Phase skip reasoning details | Brief: `Skipping PREPARE/ARCHITECT (approved plan exists)` |
+| Phase skip reasoning details | Brief: `Skipping PREPARE (structured gate passed)` |
 
 **User can always ask** for details (e.g., "Why that strategy?" or "Show me the variety analysis").
 
@@ -120,7 +117,7 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 | If task appears... | Variety Level | Action |
 |-------------------|---------------|--------|
 | Single file, one domain, routine | Low (4-6) | Offer comPACT using `AskUserQuestion` tool (see below) |
-| Multiple files, one domain, familiar | Low-Medium | Proceed with orchestrate, consider skipping PREPARE |
+| Multiple files, one domain, familiar | Low-Medium | Proceed with orchestrate (phase gates determine skips) |
 | Multiple domains, some ambiguity | Medium (7-10) | Standard orchestrate with all phases |
 | Greenfield, architectural decisions, unknowns | High (11-14) | Recommend plan-mode first |
 | Novel technology, unclear requirements, critical stakes | Extreme (15-16) | Recommend research spike before planning |
@@ -187,28 +184,105 @@ Lead monitors for phase completion via `SendMessage` from teammates (completion 
 
 ---
 
-## Context Assessment
+## Context Assessment: Phase Skip Decision Flow
 
-Before executing phases, assess which are needed based on existing context:
+Phases run by default. Skipping is an exception that must be earned through a structured gate. The posture is *"can I justify not running this?"* — not *"should I skip?"*
 
-| Phase | Run if... | Skip if... |
-|-------|-----------|------------|
-| **PREPARE** | Requirements unclear, external APIs to research, dependencies unmapped | Plan section passes completeness check (see below); OR requirements explicit in task; OR existing `docs/preparation/` covers scope with no unresolved items |
-| **ARCHITECT** | New component or module, interface contracts undefined, architectural decisions required | Plan section passes completeness check (see below); OR following established patterns with no new components; OR `docs/architecture/` covers design with no open items |
-| **CODE** | Always run | Never skip |
-| **TEST** | Integration/E2E tests needed, complex component interactions, security/performance verification | ALL of the following are true: (1) trivial change with no new logic requiring tests, (2) no integration boundaries crossed, (3) isolated change with no meaningful test scenarios, AND (4) plan's Phase Requirements section does not mark TEST as REQUIRED (if plan exists) |
+### Three Layers of Skip Protection
 
-**Conflict resolution**: When both "Run if" and "Skip if" criteria apply, **run the phase** (safer default). Example: A plan exists but requirements have changed—run PREPARE to validate.
+All three layers must pass before PREPARE or ARCHITECT can be skipped. Failure at any layer means the phase runs.
 
-**Plan-aware fast path**: When an approved plan exists in `docs/plans/`, PREPARE and ARCHITECT are typically skippable—the plan already synthesized specialist perspectives. Skip unless scope has changed, plan appears stale (typically >2 weeks; ask user to confirm if uncertain), OR the plan contains incompleteness signals for that phase (see Phase Skip Completeness Check below).
+| Layer | What It Checks | Fail = |
+|-------|----------------|--------|
+| **1. Variety Hard Gates** | Dimension scores vs thresholds | Phase locked to "run" — no override possible |
+| **2. Plan Completeness** | Approved plan + 7 incompleteness signals (see below) | Phase runs (plan incomplete or absent) |
+| **3. Structured Analysis** | Concrete questions requiring specific, verifiable answers | Phase runs (analysis insufficient) |
 
-**State your assessment briefly.** Example: `Skipping PREPARE/ARCHITECT (approved plan exists). Running CODE and TEST.`
+Layer 1 is a numeric gate — no rationalization possible. Layer 2 is the existing completeness check (unchanged). Layer 3 replaces the old subjective skip criteria.
 
-The user can override your assessment or ask for details.
+### Layer 1: Variety Hard Gates
 
-### Phase Skip Completeness Check
+Wire variety dimension scores (already computed in the Task Variety Assessment above) into skip eligibility as non-negotiable gates. These fire before any subjective analysis.
 
-**Principle: Existence ≠ Completeness.**
+**PREPARE Hard Gates**:
+
+| Dimension | Threshold | Rationale |
+|-----------|-----------|-----------|
+| **Novelty** ≥ 3 | Phase locked | Unfamiliar territory = unknown unknowns |
+| **Uncertainty** ≥ 3 | Phase locked | Unclear requirements = research needed |
+
+**ARCHITECT Hard Gates**:
+
+| Dimension | Threshold | Rationale |
+|-----------|-----------|-----------|
+| **Scope** ≥ 3 | Phase locked | Cross-cutting change = architectural impact |
+| **Risk** ≥ 3 | Phase locked | High stakes = design before coding |
+
+**Global Gate**: If **total variety ≥ 10**, both PREPARE and ARCHITECT are locked to "run" regardless of individual dimensions.
+
+**Threshold rationale**: Dimensions score 1-4. Score 2 = "somewhat familiar/clear" — not alarming. Score 3 = "mostly unfamiliar/unclear" — genuinely warrants the phase. Using ≥ 3 avoids false-locking on routine tasks.
+
+**If any hard gate fires** → Phase runs. No further analysis needed for this phase.
+
+**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs.
+
+### Layer 3: Structured Analysis Gate
+
+When variety hard gates don't lock a phase and no approved plan covers the phase (or the plan section is incomplete), the orchestrator must answer concrete questions to earn a skip. Vague or hedged answers ("probably none", "I think so") mean the phase runs.
+
+**PREPARE — Skip Analysis Questions** (must answer ALL three concretely):
+
+1. **Adjacency check**: *"List all files beyond the direct target(s) that this change could affect."*
+   - Must answer with specific file paths or confidently state "none — change is fully isolated to [files]."
+
+2. **Dependency check**: *"What external dependencies, APIs, or constraints exist that aren't stated in the task description?"*
+   - Must name them or state "none — all dependencies are documented in the task."
+
+3. **Unknown-unknowns check**: *"What question could PREPARE answer that you can't answer right now?"*
+   - Must state "none" with reasoning, not just assertion.
+
+**ARCHITECT — Skip Analysis Questions** (must answer ALL three concretely):
+
+1. **Interface check**: *"Does this change modify or create any interface contract (API, type, schema, protocol) consumed by other components?"*
+   - Must answer yes/no with specifics.
+
+2. **Pattern check**: *"What architectural pattern is being followed, and where is it established in the codebase?"*
+   - Must cite a specific existing pattern with file references, not just assert "established patterns."
+
+3. **Impact check**: *"Could a reasonable architect disagree with the approach implied by this task?"*
+   - If yes, ARCHITECT runs. "No" requires brief reasoning.
+
+**Key property**: These questions require **specific, verifiable answers** (file paths, pattern references, named dependencies) rather than subjective assertions.
+
+**When skipping via structured analysis**: Record the analysis in task metadata for auditability:
+`TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "structured_gate_passed", "skip_analysis": {"adjacency": "...", "dependency": "...", "unknown_unknowns": "..."}})`
+`# ARCHITECT example:`
+`TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "structured_gate_passed", "skip_analysis": {"interface": "...", "pattern": "...", "impact": "..."}})`
+
+### Per-Phase Decision Flow
+
+For each of PREPARE and ARCHITECT, evaluate in order:
+
+```
+1. Check Layer 1 (variety hard gates) → Locked? → Phase RUNS (no further analysis)
+2. Check approved plan + Layer 2 (completeness check) → Plan section complete? → SKIP (reason: "plan_section_complete")
+3. Run Layer 3 (structured analysis gate) → All questions answered concretely? → SKIP (reason: "structured_gate_passed")
+4. Default → Phase RUNS
+```
+
+**CODE phase**: Always runs. Never skip.
+
+**TEST phase**: Skip criteria unchanged — requires ALL four conditions: (1) trivial change with no new logic, (2) no integration boundaries crossed, (3) isolated with no meaningful test scenarios, AND (4) plan doesn't mark TEST as REQUIRED.
+
+**Conflict resolution**: When analysis is ambiguous, phase runs. The burden of proof is on skipping.
+
+**State your assessment briefly.** Example: `Skipping PREPARE (structured gate passed). Running ARCHITECT, CODE, TEST.`
+
+The user can override your assessment or ask for details (e.g., "Show me the skip analysis").
+
+### Phase Skip Completeness Check (Layer 2)
+
+**Principle: Existence ≠ Completeness.** This is Layer 2 of the skip protection (see Per-Phase Decision Flow above). It applies when skipping based on an approved plan.
 
 Before skipping, scan the plan section for incompleteness signals (see [pact-completeness.md](../protocols/pact-completeness.md)):
 - [ ] No unchecked research items (`- [ ]`)
@@ -219,7 +293,7 @@ Before skipping, scan the plan section for incompleteness signals (see [pact-com
 - [ ] No unresolved open questions
 - [ ] No research/investigation tasks in implementation plan (go/no-go items, feasibility studies, audit tasks)
 
-**All clear** → Skip with reason `"plan_section_complete"` (not `"approved_plan_exists"`)
+**All clear** → Skip with reason `"plan_section_complete"`
 **Any signal present** → Run the phase
 
 > **Note**: The plan's Phase Requirements table is advisory. When in doubt, verify against actual section content — the table may be stale if the plan was updated after initial synthesis.
@@ -248,7 +322,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 ### PREPARE Phase → `pact-preparer`
 
-**Skip criteria met (including completeness check)?** → Proceed to ARCHITECT phase.
+**Phase skip decision flow passed (all 3 layers)?** → Mark PREPARE `completed` with skip metadata and proceed to ARCHITECT phase.
 
 **Plan sections to pass** (if plan exists):
 - "Preparation Phase"
@@ -272,19 +346,17 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 ---
 
-### Post-PREPARE Re-assessment
+### PREPARE→ARCHITECT Coupling
 
-If PREPARE ran and ARCHITECT was marked "Skip," compare PREPARE's recommended approach to the skip rationale:
+When PREPARE runs, the orchestrator reviews PREPARE output before evaluating ARCHITECT's skip eligibility:
 
-- **Approach matches rationale** → Skip holds
-- **Novel approach** (new components, interfaces, expanded scope) → Override, run ARCHITECT
+- **PREPARE ran + ARCHITECT hard gates fire** (Scope ≥ 3 or Risk ≥ 3 or total ≥ 10) → Full ARCHITECT, no further analysis needed
+- **PREPARE ran + ARCHITECT hard gates don't fire** → Review PREPARE output: *"Did PREPARE reveal new components, interface changes, pattern decisions, or cross-module impact?"* If yes → full ARCHITECT. If no → proceed to structured analysis gate for ARCHITECT.
+- **PREPARE skipped** → ARCHITECT evaluated independently through its own gate (no coupling)
 
-**Deferred skip decisions**: When PREPARE is going to run (not skipped), do not pre-commit ARCHITECT's skip decision. PREPARE outcomes may reveal the need for architectural decisions that weren't apparent during Context Assessment. Defer the ARCHITECT skip/run decision until PREPARE results are available, then apply the re-assessment criteria above.
+**Deferred skip decisions**: When PREPARE runs, do not pre-commit ARCHITECT's skip decision during Context Assessment. Defer until PREPARE results are available, then apply the coupling rules above.
 
-**Example**:
-> Skip rationale: "following established pattern in `src/utils/`"
-> PREPARE recommends "add helper to existing utils" → Skip holds
-> PREPARE recommends "new ValidationService class" → Override, run ARCHITECT
+The outcome is binary: full ARCHITECT or skip. No "light ARCHITECT" execution mode.
 
 ---
 
@@ -317,7 +389,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 
 ### ARCHITECT Phase → `pact-architect`
 
-**Skip criteria met (including completeness check, after re-assessment)?** → Proceed to CODE phase.
+**Phase skip decision flow passed (all 3 layers, after PREPARE→ARCHITECT coupling if PREPARE ran)?** → Mark ARCHITECT `completed` with skip metadata and proceed to CODE phase.
 
 **Plan sections to pass** (if plan exists):
 - "Architecture Phase"
