@@ -90,11 +90,11 @@ ls {worktree_path}/docs/preparation/
 ```
 Should contain research output file(s).
 
-### Step 7: Observe Post-PREPARE Re-assessment
+### Step 7: Observe PREPARE→ARCHITECT Coupling
 
-**What happens**: The orchestrator evaluates whether ARCHITECT should still be skipped or overridden based on PREPARE findings.
+**What happens**: The orchestrator reviews PREPARE output before evaluating ARCHITECT's skip eligibility. Hard gates are checked first (Scope ≥ 3, Risk ≥ 3, or total ≥ 10), then PREPARE output is reviewed for new components, interface changes, or cross-module impact.
 
-**Expected outcome**: If PREPARE recommends new components or interfaces, ARCHITECT runs. If it follows existing patterns, ARCHITECT may be skipped.
+**Expected outcome**: If PREPARE reveals new components or interfaces, ARCHITECT runs. If hard gates don't fire and no new architectural concerns emerged, ARCHITECT proceeds to structured analysis gate or may be skipped.
 
 ### Step 8: Observe Scope Detection
 
