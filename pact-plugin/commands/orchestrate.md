@@ -88,7 +88,7 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 |----------------------|-----------------|
 | Variety dimension scores, full tables | One-line summary: `Variety: Low (5) — proceeding with orchestrate` |
 | QDCL checklist, dependency analysis | Decision only: `Invoking 2 backend coders in parallel` |
-| Phase skip reasoning details | Brief: `Skipping PREPARE/ARCHITECT (approved plan exists)` |
+| Phase skip reasoning details | Brief: `Skipping PREPARE (structured gate passed)` |
 
 **User can always ask** for details (e.g., "Why that strategy?" or "Show me the variety analysis").
 
@@ -117,7 +117,7 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 | If task appears... | Variety Level | Action |
 |-------------------|---------------|--------|
 | Single file, one domain, routine | Low (4-6) | Offer comPACT using `AskUserQuestion` tool (see below) |
-| Multiple files, one domain, familiar | Low-Medium | Proceed with orchestrate, consider skipping PREPARE |
+| Multiple files, one domain, familiar | Low-Medium | Proceed with orchestrate (phase gates determine skips) |
 | Multiple domains, some ambiguity | Medium (7-10) | Standard orchestrate with all phases |
 | Greenfield, architectural decisions, unknowns | High (11-14) | Recommend plan-mode first |
 | Novel technology, unclear requirements, critical stakes | Extreme (15-16) | Recommend research spike before planning |
