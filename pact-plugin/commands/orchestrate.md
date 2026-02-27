@@ -318,7 +318,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 ### PREPARE Phase → `pact-preparer`
 
-**Skip criteria met (including completeness check)?** → Proceed to ARCHITECT phase.
+**Phase skip decision flow passed (all 3 layers)?** → Mark PREPARE `completed` with skip metadata and proceed to ARCHITECT phase.
 
 **Plan sections to pass** (if plan exists):
 - "Preparation Phase"
@@ -385,7 +385,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 
 ### ARCHITECT Phase → `pact-architect`
 
-**Skip criteria met (including completeness check, after re-assessment)?** → Proceed to CODE phase.
+**Phase skip decision flow passed (all 3 layers, after PREPARE→ARCHITECT coupling if PREPARE ran)?** → Mark ARCHITECT `completed` with skip metadata and proceed to CODE phase.
 
 **Plan sections to pass** (if plan exists):
 - "Architecture Phase"
