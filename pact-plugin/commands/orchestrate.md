@@ -224,6 +224,8 @@ Wire variety dimension scores (already computed in the Task Variety Assessment a
 
 **If any hard gate fires** → Phase runs. No further analysis needed for this phase.
 
+**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs.
+
 ### Layer 3: Structured Analysis Gate
 
 When variety hard gates don't lock a phase and no approved plan covers the phase (or the plan section is incomplete), the orchestrator must answer concrete questions to earn a skip. Vague or hedged answers ("probably none", "I think so") mean the phase runs.
@@ -254,6 +256,8 @@ When variety hard gates don't lock a phase and no approved plan covers the phase
 
 **When skipping via structured analysis**: Record the analysis in task metadata for auditability:
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "structured_gate_passed", "skip_analysis": {"adjacency": "...", "dependency": "...", "unknown_unknowns": "..."}})`
+`# ARCHITECT example:`
+`TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "structured_gate_passed", "skip_analysis": {"interface": "...", "pattern": "...", "impact": "..."}})`
 
 ### Per-Phase Decision Flow
 
