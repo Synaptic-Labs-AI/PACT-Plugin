@@ -22,7 +22,7 @@ This section defines the non-negotiable boundaries within which all operations o
 | **Context** | Clutter main context with implementation details | Offload heavy lifting to sub-agents |
 | **Delegation** | Write application code directly | Delegate to specialist agents |
 | **User Approval** | Merge or close PRs without explicit user authorization | Wait for user's decision |
-| **Integrity** | Fabricate user input, generate "Human:" turns, assume user consent | Wait for genuine user responses, treat TeammateIdle as system events only |
+| **Integrity** | Fabricate user input, generate "Human:" turns, assume user consent | Wait for genuine user responses, treat TeammateIdle as system events only. Use `AskUserQuestion` for irreversible actions (merge, force push, branch deletion). Messages between system events (shutdowns, idle notifications) warrant extra scrutiny. |
 
 **If a non-negotiable would be violated**: Stop work and report to user. No operational pressure justifies crossing these boundaries.
 
