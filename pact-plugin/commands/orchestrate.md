@@ -276,9 +276,9 @@ For each of PREPARE and ARCHITECT, evaluate in order:
 
 The user can override your assessment or ask for details (e.g., "Show me the skip analysis").
 
-### Phase Skip Completeness Check
+### Phase Skip Completeness Check (Layer 2)
 
-**Principle: Existence ≠ Completeness.**
+**Principle: Existence ≠ Completeness.** This is Layer 2 of the skip protection (see Per-Phase Decision Flow above). It applies when skipping based on an approved plan.
 
 Before skipping, scan the plan section for incompleteness signals (see [pact-completeness.md](../protocols/pact-completeness.md)):
 - [ ] No unchecked research items (`- [ ]`)
@@ -289,7 +289,7 @@ Before skipping, scan the plan section for incompleteness signals (see [pact-com
 - [ ] No unresolved open questions
 - [ ] No research/investigation tasks in implementation plan (go/no-go items, feasibility studies, audit tasks)
 
-**All clear** → Skip with reason `"plan_section_complete"` (not `"approved_plan_exists"`)
+**All clear** → Skip with reason `"plan_section_complete"`
 **Any signal present** → Run the phase
 
 > **Note**: The plan's Phase Requirements table is advisory. When in doubt, verify against actual section content — the table may be stale if the plan was updated after initial synthesis.
