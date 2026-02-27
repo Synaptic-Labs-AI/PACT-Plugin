@@ -210,7 +210,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 | User's decision | Specialists | Next action |
 |----------------|-------------|-------------|
-| **Yes** / create PR (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. Shut down after all remediation complete + user merge decision. |
+| **Yes** / create PR (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. Shut down after all remediation complete + user merge decision (via `AskUserQuestion`). |
 | **Not yet** / pause work | **Shut down** — no immediate follow-up expected | Worktree persists; user resumes later. |
 | **More work** / continue | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Continue with `/PACT:comPACT` or `/PACT:orchestrate`. |
 

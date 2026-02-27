@@ -413,6 +413,25 @@ else
 fi
 echo ""
 
+# --- 22. AskUserQuestion merge authorization mandate ---
+# Verify that the AskUserQuestion mandate for irreversible actions appears in all
+# key governance files. Catches accidental removal of the merge authorization
+# strengthening introduced in PR #219 (issue #217).
+echo "22. AskUserQuestion merge authorization mandate:"
+check_pattern "pact-plugin/CLAUDE.md" \
+    "CLAUDE.md SACROSANCT table mandates AskUserQuestion" \
+    'Irreversible.*AskUserQuestion'
+check_pattern "$COMMANDS_DIR/peer-review.md" \
+    "peer-review.md merge step uses AskUserQuestion" \
+    'AskUserQuestion.*merge authorization'
+check_pattern "$PROTOCOLS_DIR/pact-s5-policy.md" \
+    "pact-s5-policy.md Merge Authorization requires AskUserQuestion" \
+    'AskUserQuestion.*verified interaction channel'
+check_pattern "$PROTOCOLS_DIR/algedonic.md" \
+    "algedonic.md Message Authenticity references AskUserQuestion" \
+    'AskUserQuestion.*verified interaction channel'
+echo ""
+
 # --- Summary ---
 echo "=== Summary ==="
 echo "Passed: $PASS"
