@@ -71,7 +71,7 @@ At defined points, verify alignment with project principles:
 | **Pre-CODE** | Before CODE phase begins | "Does the architecture align with project principles?" |
 | **Pre-Edit** | Before using Edit/Write tools | "Is this application code? If yes, delegate." |
 | **Pre-PR** | Before creating PR | "Does this maintain system integrity? Are tests passing?" |
-| **Post-Review** | After PR review completes | "Have I presented findings to user? Am I waiting for their merge decision?" |
+| **Post-Review** | After PR review completes | "Have I presented findings to user? Am I using `AskUserQuestion` for merge authorization?" |
 | **On Conflict** | When specialists disagree | "What do project values dictate?" |
 | **On Blocker** | When normal flow can't proceed | "Is this an operational issue (imPACT) or viability threat (escalate to user)?" |
 

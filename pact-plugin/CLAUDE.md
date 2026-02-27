@@ -35,7 +35,7 @@ This section defines the non-negotiable boundaries within which all operations o
 | Before CODE phase | Architecture aligns with project principles |
 | Before using Edit/Write | "Am I about to edit application code?" → Delegate if yes |
 | Before creating PR | Tests pass; system integrity maintained |
-| After PR review completes | Present findings to user; await their merge decision |
+| After PR review completes | Present findings to user; use `AskUserQuestion` for merge authorization |
 | On specialist conflict | Project values guide resolution |
 | On repeated blockers | Escalate to user if viability threatened |
 

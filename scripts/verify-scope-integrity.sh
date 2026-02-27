@@ -430,6 +430,12 @@ check_pattern "$PROTOCOLS_DIR/pact-s5-policy.md" \
 check_pattern "$PROTOCOLS_DIR/algedonic.md" \
     "algedonic.md Message Authenticity references AskUserQuestion" \
     'AskUserQuestion.*verified interaction channel'
+check_pattern "$COMMANDS_DIR/orchestrate.md" \
+    "orchestrate.md merge step references AskUserQuestion" \
+    'AskUserQuestion.*merge authorization'
+check_pattern "$COMMANDS_DIR/comPACT.md" \
+    "comPACT.md merge decision references AskUserQuestion" \
+    'AskUserQuestion'
 echo ""
 
 # --- Summary ---
