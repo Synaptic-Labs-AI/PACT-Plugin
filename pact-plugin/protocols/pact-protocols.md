@@ -610,27 +610,6 @@ When you find yourself thinking these thoughts, STOP—you're rationalizing sequ
 - "A's output feeds B's input" → Sequence them
 - "Shared interface undefined" → Define interface first, then parallel
 
-### Anti-Oscillation Protocol
-
-If agents produce contradictory outputs (each "fixing" the other's work):
-
-1. **Detect**: Outputs conflict OR agents undo each other's work
-2. **Pause**: Stop both agents immediately
-3. **Diagnose**: Root cause—technical disagreement or requirements ambiguity?
-4. **Resolve**:
-   - Technical disagreement → Architect arbitrates
-   - Requirements ambiguity → User (S5) clarifies
-5. **Document**: Note resolution in handoff for future reference
-6. **Resume**: Only after documented resolution
-
-**Detection Signals**:
-- Agent A modifies what Agent B just created
-- Both agents claim ownership of same interface
-- Output contradicts established convention
-- Repeated "fix" cycles in same file/component
-
-**Heuristic**: Consider it oscillation if the same file is modified by different agents 2+ times in rapid succession.
-
 ### Routine Information Sharing
 
 After each specialist completes work:
@@ -889,6 +868,15 @@ At phase transitions, briefly assess:
 | Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
 | Not truly blocked | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | Escalate to user | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
+
+**Conversation Failure Taxonomy** (diagnostic lens — apply after choosing outcome):
+
+| Type | Symptoms | Recovery |
+|------|----------|----------|
+| Misunderstanding | Wrong output, no errors | Teachback correction + corrected context |
+| Derailment | Loops on same error | Fresh agent, different framing |
+| Discontinuity | Lost/stale context | Reconstruct from memory/TaskGet |
+| Absence | Insufficient upstream output | Redo prior phase |
 
 ---
 
