@@ -81,6 +81,13 @@ from .memory_init import ensure_memory_ready
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Fields whose changes should trigger embedding regeneration.
+# Kept as a module-level constant so tests can import and verify it.
+CONTENT_FIELDS = {
+    "context", "goal", "lessons_learned", "decisions", "entities",
+    "reasoning_chains", "agreements_reached", "disagreements_resolved",
+}
+
 
 def _ensure_ready() -> None:
     """
@@ -489,9 +496,7 @@ class PACTMemory:
 
             if success:
                 # Update embedding if content changed
-                content_fields = {"context", "goal", "lessons_learned", "decisions", "entities",
-                                  "reasoning_chains", "agreements_reached", "disagreements_resolved"}
-                if any(field in updates for field in content_fields):
+                if any(field in updates for field in CONTENT_FIELDS):
                     memory_dict = get_memory(conn, memory_id)
                     if memory_dict:
                         self._store_embedding(conn, memory_id, memory_dict)

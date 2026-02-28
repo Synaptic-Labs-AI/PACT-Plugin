@@ -621,7 +621,8 @@ def search_memories_by_text(
     """
     ensure_initialized(conn)
 
-    # Escape SQL LIKE wildcards in the search term so literal % and _ are matched
+    # Escape SQL LIKE wildcards in the search term so literal % and _ are matched.
+    # NOTE: ESCAPE '\\' is SQLite-specific syntax; update if migrating to another DB dialect.
     escaped = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     search_pattern = f"%{escaped}%"
 

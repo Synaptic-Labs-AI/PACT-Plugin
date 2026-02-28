@@ -604,19 +604,14 @@ class TestFormatEntryFieldOrder:
 
 
 class TestContentFieldsSetInAPI:
-    """Test that content_fields in memory_api.py includes CT fields."""
+    """Test that CONTENT_FIELDS in memory_api.py includes CT fields."""
 
     def test_content_fields_includes_ct_fields(self):
-        """The content_fields set used for embedding regeneration must include CT fields."""
-        # Import the set from the actual code path
-        # content_fields is defined inline in PACTMemory.update, so we verify
-        # by checking the expected set composition
+        """The CONTENT_FIELDS set used for embedding regeneration must include CT fields."""
+        from scripts.memory_api import CONTENT_FIELDS
+
         expected_ct_fields = {"reasoning_chains", "agreements_reached", "disagreements_resolved"}
-        content_fields = {
-            "context", "goal", "lessons_learned", "decisions", "entities",
-            "reasoning_chains", "agreements_reached", "disagreements_resolved"
-        }
-        assert expected_ct_fields.issubset(content_fields)
+        assert expected_ct_fields.issubset(CONTENT_FIELDS)
 
 
 class TestDeleteMemoryWithCTFields:

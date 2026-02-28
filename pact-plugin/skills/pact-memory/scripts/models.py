@@ -125,10 +125,15 @@ def _parse_string_list(raw: Any) -> List[str]:
     """
     Parse a field that should be a list of strings, handling JSON strings and None.
 
+    Database TEXT columns store lists as JSON arrays (e.g. '["a","b"]'). When
+    read back, the value may already be deserialized (list) or still be a raw
+    JSON string. This helper normalizes all representations into List[str].
+
     Handles three cases:
-    - None/empty: returns []
+    - None/empty/falsy: returns []
     - list: filters None values and converts items to str
-    - str: attempts JSON parse, falls back to single-element list
+    - str: attempts JSON parse; if the result is a list, returns it as
+      List[str]; otherwise wraps the original string in a single-element list
 
     Args:
         raw: The raw field value from database or dict.
