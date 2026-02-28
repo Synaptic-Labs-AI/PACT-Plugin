@@ -293,7 +293,7 @@ def _migrate_ct_fields(conn: sqlite3.Connection) -> None:
     for col in ("reasoning_chains", "agreements_reached", "disagreements_resolved"):
         try:
             conn.execute(f"ALTER TABLE memories ADD COLUMN {col} TEXT")
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # Column already exists
     conn.commit()
 
@@ -606,7 +606,8 @@ def search_memories_by_text(
     """
     Search memories by text content (basic substring search).
 
-    Searches across context, goal, lessons_learned, and decisions fields.
+    Searches across context, goal, lessons_learned, decisions,
+    reasoning_chains, agreements_reached, and disagreements_resolved fields.
     For semantic search, use the search module with embeddings.
 
     Args:
@@ -620,18 +621,20 @@ def search_memories_by_text(
     """
     ensure_initialized(conn)
 
-    search_pattern = f"%{search_term}%"
+    # Escape SQL LIKE wildcards in the search term so literal % and _ are matched
+    escaped = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    search_pattern = f"%{escaped}%"
 
     query = """
         SELECT * FROM memories
         WHERE (
-            context LIKE ?
-            OR goal LIKE ?
-            OR lessons_learned LIKE ?
-            OR decisions LIKE ?
-            OR reasoning_chains LIKE ?
-            OR agreements_reached LIKE ?
-            OR disagreements_resolved LIKE ?
+            context LIKE ? ESCAPE '\\'
+            OR goal LIKE ? ESCAPE '\\'
+            OR lessons_learned LIKE ? ESCAPE '\\'
+            OR decisions LIKE ? ESCAPE '\\'
+            OR reasoning_chains LIKE ? ESCAPE '\\'
+            OR agreements_reached LIKE ? ESCAPE '\\'
+            OR disagreements_resolved LIKE ? ESCAPE '\\'
         )
     """
     params = [search_pattern] * 7
@@ -734,6 +737,9 @@ def quick_save(
     goal: Optional[str] = None,
     lessons_learned: Optional[List[str]] = None,
     decisions: Optional[List[Dict[str, Any]]] = None,
+    reasoning_chains: Optional[List[str]] = None,
+    agreements_reached: Optional[List[str]] = None,
+    disagreements_resolved: Optional[List[str]] = None,
     project_id: Optional[str] = None,
     session_id: Optional[str] = None
 ) -> str:
@@ -747,6 +753,9 @@ def quick_save(
         goal: Goal description.
         lessons_learned: List of lessons.
         decisions: List of decision dicts.
+        reasoning_chains: How key decisions connect.
+        agreements_reached: What was verified via teachback.
+        disagreements_resolved: Where agents disagreed and resolution.
         project_id: Project identifier.
         session_id: Session identifier.
 
@@ -758,6 +767,9 @@ def quick_save(
         "goal": goal,
         "lessons_learned": lessons_learned or [],
         "decisions": decisions or [],
+        "reasoning_chains": reasoning_chains or [],
+        "agreements_reached": agreements_reached or [],
+        "disagreements_resolved": disagreements_resolved or [],
         "project_id": project_id,
         "session_id": session_id
     }

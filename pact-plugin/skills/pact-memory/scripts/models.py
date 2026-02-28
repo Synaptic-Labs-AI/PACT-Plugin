@@ -12,6 +12,7 @@ Used by:
 - search.py: Search results returned as MemoryObject instances
 """
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
@@ -140,7 +141,6 @@ def _parse_string_list(raw: Any) -> List[str]:
     if isinstance(raw, list):
         return [str(item) for item in raw if item is not None]
     if isinstance(raw, str):
-        import json
         try:
             parsed = json.loads(raw)
             return [str(item) for item in parsed if item is not None] if isinstance(parsed, list) else [raw]
@@ -206,8 +206,6 @@ class MemoryObject:
         Returns:
             MemoryObject instance.
         """
-        import json
-
         # Parse active_tasks
         raw_tasks = data.get("active_tasks") or []
         if isinstance(raw_tasks, str):
@@ -256,7 +254,6 @@ class MemoryObject:
         # Parse files (simple string list)
         files = data.get("files") or []
         if isinstance(files, str):
-            import json
             try:
                 files = json.loads(files)
             except json.JSONDecodeError:

@@ -51,6 +51,8 @@ memory_id = memory.save({
         {"name": "TokenManager", "type": "class"}
     ]
 })
+# See Memory Structure table below for all available fields
+# including agreements_reached and disagreements_resolved
 
 # Search memories
 results = memory.search("rate limiting tokens")
