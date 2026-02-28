@@ -58,5 +58,22 @@ At phase transitions, briefly assess:
 
 **Who performs checkpoints**: Orchestrator, at S4 mode transitions (between phases).
 
+### Agent State Model
+
+Derive agent state from progress signals (see agent-teams skill, Progress Signals section) and existing monitoring:
+
+| State | Indicators | Orchestrator Action |
+|-------|-----------|-------------------|
+| **Converging** | Progress signals show forward movement (files modified, tests passing) | No intervention needed |
+| **Exploring** | Progress signals show searching behavior (reading files, no modifications yet) | Normal for early task stages; intervene if persists past ~50% of expected duration |
+| **Stuck** | No progress signals for extended period; stall detection triggers | Send context/guidance via SendMessage; escalate to imPACT if unresponsive |
+
+**State transitions**:
+- Exploring → Converging: Normal (agent found approach, started implementing)
+- Converging → Exploring: Concerning (may indicate blocker or scope expansion)
+- Any → Stuck: Intervention needed
+
+**Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
+
 ---
 
