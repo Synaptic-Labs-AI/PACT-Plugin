@@ -123,11 +123,12 @@ def get_environment_delta(
 
     delta: dict[str, str] = {}
     for entry in entries:
-        if (
-            entry.get("ts", 0) >= since_ts
-            and entry.get("agent") != requesting_agent
-        ):
-            delta[entry["file"]] = entry["agent"]
+        file_path = entry.get("file")
+        agent = entry.get("agent")
+        if not file_path or not agent:
+            continue
+        if entry.get("ts", 0) >= since_ts and agent != requesting_agent:
+            delta[file_path] = agent
 
     return delta
 

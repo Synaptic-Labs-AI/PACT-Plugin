@@ -107,3 +107,43 @@ class TestEnvironmentDrift:
 
         assert "src/old.ts" not in delta
         assert "src/new.ts" in delta
+
+    def test_skips_entry_missing_file_key(self, tmp_path):
+        from file_tracker import get_environment_delta
+
+        tracking_file = tmp_path / "file-edits.json"
+        now = int(time.time())
+        entries = [
+            {"agent": "backend-coder", "tool": "Edit", "ts": now - 10},
+            {"file": "src/valid.ts", "agent": "backend-coder", "tool": "Edit", "ts": now - 5},
+        ]
+        tracking_file.write_text(json.dumps(entries))
+
+        delta = get_environment_delta(
+            since_ts=now - 15,
+            requesting_agent="frontend-coder",
+            tracking_path=str(tracking_file),
+        )
+
+        assert len(delta) == 1
+        assert "src/valid.ts" in delta
+
+    def test_skips_entry_missing_agent_key(self, tmp_path):
+        from file_tracker import get_environment_delta
+
+        tracking_file = tmp_path / "file-edits.json"
+        now = int(time.time())
+        entries = [
+            {"file": "src/orphan.ts", "tool": "Edit", "ts": now - 10},
+            {"file": "src/valid.ts", "agent": "backend-coder", "tool": "Edit", "ts": now - 5},
+        ]
+        tracking_file.write_text(json.dumps(entries))
+
+        delta = get_environment_delta(
+            since_ts=now - 15,
+            requesting_agent="frontend-coder",
+            tracking_path=str(tracking_file),
+        )
+
+        assert "src/orphan.ts" not in delta
+        assert "src/valid.ts" in delta
