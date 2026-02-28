@@ -111,6 +111,8 @@ def get_environment_delta(
     Returns a dict of {file_path: agent_name} for files modified by agents
     other than requesting_agent after since_ts. Used by orchestrator to
     detect environment drift when dispatching or briefing agents.
+
+    Note: Uses inclusive boundary (>=) — entries AT exactly since_ts are included.
     """
     tracking_file = Path(tracking_path)
     if not tracking_file.exists():

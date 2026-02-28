@@ -6,6 +6,7 @@ Tests cover:
 2. Format specification is present
 3. Natural breakpoints are defined
 4. Timing guidance is included
+5. No-commit guardrail is present
 """
 from pathlib import Path
 
@@ -35,3 +36,6 @@ class TestProgressSignals:
 
     def test_timing_guidance_included(self, skill_content):
         assert "2-4 signals per task" in skill_content
+
+    def test_no_commit_guardrail(self, skill_content):
+        assert "Do not create git commits" in skill_content

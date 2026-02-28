@@ -147,3 +147,22 @@ class TestEnvironmentDrift:
 
         assert "src/orphan.ts" not in delta
         assert "src/valid.ts" in delta
+
+    def test_duplicate_file_last_agent_wins(self, tmp_path):
+        from file_tracker import get_environment_delta
+
+        tracking_file = tmp_path / "file-edits.json"
+        now = int(time.time())
+        entries = [
+            {"file": "src/shared.ts", "agent": "backend-coder", "tool": "Edit", "ts": now - 10},
+            {"file": "src/shared.ts", "agent": "database-engineer", "tool": "Edit", "ts": now - 5},
+        ]
+        tracking_file.write_text(json.dumps(entries))
+
+        delta = get_environment_delta(
+            since_ts=now - 15,
+            requesting_agent="frontend-coder",
+            tracking_path=str(tracking_file),
+        )
+
+        assert delta["src/shared.ts"] == "database-engineer"

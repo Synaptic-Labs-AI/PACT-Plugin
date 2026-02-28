@@ -79,7 +79,7 @@ context: "Orchestration retrospective for {feature}"
 goal: "Calibrate orchestration judgment via second-order observation"
 decisions: ["Variety scored {X}, actual was {Y}", "Specialist {Z} was {well/poorly} matched because {reason}"]
 lessons_learned: ["Pattern: {any recurring observation}"]
-entities: ["orchestration_calibration"]
+entities: ["orchestration_calibration", "{domain}"]
 ```
 
 **Skip when**: Session was trivial (single comPACT, no variety assessment performed).
