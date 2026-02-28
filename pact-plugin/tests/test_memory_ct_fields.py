@@ -641,7 +641,7 @@ class TestDeleteMemoryWithCTFields:
         assert delete_memory(db_conn, memory_id) is False
 
 
-class TestSyncToCaudeMdWithCTFields:
+class TestSyncToClaudeMdWithCTFields:
     """End-to-end integration test for sync_to_claude_md with CT-enriched memories."""
 
     def test_sync_writes_ct_fields_to_claude_md(self, tmp_path):
