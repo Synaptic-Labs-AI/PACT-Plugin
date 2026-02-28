@@ -62,7 +62,29 @@ Before other cleanup, audit and optionally clean up Task state:
 
 If no actions were needed, state "Workspace is clean and docs are in sync."
 
-## 4. Team Cleanup
+## 4. Orchestration Retrospective (Second-Order Cybernetics)
+
+Before closing the session, perform a brief self-assessment. Compare your initial variety assessment and orchestration decisions against actual outcomes. This calibrates future judgment.
+
+**Answer these four questions:**
+
+1. **Variety accuracy**: Was the initial variety score close to actual complexity? Over/under by how much?
+2. **Phase efficiency**: Did any phases need to be re-run (imPACT)? Were any skipped phases needed after all?
+3. **Specialist fit**: Were specialists well-matched to tasks? Any that should have been different?
+4. **Estimation pattern**: Does this match a recurring pattern from prior sessions? (Search pact-memory for `orchestration_calibration` entries)
+
+**Save as pact-memory** (delegate to pact-memory-agent):
+```
+context: "Orchestration retrospective for {feature}"
+goal: "Calibrate orchestration judgment via second-order observation"
+decisions: ["Variety scored {X}, actual was {Y}", "Specialist {Z} was {well/poorly} matched because {reason}"]
+lessons_learned: ["Pattern: {any recurring observation}"]
+entities: ["orchestration_calibration"]
+```
+
+**Skip when**: Session was trivial (single comPACT, no variety assessment performed).
+
+## 5. Team Cleanup
 
 Clean up the session team to free resources:
 

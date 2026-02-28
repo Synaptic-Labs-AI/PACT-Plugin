@@ -34,6 +34,17 @@ Score each dimension 1-4 and sum:
 
 > **Extreme (15-16) means**: Too much variety to absorb safely. The recommended action is a **research spike** (time-boxed exploration to reduce uncertainty) followed by reassessment. After the spike, the task should score lower—if it still scores 15+, decompose further or reconsider feasibility.
 
+### Learning II: Pattern-Adjusted Scoring
+
+Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
+
+1. **Search**: Query pact-memory for `"{domain} orchestration_calibration"` and `"{domain} blocker OR stall OR rePACT"`
+2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
+3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
+4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
+
+**Skip when**: First session on a new project (no calibration data exists yet).
+
 ### Variety Strategies
 
 **Attenuate** (reduce incoming variety):
@@ -57,6 +68,23 @@ At phase transitions, briefly assess:
 - "Are we matched?" → Continue as planned
 
 **Who performs checkpoints**: Orchestrator, at S4 mode transitions (between phases).
+
+### Agent State Model
+
+Derive agent state from progress signals (see agent-teams skill, Progress Signals section) and existing monitoring:
+
+| State | Indicators | Orchestrator Action |
+|-------|-----------|-------------------|
+| **Converging** | Progress signals show forward movement (files modified, tests passing) | No intervention needed |
+| **Exploring** | Progress signals show searching behavior (reading files, no modifications yet) | Normal for early task stages; intervene if persists past ~50% of expected duration |
+| **Stuck** | No progress signals for extended period; stall detection triggers | Send context/guidance via SendMessage; escalate to imPACT if unresponsive |
+
+**State transitions**:
+- Exploring → Converging: Normal (agent found approach, started implementing)
+- Converging → Exploring: Concerning (may indicate blocker or scope expansion)
+- Any → Stuck: Intervention needed
+
+**Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
 
 ---
 

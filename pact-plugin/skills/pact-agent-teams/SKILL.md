@@ -62,6 +62,20 @@ Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (option
 Report progress naturally in your responses. For significant milestones, update your task metadata:
 `TaskUpdate(taskId, metadata={"progress": "brief status"})`
 
+### Progress Signals
+
+When the lead requests progress monitoring in your dispatch, send brief progress updates at natural breakpoints during your work.
+
+**Format**: `[sender→lead] Progress: {what's done}/{what's remaining}, {current status}`
+
+**Natural breakpoints**:
+- After modifying a file
+- After running tests
+- When encountering an unexpected issue (before it becomes a blocker)
+- When switching between major subtasks
+
+**Timing**: 2-4 signals per task is typical. Don't over-report — signal at meaningful transitions, not every tool call.
+
 ## Message Prefix Convention
 
 **Prefix all `SendMessage` `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
@@ -208,3 +222,5 @@ When you receive a `shutdown_request`:
 Only report work as completed if you actually performed the changes. Never fabricate
 a completion HANDOFF. If files don't exist, can't be edited, or tools fail, report
 a BLOCKER via `SendMessage` -- never invent results.
+
+**Do not create git commits.** All staging and committing is the lead's responsibility. Your job ends at the HANDOFF.

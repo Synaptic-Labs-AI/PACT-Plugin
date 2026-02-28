@@ -101,6 +101,38 @@ def check_conflict(
     return None
 
 
+def get_environment_delta(
+    since_ts: int,
+    requesting_agent: str,
+    tracking_path: str,
+) -> dict[str, str]:
+    """Return files modified by OTHER agents since the given timestamp.
+
+    Returns a dict of {file_path: agent_name} for files modified by agents
+    other than requesting_agent after since_ts. Used by orchestrator to
+    detect environment drift when dispatching or briefing agents.
+    """
+    tracking_file = Path(tracking_path)
+    if not tracking_file.exists():
+        return {}
+
+    try:
+        entries = json.loads(tracking_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+    delta: dict[str, str] = {}
+    for entry in entries:
+        file_path = entry.get("file")
+        agent = entry.get("agent")
+        if not file_path or not agent:
+            continue
+        if entry.get("ts", 0) >= since_ts and agent != requesting_agent:
+            delta[file_path] = agent
+
+    return delta
+
+
 def main():
     team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
     if not team_name:
