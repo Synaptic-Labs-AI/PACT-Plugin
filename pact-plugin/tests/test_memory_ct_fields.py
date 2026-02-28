@@ -27,10 +27,13 @@ from scripts.database import (
     init_schema,
     create_memory,
     get_memory,
+    update_memory,
     search_memories_by_text,
+    ensure_initialized,
+    _migrate_ct_fields,
     JSON_FIELDS,
 )
-from scripts.models import MemoryObject
+from scripts.models import MemoryObject, _parse_string_list
 from scripts.working_memory import _format_memory_entry
 
 
@@ -211,3 +214,338 @@ class TestWorkingMemoryFormatting:
         assert "**Agreements**:" not in formatted
         assert "**Disagreements resolved**:" not in formatted
         assert "Simple task" in formatted
+
+    def test_format_entry_ct_fields_as_strings(self):
+        """CT fields passed as plain strings should render correctly."""
+        memory = {
+            "context": "Test",
+            "reasoning_chains": "Single chain as string",
+            "agreements_reached": "Single agreement as string",
+            "disagreements_resolved": "Single resolution as string",
+        }
+        formatted = _format_memory_entry(memory)
+
+        assert "**Reasoning chains**: Single chain as string" in formatted
+        assert "**Agreements**: Single agreement as string" in formatted
+        assert "**Disagreements resolved**: Single resolution as string" in formatted
+
+    def test_format_entry_ct_fields_empty_lists(self):
+        """Empty list CT fields should be omitted from formatting."""
+        memory = {
+            "context": "Test",
+            "reasoning_chains": [],
+            "agreements_reached": [],
+            "disagreements_resolved": [],
+        }
+        formatted = _format_memory_entry(memory)
+
+        assert "**Reasoning chains**:" not in formatted
+        assert "**Agreements**:" not in formatted
+        assert "**Disagreements resolved**:" not in formatted
+
+    def test_format_entry_ct_fields_multiple_items(self):
+        """Multiple CT field items should be joined with commas."""
+        memory = {
+            "reasoning_chains": ["chain A", "chain B", "chain C"],
+            "agreements_reached": ["agree 1", "agree 2"],
+        }
+        formatted = _format_memory_entry(memory)
+
+        assert "chain A, chain B, chain C" in formatted
+        assert "agree 1, agree 2" in formatted
+
+
+class TestParseStringList:
+    """Test the _parse_string_list helper used by all CT fields."""
+
+    def test_none_returns_empty(self):
+        assert _parse_string_list(None) == []
+
+    def test_empty_string_returns_empty(self):
+        assert _parse_string_list("") == []
+
+    def test_empty_list_returns_empty(self):
+        assert _parse_string_list([]) == []
+
+    def test_list_of_strings(self):
+        assert _parse_string_list(["a", "b"]) == ["a", "b"]
+
+    def test_list_filters_none_values(self):
+        assert _parse_string_list(["a", None, "b"]) == ["a", "b"]
+
+    def test_list_converts_non_strings(self):
+        """Non-string items in list are converted to str."""
+        assert _parse_string_list([1, 2.5, True]) == ["1", "2.5", "True"]
+
+    def test_json_string_parsed_to_list(self):
+        assert _parse_string_list(json.dumps(["x", "y"])) == ["x", "y"]
+
+    def test_plain_string_becomes_single_element_list(self):
+        assert _parse_string_list("not json") == ["not json"]
+
+    def test_json_non_list_falls_back_to_single_element(self):
+        """JSON string that parses to a non-list (e.g., dict) falls back."""
+        assert _parse_string_list(json.dumps({"key": "val"})) == ['{"key": "val"}']
+
+    def test_json_list_with_none_values(self):
+        """JSON list containing null values should filter them out."""
+        assert _parse_string_list(json.dumps(["a", None, "b"])) == ["a", "b"]
+
+    def test_non_list_non_string_type_returns_empty(self):
+        """Integer or other non-list/non-string types return empty list."""
+        assert _parse_string_list(42) == []
+        assert _parse_string_list(3.14) == []
+
+    def test_zero_returns_empty(self):
+        """Falsy numeric values should return empty list."""
+        assert _parse_string_list(0) == []
+
+    def test_false_returns_empty(self):
+        """Boolean False should return empty list."""
+        assert _parse_string_list(False) == []
+
+
+class TestMigrateCTFields:
+    """Test the _migrate_ct_fields database migration."""
+
+    def test_adds_columns_to_existing_db(self):
+        """Migration adds CT columns to a database without them."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "old_db.db"
+            conn = get_connection(db_path)
+            # Create a minimal table without CT columns
+            conn.execute("""
+                CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    context TEXT,
+                    goal TEXT,
+                    active_tasks TEXT,
+                    lessons_learned TEXT,
+                    decisions TEXT,
+                    entities TEXT,
+                    project_id TEXT,
+                    session_id TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            conn.commit()
+
+            # Run migration
+            _migrate_ct_fields(conn)
+
+            # Verify columns exist by inserting data with CT fields
+            conn.execute(
+                "INSERT INTO memories (id, reasoning_chains, agreements_reached, disagreements_resolved) "
+                "VALUES (?, ?, ?, ?)",
+                ("test1", '["chain"]', '["agree"]', '["resolved"]')
+            )
+            conn.commit()
+
+            cursor = conn.execute("SELECT reasoning_chains, agreements_reached, disagreements_resolved FROM memories WHERE id = ?", ("test1",))
+            row = cursor.fetchone()
+            assert row[0] == '["chain"]'
+            assert row[1] == '["agree"]'
+            assert row[2] == '["resolved"]'
+            conn.close()
+
+    def test_idempotent_migration(self):
+        """Running migration twice should not error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_db.db"
+            conn = get_connection(db_path)
+            init_schema(conn)  # Already has CT columns
+
+            # Running migration again should be safe
+            _migrate_ct_fields(conn)
+            _migrate_ct_fields(conn)
+
+            # Verify DB still works
+            memory_id = create_memory(conn, {"context": "test"})
+            assert get_memory(conn, memory_id) is not None
+            conn.close()
+
+
+class TestEnsureInitializedMigration:
+    """Test that ensure_initialized runs migration for existing databases."""
+
+    def test_existing_db_gets_migration(self):
+        """An existing database without CT columns gets them via ensure_initialized."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "legacy.db"
+            conn = get_connection(db_path)
+            # Create legacy schema (no CT columns)
+            conn.execute("""
+                CREATE TABLE memories (
+                    id TEXT PRIMARY KEY,
+                    context TEXT,
+                    goal TEXT,
+                    active_tasks TEXT,
+                    lessons_learned TEXT,
+                    decisions TEXT,
+                    entities TEXT,
+                    project_id TEXT,
+                    session_id TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.commit()
+
+            # ensure_initialized should detect existing table and run migration
+            ensure_initialized(conn)
+
+            # Verify CT columns exist
+            conn.execute(
+                "INSERT INTO memories (id, reasoning_chains) VALUES (?, ?)",
+                ("test1", '["migrated"]')
+            )
+            conn.commit()
+
+            cursor = conn.execute("SELECT reasoning_chains FROM memories WHERE id = ?", ("test1",))
+            assert cursor.fetchone()[0] == '["migrated"]'
+            conn.close()
+
+
+class TestDatabaseCTFieldsEdgeCases:
+    """Edge cases for CT fields in the database layer."""
+
+    def test_create_with_empty_ct_lists(self, db_conn):
+        """Empty lists should round-trip through database."""
+        memory = {
+            "context": "Edge case test",
+            "reasoning_chains": [],
+            "agreements_reached": [],
+            "disagreements_resolved": [],
+        }
+        memory_id = create_memory(db_conn, memory)
+        retrieved = get_memory(db_conn, memory_id)
+
+        assert retrieved is not None
+        assert retrieved["reasoning_chains"] == []
+        assert retrieved["agreements_reached"] == []
+        assert retrieved["disagreements_resolved"] == []
+
+    def test_create_with_multiple_ct_items(self, db_conn):
+        """Multiple items per CT field should round-trip."""
+        memory = {
+            "reasoning_chains": ["chain 1", "chain 2", "chain 3"],
+            "agreements_reached": ["agree A", "agree B"],
+            "disagreements_resolved": ["resolved X", "resolved Y"],
+        }
+        memory_id = create_memory(db_conn, memory)
+        retrieved = get_memory(db_conn, memory_id)
+
+        assert retrieved["reasoning_chains"] == ["chain 1", "chain 2", "chain 3"]
+        assert retrieved["agreements_reached"] == ["agree A", "agree B"]
+        assert retrieved["disagreements_resolved"] == ["resolved X", "resolved Y"]
+
+    def test_update_memory_with_ct_fields(self, db_conn):
+        """Updating a memory to add CT fields should work."""
+        memory_id = create_memory(db_conn, {"context": "Initial"})
+
+        updated = update_memory(db_conn, memory_id, {
+            "reasoning_chains": ["new chain added"],
+            "agreements_reached": ["new agreement"],
+        })
+        assert updated is True
+
+        retrieved = get_memory(db_conn, memory_id)
+        assert retrieved["reasoning_chains"] == ["new chain added"]
+        assert retrieved["agreements_reached"] == ["new agreement"]
+
+    def test_search_via_agreements_field(self, db_conn):
+        """Search should find memories via agreements_reached content."""
+        create_memory(db_conn, {
+            "context": "Test search",
+            "agreements_reached": ["Teachback verified: Redis cache strategy"],
+        })
+
+        results = search_memories_by_text(db_conn, "Teachback verified")
+        assert len(results) >= 1
+
+    def test_search_via_disagreements_field(self, db_conn):
+        """Search should find memories via disagreements_resolved content."""
+        create_memory(db_conn, {
+            "context": "Test search",
+            "disagreements_resolved": ["REST won over GraphQL for simplicity"],
+        })
+
+        results = search_memories_by_text(db_conn, "GraphQL")
+        assert len(results) >= 1
+
+    def test_search_no_false_positives(self, db_conn):
+        """Search for absent terms should return no results."""
+        create_memory(db_conn, {
+            "context": "Something else",
+            "reasoning_chains": ["unrelated chain"],
+        })
+
+        results = search_memories_by_text(db_conn, "xyznonexistent42")
+        assert len(results) == 0
+
+
+class TestModelCTFieldsEdgeCases:
+    """Edge cases for CT fields in the MemoryObject model."""
+
+    def test_searchable_text_omits_empty_ct_fields(self):
+        """get_searchable_text should not include labels for empty CT fields."""
+        obj = MemoryObject.from_dict({"id": "test", "context": "Only context"})
+        text = obj.get_searchable_text()
+
+        assert "Reasoning:" not in text
+        assert "Agreements:" not in text
+        assert "Disagreements resolved:" not in text
+
+    def test_searchable_text_includes_disagreements(self):
+        """get_searchable_text should include disagreements_resolved."""
+        obj = MemoryObject.from_dict({
+            "id": "test",
+            "disagreements_resolved": ["REST over GraphQL"],
+        })
+        text = obj.get_searchable_text()
+
+        assert "Disagreements resolved:" in text
+        assert "REST over GraphQL" in text
+
+    def test_from_dict_with_none_ct_fields(self):
+        """Explicit None for CT fields should produce empty lists."""
+        data = {
+            "id": "test",
+            "reasoning_chains": None,
+            "agreements_reached": None,
+            "disagreements_resolved": None,
+        }
+        obj = MemoryObject.from_dict(data)
+
+        assert obj.reasoning_chains == []
+        assert obj.agreements_reached == []
+        assert obj.disagreements_resolved == []
+
+    def test_from_dict_ct_fields_with_mixed_types_in_list(self):
+        """List containing mixed types should be converted to strings."""
+        data = {
+            "id": "test",
+            "reasoning_chains": ["string item", 42, True],
+        }
+        obj = MemoryObject.from_dict(data)
+
+        assert obj.reasoning_chains == ["string item", "42", "True"]
+
+    def test_to_dict_empty_ct_fields_are_empty_lists(self):
+        """to_dict for object with no CT data should have empty lists."""
+        obj = MemoryObject.from_dict({"id": "test"})
+        d = obj.to_dict()
+
+        assert d["reasoning_chains"] == []
+        assert d["agreements_reached"] == []
+        assert d["disagreements_resolved"] == []
+
+    def test_storage_dict_empty_ct_fields(self):
+        """to_storage_dict for object with no CT data should have empty lists."""
+        obj = MemoryObject.from_dict({"id": "test"})
+        storage = obj.to_storage_dict()
+
+        assert storage["reasoning_chains"] == []
+        assert storage["agreements_reached"] == []
+        assert storage["disagreements_resolved"] == []
