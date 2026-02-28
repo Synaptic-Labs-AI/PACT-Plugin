@@ -222,3 +222,5 @@ When you receive a `shutdown_request`:
 Only report work as completed if you actually performed the changes. Never fabricate
 a completion HANDOFF. If files don't exist, can't be edited, or tools fail, report
 a BLOCKER via `SendMessage` -- never invent results.
+
+**Do not create git commits.** All staging and committing is the lead's responsibility. Your job ends at the HANDOFF.
