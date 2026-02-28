@@ -108,6 +108,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
             lessons_learned TEXT,
             decisions TEXT,
             entities TEXT,
+            reasoning_chains TEXT,
+            agreements_reached TEXT,
+            disagreements_resolved TEXT,
             project_id TEXT,
             session_id TEXT,
             created_at TEXT DEFAULT (datetime('now')),
@@ -280,11 +283,27 @@ def _check_and_migrate_vector_table(conn: sqlite3.Connection, new_dim: int) -> N
         logger.debug(f"Could not check vector table dimension: {e}")
 
 
+def _migrate_ct_fields(conn: sqlite3.Connection) -> None:
+    """
+    Add CT-aware columns to existing databases (v3.8.0).
+
+    New columns: reasoning_chains, agreements_reached, disagreements_resolved.
+    Safe to call repeatedly — silently skips columns that already exist.
+    """
+    for col in ("reasoning_chains", "agreements_reached", "disagreements_resolved"):
+        try:
+            conn.execute(f"ALTER TABLE memories ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+
+
 def ensure_initialized(conn: sqlite3.Connection) -> None:
     """
     Ensure the database is initialized.
 
     Checks if tables exist and initializes schema if not.
+    For existing databases, runs migrations to add any new columns.
 
     Args:
         conn: Active database connection.
@@ -294,13 +313,16 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
     )
     if cursor.fetchone() is None:
         init_schema(conn)
+    else:
+        _migrate_ct_fields(conn)
 
 
 # =============================================================================
 # JSON Field Helpers
 # =============================================================================
 
-JSON_FIELDS = {"active_tasks", "lessons_learned", "decisions", "entities"}
+JSON_FIELDS = {"active_tasks", "lessons_learned", "decisions", "entities",
+               "reasoning_chains", "agreements_reached", "disagreements_resolved"}
 
 
 def _serialize_json_fields(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -373,6 +395,9 @@ def create_memory(
             - lessons_learned: Optional[List[str]] - Lessons
             - decisions: Optional[List[dict]] - Decisions
             - entities: Optional[List[dict]] - Entities
+            - reasoning_chains: Optional[List[str]] - How key decisions connect
+            - agreements_reached: Optional[List[str]] - What was verified via teachback
+            - disagreements_resolved: Optional[List[str]] - Where agents disagreed and resolution
             - project_id: Optional[str] - Project identifier
             - session_id: Optional[str] - Session identifier
 
@@ -393,9 +418,10 @@ def create_memory(
     conn.execute("""
         INSERT INTO memories (
             id, context, goal, active_tasks, lessons_learned,
-            decisions, entities, project_id, session_id,
+            decisions, entities, reasoning_chains, agreements_reached,
+            disagreements_resolved, project_id, session_id,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         memory_id,
         data.get("context"),
@@ -404,6 +430,9 @@ def create_memory(
         data.get("lessons_learned"),
         data.get("decisions"),
         data.get("entities"),
+        data.get("reasoning_chains"),
+        data.get("agreements_reached"),
+        data.get("disagreements_resolved"),
         data.get("project_id"),
         data.get("session_id"),
         now,
@@ -577,7 +606,8 @@ def search_memories_by_text(
     """
     Search memories by text content (basic substring search).
 
-    Searches across context, goal, lessons_learned, and decisions fields.
+    Searches across context, goal, lessons_learned, decisions,
+    reasoning_chains, agreements_reached, and disagreements_resolved fields.
     For semantic search, use the search module with embeddings.
 
     Args:
@@ -591,18 +621,24 @@ def search_memories_by_text(
     """
     ensure_initialized(conn)
 
-    search_pattern = f"%{search_term}%"
+    # Escape SQL LIKE wildcards in the search term so literal % and _ are matched.
+    # NOTE: ESCAPE '\\' is SQLite-specific syntax; update if migrating to another DB dialect.
+    escaped = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    search_pattern = f"%{escaped}%"
 
     query = """
         SELECT * FROM memories
         WHERE (
-            context LIKE ?
-            OR goal LIKE ?
-            OR lessons_learned LIKE ?
-            OR decisions LIKE ?
+            context LIKE ? ESCAPE '\\'
+            OR goal LIKE ? ESCAPE '\\'
+            OR lessons_learned LIKE ? ESCAPE '\\'
+            OR decisions LIKE ? ESCAPE '\\'
+            OR reasoning_chains LIKE ? ESCAPE '\\'
+            OR agreements_reached LIKE ? ESCAPE '\\'
+            OR disagreements_resolved LIKE ? ESCAPE '\\'
         )
     """
-    params = [search_pattern, search_pattern, search_pattern, search_pattern]
+    params = [search_pattern] * 7
 
     if project_id is not None:
         query += " AND project_id = ?"
@@ -702,6 +738,9 @@ def quick_save(
     goal: Optional[str] = None,
     lessons_learned: Optional[List[str]] = None,
     decisions: Optional[List[Dict[str, Any]]] = None,
+    reasoning_chains: Optional[List[str]] = None,
+    agreements_reached: Optional[List[str]] = None,
+    disagreements_resolved: Optional[List[str]] = None,
     project_id: Optional[str] = None,
     session_id: Optional[str] = None
 ) -> str:
@@ -715,6 +754,9 @@ def quick_save(
         goal: Goal description.
         lessons_learned: List of lessons.
         decisions: List of decision dicts.
+        reasoning_chains: How key decisions connect.
+        agreements_reached: What was verified via teachback.
+        disagreements_resolved: Where agents disagreed and resolution.
         project_id: Project identifier.
         session_id: Session identifier.
 
@@ -726,6 +768,9 @@ def quick_save(
         "goal": goal,
         "lessons_learned": lessons_learned or [],
         "decisions": decisions or [],
+        "reasoning_chains": reasoning_chains or [],
+        "agreements_reached": agreements_reached or [],
+        "disagreements_resolved": disagreements_resolved or [],
         "project_id": project_id,
         "session_id": session_id
     }

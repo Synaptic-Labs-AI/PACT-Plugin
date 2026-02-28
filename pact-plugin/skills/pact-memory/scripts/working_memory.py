@@ -271,6 +271,30 @@ def _format_memory_entry(
         elif isinstance(lessons, str):
             lines.append(f"**Lessons**: {lessons}")
 
+    # Add reasoning chains if present
+    reasoning = memory.get("reasoning_chains")
+    if reasoning:
+        if isinstance(reasoning, list) and reasoning:
+            lines.append(f"**Reasoning chains**: {', '.join(str(r) for r in reasoning)}")
+        elif isinstance(reasoning, str):
+            lines.append(f"**Reasoning chains**: {reasoning}")
+
+    # Add agreements if present
+    agreements = memory.get("agreements_reached")
+    if agreements:
+        if isinstance(agreements, list) and agreements:
+            lines.append(f"**Agreements**: {', '.join(str(a) for a in agreements)}")
+        elif isinstance(agreements, str):
+            lines.append(f"**Agreements**: {agreements}")
+
+    # Add disagreements resolved if present
+    disagreements = memory.get("disagreements_resolved")
+    if disagreements:
+        if isinstance(disagreements, list) and disagreements:
+            lines.append(f"**Disagreements resolved**: {', '.join(str(d) for d in disagreements)}")
+        elif isinstance(disagreements, str):
+            lines.append(f"**Disagreements resolved**: {disagreements}")
+
     # Add files if present
     if files:
         lines.append(f"**Files**: {', '.join(files)}")

@@ -124,6 +124,19 @@ If the blocker reveals that a sub-task is more complex than expected and needs i
 
 **When to terminate**: Last resort — agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle stall unresolved by resume. `TaskStop` is a force-stop (immediate, non-cooperative); use `SendMessage(type="shutdown_request")` for cooperative shutdown. After termination, spawn a fresh agent with partial handoff from the terminated agent's task metadata.
 
+### Conversation Failure Taxonomy
+
+Use this diagnostic lens **after** identifying an outcome to understand **why** the conversation broke down. Type-specific diagnosis improves the quality of re-dispatch and prevents recurring failures.
+
+| Breakdown Type | Symptoms | Likely Outcome | Recovery Guidance |
+|---------------|----------|----------------|-------------------|
+| **Misunderstanding** | Wrong output, no errors — agent built the wrong thing | Augment present phase | Teachback correction: clarify what was misunderstood, re-dispatch with corrected context |
+| **Derailment** | Loops on same error/approach, unable to make progress | Terminate agent | Fresh agent with different framing — restructure the conversation, don't just retry |
+| **Discontinuity** | Lost context, outdated understanding, stale assumptions | Augment present phase | Reconstruct from memory + TaskGet chain, re-dispatch with restored context |
+| **Absence** | Started without sufficient upstream conversation | Redo prior phase | Have the missing conversation first — the upstream phase output was insufficient |
+
+**Usage**: After the three triage questions identify an outcome, check which breakdown type matches. This informs the dispatch prompt for the next agent — e.g., "Prior agent misunderstood the interface contract; the correct contract is X" is more useful than "redo this."
+
 ---
 
 ## Phase Re-Entry Task Protocol

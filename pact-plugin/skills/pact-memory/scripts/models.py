@@ -12,6 +12,7 @@ Used by:
 - search.py: Search results returned as MemoryObject instances
 """
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
@@ -120,14 +121,47 @@ class Entity:
         return result
 
 
+def _parse_string_list(raw: Any) -> List[str]:
+    """
+    Parse a field that should be a list of strings, handling JSON strings and None.
+
+    Database TEXT columns store lists as JSON arrays (e.g. '["a","b"]'). When
+    read back, the value may already be deserialized (list) or still be a raw
+    JSON string. This helper normalizes all representations into List[str].
+
+    Handles three cases:
+    - None/empty/falsy: returns []
+    - list: filters None values and converts items to str
+    - str: attempts JSON parse; if the result is a list, returns it as
+      List[str]; otherwise wraps the original string in a single-element list
+
+    Args:
+        raw: The raw field value from database or dict.
+
+    Returns:
+        List of strings.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item is not None]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return [str(item) for item in parsed if item is not None] if isinstance(parsed, list) else [raw]
+        except json.JSONDecodeError:
+            return [raw] if raw else []
+    return []
+
+
 @dataclass
 class MemoryObject:
     """
     Rich memory object representing a saved context.
 
     This is the primary data structure for memories in the PACT Memory system.
-    It combines context, goals, tasks, lessons, decisions, and entity references
-    into a single cohesive structure.
+    It combines context, goals, tasks, lessons, decisions, entity references,
+    and conversation-theory fields into a single cohesive structure.
 
     Attributes:
         id: Unique identifier for the memory.
@@ -137,6 +171,9 @@ class MemoryObject:
         lessons_learned: What worked or didn't work.
         decisions: Decisions made with rationale and alternatives.
         entities: Referenced components, services, or modules.
+        reasoning_chains: How key decisions connect — "X because Y, which required Z".
+        agreements_reached: What was verified via teachback or agreement check.
+        disagreements_resolved: Where agents disagreed and how it was settled.
         files: List of file paths associated with this memory.
         project_id: Project identifier for scoping.
         session_id: Session identifier for grouping.
@@ -150,6 +187,9 @@ class MemoryObject:
     lessons_learned: List[str] = field(default_factory=list)
     decisions: List[Decision] = field(default_factory=list)
     entities: List[Entity] = field(default_factory=list)
+    reasoning_chains: List[str] = field(default_factory=list)
+    agreements_reached: List[str] = field(default_factory=list)
+    disagreements_resolved: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
     project_id: Optional[str] = None
     session_id: Optional[str] = None
@@ -171,8 +211,6 @@ class MemoryObject:
         Returns:
             MemoryObject instance.
         """
-        import json
-
         # Parse active_tasks
         raw_tasks = data.get("active_tasks") or []
         if isinstance(raw_tasks, str):
@@ -186,16 +224,8 @@ class MemoryObject:
         # Filter out None values in the list
         active_tasks = [TaskItem.from_dict(t) for t in raw_tasks if t is not None]
 
-        # Parse lessons_learned (should be list of strings)
-        raw_lessons = data.get("lessons_learned") or []
-        if isinstance(raw_lessons, str):
-            try:
-                parsed = json.loads(raw_lessons)
-                raw_lessons = parsed if isinstance(parsed, list) else [raw_lessons]
-            except json.JSONDecodeError:
-                raw_lessons = [raw_lessons] if raw_lessons else []
-        # Filter out None values
-        lessons_learned = [str(l) for l in raw_lessons if l is not None] if raw_lessons else []
+        # Parse lessons_learned (simple string list — uses shared helper)
+        lessons_learned = _parse_string_list(data.get("lessons_learned"))
 
         # Parse decisions
         raw_decisions = data.get("decisions") or []
@@ -221,10 +251,14 @@ class MemoryObject:
         # Filter out None values
         entities = [Entity.from_dict(e) for e in raw_entities if e is not None]
 
+        # Parse CT fields (simple string lists, same pattern as lessons_learned)
+        reasoning_chains = _parse_string_list(data.get("reasoning_chains"))
+        agreements_reached = _parse_string_list(data.get("agreements_reached"))
+        disagreements_resolved = _parse_string_list(data.get("disagreements_resolved"))
+
         # Parse files (simple string list)
         files = data.get("files") or []
         if isinstance(files, str):
-            import json
             try:
                 files = json.loads(files)
             except json.JSONDecodeError:
@@ -242,6 +276,9 @@ class MemoryObject:
             lessons_learned=lessons_learned,
             decisions=decisions,
             entities=entities,
+            reasoning_chains=reasoning_chains,
+            agreements_reached=agreements_reached,
+            disagreements_resolved=disagreements_resolved,
             files=files,
             project_id=data.get("project_id"),
             session_id=data.get("session_id"),
@@ -267,6 +304,9 @@ class MemoryObject:
             "lessons_learned": self.lessons_learned,
             "decisions": [d.to_dict() for d in self.decisions],
             "entities": [e.to_dict() for e in self.entities],
+            "reasoning_chains": self.reasoning_chains,
+            "agreements_reached": self.agreements_reached,
+            "disagreements_resolved": self.disagreements_resolved,
             "files": self.files,
             "project_id": self.project_id,
             "session_id": self.session_id,
@@ -292,6 +332,9 @@ class MemoryObject:
             "lessons_learned": self.lessons_learned,
             "decisions": [d.to_dict() for d in self.decisions],
             "entities": [e.to_dict() for e in self.entities],
+            "reasoning_chains": self.reasoning_chains,
+            "agreements_reached": self.agreements_reached,
+            "disagreements_resolved": self.disagreements_resolved,
             "project_id": self.project_id,
             "session_id": self.session_id
         }
@@ -337,6 +380,18 @@ class MemoryObject:
                 for e in self.entities
             )
             parts.append(f"Entities: {entity_text}")
+
+        if self.reasoning_chains:
+            chains_text = "; ".join(self.reasoning_chains)
+            parts.append(f"Reasoning: {chains_text}")
+
+        if self.agreements_reached:
+            agreements_text = "; ".join(self.agreements_reached)
+            parts.append(f"Agreements: {agreements_text}")
+
+        if self.disagreements_resolved:
+            disagreements_text = "; ".join(self.disagreements_resolved)
+            parts.append(f"Disagreements resolved: {disagreements_text}")
 
         return "\n".join(parts)
 
