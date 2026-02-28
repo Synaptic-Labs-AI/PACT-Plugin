@@ -489,7 +489,8 @@ class PACTMemory:
 
             if success:
                 # Update embedding if content changed
-                content_fields = {"context", "goal", "lessons_learned", "decisions", "entities"}
+                content_fields = {"context", "goal", "lessons_learned", "decisions", "entities",
+                                  "reasoning_chains", "agreements_reached", "disagreements_resolved"}
                 if any(field in updates for field in content_fields):
                     memory_dict = get_memory(conn, memory_id)
                     if memory_dict:

@@ -43,6 +43,9 @@ memory_id = memory.save({
             "rationale": "Fast TTL support, distributed access"
         }
     ],
+    "reasoning_chains": [
+        "Redis chosen because TTL support → needed for token expiry → simpler than DB cleanup"
+    ],
     "entities": [
         {"name": "AuthService", "type": "component"},
         {"name": "TokenManager", "type": "class"}
@@ -71,6 +74,9 @@ Each memory can contain:
 | `lessons_learned` | list | What worked or didn't work |
 | `decisions` | list | Decisions with rationale and alternatives |
 | `entities` | list | Referenced components, services, modules |
+| `reasoning_chains` | list | How key decisions connect — "X because Y, which required Z" |
+| `agreements_reached` | list | What was verified via teachback or agreement check |
+| `disagreements_resolved` | list | Where agents disagreed and how it was settled |
 | `files` | list | Associated file paths (auto-linked) |
 | `project_id` | string | Auto-detected from environment |
 | `session_id` | string | Auto-detected from environment |

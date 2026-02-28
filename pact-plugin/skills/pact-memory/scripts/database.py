@@ -108,6 +108,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
             lessons_learned TEXT,
             decisions TEXT,
             entities TEXT,
+            reasoning_chains TEXT,
+            agreements_reached TEXT,
+            disagreements_resolved TEXT,
             project_id TEXT,
             session_id TEXT,
             created_at TEXT DEFAULT (datetime('now')),
@@ -280,11 +283,27 @@ def _check_and_migrate_vector_table(conn: sqlite3.Connection, new_dim: int) -> N
         logger.debug(f"Could not check vector table dimension: {e}")
 
 
+def _migrate_ct_fields(conn: sqlite3.Connection) -> None:
+    """
+    Add CT-aware columns to existing databases (v3.8.0).
+
+    New columns: reasoning_chains, agreements_reached, disagreements_resolved.
+    Safe to call repeatedly — silently skips columns that already exist.
+    """
+    for col in ("reasoning_chains", "agreements_reached", "disagreements_resolved"):
+        try:
+            conn.execute(f"ALTER TABLE memories ADD COLUMN {col} TEXT")
+        except Exception:
+            pass  # Column already exists
+    conn.commit()
+
+
 def ensure_initialized(conn: sqlite3.Connection) -> None:
     """
     Ensure the database is initialized.
 
     Checks if tables exist and initializes schema if not.
+    For existing databases, runs migrations to add any new columns.
 
     Args:
         conn: Active database connection.
@@ -294,13 +313,16 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
     )
     if cursor.fetchone() is None:
         init_schema(conn)
+    else:
+        _migrate_ct_fields(conn)
 
 
 # =============================================================================
 # JSON Field Helpers
 # =============================================================================
 
-JSON_FIELDS = {"active_tasks", "lessons_learned", "decisions", "entities"}
+JSON_FIELDS = {"active_tasks", "lessons_learned", "decisions", "entities",
+               "reasoning_chains", "agreements_reached", "disagreements_resolved"}
 
 
 def _serialize_json_fields(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -373,6 +395,9 @@ def create_memory(
             - lessons_learned: Optional[List[str]] - Lessons
             - decisions: Optional[List[dict]] - Decisions
             - entities: Optional[List[dict]] - Entities
+            - reasoning_chains: Optional[List[str]] - How key decisions connect
+            - agreements_reached: Optional[List[str]] - What was verified via teachback
+            - disagreements_resolved: Optional[List[str]] - Where agents disagreed and resolution
             - project_id: Optional[str] - Project identifier
             - session_id: Optional[str] - Session identifier
 
@@ -393,9 +418,10 @@ def create_memory(
     conn.execute("""
         INSERT INTO memories (
             id, context, goal, active_tasks, lessons_learned,
-            decisions, entities, project_id, session_id,
+            decisions, entities, reasoning_chains, agreements_reached,
+            disagreements_resolved, project_id, session_id,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         memory_id,
         data.get("context"),
@@ -404,6 +430,9 @@ def create_memory(
         data.get("lessons_learned"),
         data.get("decisions"),
         data.get("entities"),
+        data.get("reasoning_chains"),
+        data.get("agreements_reached"),
+        data.get("disagreements_resolved"),
         data.get("project_id"),
         data.get("session_id"),
         now,
@@ -600,9 +629,12 @@ def search_memories_by_text(
             OR goal LIKE ?
             OR lessons_learned LIKE ?
             OR decisions LIKE ?
+            OR reasoning_chains LIKE ?
+            OR agreements_reached LIKE ?
+            OR disagreements_resolved LIKE ?
         )
     """
-    params = [search_pattern, search_pattern, search_pattern, search_pattern]
+    params = [search_pattern] * 7
 
     if project_id is not None:
         query += " AND project_id = ?"
