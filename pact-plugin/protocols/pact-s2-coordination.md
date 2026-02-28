@@ -127,27 +127,6 @@ When you find yourself thinking these thoughts, STOP—you're rationalizing sequ
 - "A's output feeds B's input" → Sequence them
 - "Shared interface undefined" → Define interface first, then parallel
 
-### Anti-Oscillation Protocol
-
-If agents produce contradictory outputs (each "fixing" the other's work):
-
-1. **Detect**: Outputs conflict OR agents undo each other's work
-2. **Pause**: Stop both agents immediately
-3. **Diagnose**: Root cause—technical disagreement or requirements ambiguity?
-4. **Resolve**:
-   - Technical disagreement → Architect arbitrates
-   - Requirements ambiguity → User (S5) clarifies
-5. **Document**: Note resolution in handoff for future reference
-6. **Resume**: Only after documented resolution
-
-**Detection Signals**:
-- Agent A modifies what Agent B just created
-- Both agents claim ownership of same interface
-- Output contradicts established convention
-- Repeated "fix" cycles in same file/component
-
-**Heuristic**: Consider it oscillation if the same file is modified by different agents 2+ times in rapid succession.
-
 ### Routine Information Sharing
 
 After each specialist completes work:
