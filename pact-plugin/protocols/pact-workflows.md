@@ -50,6 +50,8 @@
 
 **Trigger when**: Blocked; get similar errors repeatedly; or prior phase output is wrong.
 
+**Diagnostic inputs**: Before triaging, check available signals — progress signal history (if monitoring was requested) reveals whether the agent was converging, exploring, or stuck. Apply the Conversation Failure Taxonomy after choosing an outcome.
+
 **Three questions**:
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
 2. **Additional agents needed?** — Do we need help beyond the blocked agent's scope/specialty?
@@ -125,6 +127,7 @@ Invoke multiple specialists of the same type when:
 1. **Check for conflicts** — Do any sub-tasks touch the same files?
 2. **Assign boundaries** — If conflicts exist, sequence or define clear boundaries
 3. **Set convention authority** — First agent's choices become standard for the batch
+4. **Environment drift** — When dispatching subsequent agents after earlier agents complete, check `file-edits.json` for files modified since last dispatch and include relevant deltas in prompts
 
 ### Light ceremony instructions (injected when invoking specialist)
 

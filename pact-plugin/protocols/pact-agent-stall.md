@@ -7,6 +7,8 @@
 
 Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on `SendMessage` receipt). If a teammate goes idle without sending a completion message or blocker, treat as stalled immediately.
 
+**Relationship to agent state model**: Stall detection is the binary endpoint (active vs. stalled). For finer-grained mid-execution assessment (converging/exploring/stuck), see the agent state model in [pact-variety.md](pact-variety.md#agent-state-model). An agent assessed as "stuck" via progress signals may stall if not intervened upon.
+
 ### Recovery Protocol
 
 1. Check the teammate's `TaskList` status and any partial task metadata or `SendMessage` output for context on what happened
