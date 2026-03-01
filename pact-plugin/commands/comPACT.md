@@ -120,6 +120,8 @@ Before invoking multiple specialists concurrently, perform this coordination che
    - Clearly state which sub-task handles which files/components
    - Include this in each specialist's prompt
 
+4. **Environment drift** — When dispatching subsequent agents after earlier ones complete, check `file-edits.json` for modified files and include deltas in prompts (see [pact-s2-coordination.md](../protocols/pact-s2-coordination.md#environment-drift-detection))
+
 **If conflicts cannot be resolved**: Sequence the work instead of dispatching concurrently.
 
 ---
@@ -165,6 +167,8 @@ For each specialist needed:
 3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all specialists in parallel (multiple `Task` calls in one response).
+
+**Progress monitoring**: For parallel dispatch or novel domains, include "Send progress signals per the agent-teams skill Progress Signals section" in each specialist's dispatch prompt.
 
 **After all concurrent agents complete**: Verify no conflicts occurred, run full test suite.
 
