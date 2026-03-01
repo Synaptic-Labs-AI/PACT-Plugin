@@ -27,5 +27,8 @@ class TestLearningIIPatterns:
     def test_memory_search_convention(self, variety_content):
         assert "orchestration_calibration" in variety_content
 
+    def test_review_calibration_in_search(self, variety_content):
+        assert "review_calibration" in variety_content
+
     def test_score_adjustment_rule(self, variety_content):
         assert "3+ memories match" in variety_content

@@ -796,7 +796,7 @@ Score each dimension 1-4 and sum:
 
 Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
 
-1. **Search**: Query pact-memory for `"{domain} orchestration_calibration"` and `"{domain} blocker OR stall OR rePACT"`
+1. **Search**: Query pact-memory for `"{domain} orchestration_calibration OR review_calibration"` and `"{domain} blocker OR stall OR rePACT"`
 2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
 3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
 4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
