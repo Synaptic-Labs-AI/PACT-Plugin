@@ -65,6 +65,15 @@
 | Not truly blocked | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | Escalate to user | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
+**Conversation Failure Taxonomy** (diagnostic lens — apply after choosing outcome):
+
+| Type | Symptoms | Recovery |
+|------|----------|----------|
+| Misunderstanding | Wrong output, no errors | Teachback correction + corrected context |
+| Derailment | Loops on same error | Fresh agent, different framing |
+| Discontinuity | Lost/stale context | Reconstruct from memory/TaskGet |
+| Absence | Insufficient upstream output | Redo prior phase |
+
 ---
 
 ## comPACT Protocol
