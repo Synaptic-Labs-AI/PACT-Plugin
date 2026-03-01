@@ -94,6 +94,7 @@ imPACT is for operational problem-solving. If you're questioning whether the wor
 Before triaging, quickly check for existing context:
 - **Plan**: Check `docs/plans/` for related plan (broader feature context)
 - **Prior phase outputs**: Check `docs/preparation/`, `docs/architecture/` for relevant artifacts
+- **Progress signals**: If progress monitoring was requested for this agent, review the signal history — was the agent converging, exploring, or stuck before the blocker? This informs the Conversation Failure Taxonomy diagnosis.
 
 This context informs whether the blocker is isolated or systemic.
 

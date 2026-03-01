@@ -50,6 +50,8 @@
 
 **Trigger when**: Blocked; get similar errors repeatedly; or prior phase output is wrong.
 
+**Diagnostic inputs**: Before triaging, check available signals — progress signal history (if monitoring was requested) reveals whether the agent was converging, exploring, or stuck. Apply the Conversation Failure Taxonomy after choosing an outcome.
+
 **Three questions**:
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
 2. **Additional agents needed?** — Do we need help beyond the blocked agent's scope/specialty?
@@ -64,6 +66,15 @@
 | Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
 | Not truly blocked | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | Escalate to user | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
+
+**Conversation Failure Taxonomy** (diagnostic lens — apply after choosing outcome):
+
+| Type | Symptoms | Recovery |
+|------|----------|----------|
+| Misunderstanding | Wrong output, no errors | Teachback correction + corrected context |
+| Derailment | Loops on same error | Fresh agent, different framing |
+| Discontinuity | Lost/stale context | Reconstruct from memory/TaskGet |
+| Absence | Insufficient upstream output | Redo prior phase |
 
 ---
 
@@ -116,6 +127,7 @@ Invoke multiple specialists of the same type when:
 1. **Check for conflicts** — Do any sub-tasks touch the same files?
 2. **Assign boundaries** — If conflicts exist, sequence or define clear boundaries
 3. **Set convention authority** — First agent's choices become standard for the batch
+4. **Environment drift** — When dispatching subsequent agents after earlier agents complete, check `file-edits.json` for files modified since last dispatch and include relevant deltas in prompts
 
 ### Light ceremony instructions (injected when invoking specialist)
 
@@ -123,6 +135,7 @@ Invoke multiple specialists of the same type when:
 - Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context
 - Do not create new documentation artifacts
 - Smoke tests only: Verify it compiles, runs, and happy path doesn't crash (no comprehensive unit tests—that's TEST phase work)
+- For parallel dispatch or novel domains: include "Send progress signals per the agent-teams skill Progress Signals section" in dispatch prompt
 
 **Escalate to `/PACT:orchestrate` when**:
 - Task spans multiple specialist domains

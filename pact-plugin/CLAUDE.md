@@ -143,6 +143,7 @@ The orchestrator operates in two distinct modes. Being aware of which mode you'r
 - **Focus**: "Execute the plan efficiently"
 - **Key questions**: Are agents progressing? Resources allocated? Blockers cleared?
 - **Mindset**: Get current work done well
+- **Agent state awareness**: When monitoring agents, assess their state as converging, exploring, or stuck based on progress signals. See @~/.claude/protocols/pact-plugin/pact-variety.md for the agent state model.
 
 **S4 Mode (Outside-Future)**: Strategic Intelligence
 - **Active during**: Requirement analysis, risk assessment, adaptation decisions
@@ -339,7 +340,7 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
 | Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
 
-**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals). The orchestrator creates tasks and monitors via `TaskList` and incoming `SendMessage` signals.
+**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals, progress signals). The orchestrator creates tasks and monitors via `TaskList` and incoming `SendMessage` signals. Agents can send brief mid-task status updates (`[sender→lead] Progress: {done}/{remaining}, {status}`) when requested.
 
 ##### Signal Task Handling
 When an agent reports a blocker or algedonic signal via `SendMessage`:

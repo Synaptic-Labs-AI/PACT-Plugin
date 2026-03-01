@@ -136,6 +136,22 @@ After each specialist completes work:
 
 This transforms implicit knowledge into explicit coordination, reducing "surprise" conflicts.
 
+### Environment Drift Detection
+
+When dispatching agents during parallel execution, the codebase may have changed since earlier agents were briefed. Use the file tracking system to detect environment drift.
+
+**Before dispatching a new agent (when other agents have already modified files)**:
+1. Check the team's `file-edits.json` (maintained by `file_tracker.py`) for files modified since the session started or since the last dispatch
+2. If files relevant to the new agent's scope were modified, include an environment delta in the dispatch prompt:
+   > "Since your context was set, these files were modified: `src/auth.ts` (by backend-coder), `src/types.ts` (by database-engineer). Review before making assumptions about their current state."
+3. This is not a full re-briefing — just a delta awareness signal
+
+**When an agent completes and another agent is still running**:
+- Check if the completing agent modified files in the running agent's scope
+- If so, send a brief `SendMessage` to the running agent: "Environment changed: {file} was modified by {agent}. Verify your assumptions about it."
+
+**Skip when**: Single-agent execution (no parallel agents = no drift risk).
+
 ---
 
 ## Backend ↔ Database Boundary

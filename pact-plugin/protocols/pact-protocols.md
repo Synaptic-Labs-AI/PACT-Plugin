@@ -478,6 +478,7 @@ If the specialist has been shut down or is unresponsive when agreement verificat
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
 - **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
+- **Conversation Failure Taxonomy**: See [pact-workflows.md](pact-workflows.md) (imPACT section) for diagnosing communication failures between agents.
 
 ---
 
@@ -618,6 +619,22 @@ After each specialist completes work:
 3. **Update** shared context for any agents still running in parallel
 
 This transforms implicit knowledge into explicit coordination, reducing "surprise" conflicts.
+
+### Environment Drift Detection
+
+When dispatching agents during parallel execution, the codebase may have changed since earlier agents were briefed. Use the file tracking system to detect environment drift.
+
+**Before dispatching a new agent (when other agents have already modified files)**:
+1. Check the team's `file-edits.json` (maintained by `file_tracker.py`) for files modified since the session started or since the last dispatch
+2. If files relevant to the new agent's scope were modified, include an environment delta in the dispatch prompt:
+   > "Since your context was set, these files were modified: `src/auth.ts` (by backend-coder), `src/types.ts` (by database-engineer). Review before making assumptions about their current state."
+3. This is not a full re-briefing — just a delta awareness signal
+
+**When an agent completes and another agent is still running**:
+- Check if the completing agent modified files in the running agent's scope
+- If so, send a brief `SendMessage` to the running agent: "Environment changed: {file} was modified by {agent}. Verify your assumptions about it."
+
+**Skip when**: Single-agent execution (no parallel agents = no drift risk).
 
 ---
 
@@ -776,6 +793,17 @@ Score each dimension 1-4 and sum:
 
 > **Extreme (15-16) means**: Too much variety to absorb safely. The recommended action is a **research spike** (time-boxed exploration to reduce uncertainty) followed by reassessment. After the spike, the task should score lower—if it still scores 15+, decompose further or reconsider feasibility.
 
+### Learning II: Pattern-Adjusted Scoring
+
+Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
+
+1. **Search**: Query pact-memory for `"{domain} orchestration_calibration OR review_calibration"` and `"{domain} blocker OR stall OR rePACT"`
+2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
+3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
+4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
+
+**Skip when**: First session on a new project (no calibration data exists yet).
+
 ### Variety Strategies
 
 **Attenuate** (reduce incoming variety):
@@ -799,6 +827,23 @@ At phase transitions, briefly assess:
 - "Are we matched?" → Continue as planned
 
 **Who performs checkpoints**: Orchestrator, at S4 mode transitions (between phases).
+
+### Agent State Model
+
+Derive agent state from progress signals (see agent-teams skill, Progress Signals section) and existing monitoring:
+
+| State | Indicators | Orchestrator Action |
+|-------|-----------|-------------------|
+| **Converging** | Progress signals show forward movement (files modified, tests passing) | No intervention needed |
+| **Exploring** | Progress signals show searching behavior (reading files, no modifications yet) | Normal for early task stages; intervene if persists past ~50% of expected duration |
+| **Stuck** | No progress signals for extended period; stall detection triggers | Send context/guidance via SendMessage; escalate to imPACT if unresponsive |
+
+**State transitions**:
+- Exploring → Converging: Normal (agent found approach, started implementing)
+- Converging → Exploring: Concerning (may indicate blocker or scope expansion)
+- Any → Stuck: Intervention needed
+
+**Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
 
 ---
 
@@ -853,6 +898,8 @@ At phase transitions, briefly assess:
 ## imPACT Protocol
 
 **Trigger when**: Blocked; get similar errors repeatedly; or prior phase output is wrong.
+
+**Diagnostic inputs**: Before triaging, check available signals — progress signal history (if monitoring was requested) reveals whether the agent was converging, exploring, or stuck. Apply the Conversation Failure Taxonomy after choosing an outcome.
 
 **Three questions**:
 1. **Redo prior phase?** — Is the issue upstream in P→A→C→T?
@@ -929,6 +976,7 @@ Invoke multiple specialists of the same type when:
 1. **Check for conflicts** — Do any sub-tasks touch the same files?
 2. **Assign boundaries** — If conflicts exist, sequence or define clear boundaries
 3. **Set convention authority** — First agent's choices become standard for the batch
+4. **Environment drift** — When dispatching subsequent agents after earlier agents complete, check `file-edits.json` for files modified since last dispatch and include relevant deltas in prompts
 
 ### Light ceremony instructions (injected when invoking specialist)
 
@@ -936,6 +984,7 @@ Invoke multiple specialists of the same type when:
 - Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context
 - Do not create new documentation artifacts
 - Smoke tests only: Verify it compiles, runs, and happy path doesn't crash (no comprehensive unit tests—that's TEST phase work)
+- For parallel dispatch or novel domains: include "Send progress signals per the agent-teams skill Progress Signals section" in dispatch prompt
 
 **Escalate to `/PACT:orchestrate` when**:
 - Task spans multiple specialist domains
@@ -1227,6 +1276,8 @@ If work spans sessions, update CLAUDE.md with:
 - Teammate process terminated without sending a completion message or blocker via `SendMessage`
 
 Detection is event-driven: check at signal monitoring points (after dispatch, on TeammateIdle events, on `SendMessage` receipt). If a teammate goes idle without sending a completion message or blocker, treat as stalled immediately.
+
+**Relationship to agent state model**: Stall detection is the binary endpoint (active vs. stalled). For finer-grained mid-execution assessment (converging/exploring/stuck), see the agent state model in [pact-variety.md](pact-variety.md#agent-state-model). An agent assessed as "stuck" via progress signals may stall if not intervened upon.
 
 ### Recovery Protocol
 
