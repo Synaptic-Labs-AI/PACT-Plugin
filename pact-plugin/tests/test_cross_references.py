@@ -5,6 +5,8 @@ Tests cover:
 L2. Conversation Failure Taxonomy in pact-workflows.md
 L3. Progress monitoring dispatch instructions in orchestrate.md, comPACT.md, pact-workflows.md
 L4. Environment drift cross-references in orchestrate.md, comPACT.md
+L5. Review calibration save step in peer-review.md
+L6. Agent state model cross-reference in pact-agent-stall.md
 """
 from pathlib import Path
 
@@ -17,6 +19,8 @@ COMMANDS_DIR = Path(__file__).parent.parent / "commands"
 WORKFLOWS_PATH = PROTOCOLS_DIR / "pact-workflows.md"
 ORCHESTRATE_PATH = COMMANDS_DIR / "orchestrate.md"
 COMPACT_PATH = COMMANDS_DIR / "comPACT.md"
+PEER_REVIEW_PATH = COMMANDS_DIR / "peer-review.md"
+AGENT_STALL_PATH = PROTOCOLS_DIR / "pact-agent-stall.md"
 
 
 class TestConversationFailureTaxonomy:
@@ -78,3 +82,25 @@ class TestEnvironmentDriftReferences:
 
     def test_compact_has_environment_drift(self, compact_content):
         assert "Environment drift" in compact_content or "file-edits.json" in compact_content
+
+
+class TestReviewCalibration:
+    """L5: Review calibration save step in peer-review.md."""
+
+    @pytest.fixture
+    def peer_review_content(self):
+        return PEER_REVIEW_PATH.read_text(encoding="utf-8")
+
+    def test_peer_review_has_review_calibration(self, peer_review_content):
+        assert "review_calibration" in peer_review_content
+
+
+class TestAgentStallCrossReference:
+    """L6: Agent state model cross-reference in pact-agent-stall.md."""
+
+    @pytest.fixture
+    def stall_content(self):
+        return AGENT_STALL_PATH.read_text(encoding="utf-8")
+
+    def test_stall_has_agent_state_model_reference(self, stall_content):
+        assert "agent state model" in stall_content.lower()

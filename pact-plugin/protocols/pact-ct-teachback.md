@@ -102,5 +102,6 @@ If the specialist has been shut down or is unresponsive when agreement verificat
 - **S4 Checkpoints**: Agreement verification extends S4 checkpoints with a CT-informed question. Both run at phase boundaries; S4 asks "is our plan valid?" while CT asks "do we share understanding?"
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
 - **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
+- **Conversation Failure Taxonomy**: See [pact-workflows.md](pact-workflows.md) (imPACT section) for diagnosing communication failures between agents.
 
 ---
