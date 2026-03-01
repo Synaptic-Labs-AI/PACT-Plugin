@@ -123,6 +123,7 @@ Invoke multiple specialists of the same type when:
 - Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context
 - Do not create new documentation artifacts
 - Smoke tests only: Verify it compiles, runs, and happy path doesn't crash (no comprehensive unit tests—that's TEST phase work)
+- For parallel dispatch or novel domains: include "Send progress signals per the agent-teams skill Progress Signals section" in dispatch prompt
 
 **Escalate to `/PACT:orchestrate` when**:
 - Task spans multiple specialist domains

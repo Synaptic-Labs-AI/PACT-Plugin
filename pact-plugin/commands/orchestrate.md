@@ -470,17 +470,20 @@ For each pair of work units, check:
 
 #### S2 Pre-Dispatch Coordination
 
-Before concurrent dispatch, check internally: shared files? shared interfaces? conventions established?
+Before concurrent dispatch, check internally: shared files? shared interfaces? conventions established? environment drift?
 
 - **Shared files**: Sequence those agents OR assign clear boundaries
 - **Conventions**: First agent's choice becomes standard; propagate to others
 - **Resolution authority**: Technical disagreements → Architect arbitrates; Style/convention → First agent's choice
+- **Environment drift**: When dispatching subsequent agents after earlier agents have completed, check `file-edits.json` for files modified since last dispatch. Include relevant deltas in the new agent's prompt (see [pact-s2-coordination.md](../protocols/pact-s2-coordination.md#environment-drift-detection)).
 
 **Output**: Silent if no conflicts; only mention if conflicts found (e.g., `S2 check: types.ts shared — backend writes, frontend reads`).
 
 **Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
 
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
+
+**Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
 
 **Dispatch coder(s)**:
 
@@ -583,6 +586,8 @@ Monitor for blocker/algedonic signals via:
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
 On signal detected: Follow Signal Task Handling in CLAUDE.md.
+
+**Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
 **HALT handling**: On HALT signal, immediately `SendMessage(type="broadcast", content="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.", summary="HALT: {category}")` to stop all running teammates before presenting to user.
 
