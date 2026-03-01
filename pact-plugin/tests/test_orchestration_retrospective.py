@@ -5,6 +5,7 @@ Tests cover:
 1. Orchestration Retrospective section exists
 2. Four assessment questions defined
 3. pact-memory save convention documented
+4. Estimation pattern question documented
 """
 from pathlib import Path
 
@@ -32,6 +33,9 @@ class TestOrchestrationRetrospective:
 
     def test_specialist_fit_question(self, wrapup_content):
         assert "Specialist fit" in wrapup_content
+
+    def test_estimation_pattern_question(self, wrapup_content):
+        assert "Estimation pattern" in wrapup_content
 
     def test_memory_save_convention(self, wrapup_content):
         assert "orchestration_calibration" in wrapup_content

@@ -166,3 +166,47 @@ class TestEnvironmentDrift:
         )
 
         assert delta["src/shared.ts"] == "database-engineer"
+
+    def test_inclusive_boundary_at_exact_timestamp(self, tmp_path):
+        from file_tracker import get_environment_delta
+
+        tracking_file = tmp_path / "file-edits.json"
+        exact_ts = 1000000
+        entries = [
+            {"file": "src/boundary.ts", "agent": "backend-coder", "tool": "Edit", "ts": exact_ts},
+        ]
+        tracking_file.write_text(json.dumps(entries))
+
+        delta = get_environment_delta(
+            since_ts=exact_ts,
+            requesting_agent="frontend-coder",
+            tracking_path=str(tracking_file),
+        )
+
+        assert "src/boundary.ts" in delta
+        assert delta["src/boundary.ts"] == "backend-coder"
+
+    def test_entry_missing_ts_key(self, tmp_path):
+        from file_tracker import get_environment_delta
+
+        tracking_file = tmp_path / "file-edits.json"
+        entries = [
+            {"file": "src/no-ts.ts", "agent": "backend-coder", "tool": "Edit"},
+        ]
+        tracking_file.write_text(json.dumps(entries))
+
+        # ts defaults to 0 via .get("ts", 0), so included when since_ts=0
+        delta = get_environment_delta(
+            since_ts=0,
+            requesting_agent="frontend-coder",
+            tracking_path=str(tracking_file),
+        )
+        assert "src/no-ts.ts" in delta
+
+        # But excluded when since_ts > 0
+        delta = get_environment_delta(
+            since_ts=1,
+            requesting_agent="frontend-coder",
+            tracking_path=str(tracking_file),
+        )
+        assert "src/no-ts.ts" not in delta
