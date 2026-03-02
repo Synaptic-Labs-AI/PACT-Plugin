@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 # Model2Vec configuration
 MODEL_NAME = "minishlab/potion-base-8M"
 EMBEDDING_DIM = 256
+# Minimum free RAM (MB) required before running embedding catch-up.
+# Model2Vec uses ~59MB; 75MB provides a safety margin.
+MIN_CATCHUP_RAM_MB = 75.0
 
 
 class EmbeddingService:
