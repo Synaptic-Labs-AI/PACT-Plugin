@@ -181,7 +181,8 @@ def maybe_migrate_embeddings() -> dict:
                         (mem_id, memory_dict.get("project_id"), embedding_blob)
                     )
                     success += 1
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to re-embed memory {mem_id}: {e}")
                 continue
 
         conn.commit()

@@ -125,7 +125,14 @@ def vector_search(
         return [(row[0], row[1]) for row in cursor.fetchall()]
 
     except Exception as e:
-        logger.warning(f"Vector search failed: {e}")
+        error_str = str(e).lower()
+        if "dimension" in error_str or "mismatch" in error_str:
+            logger.warning(
+                f"Vector search failed (dimension mismatch): {e}. "
+                "Run ensure_memory_ready() to re-initialize the vector table."
+            )
+        else:
+            logger.debug(f"Vector search failed: {e}")
         return []
 
 
