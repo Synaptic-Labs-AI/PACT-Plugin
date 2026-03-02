@@ -16,7 +16,6 @@ import logging
 import platform
 import struct
 import subprocess
-from pathlib import Path
 from typing import Any, List, Optional
 
 # Configure logging
@@ -37,6 +36,7 @@ from .database import (
 from .embeddings import (
     generate_embedding,
     generate_embedding_text,
+    MIN_CATCHUP_RAM_MB,
 )
 
 
@@ -67,10 +67,13 @@ def get_available_ram_mb() -> float:
             )
             if result.returncode == 0:
                 # Parse vm_stat output
+                # Count free + speculative + inactive pages as available.
+                # Inactive pages are reclaimable by the OS on demand.
                 lines = result.stdout.strip().split("\n")
                 page_size = 4096  # Default page size on macOS
                 free_pages = 0
                 speculative_pages = 0
+                inactive_pages = 0
 
                 for line in lines:
                     if "page size of" in line:
@@ -92,8 +95,13 @@ def get_available_ram_mb() -> float:
                             speculative_pages = int(line.split(":")[1].strip().rstrip("."))
                         except (ValueError, IndexError):
                             pass
+                    elif "Pages inactive:" in line:
+                        try:
+                            inactive_pages = int(line.split(":")[1].strip().rstrip("."))
+                        except (ValueError, IndexError):
+                            pass
 
-                free_bytes = (free_pages + speculative_pages) * page_size
+                free_bytes = (free_pages + speculative_pages + inactive_pages) * page_size
                 return free_bytes / (1024 * 1024)
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -242,7 +250,7 @@ def embed_single_memory(memory_id: str) -> bool:
 def embed_pending_memories(
     project_id: Optional[str] = None,
     limit: int = 20,
-    min_ram_mb: float = 500.0
+    min_ram_mb: float = MIN_CATCHUP_RAM_MB
 ) -> dict:
     """
     Process pending embeddings serially. Stops on first failure.
@@ -253,7 +261,7 @@ def embed_pending_memories(
     Args:
         project_id: Optional project filter.
         limit: Max memories to process.
-        min_ram_mb: Minimum free RAM required to proceed (default 500MB).
+        min_ram_mb: Minimum free RAM required to proceed (default MIN_CATCHUP_RAM_MB).
 
     Returns:
         dict with keys:
