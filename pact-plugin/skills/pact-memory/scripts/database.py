@@ -262,7 +262,7 @@ def _check_and_migrate_vector_table(conn: sqlite3.Connection, new_dim: int) -> N
         try:
             # Try a test query that would fail if dimensions don't match
             conn.execute(
-                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 0",
+                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 1",
                 (test_embedding,)
             )
             # If we get here, dimensions match
