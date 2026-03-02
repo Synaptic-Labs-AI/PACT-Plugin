@@ -50,7 +50,7 @@ cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 
 ## See It In Action
 
-> *Simplified for illustration — actual output varies by task and project.*
+*Simplified for illustration. Actual output varies by task and project.*
 
 ### Building a Feature from Scratch
 
@@ -192,11 +192,11 @@ PACT is built on the **Viable System Model** (VSM), a cybernetics framework for 
 
 | Hook | Trigger | Purpose |
 |------|---------|---------|
-| `session_init.py` | Session start | Load active plans, check memory |
+| `session_init.py` | Session start | Initialize PACT environment, generate team |
 | `phase_completion.py` | Session stop | Remind about decision logs |
 | `validate_handoff.py` | Agent handoff | Verify output quality |
 | `track_files.py` | File edit/write | Track files for memory graph |
-| `memory_prompt.py` | Session end | Prompt to save learnings |
+| `memory_prompt.py` | Session stop | Prompt to save learnings |
 
 *(Selected hooks shown — see [hooks/](pact-plugin/hooks/) for full list)*
 
@@ -210,18 +210,55 @@ PACT uses Gordon Pask's Conversation Theory to ensure shared understanding betwe
 
 ---
 
+## Requirements
+
+- **Claude Code** (the CLI tool): `npm install -g @anthropic-ai/claude-code`
+- **Agent Teams enabled** (see [Enabling Agent Teams](#enabling-agent-teams) below)
+- **Python 3.9+** (for memory system and hooks)
+- **macOS or Linux** (Windows support coming soon)
+
+### Enabling Agent Teams
+
+> **Required since PACT v3.0.** PACT's specialist agents run as an Agent Team — a coordinated group of Claude Code instances with shared tasks and inter-agent messaging. Agent Teams are experimental in Claude Code and **disabled by default**.
+
+Add the following to your `settings.json` (global `~/.claude/settings.json` or project-level `.claude/settings.json`):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
+Without this setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
+
+> **Note:** Agent Teams have [known limitations](https://code.claude.com/docs/en/agent-teams#limitations) around session resumption, task coordination, and shutdown behavior. See the Claude Code docs for details.
+
+### Optional Dependencies
+
+```bash
+# For memory system with embeddings
+pip install sqlite-vec
+
+# For n8n workflows
+# Requires n8n-mcp MCP server
+```
+
+---
+
 ## Installation
 
 ### Option A: Let Claude Set It Up (Easiest)
 
-Give Claude this prompt:
+**Quick version** — give Claude this prompt:
 
 ```
 Read the PACT setup instructions at https://github.com/ProfSynapse/PACT-prompt/blob/main/README.md
 and help me install the PACT plugin with auto-updates enabled.
 ```
 
-Or copy this detailed prompt for Claude:
+**Step-by-step version** — if you prefer more control, give Claude this instead:
 
 ```
 Help me install the PACT plugin for Claude Code:
@@ -462,43 +499,6 @@ Act as PACT Orchestrator...
 2. **Create project-local skills** in your project's `.claude/skills/` (Claude Code feature)
 3. **Create global skills** in `~/.claude/skills/` for use across all projects
 4. **Fork the plugin** if you need to modify agents or hooks for your domain
-
----
-
-## Requirements
-
-- **Claude Code** (the CLI tool): `npm install -g @anthropic-ai/claude-code`
-- **Agent Teams enabled** (see [Enabling Agent Teams](#enabling-agent-teams) below)
-- **Python 3.9+** (for memory system and hooks)
-- **macOS or Linux** (Windows support coming soon)
-
-### Enabling Agent Teams
-
-> **Required since PACT v3.0.** PACT's specialist agents run as an Agent Team — a coordinated group of Claude Code instances with shared tasks and inter-agent messaging. Agent Teams are experimental in Claude Code and **disabled by default**.
-
-Add the following to your `settings.json` (global `~/.claude/settings.json` or project-level `.claude/settings.json`):
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  }
-}
-```
-
-Without this setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
-
-> **Note:** Agent Teams have [known limitations](https://code.claude.com/docs/en/agent-teams#limitations) around session resumption, task coordination, and shutdown behavior. See the Claude Code docs for details.
-
-### Optional Dependencies
-
-```bash
-# For memory system with embeddings
-pip install sqlite-vec
-
-# For n8n workflows
-# Requires n8n-mcp MCP server
-```
 
 ---
 
