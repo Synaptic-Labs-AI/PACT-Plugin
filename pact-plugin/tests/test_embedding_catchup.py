@@ -162,8 +162,9 @@ class TestGetAvailableRamMb:
              patch.object(ec_module.platform, "system", return_value="Darwin"), \
              patch.object(ec_module.subprocess, "run", return_value=mock_result):
             result = ec_module.get_available_ram_mb()
-            # (10000 + 5000) * 16384 / (1024 * 1024) = 234.375
-            assert result == pytest.approx(234.375)
+            # (free + speculative + inactive) * page_size / (1024 * 1024)
+            # (10000 + 5000 + 30000) * 16384 / (1024 * 1024) = 703.125
+            assert result == pytest.approx(703.125)
 
     def test_darwin_vm_stat_default_page_size(self, ec_module):
         """On macOS, should use 4096 as default page size if not parsed."""
@@ -362,9 +363,10 @@ class TestEmbedPendingMemories:
 
     def test_default_min_ram_mb_uses_constant(self, ec_module):
         """Default min_ram_mb parameter should equal MIN_CATCHUP_RAM_MB."""
+        from embeddings import MIN_CATCHUP_RAM_MB
         sig = inspect.signature(ec_module.embed_pending_memories)
         default = sig.parameters["min_ram_mb"].default
-        assert default == 75.0
+        assert default == MIN_CATCHUP_RAM_MB
 
 
 class TestGetUnembeddedMemories:
@@ -383,6 +385,65 @@ class TestGetUnembeddedMemories:
         result = ec_module.get_unembedded_memories()
         assert result == []
 
+    def test_returns_memory_ids_from_db(self, ec_module):
+        """Should return list of memory IDs that lack embeddings."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        # Mock the cursor chain: sqlite_master check returns a row,
+        # then the LEFT JOIN query returns memory IDs
+        mock_conn = MagicMock()
+        mock_cursor_master = MagicMock()
+        mock_cursor_master.fetchone.return_value = ("vec_memories",)
+        mock_cursor_query = MagicMock()
+        mock_cursor_query.fetchall.return_value = [("mem-1",), ("mem-2",), ("mem-3",)]
+        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_query]
+
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = ec_module.get_unembedded_memories(limit=10)
+        assert result == ["mem-1", "mem-2", "mem-3"]
+
+    def test_returns_empty_when_vec_table_missing(self, ec_module):
+        """Should return empty list when vec_memories table does not exist."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None  # table not found
+        mock_conn.execute.return_value = mock_cursor
+
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = ec_module.get_unembedded_memories()
+        assert result == []
+
+    def test_passes_project_id_filter(self, ec_module):
+        """Should include project_id in query when provided."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        mock_conn = MagicMock()
+        mock_cursor_master = MagicMock()
+        mock_cursor_master.fetchone.return_value = ("vec_memories",)
+        mock_cursor_query = MagicMock()
+        mock_cursor_query.fetchall.return_value = [("mem-1",)]
+        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_query]
+
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = ec_module.get_unembedded_memories(project_id="my-proj", limit=5)
+        assert result == ["mem-1"]
+        # Verify the query params include project_id and limit
+        call_args = mock_conn.execute.call_args_list[1]
+        params = call_args[0][1]
+        assert "my-proj" in params
+        assert 5 in params
+
 
 class TestEmbedSingleMemory:
     """Tests for embed_single_memory() - embedding a single memory by ID."""
@@ -397,5 +458,77 @@ class TestEmbedSingleMemory:
         """Should return False on any error."""
         ec_module.SQLITE_EXTENSIONS_ENABLED = True
         ec_module.db_connection = MagicMock(side_effect=Exception("DB error"))
+        result = ec_module.embed_single_memory("test-id")
+        assert result is False
+
+    def test_returns_true_on_successful_embedding(self, ec_module):
+        """Should return True when memory is found, embedded, and stored."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        mock_memory = {
+            "id": "test-id",
+            "context": "Test memory context",
+            "project_id": "proj-1",
+        }
+
+        mock_conn = MagicMock()
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        ec_module.get_memory = MagicMock(return_value=mock_memory)
+        ec_module.generate_embedding_text = MagicMock(return_value="embedding text")
+        ec_module.generate_embedding = MagicMock(return_value=[0.1, 0.2, 0.3])
+
+        # Mock sqlite_vec import within the function
+        mock_sqlite_vec = MagicMock()
+        with patch.dict(sys.modules, {"sqlite_vec": mock_sqlite_vec}):
+            result = ec_module.embed_single_memory("test-id")
+
+        assert result is True
+        mock_conn.commit.assert_called_once()
+
+    def test_returns_false_when_memory_not_found(self, ec_module):
+        """Should return False when memory ID does not exist in DB."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        mock_conn = MagicMock()
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        ec_module.get_memory = MagicMock(return_value=None)
+
+        result = ec_module.embed_single_memory("nonexistent-id")
+        assert result is False
+
+    def test_returns_false_when_embedding_generation_fails(self, ec_module):
+        """Should return False when generate_embedding returns None."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        mock_conn = MagicMock()
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        ec_module.get_memory = MagicMock(return_value={"id": "test-id", "context": "ctx"})
+        ec_module.generate_embedding_text = MagicMock(return_value="text")
+        ec_module.generate_embedding = MagicMock(return_value=None)
+
+        result = ec_module.embed_single_memory("test-id")
+        assert result is False
+
+    def test_returns_false_when_no_embedding_text(self, ec_module):
+        """Should return False when generate_embedding_text returns empty string."""
+        ec_module.SQLITE_EXTENSIONS_ENABLED = True
+
+        mock_conn = MagicMock()
+        ec_module.db_connection = MagicMock()
+        ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        ec_module.db_connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        ec_module.get_memory = MagicMock(return_value={"id": "test-id", "context": "ctx"})
+        ec_module.generate_embedding_text = MagicMock(return_value="")
+
         result = ec_module.embed_single_memory("test-id")
         assert result is False
