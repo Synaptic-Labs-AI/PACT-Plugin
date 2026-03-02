@@ -12,7 +12,7 @@ This is **vibe coding**: one AI trying to do everything at once, with no structu
 
 ## The Solution
 
-PACT Harness turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **11 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
+PACT turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **11 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
 
 | Without PACT | With PACT |
 |-------------|-----------|
@@ -110,7 +110,7 @@ Every task flows through four phases, each handled by the right specialist:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The orchestrator manages the cycle, delegating each phase to the appropriate specialist. Simple tasks get light process (`/PACT:comPACT`); complex tasks get the full ceremony (`/PACT:orchestrate`). PACT Harness scales its rigor to match the complexity of the work.
+The orchestrator manages the cycle, delegating each phase to the appropriate specialist. Simple tasks get light process (`/PACT:comPACT`); complex tasks get the full ceremony (`/PACT:orchestrate`). PACT scales its rigor to match the complexity of the work.
 
 ### The Specialist Team
 
@@ -302,7 +302,7 @@ You should see the PACT Orchestrator respond.
 
 ## Skills (16 Modules)
 
-PACT includes 16 skills — 13 domain knowledge modules that load on-demand, plus 3 operational skills (`pact-agent-teams`, `pact-worktree-setup`, `pact-worktree-cleanup`) used internally by the orchestrator.
+PACT includes 16 skills — 13 domain knowledge modules that load on-demand, plus 3 operational skills (`pact-agent-teams`, `worktree-setup`, `worktree-cleanup`) used internally by the orchestrator.
 
 ### PACT Phase Skills
 | Skill | Triggers On |
