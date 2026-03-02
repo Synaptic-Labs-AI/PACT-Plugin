@@ -315,6 +315,7 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
         init_schema(conn)
     else:
         _migrate_ct_fields(conn)
+        _init_vector_table(conn)
 
 
 # =============================================================================
