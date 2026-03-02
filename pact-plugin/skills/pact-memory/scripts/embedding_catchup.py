@@ -68,10 +68,13 @@ def get_available_ram_mb() -> float:
             )
             if result.returncode == 0:
                 # Parse vm_stat output
+                # Count free + speculative + inactive pages as available.
+                # Inactive pages are reclaimable by the OS on demand.
                 lines = result.stdout.strip().split("\n")
                 page_size = 4096  # Default page size on macOS
                 free_pages = 0
                 speculative_pages = 0
+                inactive_pages = 0
 
                 for line in lines:
                     if "page size of" in line:
@@ -93,8 +96,13 @@ def get_available_ram_mb() -> float:
                             speculative_pages = int(line.split(":")[1].strip().rstrip("."))
                         except (ValueError, IndexError):
                             pass
+                    elif "Pages inactive:" in line:
+                        try:
+                            inactive_pages = int(line.split(":")[1].strip().rstrip("."))
+                        except (ValueError, IndexError):
+                            pass
 
-                free_bytes = (free_pages + speculative_pages) * page_size
+                free_bytes = (free_pages + speculative_pages + inactive_pages) * page_size
                 return free_bytes / (1024 * 1024)
         except (subprocess.TimeoutExpired, OSError):
             pass
