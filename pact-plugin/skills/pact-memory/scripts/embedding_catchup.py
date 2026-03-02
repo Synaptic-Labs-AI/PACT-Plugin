@@ -242,7 +242,7 @@ def embed_single_memory(memory_id: str) -> bool:
 def embed_pending_memories(
     project_id: Optional[str] = None,
     limit: int = 20,
-    min_ram_mb: float = 500.0
+    min_ram_mb: float = 75.0
 ) -> dict:
     """
     Process pending embeddings serially. Stops on first failure.
@@ -253,7 +253,7 @@ def embed_pending_memories(
     Args:
         project_id: Optional project filter.
         limit: Max memories to process.
-        min_ram_mb: Minimum free RAM required to proceed (default 500MB).
+        min_ram_mb: Minimum free RAM required to proceed (default 75MB).
 
     Returns:
         dict with keys:

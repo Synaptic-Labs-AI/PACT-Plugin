@@ -242,7 +242,7 @@ def maybe_embed_pending() -> dict:
         from .embedding_catchup import embed_pending_memories
 
         # Process pending embeddings
-        embed_result = embed_pending_memories(min_ram_mb=500.0, limit=20)
+        embed_result = embed_pending_memories(min_ram_mb=75.0, limit=20)
 
         if embed_result.get("skipped_ram"):
             result["status"] = "skipped_ram"
