@@ -162,28 +162,23 @@ def maybe_migrate_embeddings() -> dict:
         """)
         conn.commit()
 
-        # Re-embed all memories
+        # Re-embed all memories using SELECT * to capture all fields (including CT fields)
         service = get_embedding_service()
-        memories = conn.execute("""
-            SELECT id, context, goal, lessons_learned, decisions, entities
-            FROM memories
-        """).fetchall()
+        rows = conn.execute("SELECT * FROM memories").fetchall()
 
         success = 0
-        for mem_id, context, goal, lessons, decisions, entities in memories:
+        for row in rows:
             try:
-                memory_dict = {
-                    'context': context, 'goal': goal, 'lessons_learned': lessons,
-                    'decisions': decisions, 'entities': entities,
-                }
+                memory_dict = dict(row)
+                mem_id = memory_dict["id"]
                 embed_text = generate_embedding_text(memory_dict)
                 embedding = service.generate(embed_text)
 
                 if embedding:
                     embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
                     conn.execute(
-                        "INSERT OR REPLACE INTO vec_memories(memory_id, embedding) VALUES (?, ?)",
-                        (mem_id, embedding_blob)
+                        "INSERT OR REPLACE INTO vec_memories(memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                        (mem_id, memory_dict.get("project_id"), embedding_blob)
                     )
                     success += 1
             except Exception:
@@ -193,7 +188,7 @@ def maybe_migrate_embeddings() -> dict:
         conn.close()
 
         result["status"] = "ok"
-        result["message"] = f"Migrated {success}/{len(memories)} embeddings to {expected_dim}-dim"
+        result["message"] = f"Migrated {success}/{len(rows)} embeddings to {expected_dim}-dim"
         return result
 
     except Exception as e:
