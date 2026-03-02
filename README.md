@@ -12,7 +12,7 @@ This is **vibe coding**: one AI trying to do everything at once, with no structu
 
 ## The Solution
 
-PACT turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **11 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
+PACT Harness turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **11 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
 
 | Without PACT | With PACT |
 |-------------|-----------|
@@ -25,6 +25,8 @@ PACT turns one AI into a coordinated dev team. Instead of a single Claude guessi
 ---
 
 ## Quick Start
+
+> **Prerequisite:** PACT requires [Agent Teams](#enabling-agent-teams), which is experimental and disabled by default. Add `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"` to the `"env"` section of your `~/.claude/settings.json` before installing.
 
 **1. Install the plugin**
 ```
@@ -42,11 +44,13 @@ cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 /PACT:orchestrate Build user authentication with JWT
 ```
 
-> Requires [Agent Teams enabled](#enabling-agent-teams). See [full installation](#installation) for all options.
+> See [full installation](#installation) for all options including auto-updates.
 
 ---
 
 ## See It In Action
+
+> *Simplified for illustration — actual output varies by task and project.*
 
 ### Building a Feature from Scratch
 
@@ -106,7 +110,7 @@ Every task flows through four phases, each handled by the right specialist:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The orchestrator manages the cycle, delegating each phase to the appropriate specialist. Simple tasks get light process (`/PACT:comPACT`); complex tasks get the full ceremony (`/PACT:orchestrate`). PACT scales its rigor to match the complexity of the work.
+The orchestrator manages the cycle, delegating each phase to the appropriate specialist. Simple tasks get light process (`/PACT:comPACT`); complex tasks get the full ceremony (`/PACT:orchestrate`). PACT Harness scales its rigor to match the complexity of the work.
 
 ### The Specialist Team
 
@@ -140,7 +144,7 @@ The orchestrator manages the cycle, delegating each phase to the appropriate spe
 | `/PACT:wrap-up` | End-of-session cleanup | Ending a work session |
 | `/PACT:telegram-setup` | Set up Telegram notifications | Interact with sessions from mobile |
 
-### comPACT Shortcuts
+### comPACT Examples
 
 Target a specific specialist directly:
 
@@ -166,6 +170,9 @@ A local SQLite database with vector embeddings and graph-linked memories. Decisi
 ### Adaptive Complexity
 Tasks are scored on novelty, scope, uncertainty, and risk. Simple tasks get light process; complex tasks get full ceremony with planning, architecture, and multi-agent review.
 
+### Agent Lifecycle
+Specialists persist after their phase, available as consultants for follow-up questions. Reviewers become fixers. No wasted context.
+
 ### Telegram Bridge (Optional)
 Stay connected to your Claude Code sessions from your phone. Get notifications, answer blocking questions, and send voice replies — all from Telegram. Run `/PACT:telegram-setup` to enable.
 
@@ -173,7 +180,7 @@ Stay connected to your Claude Code sessions from your phone. Get notifications, 
 
 ## Under the Hood
 
-PACT is built on the **Viable System Model** (VSM), a cybernetics framework for designing organizations that can adapt and survive. In PACT, this means:
+PACT is built on the **Viable System Model** (VSM), a cybernetics framework for designing organizations that can adapt and survive. Here's why this design works — each layer handles a distinct concern, so the system stays coherent as complexity grows:
 
 - **S1 (Operations)**: Specialist agents doing the actual work — each autonomous within their domain
 - **S2 (Coordination)**: Protocols preventing agents from stepping on each other's work
@@ -186,10 +193,12 @@ PACT is built on the **Viable System Model** (VSM), a cybernetics framework for 
 | Hook | Trigger | Purpose |
 |------|---------|---------|
 | `session_init.py` | Session start | Load active plans, check memory |
-| `phase_completion.py` | Agent completes | Remind about decision logs |
+| `phase_completion.py` | Session stop | Remind about decision logs |
 | `validate_handoff.py` | Agent handoff | Verify output quality |
 | `track_files.py` | File edit/write | Track files for memory graph |
 | `memory_prompt.py` | Session end | Prompt to save learnings |
+
+*(Selected hooks shown — see [hooks/](pact-plugin/hooks/) for full list)*
 
 ### Protocols
 
@@ -291,9 +300,9 @@ You should see the PACT Orchestrator respond.
 
 ---
 
-## Skills (13 Domain Knowledge Modules)
+## Skills (16 Modules)
 
-Skills provide specialized knowledge that loads on-demand:
+PACT includes 16 skills — 13 domain knowledge modules that load on-demand, plus 3 operational skills (`pact-agent-teams`, `pact-worktree-setup`, `pact-worktree-cleanup`) used internally by the orchestrator.
 
 ### PACT Phase Skills
 | Skill | Triggers On |
@@ -417,7 +426,7 @@ PACT-prompt/
 │   │   └── plugin.json         # Plugin definition
 │   ├── agents/                 # 11 specialist agents
 │   ├── commands/               # 9 PACT workflow commands
-│   ├── skills/                 # 13 domain knowledge skills
+│   ├── skills/                 # 16 skills (13 domain + 3 operational)
 │   ├── hooks/                  # Automation hooks
 │   ├── protocols/              # Coordination protocols
 │   └── CLAUDE.md               # Orchestrator configuration
