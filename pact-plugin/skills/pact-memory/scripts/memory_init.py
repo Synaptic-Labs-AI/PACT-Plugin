@@ -128,7 +128,11 @@ def maybe_migrate_embeddings() -> dict:
             conn.close()
             return result  # No table, nothing to migrate
 
-        # Check actual dimension by examining an embedding
+        # Check actual dimension via byte-length of a stored embedding.
+        # Uses len(blob)//4 (not MATCH probe) because we need the actual old
+        # dimension value for the diagnostic message below.
+        # Note: database.py:_check_and_migrate_vector_table uses a MATCH probe
+        # instead — it only needs binary match/mismatch, not the old value.
         try:
             row = conn.execute("SELECT embedding FROM vec_memories LIMIT 1").fetchone()
             if row is None:

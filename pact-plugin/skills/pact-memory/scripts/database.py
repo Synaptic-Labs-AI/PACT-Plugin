@@ -253,16 +253,17 @@ def _check_and_migrate_vector_table(conn: sqlite3.Connection, new_dim: int) -> N
         if cursor.fetchone() is None:
             return  # Table doesn't exist, nothing to migrate
 
-        # Try to get current dimension by checking table info
-        # sqlite-vec virtual tables don't support pragma table_info
-        # Instead, try inserting a test embedding and check for dimension mismatch
+        # Probe dimension via MATCH query — sqlite-vec validates dimensions internally.
+        # This gives a binary match/mismatch answer (not the actual old dimension).
+        # Note: memory_init.py uses byte-length (len(blob)//4) instead because it needs
+        # the actual old dimension value for diagnostic messages during re-embedding.
         import struct
         test_embedding = struct.pack(f'{new_dim}f', *([0.0] * new_dim))
 
         try:
             # Try a test query that would fail if dimensions don't match
             conn.execute(
-                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 0",
+                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 1",
                 (test_embedding,)
             )
             # If we get here, dimensions match
@@ -277,7 +278,10 @@ def _check_and_migrate_vector_table(conn: sqlite3.Connection, new_dim: int) -> N
                 )
                 conn.execute("DROP TABLE IF EXISTS vec_memories")
                 conn.commit()
-            # If it's a different error (e.g., empty table), just continue
+            else:
+                logger.warning(
+                    f"Unexpected error during vector dimension probe: {dim_error}"
+                )
 
     except Exception as e:
         logger.debug(f"Could not check vector table dimension: {e}")

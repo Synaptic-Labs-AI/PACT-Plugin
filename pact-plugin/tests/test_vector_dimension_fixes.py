@@ -1322,3 +1322,309 @@ class TestCheckAndMigrateVectorTable:
 
         # Should not raise
         _check_and_migrate_vector_table(mock_conn, 256)
+
+
+# =============================================================================
+# Regression: probe query must use LIMIT 1 (not LIMIT 0)
+# =============================================================================
+
+class TestProbeQueryUsesLimit1:
+    """Regression tests for GitHub issue #231 — LIMIT 0 bypasses sqlite-vec MATCH engine.
+
+    The dimension probe query in _check_and_migrate_vector_table must use LIMIT 1
+    (not LIMIT 0) because LIMIT 0 causes SQLite to skip the MATCH engine entirely,
+    meaning dimension mismatches are never detected.
+    """
+
+    def test_probe_sql_contains_limit_1(self):
+        """The probe query SQL must contain LIMIT 1 to engage sqlite-vec's MATCH engine."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        executed_sql = []
+
+        def tracking_execute(sql, params=None):
+            executed_sql.append(sql)
+            mock_cursor = MagicMock()
+            sql_lower = sql.strip().lower()
+
+            if "sqlite_master" in sql_lower:
+                mock_cursor.fetchone.return_value = ('vec_memories',)
+            elif "match" in sql_lower:
+                # Probe succeeds — dimensions match
+                mock_cursor.fetchall.return_value = []
+            return mock_cursor
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = tracking_execute
+
+        _check_and_migrate_vector_table(mock_conn, 256)
+
+        # Find the probe query (the one containing MATCH)
+        probe_queries = [sql for sql in executed_sql if 'MATCH' in sql]
+        assert len(probe_queries) == 1, (
+            f"Expected exactly 1 probe query with MATCH, got {len(probe_queries)}: {probe_queries}"
+        )
+
+        probe_sql = probe_queries[0]
+        assert 'LIMIT 1' in probe_sql, (
+            f"Probe query must use LIMIT 1 (not LIMIT 0) to engage sqlite-vec MATCH engine. "
+            f"Got: {probe_sql}"
+        )
+        assert 'LIMIT 0' not in probe_sql, (
+            f"Probe query must NOT use LIMIT 0 (bypasses MATCH engine). Got: {probe_sql}"
+        )
+
+    def test_probe_sql_does_not_use_limit_0(self):
+        """Explicit negative test: LIMIT 0 must never appear in the probe query."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        executed_sql = []
+
+        def tracking_execute(sql, params=None):
+            executed_sql.append(sql)
+            mock_cursor = MagicMock()
+            sql_lower = sql.strip().lower()
+
+            if "sqlite_master" in sql_lower:
+                mock_cursor.fetchone.return_value = ('vec_memories',)
+            elif "match" in sql_lower:
+                raise Exception("dimension mismatch: expected 256, got 384")
+            elif "drop table" in sql_lower:
+                pass
+            return mock_cursor
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = tracking_execute
+
+        _check_and_migrate_vector_table(mock_conn, 256)
+
+        probe_queries = [sql for sql in executed_sql if 'MATCH' in sql]
+        for sql in probe_queries:
+            assert 'LIMIT 0' not in sql, (
+                f"LIMIT 0 bypasses sqlite-vec MATCH engine entirely (issue #231). "
+                f"Got: {sql}"
+            )
+
+
+# =============================================================================
+# Integration: real sqlite-vec connection tests
+# =============================================================================
+
+# Check availability of pysqlite3 and sqlite_vec for integration tests
+_has_sqlite_vec = False
+try:
+    import pysqlite3
+    import sqlite_vec as _sqlite_vec_mod
+    _has_sqlite_vec = True
+except ImportError:
+    pass
+
+requires_sqlite_vec = pytest.mark.skipif(
+    not _has_sqlite_vec,
+    reason="Requires pysqlite3 and sqlite_vec for real MATCH engine tests"
+)
+
+
+@requires_sqlite_vec
+class TestSqliteVecIntegration:
+    """Integration tests using real sqlite-vec to verify MATCH engine behavior.
+
+    These tests confirm that _check_and_migrate_vector_table correctly detects
+    dimension mismatches via the actual sqlite-vec MATCH engine, not mocked behavior.
+    This is the definitive guard against LIMIT 0-style bypass bugs (issue #231).
+    """
+
+    def _create_vec_table(self, conn, dim):
+        """Create a vec_memories virtual table with the given dimension."""
+        conn.execute(f"CREATE VIRTUAL TABLE vec_memories USING vec0(memory_id TEXT, embedding float[{dim}])")
+        conn.commit()
+
+    def _insert_vec_row(self, conn, memory_id, dim, values=None):
+        """Insert a row into vec_memories with the given dimension."""
+        if values is None:
+            values = [0.1] * dim
+        embedding = struct.pack(f'{dim}f', *values)
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)",
+            (memory_id, embedding)
+        )
+        conn.commit()
+
+    def _make_real_conn(self):
+        """Create a real pysqlite3 connection with sqlite-vec loaded."""
+        conn = pysqlite3.connect(':memory:')
+        conn.enable_load_extension(True)
+        _sqlite_vec_mod.load(conn)
+        conn.enable_load_extension(False)
+        return conn
+
+    def test_limit_1_detects_dimension_mismatch(self):
+        """With real sqlite-vec, LIMIT 1 must raise on dimension mismatch."""
+        conn = self._make_real_conn()
+        try:
+            # Create table with dim=4 and insert a row
+            self._create_vec_table(conn, 4)
+            self._insert_vec_row(conn, 'test-row', 4)
+
+            # Probe with wrong dimension (dim=2) — must raise
+            wrong_embedding = struct.pack('2f', 0.1, 0.2)
+            with pytest.raises(Exception, match="(?i)dimension"):
+                conn.execute(
+                    "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 1",
+                    (wrong_embedding,)
+                )
+        finally:
+            conn.close()
+
+    def test_limit_0_does_not_detect_dimension_mismatch(self):
+        """Demonstrate the bug: LIMIT 0 silently bypasses MATCH engine validation."""
+        conn = self._make_real_conn()
+        try:
+            self._create_vec_table(conn, 4)
+            self._insert_vec_row(conn, 'test-row', 4)
+
+            # Probe with wrong dimension (dim=2) using LIMIT 0 — silently succeeds (the bug)
+            wrong_embedding = struct.pack('2f', 0.1, 0.2)
+            # This should NOT raise — demonstrating why LIMIT 0 was wrong
+            conn.execute(
+                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 0",
+                (wrong_embedding,)
+            )
+            # If we get here, the bug is confirmed: LIMIT 0 doesn't validate dimensions
+        finally:
+            conn.close()
+
+    def test_matching_dimensions_succeed_with_limit_1(self):
+        """With real sqlite-vec, LIMIT 1 must succeed when dimensions match."""
+        conn = self._make_real_conn()
+        try:
+            self._create_vec_table(conn, 4)
+            self._insert_vec_row(conn, 'test-row', 4)
+
+            correct_embedding = struct.pack('4f', 0.1, 0.2, 0.3, 0.4)
+            # Must not raise — dimensions match
+            cursor = conn.execute(
+                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 1",
+                (correct_embedding,)
+            )
+            result = cursor.fetchone()
+            assert result is not None, "Should return a row when dimensions match"
+            assert result[0] == 'test-row'
+        finally:
+            conn.close()
+
+    def test_empty_table_succeeds_with_limit_1(self):
+        """LIMIT 1 on an empty vec_memories table must not raise or false-positive."""
+        conn = self._make_real_conn()
+        try:
+            self._create_vec_table(conn, 4)
+            # Table exists but is empty — no rows inserted
+
+            correct_embedding = struct.pack('4f', 0.1, 0.2, 0.3, 0.4)
+            # Must not raise — empty table should not trigger dimension error
+            cursor = conn.execute(
+                "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 1",
+                (correct_embedding,)
+            )
+            result = cursor.fetchone()
+            assert result is None, "Empty table should return no rows"
+        finally:
+            conn.close()
+
+    def test_empty_table_wrong_dim_with_limit_1(self):
+        """LIMIT 1 on an empty table with wrong dimensions — verify sqlite-vec behavior."""
+        conn = self._make_real_conn()
+        try:
+            self._create_vec_table(conn, 4)
+            # Table exists but is empty
+
+            # Probe with wrong dimension on empty table
+            wrong_embedding = struct.pack('2f', 0.1, 0.2)
+            # sqlite-vec may or may not validate dimensions on empty tables.
+            # This test documents the actual behavior for awareness.
+            try:
+                conn.execute(
+                    "SELECT memory_id FROM vec_memories WHERE embedding MATCH ? LIMIT 1",
+                    (wrong_embedding,)
+                )
+                # If no error: sqlite-vec doesn't validate dimensions on empty tables
+                # This is expected — no rows means no MATCH execution
+            except Exception as e:
+                # If error: sqlite-vec validates dimensions even on empty tables
+                assert "dimension" in str(e).lower() or "mismatch" in str(e).lower()
+        finally:
+            conn.close()
+
+    def test_check_and_migrate_with_real_sqlite_vec_mismatch(self):
+        """Full integration: _check_and_migrate_vector_table detects real mismatch."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        conn = self._make_real_conn()
+        try:
+            # Create table with dim=4 and insert a row
+            self._create_vec_table(conn, 4)
+            self._insert_vec_row(conn, 'test-row', 4)
+
+            # Call with new_dim=8 — should detect mismatch and drop table
+            _check_and_migrate_vector_table(conn, 8)
+
+            # Table should have been dropped
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
+            )
+            assert cursor.fetchone() is None, (
+                "vec_memories should have been dropped after dimension mismatch"
+            )
+        finally:
+            conn.close()
+
+    def test_check_and_migrate_with_real_sqlite_vec_match(self):
+        """Full integration: _check_and_migrate_vector_table preserves matching table."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        conn = self._make_real_conn()
+        try:
+            # Create table with dim=4 and insert a row
+            self._create_vec_table(conn, 4)
+            self._insert_vec_row(conn, 'test-row', 4)
+
+            # Call with matching new_dim=4 — should detect match and preserve table
+            _check_and_migrate_vector_table(conn, 4)
+
+            # Table should still exist
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
+            )
+            assert cursor.fetchone() is not None, (
+                "vec_memories should be preserved when dimensions match"
+            )
+
+            # Data should still be intact
+            cursor = conn.execute("SELECT memory_id FROM vec_memories")
+            rows = cursor.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == 'test-row'
+        finally:
+            conn.close()
+
+    def test_check_and_migrate_empty_table_preserves(self):
+        """Full integration: empty vec_memories should NOT be dropped."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        conn = self._make_real_conn()
+        try:
+            self._create_vec_table(conn, 4)
+            # Table exists but is empty
+
+            # Call with any dimension — empty table should not be dropped
+            _check_and_migrate_vector_table(conn, 4)
+
+            # Table should still exist
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
+            )
+            assert cursor.fetchone() is not None, (
+                "Empty vec_memories should be preserved (not false-positive dropped)"
+            )
+        finally:
+            conn.close()
