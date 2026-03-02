@@ -16,7 +16,6 @@ import logging
 import platform
 import struct
 import subprocess
-from pathlib import Path
 from typing import Any, List, Optional
 
 # Configure logging
