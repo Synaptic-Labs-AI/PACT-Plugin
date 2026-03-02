@@ -606,13 +606,15 @@ class TestGetSearchCapabilities:
 class TestVectorSearchLogging:
     """Test that vector_search logs failures at WARNING level."""
 
-    def test_exception_logged_at_warning_level(self):
-        """When vector search raises an exception, it should log at WARNING not DEBUG."""
+    def test_dimension_error_logged_at_warning_level(self):
+        """When vector search fails with dimension-related error, it should log at WARNING."""
         from scripts.search import vector_search
 
         # Use a MagicMock connection to avoid pysqlite3 read-only attribute issue
         mock_conn = MagicMock()
-        mock_conn.enable_load_extension.side_effect = Exception("test error")
+        mock_conn.enable_load_extension.side_effect = Exception(
+            "dimension mismatch: expected 256, got 384"
+        )
 
         with patch('scripts.search.SQLITE_EXTENSIONS_ENABLED', True), \
              patch('scripts.search.generate_embedding', return_value=[0.1] * 256), \
@@ -622,7 +624,25 @@ class TestVectorSearchLogging:
 
         assert result == [], "Should return empty list on error"
         mock_logger.warning.assert_called_once()
-        assert "test error" in str(mock_logger.warning.call_args)
+        assert "dimension mismatch" in str(mock_logger.warning.call_args)
+
+    def test_non_dimension_error_logged_at_debug_level(self):
+        """Non-dimension errors should log at DEBUG, not WARNING."""
+        from scripts.search import vector_search
+
+        mock_conn = MagicMock()
+        mock_conn.enable_load_extension.side_effect = Exception("connection lost")
+
+        with patch('scripts.search.SQLITE_EXTENSIONS_ENABLED', True), \
+             patch('scripts.search.generate_embedding', return_value=[0.1] * 256), \
+             patch('scripts.search.logger') as mock_logger:
+
+            result = vector_search(mock_conn, "test query")
+
+        assert result == [], "Should return empty list on error"
+        mock_logger.warning.assert_not_called()
+        mock_logger.debug.assert_called()
+        assert "connection lost" in str(mock_logger.debug.call_args)
 
     def test_no_debug_log_for_vector_search_failed(self):
         """The exception handler should use warning, not debug for 'Vector search failed'."""
@@ -827,7 +847,8 @@ class TestEdgeCases:
             result = maybe_migrate_embeddings()
 
         # The inner try/except ImportError should catch and return skipped_deps
-        assert result['status'] in ('skipped_deps', 'ok', 'error')
+        assert result['status'] == 'skipped_deps'
+        assert result['message'] == 'Dependencies not available'
 
     def test_check_embedding_availability_returns_correct_structure(self):
         """Verify check_embedding_availability returns the keys that search.py expects."""
@@ -973,3 +994,331 @@ class TestRegressionSafety:
         results = search_memories_by_text(db_conn, 'dimension')
         assert len(results) >= 1
         assert 'dimension' in results[0]['context']
+
+
+# =============================================================================
+# F2: Multi-row and partial failure in maybe_migrate_embeddings
+# =============================================================================
+
+class TestMaybeMigrateEmbeddingsMultiRow:
+    """Test migration with multiple memory rows, including partial failure."""
+
+    def _make_memory_row(self, mem_id, context='test', project_id=None):
+        """Helper to create a minimal memory row dict."""
+        return {
+            'id': mem_id,
+            'context': context,
+            'goal': None,
+            'lessons_learned': None,
+            'decisions': None,
+            'entities': None,
+            'reasoning_chains': None,
+            'agreements_reached': None,
+            'disagreements_resolved': None,
+            'project_id': project_id,
+            'session_id': None,
+            'created_at': '2026-01-01',
+            'updated_at': '2026-01-01',
+            'active_tasks': None,
+        }
+
+    def test_multiple_rows_all_succeed(self):
+        """All rows should be re-embedded when embedding generation succeeds."""
+        from scripts.memory_init import maybe_migrate_embeddings, reset_initialization
+
+        reset_initialization()
+
+        mock_conn = MagicMock()
+        mock_service = MagicMock()
+        mock_service.generate.return_value = [0.1] * 256
+
+        rows = [
+            self._make_memory_row('mem-1', 'first context', 'proj-a'),
+            self._make_memory_row('mem-2', 'second context', 'proj-b'),
+            self._make_memory_row('mem-3', 'third context'),
+        ]
+
+        mock_conn.execute.side_effect = _build_mock_execute(
+            table_exists=True,
+            embedding_bytes=struct.pack('384f', *([0.1] * 384)),
+            memory_rows=rows,
+        )
+
+        with patch('scripts.database.get_connection', return_value=mock_conn), \
+             patch('scripts.embeddings.get_embedding_service', return_value=mock_service), \
+             patch('scripts.embeddings.generate_embedding_text', return_value="text"), \
+             patch('scripts.embeddings.EMBEDDING_DIM', 256):
+
+            mock_sqlite_vec = MagicMock()
+            with patch.dict('sys.modules', {'sqlite_vec': mock_sqlite_vec}):
+                result = maybe_migrate_embeddings()
+
+        assert result['status'] == 'ok'
+        assert '3/3' in result['message'], f"Expected 3/3 in message, got: {result['message']}"
+
+    def test_partial_failure_continues_remaining(self):
+        """When some rows fail embedding, migration should continue and report partial success."""
+        from scripts.memory_init import maybe_migrate_embeddings, reset_initialization
+
+        reset_initialization()
+
+        mock_conn = MagicMock()
+        mock_service = MagicMock()
+
+        # First call succeeds, second raises, third succeeds
+        mock_service.generate.side_effect = [
+            [0.1] * 256,
+            Exception("model crashed on bad input"),
+            [0.1] * 256,
+        ]
+
+        rows = [
+            self._make_memory_row('mem-ok-1', 'good row'),
+            self._make_memory_row('mem-fail', 'bad row'),
+            self._make_memory_row('mem-ok-2', 'another good row'),
+        ]
+
+        mock_conn.execute.side_effect = _build_mock_execute(
+            table_exists=True,
+            embedding_bytes=struct.pack('384f', *([0.1] * 384)),
+            memory_rows=rows,
+        )
+
+        with patch('scripts.database.get_connection', return_value=mock_conn), \
+             patch('scripts.embeddings.get_embedding_service', return_value=mock_service), \
+             patch('scripts.embeddings.generate_embedding_text', return_value="text"), \
+             patch('scripts.embeddings.EMBEDDING_DIM', 256):
+
+            mock_sqlite_vec = MagicMock()
+            with patch.dict('sys.modules', {'sqlite_vec': mock_sqlite_vec}):
+                result = maybe_migrate_embeddings()
+
+        assert result['status'] == 'ok'
+        assert '2/3' in result['message'], (
+            f"Expected 2/3 (2 succeeded, 1 failed), got: {result['message']}"
+        )
+
+    def test_all_rows_fail_still_completes(self):
+        """If every row fails embedding, migration should still complete with 0/N count."""
+        from scripts.memory_init import maybe_migrate_embeddings, reset_initialization
+
+        reset_initialization()
+
+        mock_conn = MagicMock()
+        mock_service = MagicMock()
+        mock_service.generate.side_effect = Exception("model unavailable")
+
+        rows = [
+            self._make_memory_row('mem-f1'),
+            self._make_memory_row('mem-f2'),
+        ]
+
+        mock_conn.execute.side_effect = _build_mock_execute(
+            table_exists=True,
+            embedding_bytes=struct.pack('384f', *([0.1] * 384)),
+            memory_rows=rows,
+        )
+
+        with patch('scripts.database.get_connection', return_value=mock_conn), \
+             patch('scripts.embeddings.get_embedding_service', return_value=mock_service), \
+             patch('scripts.embeddings.generate_embedding_text', return_value="text"), \
+             patch('scripts.embeddings.EMBEDDING_DIM', 256):
+
+            mock_sqlite_vec = MagicMock()
+            with patch.dict('sys.modules', {'sqlite_vec': mock_sqlite_vec}):
+                result = maybe_migrate_embeddings()
+
+        assert result['status'] == 'ok'
+        assert '0/2' in result['message'], (
+            f"Expected 0/2 (all failed), got: {result['message']}"
+        )
+
+    def test_empty_embedding_not_counted_as_success(self):
+        """When service.generate returns empty/falsy, row should not count as success."""
+        from scripts.memory_init import maybe_migrate_embeddings, reset_initialization
+
+        reset_initialization()
+
+        mock_conn = MagicMock()
+        mock_service = MagicMock()
+        # First returns valid embedding, second returns empty list (falsy)
+        mock_service.generate.side_effect = [
+            [0.1] * 256,
+            [],
+        ]
+
+        rows = [
+            self._make_memory_row('mem-valid'),
+            self._make_memory_row('mem-empty-embed'),
+        ]
+
+        mock_conn.execute.side_effect = _build_mock_execute(
+            table_exists=True,
+            embedding_bytes=struct.pack('384f', *([0.1] * 384)),
+            memory_rows=rows,
+        )
+
+        with patch('scripts.database.get_connection', return_value=mock_conn), \
+             patch('scripts.embeddings.get_embedding_service', return_value=mock_service), \
+             patch('scripts.embeddings.generate_embedding_text', return_value="text"), \
+             patch('scripts.embeddings.EMBEDDING_DIM', 256):
+
+            mock_sqlite_vec = MagicMock()
+            with patch.dict('sys.modules', {'sqlite_vec': mock_sqlite_vec}):
+                result = maybe_migrate_embeddings()
+
+        assert result['status'] == 'ok'
+        assert '1/2' in result['message'], (
+            f"Expected 1/2 (one empty embedding), got: {result['message']}"
+        )
+
+
+# =============================================================================
+# F3: Direct tests for _check_and_migrate_vector_table
+# =============================================================================
+
+class TestCheckAndMigrateVectorTable:
+    """Direct tests for _check_and_migrate_vector_table dimension detection."""
+
+    def test_no_table_is_noop(self):
+        """When vec_memories table doesn't exist, function returns without action."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None  # Table doesn't exist
+        mock_conn.execute.return_value = mock_cursor
+
+        _check_and_migrate_vector_table(mock_conn, 256)
+
+        # Should only have called execute once (the sqlite_master check)
+        assert mock_conn.execute.call_count == 1
+        # Should NOT have called DROP TABLE
+        for call_args in mock_conn.execute.call_args_list:
+            sql = str(call_args)
+            assert 'DROP TABLE' not in sql
+
+    def test_matching_dimensions_is_noop(self):
+        """When probe query succeeds, dimensions match — no migration needed."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        call_count = {'n': 0}
+
+        def mock_execute(sql, params=None):
+            call_count['n'] += 1
+            mock_cursor = MagicMock()
+            sql_lower = sql.strip().lower()
+
+            if "sqlite_master" in sql_lower:
+                mock_cursor.fetchone.return_value = ('vec_memories',)
+            elif "embedding match" in sql_lower:
+                # Probe succeeds — dimensions match
+                mock_cursor.fetchall.return_value = []
+            return mock_cursor
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = mock_execute
+
+        _check_and_migrate_vector_table(mock_conn, 256)
+
+        # Should NOT have called DROP TABLE or commit
+        for call_args in mock_conn.execute.call_args_list:
+            sql = str(call_args)
+            assert 'DROP TABLE' not in sql
+
+    def test_dimension_mismatch_drops_table(self):
+        """When probe query fails with dimension error, table should be dropped."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        dropped = []
+
+        def mock_execute(sql, params=None):
+            mock_cursor = MagicMock()
+            sql_lower = sql.strip().lower()
+
+            if "sqlite_master" in sql_lower:
+                mock_cursor.fetchone.return_value = ('vec_memories',)
+            elif "embedding match" in sql_lower:
+                raise Exception("dimension mismatch: expected 256, got 384")
+            elif "drop table" in sql_lower:
+                dropped.append(sql)
+            return mock_cursor
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = mock_execute
+
+        _check_and_migrate_vector_table(mock_conn, 256)
+
+        assert len(dropped) == 1, f"Expected 1 DROP TABLE call, got {len(dropped)}"
+        assert 'vec_memories' in dropped[0]
+        mock_conn.commit.assert_called_once()
+
+    def test_mismatch_keyword_variants_trigger_drop(self):
+        """Error messages containing 'mismatch', 'invalid', or 'dimension' should all trigger drop."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        error_messages = [
+            "dimension mismatch in vector table",
+            "invalid vector size",
+            "dimension does not match expected",
+        ]
+
+        for error_msg in error_messages:
+            dropped = []
+
+            def make_execute(err):
+                def mock_execute(sql, params=None):
+                    mock_cursor = MagicMock()
+                    sql_lower = sql.strip().lower()
+
+                    if "sqlite_master" in sql_lower:
+                        mock_cursor.fetchone.return_value = ('vec_memories',)
+                    elif "embedding match" in sql_lower:
+                        raise Exception(err)
+                    elif "drop table" in sql_lower:
+                        dropped.append(sql)
+                    return mock_cursor
+                return mock_execute
+
+            mock_conn = MagicMock()
+            mock_conn.execute.side_effect = make_execute(error_msg)
+
+            _check_and_migrate_vector_table(mock_conn, 256)
+
+            assert len(dropped) == 1, (
+                f"Error '{error_msg}' should trigger DROP TABLE, got {len(dropped)} drops"
+            )
+
+    def test_unrelated_error_does_not_drop(self):
+        """Probe errors without dimension keywords should NOT trigger table drop."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        def mock_execute(sql, params=None):
+            mock_cursor = MagicMock()
+            sql_lower = sql.strip().lower()
+
+            if "sqlite_master" in sql_lower:
+                mock_cursor.fetchone.return_value = ('vec_memories',)
+            elif "embedding match" in sql_lower:
+                raise Exception("database is locked")
+            return mock_cursor
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = mock_execute
+
+        _check_and_migrate_vector_table(mock_conn, 256)
+
+        # Should NOT have called DROP TABLE
+        for call_args in mock_conn.execute.call_args_list:
+            sql = str(call_args)
+            assert 'DROP TABLE' not in sql
+
+    def test_outer_exception_caught_gracefully(self):
+        """If the initial sqlite_master query fails, function should not raise."""
+        from scripts.database import _check_and_migrate_vector_table
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = Exception("connection lost")
+
+        # Should not raise
+        _check_and_migrate_vector_table(mock_conn, 256)
