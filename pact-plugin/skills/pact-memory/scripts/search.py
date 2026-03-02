@@ -125,7 +125,7 @@ def vector_search(
         return [(row[0], row[1]) for row in cursor.fetchall()]
 
     except Exception as e:
-        logger.debug(f"Vector search failed: {e}")
+        logger.warning(f"Vector search failed: {e}")
         return []
 
 
@@ -453,12 +453,10 @@ def get_search_capabilities() -> Dict[str, Any]:
         "graph_boosting": True,  # Always available
         "search_mode": search_mode,
         "sqlite_extensions_enabled": SQLITE_EXTENSIONS_ENABLED,
-        "embedding_backend": embedding_status.get("active_backend"),
-        "model_path": embedding_status.get("model_path"),
-        "model_exists": embedding_status.get("model_exists", False),
+        "embedding_backend": embedding_status.get("backend"),
+        "embedding_dimension": embedding_status.get("embedding_dimension"),
         "details": {
             "pysqlite3_available": SQLITE_EXTENSIONS_ENABLED,
             "embeddings_available": embedding_status["available"],
-            "backends": embedding_status.get("backends", {})
         }
     }
