@@ -8,9 +8,8 @@ All path constants and directory configurations are defined here
 to ensure consistency across all modules.
 
 Used by:
-- database.py: Database path configuration
-- embeddings.py: Model path configuration
-- setup_memory.py: Directory creation and model download
+- database.py: Database path configuration (DB_PATH, PACT_MEMORY_DIR)
+- setup_memory.py: Directory creation (PACT_MEMORY_DIR)
 """
 
 from pathlib import Path
@@ -21,23 +20,5 @@ PACT_MEMORY_DIR = Path.home() / ".claude" / "pact-memory"
 # Database configuration
 DB_PATH = PACT_MEMORY_DIR / "memory.db"
 
-# Model configuration
-MODELS_DIR = PACT_MEMORY_DIR / "models"
-DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2-Q8_0.gguf"
-DEFAULT_MODEL_PATH = MODELS_DIR / DEFAULT_MODEL_NAME
-
 # Session tracking directory
 SESSION_TRACKING_DIR = PACT_MEMORY_DIR / "session-tracking"
-
-# Model download URL
-MODEL_URL = (
-    "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/"
-    "resolve/main/all-MiniLM-L6-v2-Q8_0.gguf"
-)
-
-# Embedding configuration
-# Model2Vec (primary backend) uses 256-dim embeddings
-# sentence-transformers/sqlite-lembed use 384-dim embeddings
-# The active backend determines the actual dimension used
-EMBEDDING_DIMENSION = 256  # Default to model2vec dimension
-MODEL_SIZE_MB = 24  # Approximate size for GGUF model (sqlite-lembed fallback)
