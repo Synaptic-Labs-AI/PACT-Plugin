@@ -1,26 +1,203 @@
-# PACT Framework for Claude Code
+# PACT — Orchestration Harness for Claude Code
 
-> **Principled AI-assisted Coding through Teamwork** — Transform Claude Code into a coordinated team of specialist developers using the Prepare → Architect → Code → Test methodology.
+> **Stop vibe coding. Start orchestrating.** PACT turns a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
-## What is PACT?
+<!-- TODO: Add demo GIF showing PACT orchestrating a real task -->
 
-PACT turns a single AI assistant into **11 specialist agents** that work together systematically:
+## The Problem
 
-| Agent | Role |
-|-------|------|
+You ask Claude Code to build a feature. It starts coding immediately — no research, no design, no plan. Halfway through, it loses context and starts guessing. You end up with code that sort of works but wasn't thought through.
+
+This is **vibe coding**: one AI trying to do everything at once, with no structure and no memory.
+
+## The Solution
+
+PACT turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **11 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
+
+| Without PACT | With PACT |
+|-------------|-----------|
+| AI starts coding immediately | Research and planning happen first |
+| Context lost mid-task | Each specialist gets a fresh context window |
+| One agent guesses at everything | Dedicated researchers, architects, coders, testers |
+| No memory between sessions | Persistent memory system across sessions |
+| Same mistakes repeated | Lessons learned are captured and reused |
+
+---
+
+## Quick Start
+
+**1. Install the plugin**
+```
+/plugin marketplace add ProfSynapse/PACT-prompt
+/plugin install PACT@pact-marketplace
+```
+
+**2. Set up the orchestrator** ([detailed options below](#installation))
+```bash
+cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+```
+
+**3. Restart Claude Code and go**
+```
+/PACT:orchestrate Build user authentication with JWT
+```
+
+> Requires [Agent Teams enabled](#enabling-agent-teams). See [full installation](#installation) for all options.
+
+---
+
+## See It In Action
+
+### Building a Feature from Scratch
+
+```
+You:   "I need user authentication with JWT tokens"
+
+PACT:  [PREPARE]   Researching JWT best practices, library options, security patterns...
+       [ARCHITECT]  Designing auth flow, token structure, middleware, refresh strategy...
+       [CODE]       Backend coder implementing AuthService, JWT middleware, token rotation...
+       [TEST]       Test engineer verifying login, refresh, expiration, edge cases...
+
+Result: Production-ready auth system — researched, designed, built, and tested.
+```
+
+### Quick Fix with a Single Specialist
+
+```
+You:   /PACT:comPACT backend Fix the null check in validateToken
+
+PACT:  [Backend Coder] Analyzed the issue, fixed null check, added guard clause,
+       verified build passes. Done.
+```
+
+### Planning Before Building
+
+```
+You:   /PACT:plan-mode Design a caching strategy for our API
+
+PACT:  [Preparer]  Researching Redis vs Memcached vs in-memory options...
+       [Architect]  Designing cache invalidation strategy, TTL policies...
+       [Database]   Analyzing query patterns for optimal cache keys...
+
+       Plan saved to docs/plans/api-caching-plan.md — ready for your approval.
+```
+
+---
+
+## How It Works
+
+### The PACT Cycle
+
+Every task flows through four phases, each handled by the right specialist:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    /PACT:orchestrate                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   PREPARE ──► ARCHITECT ──► CODE ──► TEST                   │
+│      │            │           │         │                   │
+│      ▼            ▼           ▼         ▼                   │
+│   Research    Design      Implement   Verify                │
+│   Docs        Blueprint   Backend     Unit tests            │
+│   APIs        Contracts   Frontend    Integration           │
+│   Context     Schema      Database    E2E tests             │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The orchestrator manages the cycle, delegating each phase to the appropriate specialist. Simple tasks get light process (`/PACT:comPACT`); complex tasks get the full ceremony (`/PACT:orchestrate`). PACT scales its rigor to match the complexity of the work.
+
+### The Specialist Team
+
+| Agent | What They Do |
+|-------|-------------|
 | **Preparer** | Research, gather requirements, read docs |
-| **Architect** | Design systems, create blueprints |
-| **Backend Coder** | Implement server-side logic |
-| **Frontend Coder** | Build user interfaces |
-| **Database Engineer** | Design schemas, optimize queries |
+| **Architect** | Design systems, create blueprints, define contracts |
+| **Backend Coder** | Implement server-side logic, APIs, middleware |
+| **Frontend Coder** | Build user interfaces, client-side logic |
+| **Database Engineer** | Design schemas, optimize queries, migrations |
 | **DevOps Engineer** | CI/CD, Docker, infrastructure, build systems |
 | **n8n Specialist** | Build workflow automations |
-| **Test Engineer** | Write comprehensive tests |
+| **Test Engineer** | Write and run comprehensive tests |
 | **Security Engineer** | Adversarial security code review |
 | **QA Engineer** | Runtime verification, exploratory testing |
 | **Memory Agent** | Persist context, recover from compaction |
 
-Instead of "vibe coding" (letting AI guess), PACT ensures **preparation before coding**, **architecture before implementation**, and **testing as integral**.
+---
+
+## Commands
+
+| Command | Purpose | When to Use |
+|---------|---------|-------------|
+| `/PACT:orchestrate` | Full multi-agent workflow | New features, complex tasks |
+| `/PACT:comPACT` | Single specialist, light process | Quick fixes, focused tasks |
+| `/PACT:plan-mode` | Planning consultation (no code) | Before complex implementations |
+| `/PACT:rePACT` | Nested PACT cycle for sub-tasks | Complex sub-problems during CODE |
+| `/PACT:imPACT` | Triage when blocked | Hit a blocker, need help deciding |
+| `/PACT:peer-review` | Commit, PR, multi-agent review | Ready to merge |
+| `/PACT:pin-memory` | Pin critical context permanently | Gotchas, key decisions to preserve |
+| `/PACT:wrap-up` | End-of-session cleanup | Ending a work session |
+| `/PACT:telegram-setup` | Set up Telegram notifications | Interact with sessions from mobile |
+
+### comPACT Shortcuts
+
+Target a specific specialist directly:
+
+```bash
+/PACT:comPACT backend   Fix the authentication bug
+/PACT:comPACT frontend  Add loading spinner to submit button
+/PACT:comPACT database  Add index to users.email column
+/PACT:comPACT test      Add unit tests for payment module
+/PACT:comPACT architect Should we use microservices here?
+/PACT:comPACT prepare   Research OAuth2 best practices
+```
+
+---
+
+## Features
+
+### Specialist Agents
+Eleven agents with distinct expertise — from research to security review. Each gets a fresh context window, so no single agent is overloaded.
+
+### Persistent Memory
+A local SQLite database with vector embeddings and graph-linked memories. Decisions, lessons, and context persist across sessions — PACT remembers what worked and what didn't.
+
+### Adaptive Complexity
+Tasks are scored on novelty, scope, uncertainty, and risk. Simple tasks get light process; complex tasks get full ceremony with planning, architecture, and multi-agent review.
+
+### Telegram Bridge (Optional)
+Stay connected to your Claude Code sessions from your phone. Get notifications, answer blocking questions, and send voice replies — all from Telegram. Run `/PACT:telegram-setup` to enable.
+
+---
+
+## Under the Hood
+
+PACT is built on the **Viable System Model** (VSM), a cybernetics framework for designing organizations that can adapt and survive. In PACT, this means:
+
+- **S1 (Operations)**: Specialist agents doing the actual work — each autonomous within their domain
+- **S2 (Coordination)**: Protocols preventing agents from stepping on each other's work
+- **S3 (Control)**: The orchestrator managing current execution — tracking progress, clearing blockers
+- **S4 (Intelligence)**: Strategic assessment — is the plan still valid? Should we adapt?
+- **S5 (Policy)**: Non-negotiable rules — security, quality, ethics — that no operational pressure overrides
+
+### Hooks (Automation)
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `session_init.py` | Session start | Load active plans, check memory |
+| `phase_completion.py` | Agent completes | Remind about decision logs |
+| `validate_handoff.py` | Agent handoff | Verify output quality |
+| `track_files.py` | File edit/write | Track files for memory graph |
+| `memory_prompt.py` | Session end | Prompt to save learnings |
+
+### Protocols
+
+Coordination protocols handle agent communication, phase transitions, scope detection, algedonic signals (emergency escalation), and variety management. See the [protocol reference](pact-plugin/protocols/) for details.
+
+### Conversation Theory
+
+PACT uses Gordon Pask's Conversation Theory to ensure shared understanding between agents. Teachback protocols verify that downstream agents correctly understood upstream decisions before proceeding.
 
 ---
 
@@ -28,7 +205,7 @@ Instead of "vibe coding" (letting AI guess), PACT ensures **preparation before c
 
 ### Option A: Let Claude Set It Up (Easiest)
 
-Just give Claude this prompt:
+Give Claude this prompt:
 
 ```
 Read the PACT setup instructions at https://github.com/ProfSynapse/PACT-prompt/blob/main/README.md
@@ -38,7 +215,7 @@ and help me install the PACT plugin with auto-updates enabled.
 Or copy this detailed prompt for Claude:
 
 ```
-Help me install the PACT Framework plugin for Claude Code:
+Help me install the PACT plugin for Claude Code:
 
 1. Add the marketplace: /plugin marketplace add ProfSynapse/PACT-prompt
 2. Install the plugin: /plugin install PACT@pact-marketplace
@@ -94,7 +271,7 @@ cd PACT-prompt
 claude
 ```
 
-### ⚠️ Restart Required
+### Restart Required
 
 After installing, you **must restart Claude Code**:
 
@@ -110,56 +287,7 @@ After restart, test with:
 /PACT:orchestrate Hello, confirm PACT is working
 ```
 
-You should see the 🛠️ PACT Orchestrator respond.
-
----
-
-## Quick Start
-
-Once installed, start Claude Code in your project:
-
-```bash
-claude
-```
-
-Then use natural language or commands:
-
-```
-# Natural language
-"I want to build a REST API for user management. Start the PACT process."
-
-# Or use commands directly
-/PACT:orchestrate Build user authentication with JWT
-/PACT:comPACT backend Fix the null pointer in auth middleware
-/PACT:plan-mode Design a caching strategy for our API
-```
-
----
-
-## Commands
-
-| Command | Purpose | When to Use |
-|---------|---------|-------------|
-| `/PACT:orchestrate` | Full multi-agent workflow | New features, complex tasks |
-| `/PACT:comPACT` | Single specialist, light process | Quick fixes, focused tasks |
-| `/PACT:plan-mode` | Planning consultation (no code) | Before complex implementations |
-| `/PACT:rePACT` | Nested PACT cycle for sub-tasks | Complex sub-problems during CODE |
-| `/PACT:imPACT` | Triage when blocked | Hit a blocker, need help deciding |
-| `/PACT:peer-review` | Commit, PR, multi-agent review | Ready to merge |
-| `/PACT:pin-memory` | Pin critical context permanently | Gotchas, key decisions to preserve |
-| `/PACT:wrap-up` | End-of-session cleanup | Ending a work session |
-| `/PACT:telegram-setup` | Set up Telegram notifications | Interact with sessions from mobile |
-
-### comPACT Examples
-
-```bash
-/PACT:comPACT backend Fix the authentication bug
-/PACT:comPACT frontend Add loading spinner to submit button
-/PACT:comPACT database Add index to users.email column
-/PACT:comPACT test Add unit tests for payment module
-/PACT:comPACT architect Should we use microservices here?
-/PACT:comPACT prepare Research OAuth2 best practices
-```
+You should see the PACT Orchestrator respond.
 
 ---
 
@@ -288,54 +416,13 @@ PACT-prompt/
 │   ├── .claude-plugin/
 │   │   └── plugin.json         # Plugin definition
 │   ├── agents/                 # 11 specialist agents
-│   ├── commands/               # 8 PACT workflow commands
+│   ├── commands/               # 9 PACT workflow commands
 │   ├── skills/                 # 13 domain knowledge skills
 │   ├── hooks/                  # Automation hooks
 │   ├── protocols/              # Coordination protocols
 │   └── CLAUDE.md               # Orchestrator configuration
 └── docs/
 ```
-
----
-
-## How It Works
-
-### The PACT Cycle
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    /PACT:orchestrate                        │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   PREPARE ──► ARCHITECT ──► CODE ──► TEST                   │
-│      │            │           │         │                   │
-│      ▼            ▼           ▼         ▼                   │
-│   Research    Design      Implement   Verify                │
-│   Docs        Blueprint   Backend     Unit tests            │
-│   APIs        Contracts   Frontend    Integration           │
-│   Context     Schema      Database    E2E tests             │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### VSM-Enhanced Orchestration
-
-PACT uses the **Viable System Model** for intelligent coordination:
-
-- **Variety Management**: Simple tasks get light process; complex tasks get full ceremony
-- **Adaptive Workflow**: Orchestrator selects the right level of rigor
-- **Viability Sensing**: Agents emit emergency signals (HALT/ALERT) for critical issues
-- **Continuous Audit**: Quality feedback during implementation, not just at the end
-
-### Hooks (Automation)
-
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| `session_init.py` | Session start | Load active plans, check memory |
-| `phase_completion.py` | Agent completes | Remind about decision logs |
-| `validate_handoff.py` | Agent handoff | Verify output quality |
-| `track_files.py` | File edit/write | Track files for memory graph |
-| `memory_prompt.py` | Session end | Prompt to save learnings |
 
 ---
 
@@ -378,7 +465,7 @@ Act as PACT Orchestrator...
 
 ### Enabling Agent Teams
 
-> **Required since PACT v3.0.** PACT's specialist agents now run as an Agent Team — a coordinated group of Claude Code instances with shared tasks and inter-agent messaging. Agent Teams are experimental in Claude Code and **disabled by default**.
+> **Required since PACT v3.0.** PACT's specialist agents run as an Agent Team — a coordinated group of Claude Code instances with shared tasks and inter-agent messaging. Agent Teams are experimental in Claude Code and **disabled by default**.
 
 Add the following to your `settings.json` (global `~/.claude/settings.json` or project-level `.claude/settings.json`):
 
@@ -402,45 +489,6 @@ pip install sqlite-vec
 
 # For n8n workflows
 # Requires n8n-mcp MCP server
-```
-
----
-
-## Examples
-
-### Start a New Feature
-
-```
-User: I need user authentication with JWT tokens
-
-Claude: I'll use /PACT:orchestrate to coordinate this...
-
-[PREPARE] Researching JWT best practices, library options...
-[ARCHITECT] Designing auth flow, token structure, middleware...
-[CODE] Backend coder implementing AuthService, middleware...
-[TEST] Test engineer verifying login, refresh, edge cases...
-```
-
-### Quick Fix
-
-```
-User: /PACT:comPACT backend Fix the null check in validateToken
-
-Claude: Invoking backend specialist for focused fix...
-[Backend Coder] Fixed null check, added test, verified build passes.
-```
-
-### Planning Before Building
-
-```
-User: /PACT:plan-mode Design a caching strategy for our API
-
-Claude: [S4 Intelligence Mode] Consulting specialists...
-[Preparer] Researching Redis vs Memcached vs in-memory...
-[Architect] Designing cache invalidation strategy...
-[Database] Considering query patterns for cache keys...
-
-Plan saved to docs/plans/api-caching-plan.md
 ```
 
 ---
