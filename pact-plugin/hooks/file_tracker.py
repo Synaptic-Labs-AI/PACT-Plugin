@@ -25,6 +25,16 @@ except ImportError:
     HAS_FLOCK = False
 
 
+def _normalize_path(file_path: str) -> str:
+    """Normalize a file path for consistent comparison.
+
+    Resolves symlinks and relative components so that './src/auth.ts',
+    'src/auth.ts', and '/abs/path/src/auth.ts' all produce the same key
+    in the tracking file.
+    """
+    return os.path.realpath(file_path)
+
+
 def track_edit(
     file_path: str,
     agent_name: str,
@@ -32,6 +42,7 @@ def track_edit(
     tracking_path: str,
 ) -> None:
     """Append a file edit record to the tracking file."""
+    file_path = _normalize_path(file_path)
     tracking_file = Path(tracking_path)
     tracking_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -49,14 +60,16 @@ def track_edit(
             try:
                 f.seek(0)
                 content = f.read()
-                entries = json.loads(content) if content.strip() else []
-            except (json.JSONDecodeError, IOError):
-                entries = []
-            entries.append(new_entry)
-            f.seek(0)
-            f.truncate()
-            f.write(json.dumps(entries))
-            fcntl.flock(f, fcntl.LOCK_UN)
+                try:
+                    entries = json.loads(content) if content.strip() else []
+                except (json.JSONDecodeError, IOError):
+                    entries = []
+                entries.append(new_entry)
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(entries))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
     else:
         entries = []
         if tracking_file.exists():
@@ -74,6 +87,7 @@ def check_conflict(
     tracking_path: str,
 ) -> str | None:
     """Check if another agent has edited this file."""
+    file_path = _normalize_path(file_path)
     if not agent_name:
         return None
 
