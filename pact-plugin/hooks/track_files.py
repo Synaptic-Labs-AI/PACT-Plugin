@@ -14,8 +14,14 @@ Output: None (writes to tracking file for later memory association)
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+    HAS_FLOCK = True
+except ImportError:
+    HAS_FLOCK = False
 
 
 # Directory for tracking data
@@ -34,26 +40,65 @@ def get_session_tracking_file() -> Path:
 
 
 def load_tracked_files() -> dict:
-    """Load existing tracked files for this session."""
+    """Load existing tracked files for this session.
+
+    Uses shared (LOCK_SH) file locking on platforms that support fcntl
+    to prevent reading while another process is mid-write.
+    """
+    default = {"files": [], "session_id": os.environ.get("CLAUDE_SESSION_ID", "unknown")}
     tracking_file = get_session_tracking_file()
-    if tracking_file.exists():
+    if not tracking_file.exists():
+        return default
+
+    if HAS_FLOCK:
+        try:
+            with open(tracking_file, "r") as f:
+                fcntl.flock(f, fcntl.LOCK_SH)
+                try:
+                    content = f.read()
+                    return json.loads(content) if content.strip() else default
+                except json.JSONDecodeError:
+                    return default
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except IOError:
+            return default
+    else:
         try:
             with open(tracking_file, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
-            pass
-    return {"files": [], "session_id": os.environ.get("CLAUDE_SESSION_ID", "unknown")}
+            return default
 
 
 def save_tracked_files(data: dict):
-    """Save tracked files for this session."""
+    """Save tracked files for this session.
+
+    Uses exclusive (LOCK_EX) file locking on platforms that support fcntl
+    to prevent concurrent write corruption. Unlock is in a finally block
+    to ensure release even on exceptions.
+    """
     ensure_tracking_dir()
     tracking_file = get_session_tracking_file()
-    try:
-        with open(tracking_file, "w") as f:
-            json.dump(data, f, indent=2)
-    except IOError as e:
-        print(f"Warning: Could not save tracking data: {e}", file=sys.stderr)
+
+    if HAS_FLOCK:
+        try:
+            with open(tracking_file, "a+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    f.truncate()
+                    json.dump(data, f, indent=2)
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except IOError as e:
+            print(f"Warning: Could not save tracking data: {e}", file=sys.stderr)
+    else:
+        try:
+            with open(tracking_file, "w") as f:
+                json.dump(data, f, indent=2)
+        except IOError as e:
+            print(f"Warning: Could not save tracking data: {e}", file=sys.stderr)
 
 
 def extract_file_path(tool_input: dict) -> str:
@@ -62,32 +107,65 @@ def extract_file_path(tool_input: dict) -> str:
     return tool_input.get("file_path", "")
 
 
-def track_file(file_path: str, tool_name: str):
-    """Add a file to the tracking list."""
-    if not file_path:
-        return
+def _update_data(data: dict, file_path: str, tool_name: str) -> dict:
+    """Update tracking data with a file entry (pure function, no I/O).
 
-    data = load_tracked_files()
-
-    # Check if already tracked
+    Separated from I/O so that the read-modify-write cycle can be done
+    under a single lock.
+    """
     existing_paths = [f["path"] for f in data["files"]]
     if file_path in existing_paths:
-        # Update timestamp
         for f in data["files"]:
             if f["path"] == file_path:
-                f["last_modified"] = datetime.utcnow().isoformat()
+                f["last_modified"] = datetime.now(timezone.utc).isoformat()
                 f["tool"] = tool_name
                 break
     else:
-        # Add new entry
         data["files"].append({
             "path": file_path,
             "tool": tool_name,
-            "first_seen": datetime.utcnow().isoformat(),
-            "last_modified": datetime.utcnow().isoformat(),
+            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "last_modified": datetime.now(timezone.utc).isoformat(),
         })
+    return data
 
-    save_tracked_files(data)
+
+def track_file(file_path: str, tool_name: str):
+    """Add a file to the tracking list.
+
+    Uses a single exclusive lock for the entire read-modify-write cycle
+    to prevent TOCTOU race conditions between concurrent hook invocations.
+    """
+    if not file_path:
+        return
+
+    ensure_tracking_dir()
+    tracking_file = get_session_tracking_file()
+    default = {"files": [], "session_id": os.environ.get("CLAUDE_SESSION_ID", "unknown")}
+
+    if HAS_FLOCK:
+        try:
+            with open(tracking_file, "a+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    content = f.read()
+                    try:
+                        data = json.loads(content) if content.strip() else default
+                    except json.JSONDecodeError:
+                        data = default
+                    data = _update_data(data, file_path, tool_name)
+                    f.seek(0)
+                    f.truncate()
+                    json.dump(data, f, indent=2)
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except IOError as e:
+            print(f"Warning: Could not track file: {e}", file=sys.stderr)
+    else:
+        data = load_tracked_files()
+        data = _update_data(data, file_path, tool_name)
+        save_tracked_files(data)
 
 
 def main():

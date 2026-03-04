@@ -10,9 +10,11 @@ Tests cover:
 5. No-op when no agent name set
 6. main() entry point: stdin JSON parsing, exit codes, output format
 7. Corrupted tracking JSON treated as empty list
+8. Path normalization: different representations of same file match
 """
 import io
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -31,8 +33,10 @@ class TestFileTracker:
 
         tracking_file = tmp_path / "file-edits.json"
 
+        # Use an absolute path to avoid cwd-dependent normalization
+        abs_path = str(tmp_path / "src" / "auth.ts")
         track_edit(
-            file_path="src/auth.ts",
+            file_path=abs_path,
             agent_name="backend-coder",
             tool_name="Edit",
             tracking_path=str(tracking_file)
@@ -40,7 +44,7 @@ class TestFileTracker:
 
         entries = json.loads(tracking_file.read_text())
         assert len(entries) == 1
-        assert entries[0]["file"] == "src/auth.ts"
+        assert entries[0]["file"] == os.path.realpath(abs_path)
         assert entries[0]["agent"] == "backend-coder"
 
     def test_detects_conflict(self, tmp_path):
@@ -92,12 +96,13 @@ class TestFileTracker:
         tracking_file = tmp_path / "file-edits.json"
         tracking_file.write_text("not valid json{{{")
 
+        abs_path = str(tmp_path / "src" / "auth.ts")
         # track_edit should overwrite with a fresh single-entry list
-        track_edit("src/auth.ts", "backend-coder", "Edit", str(tracking_file))
+        track_edit(abs_path, "backend-coder", "Edit", str(tracking_file))
 
         entries = json.loads(tracking_file.read_text())
         assert len(entries) == 1
-        assert entries[0]["file"] == "src/auth.ts"
+        assert entries[0]["file"] == os.path.realpath(abs_path)
 
     def test_corrupted_tracking_json_no_conflict(self, tmp_path):
         """check_conflict with corrupted tracking file should return None."""
@@ -109,6 +114,86 @@ class TestFileTracker:
         conflict = check_conflict("src/auth.ts", "backend-coder", str(tracking_file))
 
         assert conflict is None
+
+
+class TestPathNormalization:
+    """Tests for _normalize_path and its effect on conflict detection."""
+
+    def test_relative_path_normalized_to_absolute(self, tmp_path, monkeypatch):
+        """Relative paths are resolved to absolute before recording."""
+        from file_tracker import track_edit
+
+        tracking_file = tmp_path / "file-edits.json"
+
+        # Use a real directory as cwd so os.path.realpath can resolve
+        monkeypatch.chdir(tmp_path)
+        track_edit("src/auth.ts", "backend-coder", "Edit", str(tracking_file))
+
+        entries = json.loads(tracking_file.read_text())
+        assert len(entries) == 1
+        # The stored path should be absolute (resolved from cwd)
+        assert entries[0]["file"] == str(tmp_path / "src" / "auth.ts")
+
+    def test_dotslash_and_plain_paths_match(self, tmp_path, monkeypatch):
+        """'./src/auth.ts' and 'src/auth.ts' should detect as same file."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = tmp_path / "file-edits.json"
+
+        monkeypatch.chdir(tmp_path)
+        track_edit("./src/auth.ts", "backend-coder", "Edit", str(tracking_file))
+
+        conflict = check_conflict("src/auth.ts", "frontend-coder", str(tracking_file))
+        assert conflict is not None
+        assert "backend-coder" in conflict
+
+    def test_dotdot_paths_normalized(self, tmp_path, monkeypatch):
+        """Paths with '../' components are resolved correctly."""
+        from file_tracker import track_edit, check_conflict
+
+        tracking_file = tmp_path / "file-edits.json"
+
+        monkeypatch.chdir(tmp_path)
+        track_edit("src/../src/auth.ts", "backend-coder", "Edit", str(tracking_file))
+
+        conflict = check_conflict("src/auth.ts", "frontend-coder", str(tracking_file))
+        assert conflict is not None
+        assert "backend-coder" in conflict
+
+    def test_normalize_path_helper(self):
+        """_normalize_path produces absolute, resolved paths."""
+        from file_tracker import _normalize_path
+
+        result = _normalize_path("/tmp/foo/../bar/baz.ts")
+        assert result == os.path.join(os.path.realpath("/tmp"), "bar", "baz.ts")
+        assert ".." not in result
+
+
+class TestLockRelease:
+    """Tests that fcntl lock is released even on exception."""
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="fcntl not available on Windows"
+    )
+    def test_lock_released_on_write_exception(self, tmp_path):
+        """Lock must be released if an exception occurs during write operations."""
+        import fcntl
+        from file_tracker import track_edit
+
+        tracking_file = tmp_path / "file-edits.json"
+        tracking_file.write_text("[]")
+
+        # Patch json.dumps to raise during the write phase (after lock acquired)
+        with patch("file_tracker.json.dumps", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                track_edit("/tmp/test.ts", "agent-a", "Edit", str(tracking_file))
+
+        # If the lock was properly released via finally, we should be able
+        # to acquire it again without blocking
+        with open(tracking_file, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 class TestMainEntryPoint:
