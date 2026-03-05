@@ -14,7 +14,11 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 1. Invoke `/PACT:worktree-setup` with suffix branch: `feature-X--{scope_id}`
 2. Pass the worktree path to the rePACT invocation so the sub-scope operates in its own filesystem
 
-**Dispatch**: Invoke `/PACT:rePACT` for each sub-scope with its scope contract and worktree path. Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
+**Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata:
+`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+This ensures decomposition state survives compaction. The executor (rePACT) reads these values via `TaskGet(scopeTaskId).metadata` on entry — the spawn prompt provides a thin bootstrap only.
+
+**Dispatch**: Invoke `/PACT:rePACT` for each sub-scope. Sub-scopes read their scope contract from task metadata (not the prompt). Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
 
 **Sub-scope failure policy**: Sub-scope failure is isolated — sibling scopes continue independently. Individual scope failures route through `/PACT:imPACT` to the affected scope only. However, when a sub-scope emits HALT, the parent orchestrator stops ALL sub-scopes (consistent with algedonic protocol: "Stop ALL agents"). Preserve work-in-progress for all scopes. After HALT resolution, review interrupted scopes before resuming.
 
@@ -32,10 +36,14 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 
 This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
 
+**Recover scope state**: Read scope contracts and worktree paths from per-scope sub-task metadata: `TaskGet(scopeTaskId).metadata.scope_contract` and `.worktree_path`. This enables contract verification even after compaction.
+
 **Merge sub-scope branches**: Before running contract verification, merge each sub-scope's work back:
-1. For each completed sub-scope, merge its suffix branch to the feature branch
-2. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
-3. Proceed to contract verification and integration tests (below) on the merged feature branch
+1. For each completed sub-scope, read its worktree path from `TaskGet(scopeTaskId).metadata.worktree_path`
+2. Merge: `git merge --no-ff {sub-scope-branch}` — the `--no-ff` preserves scope boundaries in git history
+3. On merge conflict → emit algedonic ALERT (cross-scope interference indicates a `shared_files` constraint violation or incomplete contract)
+4. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
+5. Proceed to contract verification and integration tests (below) on the merged feature branch
 
 **Delegate in parallel**:
 - **`pact-architect`**: Verify cross-scope contract compatibility
@@ -48,8 +56,8 @@ This phase verifies that independently-developed sub-scopes are compatible befor
   - Confirm no shared file constraint violations occurred
 
 **Invoke each with**:
-- Feature description and scope contract summaries
-- All sub-scope handoffs (contract fulfillment sections)
+- Feature description and scope contracts (read from `TaskGet(scopeTaskId).metadata.scope_contract` for each sub-scope)
+- All sub-scope handoffs (contract fulfillment sections from task metadata)
 - "This is cross-scope integration verification. Focus on compatibility between scopes, not internal scope correctness."
 
 **On consolidation failure**: Route through `/PACT:imPACT` for triage. Possible outcomes:

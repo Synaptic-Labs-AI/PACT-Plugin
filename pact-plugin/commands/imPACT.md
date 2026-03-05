@@ -53,6 +53,11 @@ imPACT is **S3-level triage**—operational problem-solving within normal workfl
 
 **Escalation indicator**: If you run 3+ consecutive imPACT cycles without resolution, this may indicate a systemic issue requiring user intervention (proto-algedonic signal).
 
+**Persist cycle count**: On each imPACT entry, read the current count and increment:
+1. Recovery: `TaskGet(featureTaskId).metadata.impact_cycle_count` (default 0 if absent)
+2. Increment: `TaskUpdate(featureTaskId, metadata={"impact_cycle_count": N+1})`
+3. Check threshold: if `impact_cycle_count >= 3` → emit ALERT (META-BLOCK)
+
 ### imPACT vs Algedonic
 
 | Aspect | imPACT | Algedonic |
@@ -62,8 +67,8 @@ imPACT is **S3-level triage**—operational problem-solving within normal workfl
 | **Question** | "How do we proceed?" | "Should we proceed at all?" |
 | **Examples** | Missing info, wrong approach, need help | Security breach, data risk, ethics issue |
 
-**When imPACT becomes Algedonic**:
-- 3+ consecutive imPACT cycles without resolution → Emit ALERT (META-BLOCK)
+**When imPACT becomes Algedonic** (uses persisted `impact_cycle_count` from feature task metadata):
+- `impact_cycle_count >= 3` without resolution → Emit ALERT (META-BLOCK)
 - During imPACT triage, discover viability threat → Emit appropriate HALT/ALERT instead
 
 imPACT is for operational problem-solving. If you're questioning whether the work should continue at all, emit an algedonic signal instead. See [algedonic.md](../protocols/algedonic.md) for trigger conditions and signal format.

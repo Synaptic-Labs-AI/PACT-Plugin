@@ -82,10 +82,10 @@ The executor interface defines the contract between the parent orchestrator and 
 
 ```
 Input:
-  scope_contract: {the scope contract for this sub-scope}
+  scope_contract: {read from TaskGet(taskId).metadata.scope_contract}
+  worktree_path: {read from TaskGet(taskId).metadata.worktree_path}
+  nesting_depth: {read from TaskGet(taskId).metadata.nesting_depth}
   feature_context: {parent feature description, branch, relevant docs}
-  branch: {current feature branch name}
-  nesting_depth: {current nesting level, 0-based}
 
 Output:
   handoff: {standard handoff (6 fields, 5 required) + contract fulfillment section}
@@ -93,16 +93,18 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
+> **State persistence**: All three input fields (`scope_contract`, `worktree_path`, `nesting_depth`) are stored in per-scope sub-task metadata by the parent orchestrator during ATOMIZE. The executor reads them via `TaskGet` on entry. This ensures decomposition state survives context compaction — the spawn prompt provides a thin bootstrap, not the authoritative source.
+
 #### Current Executor: rePACT
 
 rePACT implements the executor interface as follows:
 
 | Interface Element | rePACT Implementation |
 |-------------------|-----------------------|
-| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: scope_contract** | Read from `TaskGet(taskId).metadata.scope_contract` on entry (stored by parent during ATOMIZE) |
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
-| **Input: branch** | Uses the current feature branch (no new branch created) |
-| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
+| **Input: worktree_path** | Read from `TaskGet(taskId).metadata.worktree_path` on entry (stored by parent during ATOMIZE) |
+| **Input: nesting_depth** | Read from `TaskGet(taskId).metadata.nesting_depth` on entry; enforced at 1-level maximum |
 | **Output: handoff** | Standard handoff (6 fields, 5 required) with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
 | **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |

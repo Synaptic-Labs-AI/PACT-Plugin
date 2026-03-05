@@ -130,6 +130,9 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 
 **Output format**: One-line summary only. Example: `Variety: Medium (8) — standard orchestrate with all phases`
 
+**Persist**: After computing variety scores, store them on the feature task for compaction recovery:
+`TaskUpdate(featureTaskId, metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}})`
+
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
 **User override**: User can always specify their preferred workflow regardless of assessment.
@@ -224,7 +227,7 @@ Wire variety dimension scores (already computed in the Task Variety Assessment a
 
 **If any hard gate fires** → Phase runs. No further analysis needed for this phase.
 
-**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs.
+**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs. Recovery: read from `TaskGet(featureTaskId).metadata.variety` if scores were previously computed but lost to compaction.
 
 ### Layer 3: Structured Analysis Gate
 
@@ -362,11 +365,22 @@ The outcome is binary: full ARCHITECT or skip. No "light ARCHITECT" execution mo
 
 ### Scope Detection Evaluation
 
-After PREPARE completes (or is skipped with plan context), evaluate whether the task warrants decomposition into sub-scopes. For heuristic definitions and scoring, see [pact-scope-detection.md](../protocols/pact-scope-detection.md).
+Evaluate whether the task warrants decomposition into sub-scopes. For heuristic definitions and scoring, see [pact-scope-detection.md](../protocols/pact-scope-detection.md).
 
-**When**: After PREPARE output is available (or plan content, if PREPARE was skipped). comPACT bypasses detection entirely.
+**Precondition — Input availability check**:
 
-**Process**:
+Scope detection requires PREPARE output or plan content as input. Before proceeding, verify input is available:
+
+| Condition | Input Available? | Action |
+|-----------|-----------------|--------|
+| PREPARE ran | Yes (PREPARE output) | Proceed to scoring |
+| PREPARE skipped, plan exists | Yes (plan content) | Proceed to scoring |
+| PREPARE skipped without plan, variety Scope >= 3 | No | **Force PREPARE to run** — revert the skip, dispatch preparer, then return here with output |
+| PREPARE skipped without plan, variety Scope < 3 | No | Skip scope detection (low scope = unlikely multi-scope). Output: `Scope detection: Skipped (no input, Scope < 3)` |
+
+> **Why force PREPARE when Scope >= 3**: A high-Scope task skipping both PREPARE and scope detection risks executing a multi-scope task in single scope. The Scope dimension directly measures cross-cutting complexity — the same dimension scope detection evaluates. Forcing PREPARE provides the research output that scope detection needs to make an informed decision.
+
+**Process** (when input is available):
 1. Score the task against the heuristics table in the protocol
 2. Apply counter-signals to adjust the score downward
 3. Determine tier:
@@ -378,6 +392,9 @@ After PREPARE completes (or is skipped with plan context), evaluate whether the 
 | All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Evaluation Response below) |
 
 **Output format**: `Scope detection: Single scope (score 2/3 threshold)` or `Scope detection: Multi-scope detected (score 4/3 threshold) — proposing decomposition`
+
+**Persist**: After evaluating scope detection, store the result on the feature task:
+`TaskUpdate(featureTaskId, metadata={"scope_detection": {"score": N, "threshold": N, "result": "single|multi"}})`
 
 #### Evaluation Response
 
@@ -481,6 +498,9 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
 
+**Persist**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
+Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries` to reconstruct agent file boundaries before dispatching subsequent agents.
+
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
@@ -535,11 +555,17 @@ Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-p
 
 **Worktree isolation**: Before dispatching each sub-scope's rePACT, invoke `/PACT:worktree-setup` with the suffix branch name (e.g., `feature-X--backend`). Pass the resulting worktree path to the rePACT invocation.
 
+**Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata so decomposition state survives compaction:
+`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+Recovery: On compaction, read from `TaskGet(scopeTaskId).metadata` to reconstruct scope contracts and worktree assignments.
+
 ---
 
 ### CONSOLIDATE Phase (Scoped Orchestration Only)
 
 Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#consolidate-phase).
+
+**Recover scope state**: Read scope contracts and worktree paths from per-scope sub-task metadata: `TaskGet(scopeTaskId).metadata.scope_contract` and `.worktree_path`. This ensures contract verification works correctly even after compaction.
 
 **Worktree cleanup**: After merging each sub-scope branch back to the feature branch, invoke `/PACT:worktree-cleanup` for that sub-scope's worktree.
 
