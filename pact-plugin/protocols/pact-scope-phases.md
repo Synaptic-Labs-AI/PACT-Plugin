@@ -15,8 +15,8 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 2. Pass the worktree path to the rePACT invocation so the sub-scope operates in its own filesystem
 
 **Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata:
-`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
-This ensures decomposition state survives compaction. The executor (rePACT) reads these values via `TaskGet(scopeTaskId).metadata` on entry — the spawn prompt provides a thin bootstrap only.
+`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"version": 1, "name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+Version field enables schema evolution when decomposition gets real usage. The executor (rePACT) reads these values via `TaskGet(scopeTaskId).metadata` on entry — the spawn prompt provides a thin bootstrap only.
 
 **Dispatch**: Invoke `/PACT:rePACT` for each sub-scope. Sub-scopes read their scope contract from task metadata (not the prompt). Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
 

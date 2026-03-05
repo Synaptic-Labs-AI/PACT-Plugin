@@ -227,7 +227,7 @@ Wire variety dimension scores (already computed in the Task Variety Assessment a
 
 **If any hard gate fires** → Phase runs. No further analysis needed for this phase.
 
-**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs. Recovery: read from `TaskGet(featureTaskId).metadata.variety` if scores were previously computed but lost to compaction.
+**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs. Recovery: read from `TaskGet(featureTaskId).metadata.variety` if scores were previously computed but lost to compaction. If absent (first run or metadata not yet stored), apply default-run posture.
 
 ### Layer 3: Structured Analysis Gate
 
@@ -378,6 +378,8 @@ Scope detection requires PREPARE output or plan content as input. Before proceed
 | PREPARE skipped without plan, variety Scope >= 3 | No | **Force PREPARE to run** — revert the skip, dispatch preparer, then return here with output |
 | PREPARE skipped without plan, variety Scope < 3 | No | Skip scope detection (low scope = unlikely multi-scope). Output: `Scope detection: Skipped (no input, Scope < 3)` |
 
+**Note**: After compaction, read variety Scope from `TaskGet(featureTaskId).metadata.variety.scope` (see Layer 1 hard gates recovery above).
+
 > **Why force PREPARE when Scope >= 3**: A high-Scope task skipping both PREPARE and scope detection risks executing a multi-scope task in single scope. The Scope dimension directly measures cross-cutting complexity — the same dimension scope detection evaluates. Forcing PREPARE provides the research output that scope detection needs to make an informed decision.
 
 **Process** (when input is available):
@@ -395,6 +397,7 @@ Scope detection requires PREPARE output or plan content as input. Before proceed
 
 **Persist**: After evaluating scope detection, store the result on the feature task:
 `TaskUpdate(featureTaskId, metadata={"scope_detection": {"score": N, "threshold": N, "result": "single|multi"}})`
+Recovery: On compaction, read from `TaskGet(featureTaskId).metadata.scope_detection`. If absent, re-evaluate using available PREPARE output or plan content.
 
 #### Evaluation Response
 
@@ -499,7 +502,7 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 **Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
 
 **Persist**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
-Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries` to reconstruct agent file boundaries before dispatching subsequent agents.
+Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries` to reconstruct agent file boundaries before dispatching subsequent agents. If absent, re-run S2 pre-parallel check.
 
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
 
@@ -556,7 +559,8 @@ Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-p
 **Worktree isolation**: Before dispatching each sub-scope's rePACT, invoke `/PACT:worktree-setup` with the suffix branch name (e.g., `feature-X--backend`). Pass the resulting worktree path to the rePACT invocation.
 
 **Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata so decomposition state survives compaction:
-`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"version": 1, "name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+Version field enables schema evolution when decomposition gets real usage.
 Recovery: On compaction, read from `TaskGet(scopeTaskId).metadata` to reconstruct scope contracts and worktree assignments.
 
 ---

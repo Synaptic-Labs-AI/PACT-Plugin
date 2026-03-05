@@ -530,7 +530,7 @@ Before invoking parallel agents, the orchestrator must:
    - If conflicts exist, either sequence the work or assign clear file/component boundaries
    - If no conflicts, proceed with parallel invocation
    - **Persist**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries`.
+   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries`. If absent, re-run S2 pre-parallel check.
 
 3. **Establish resolution authority**:
    - Technical disagreements → Architect arbitrates
@@ -580,7 +580,7 @@ When "first agent's choice becomes standard," subsequent agents need to discover
 
 4. **Persist established conventions**: Once conventions are established (from first agent's output or pre-defined), persist them:
    `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.established_conventions` and include in subsequent agent prompts.
+   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.established_conventions` and include in subsequent agent prompts. If absent, re-establish from first completing agent's output.
 
 ### Shared Language
 
@@ -1660,8 +1660,8 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 2. Pass the worktree path to the rePACT invocation so the sub-scope operates in its own filesystem
 
 **Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata:
-`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
-This ensures decomposition state survives compaction. The executor (rePACT) reads these values via `TaskGet(scopeTaskId).metadata` on entry — the spawn prompt provides a thin bootstrap only.
+`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"version": 1, "name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+Version field enables schema evolution when decomposition gets real usage. The executor (rePACT) reads these values via `TaskGet(scopeTaskId).metadata` on entry — the spawn prompt provides a thin bootstrap only.
 
 **Dispatch**: Invoke `/PACT:rePACT` for each sub-scope. Sub-scopes read their scope contract from task metadata (not the prompt). Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
 

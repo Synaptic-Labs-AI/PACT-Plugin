@@ -75,7 +75,7 @@ Review task: in_progress (persists until merge-ready)
 
 **Persist cycle count**: At the start of each remediation cycle, increment the counter:
 `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N})`
-Recovery: On compaction, read from `TaskGet(reviewTaskId).metadata.remediation_cycle_count` to determine current cycle number before the 2-cycle escalation check.
+Recovery: On compaction, read from `TaskGet(reviewTaskId).metadata.remediation_cycle_count` (default 0 if absent) to determine current cycle number before the 2-cycle escalation check.
 
 ### Verify-Only Re-Review
 

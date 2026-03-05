@@ -124,7 +124,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 5. **Persist coordination state** — After establishing boundaries and conventions:
    `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}, "established_conventions": {"key": "value"}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata` to reconstruct boundaries and conventions.
+   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata` to reconstruct boundaries and conventions. If absent, re-run S2 coordination check.
 
 **If conflicts cannot be resolved**: Sequence the work instead of dispatching concurrently.
 

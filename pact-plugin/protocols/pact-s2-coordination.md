@@ -46,7 +46,7 @@ Before invoking parallel agents, the orchestrator must:
    - If conflicts exist, either sequence the work or assign clear file/component boundaries
    - If no conflicts, proceed with parallel invocation
    - **Persist**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries`.
+   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries`. If absent, re-run S2 pre-parallel check.
 
 3. **Establish resolution authority**:
    - Technical disagreements → Architect arbitrates
@@ -96,7 +96,7 @@ When "first agent's choice becomes standard," subsequent agents need to discover
 
 4. **Persist established conventions**: Once conventions are established (from first agent's output or pre-defined), persist them:
    `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.established_conventions` and include in subsequent agent prompts.
+   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.established_conventions` and include in subsequent agent prompts. If absent, re-establish from first completing agent's output.
 
 ### Shared Language
 

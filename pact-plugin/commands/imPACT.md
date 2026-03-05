@@ -54,9 +54,11 @@ imPACT is **S3-level triage**—operational problem-solving within normal workfl
 **Escalation indicator**: If you run 3+ consecutive imPACT cycles without resolution, this may indicate a systemic issue requiring user intervention (proto-algedonic signal).
 
 **Persist cycle count**: On each imPACT entry, read the current count and increment:
-1. Recovery: `TaskGet(featureTaskId).metadata.impact_cycle_count` (default 0 if absent)
+1. Read: `TaskGet(featureTaskId).metadata.impact_cycle_count` (default 0 if absent)
 2. Increment: `TaskUpdate(featureTaskId, metadata={"impact_cycle_count": N+1})`
 3. Check threshold: if `impact_cycle_count >= 3` → emit ALERT (META-BLOCK)
+
+Recovery: On compaction, read from `TaskGet(featureTaskId).metadata.impact_cycle_count` to restore the cycle count. If absent, treat as 0.
 
 ### imPACT vs Algedonic
 
