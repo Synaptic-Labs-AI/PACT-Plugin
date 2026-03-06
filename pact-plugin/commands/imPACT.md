@@ -60,7 +60,7 @@ imPACT is **S3-level triage**—operational problem-solving within normal workfl
 
 Recovery: On compaction, read from `TaskGet(featureTaskId).metadata.impact_cycle_count` to restore the cycle count. If absent, treat as 0.
 
-**Reset**: Set `impact_cycle_count` to 0 when the current blocker is resolved (prevents inherited count from triggering premature META-BLOCK ALERT on unrelated blockers).
+**Reset**: `TaskUpdate(featureTaskId, metadata={"impact_cycle_count": 0})` when the current blocker is resolved (prevents inherited count from triggering premature META-BLOCK ALERT on unrelated blockers).
 
 ### imPACT vs Algedonic
 

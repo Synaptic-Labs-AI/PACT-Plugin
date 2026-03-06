@@ -132,6 +132,7 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 
 **Persist**: After computing variety scores, store them on the feature task for compaction recovery:
 `TaskUpdate(featureTaskId, metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}})`
+Recovery: See "Missing variety data" under Layer 2 hard gates below.
 
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
@@ -504,6 +505,9 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 **Persist**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
 Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries` to reconstruct agent file boundaries before dispatching subsequent agents. If absent, re-run S2 pre-parallel check.
 
+**Persist conventions**: `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
+Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.established_conventions` and include in subsequent agent prompts. If absent, re-establish from first completing agent's output.
+
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
@@ -561,7 +565,7 @@ Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-p
 **Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata so decomposition state survives compaction:
 `TaskUpdate(scopeTaskId, metadata={"scope_contract": {"version": 1, "name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
 Version field enables schema evolution when decomposition gets real usage.
-Recovery: On compaction, read from `TaskGet(scopeTaskId).metadata` to reconstruct scope contracts and worktree assignments.
+Recovery: On compaction, read from `TaskGet(scopeTaskId).metadata` to reconstruct scope contracts and worktree assignments. If absent, the task was not dispatched via ATOMIZE — treat as single-scope execution.
 
 ---
 
