@@ -135,7 +135,7 @@ This runs a mini-orchestration:
 
 > **Design rationale**: V3 repurposed rePACT as the single-level executor for sub-scopes dispatched by ATOMIZE. Level 2 nesting is unreachable by design -- scope detection is bypassed within sub-scopes, so a sub-scope cannot trigger further decomposition.
 
-**Enforcement via metadata**: The parent orchestrator stores `nesting_depth` in per-scope sub-task metadata during ATOMIZE. On entry, rePACT reads `TaskGet(taskId).metadata.nesting_depth` and rejects if >= 1. This survives compaction — the orchestrator cannot accidentally re-dispatch at depth 2 after losing context.
+**Enforcement via metadata**: The parent orchestrator stores `nesting_depth` in per-scope sub-task metadata during ATOMIZE (value `1` = first rePACT level). On entry, rePACT reads `TaskGet(taskId).metadata.nesting_depth` and rejects if > 1. This survives compaction — the orchestrator cannot accidentally re-dispatch at depth 2 after losing context.
 
 If you hit the nesting limit:
 - Simplify the sub-task and use `/PACT:comPACT`
@@ -187,7 +187,7 @@ Branch behavior depends on whether rePACT is invoked with a scope contract:
 ### Phase 0: Assess
 
 Before starting, verify:
-1. **Nesting depth**: Read `TaskGet(taskId).metadata.nesting_depth` — if >= 1, reject (max depth exceeded). If absent, treat as 0.
+1. **Nesting depth**: Read `TaskGet(taskId).metadata.nesting_depth` — if > 1, reject (max depth exceeded). If absent, treat as 0.
 2. **Scope contract**: If this rePACT was dispatched from ATOMIZE, read the scope contract from `TaskGet(taskId).metadata.scope_contract` instead of expecting it inline in the prompt. This ensures scope state survives compaction.
 3. **Scope appropriateness**: Is this truly a sub-task of the parent?
 4. **Domain determination**: Single-domain or multi-domain?
