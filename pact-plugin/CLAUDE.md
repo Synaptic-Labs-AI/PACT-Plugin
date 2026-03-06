@@ -91,10 +91,14 @@ If context was compacted or you are resuming prior work, reconstruct state:
 2. `TaskList` — see all tasks, their status, owners, and blockers
 3. `TaskGet` on tasks by priority: in-progress first (active work), then most-recent completed phase (current decisions), then earlier phases only if needed
 4. Determine next action:
-   - In-progress phase tasks exist → invoke the relevant workflow command to continue
+   - Blocker tasks exist → `/PACT:imPACT` to triage before resuming
+   - In-progress phase tasks → invoke the relevant workflow command to continue
+   - Review task in-progress → continue peer-review workflow
    - All phases complete, no PR → `/PACT:peer-review`
    - PR open → check PR status, present to user
-   - No tasks found → fresh start, await user direction
+   - No tasks found → check `gh pr list` for open PRs; search pact-memory for prior context; or await user direction
+
+**After compaction**: The precompact hook may provide a checkpoint message with the active workflow and current step — use this as the primary recovery signal alongside TaskList.
 
 **Persisted orchestration state** (stored via `TaskUpdate`, recoverable via `TaskGet`):
 
