@@ -91,6 +91,20 @@ If context was compacted, reconstruct state from the shared whiteboard:
 2. `TaskGet` on tasks by priority: in-progress first (active work), then most-recent completed phase (current decisions), then earlier phases only if needed
 3. Resume orchestration from current state
 
+**Persisted orchestration state** (stored via `TaskUpdate`, recoverable via `TaskGet`):
+
+| Key | Task Level | Purpose |
+|-----|-----------|---------|
+| `variety` | Feature | Variety dimension scores for hard gates |
+| `impact_cycle_count` | Feature | imPACT cycle counter (3 = META-BLOCK ALERT) |
+| `scope_detection` | Feature | Scope detection score/result (audit) |
+| `s2_boundaries` | CODE phase | Agent file scope assignments |
+| `established_conventions` | CODE phase | Convention decisions for consistency |
+| `remediation_cycle_count` | Review | PR remediation cycle counter |
+| `scope_contract` | Per-scope sub-task | Decomposition scope contract |
+| `worktree_path` | Per-scope sub-task | Sub-scope worktree location |
+| `nesting_depth` | Per-scope sub-task | Decomposition nesting level |
+
 The Task system survives compaction. Your context window doesn't.
 
 ### Git Workflow
