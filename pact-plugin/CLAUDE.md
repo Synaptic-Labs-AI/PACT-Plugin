@@ -86,10 +86,15 @@ When waiting for teammates to complete their tasks, **do not narrate waiting** �
 
 #### State Recovery (After Compaction or Session Resume)
 
-If context was compacted or you are resuming prior work, reconstruct state from the shared whiteboard:
-1. `TaskList` — see all tasks, their status, owners, and blockers
-2. `TaskGet` on tasks by priority: in-progress first (active work), then most-recent completed phase (current decisions), then earlier phases only if needed
-3. Resume orchestration from current state
+If context was compacted or you are resuming prior work, reconstruct state:
+1. Check for active worktrees: `git worktree list` — identifies where feature work is happening
+2. `TaskList` — see all tasks, their status, owners, and blockers
+3. `TaskGet` on tasks by priority: in-progress first (active work), then most-recent completed phase (current decisions), then earlier phases only if needed
+4. Determine next action:
+   - In-progress phase tasks exist → invoke the relevant workflow command to continue
+   - All phases complete, no PR → `/PACT:peer-review`
+   - PR open → check PR status, present to user
+   - No tasks found → fresh start, await user direction
 
 **Persisted orchestration state** (stored via `TaskUpdate`, recoverable via `TaskGet`):
 
@@ -104,6 +109,8 @@ If context was compacted or you are resuming prior work, reconstruct state from 
 | `scope_contract` | Per-scope sub-task | Decomposition scope contract |
 | `worktree_path` | Per-scope sub-task | Sub-scope worktree location |
 | `nesting_depth` | Per-scope sub-task | Decomposition nesting level |
+
+To act on recovered state, invoke the relevant workflow command (e.g., `/PACT:orchestrate`, `/PACT:comPACT`). The command's recovery logic consumes these values automatically.
 
 The Task system survives compaction. Your context window doesn't.
 
