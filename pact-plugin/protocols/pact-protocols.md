@@ -1610,7 +1610,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 |-------------------|---------------------|
 | **Input: scope_contract** | Passed in the teammate spawn prompt via `Task` tool (with `team_name` and `name` parameters) |
 | **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
-| **Input: branch** | Worktree working directory (teammate operates in the assigned worktree) |
+| **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
 | **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
 | **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
 | **Output: commits** | Teammate commits directly to the feature branch |
