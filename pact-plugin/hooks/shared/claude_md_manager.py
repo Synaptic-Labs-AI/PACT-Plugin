@@ -49,7 +49,7 @@ def update_claude_md() -> str | None:
 
         # Case 1: Target doesn't exist
         if not target_file.exists():
-            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             target_file.write_text(wrapped_source, encoding="utf-8")
             return "Created CLAUDE.md with PACT Orchestrator"
 

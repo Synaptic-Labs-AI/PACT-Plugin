@@ -39,7 +39,7 @@ def setup_plugin_symlinks() -> str | None:
     protocols_src = plugin_root / "protocols"
     if protocols_src.exists():
         protocols_dst = claude_dir / "protocols" / "pact-plugin"
-        protocols_dst.parent.mkdir(parents=True, exist_ok=True)
+        protocols_dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         try:
             if protocols_dst.is_symlink():
@@ -57,7 +57,7 @@ def setup_plugin_symlinks() -> str | None:
     agents_src = plugin_root / "agents"
     if agents_src.exists():
         agents_dst = claude_dir / "agents"
-        agents_dst.mkdir(parents=True, exist_ok=True)
+        agents_dst.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         agents_updated = 0
         agents_created = 0
