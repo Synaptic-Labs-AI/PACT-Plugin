@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def get_db_path() -> Path:
     """Get the database file path, creating parent directories if needed."""
-    PACT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    PACT_MEMORY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     return DB_PATH
 
 
@@ -57,6 +57,12 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+
+    # Harden database file permissions (owner-only read/write)
+    try:
+        os.chmod(str(path), 0o600)
+    except OSError:
+        pass
 
     # Enable WAL mode for corruption prevention and better concurrency
     conn.execute("PRAGMA journal_mode=WAL")
