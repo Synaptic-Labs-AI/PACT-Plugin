@@ -130,6 +130,8 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 
 **Output format**: One-line summary only. Example: `Variety: Medium (8) — standard orchestrate with all phases`
 
+**Persist `variety`**: `TaskUpdate(featureTaskId, metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}})`
+
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
 **User override**: User can always specify their preferred workflow regardless of assessment.
@@ -224,7 +226,7 @@ Wire variety dimension scores (already computed in the Task Variety Assessment a
 
 **If any hard gate fires** → Phase runs. No further analysis needed for this phase.
 
-**Missing variety data**: If variety scores are not available (e.g., variety assessment was skipped or incomplete), hard gates cannot be evaluated — the default-run posture applies and the phase runs.
+**Missing variety data**: If variety scores are not available, hard gates cannot be evaluated — the default-run posture applies. After compaction, check `TaskGet(featureTaskId).metadata.variety` first.
 
 ### Layer 3: Structured Analysis Gate
 
@@ -362,9 +364,9 @@ The outcome is binary: full ARCHITECT or skip. No "light ARCHITECT" execution mo
 
 ### Scope Detection Evaluation
 
-After PREPARE completes (or is skipped with plan context), evaluate whether the task warrants decomposition into sub-scopes. For heuristic definitions and scoring, see [pact-scope-detection.md](../protocols/pact-scope-detection.md).
+Evaluate whether the task warrants decomposition into sub-scopes. For heuristic definitions and scoring, see [pact-scope-detection.md](../protocols/pact-scope-detection.md).
 
-**When**: After PREPARE output is available (or plan content, if PREPARE was skipped). comPACT bypasses detection entirely.
+**Precondition**: Requires PREPARE output or plan content as input. If neither exists: Variety Scope >= 3 → Force PREPARE (needs research for reliable detection); Scope < 3 → skip detection (proceed single-scope).
 
 **Process**:
 1. Score the task against the heuristics table in the protocol
@@ -378,6 +380,8 @@ After PREPARE completes (or is skipped with plan context), evaluate whether the 
 | All strong signals fire, no counter-signals, autonomous enabled | Auto-decompose (see Evaluation Response below) |
 
 **Output format**: `Scope detection: Single scope (score 2/3 threshold)` or `Scope detection: Multi-scope detected (score 4/3 threshold) — proposing decomposition`
+
+**Persist `scope_detection`**: `TaskUpdate(featureTaskId, metadata={"scope_detection": {"score": N, "threshold": N, "result": "single|multi"}})`
 
 #### Evaluation Response
 
@@ -481,6 +485,8 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
 
+**Persist `s2_boundaries` and `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}, "established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
+
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
@@ -534,6 +540,8 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 Execute the [ATOMIZE Phase protocol](../protocols/pact-scope-phases.md#atomize-phase).
 
 **Worktree isolation**: Before dispatching each sub-scope's rePACT, invoke `/PACT:worktree-setup` with the suffix branch name (e.g., `feature-X--backend`). Pass the resulting worktree path to the rePACT invocation.
+
+**Persist scope state**: `TaskUpdate(scopeTaskId, metadata={"scope_contract": {...}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
 
 ---
 

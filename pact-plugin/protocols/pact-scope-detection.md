@@ -68,10 +68,13 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 ### Evaluation Timing
 
 1. **PREPARE** phase runs in single scope (always — research output is needed to evaluate signals)
-2. If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation section content against the same heuristics. If neither PREPARE output nor plan content is available, skip detection entirely (proceed single-scope).
-3. Orchestrator evaluates PREPARE output (or plan content) against heuristics
-4. Score **below threshold** → proceed with single-scope execution (today's default behavior)
-5. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
+2. If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation section content against the same heuristics.
+3. If neither PREPARE output nor plan content is available:
+   - **Variety Scope >= 3** → Force PREPARE to run (high cross-cutting complexity requires research input for reliable detection). Return to step 1.
+   - **Variety Scope < 3** → Skip detection entirely (proceed single-scope). Low scope makes multi-scope decomposition unlikely.
+4. Orchestrator evaluates PREPARE output (or plan content) against heuristics
+5. Score **below threshold** → proceed with single-scope execution (today's default behavior)
+6. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
 
 ### Bypass Rules
 

@@ -122,6 +122,8 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 4. **Environment drift** — When dispatching subsequent agents after earlier ones complete, check `file-edits.json` for modified files and include deltas in prompts (see [pact-s2-coordination.md](../protocols/pact-s2-coordination.md#environment-drift-detection))
 
+5. **Persist `s2_boundaries` and `established_conventions`** — `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {...}, "established_conventions": {...}})`
+
 **If conflicts cannot be resolved**: Sequence the work instead of dispatching concurrently.
 
 ---
