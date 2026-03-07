@@ -12,7 +12,7 @@
       "name": "PACT",
       "source": "./pact-plugin",
       "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
-      "version": "3.10.0",
+      "version": "3.9.6",
       "author": {
         "name": "ProfSynapse"
       },
