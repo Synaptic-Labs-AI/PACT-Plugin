@@ -135,8 +135,6 @@ This runs a mini-orchestration:
 
 > **Design rationale**: V3 repurposed rePACT as the single-level executor for sub-scopes dispatched by ATOMIZE. Level 2 nesting is unreachable by design -- scope detection is bypassed within sub-scopes, so a sub-scope cannot trigger further decomposition.
 
-**Enforcement via metadata**: The parent orchestrator stores `nesting_depth` in per-scope sub-task metadata during ATOMIZE (value `1` = first rePACT level). On entry, rePACT reads `TaskGet(taskId).metadata.nesting_depth` and rejects if > 1. This survives compaction — the orchestrator cannot accidentally re-dispatch at depth 2 after losing context.
-
 If you hit the nesting limit:
 - Simplify the sub-task and use `/PACT:comPACT`
 - Or escalate to user for guidance
@@ -259,8 +257,6 @@ Nested cycles produce:
 ## Scope Contract Reception
 
 When the parent orchestrator invokes rePACT with a **scope contract** (from scope detection and decomposition), the nested cycle operates scope-aware. Without a contract, rePACT behaves as described above. Contract presence is the mode switch — there are no explicit "modes" to select.
-
-**Reading the scope contract**: The scope contract is stored in task metadata by the parent orchestrator during ATOMIZE. Read it via `TaskGet(taskId).metadata.scope_contract`. The worktree path is also in metadata: `TaskGet(taskId).metadata.worktree_path`. This ensures scope state is recoverable after compaction — do not rely on the spawn prompt alone for contract details.
 
 **When a scope contract is provided:**
 

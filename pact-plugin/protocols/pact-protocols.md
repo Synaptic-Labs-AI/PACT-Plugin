@@ -529,8 +529,7 @@ Before invoking parallel agents, the orchestrator must:
 2. **Define boundaries or sequencing**:
    - If conflicts exist, either sequence the work or assign clear file/component boundaries
    - If no conflicts, proceed with parallel invocation
-   - **Persist**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.s2_boundaries`. If absent, re-run S2 pre-parallel check.
+   - **Persist `s2_boundaries`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
 
 3. **Establish resolution authority**:
    - Technical disagreements → Architect arbitrates
@@ -578,9 +577,7 @@ When "first agent's choice becomes standard," subsequent agents need to discover
    - Or: Run one agent first to establish conventions, then invoke the rest concurrently
    - **Tie-breaker**: If agents complete simultaneously and no first-agent convention exists, use alphabetical domain order (backend, database, frontend) for convention precedence
 
-4. **Persist established conventions**: Once conventions are established (from first agent's output or pre-defined), persist them:
-   `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
-   Recovery: On compaction, read from `TaskGet(codePhaseTaskId).metadata.established_conventions` and include in subsequent agent prompts. If absent, re-establish from first completing agent's output.
+4. **Persist `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
 
 ### Shared Language
 
@@ -1578,7 +1575,7 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
-> **State persistence**: All three input fields (`scope_contract`, `worktree_path`, `nesting_depth`) are stored in per-scope sub-task metadata by the parent orchestrator during ATOMIZE. The executor reads them via `TaskGet` on entry. This ensures decomposition state survives context compaction — the spawn prompt provides a thin bootstrap, not the authoritative source.
+> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read via `TaskGet` on entry.
 
 #### Current Executor: rePACT
 
@@ -1659,9 +1656,7 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 1. Invoke `/PACT:worktree-setup` with suffix branch: `feature-X--{scope_id}`
 2. Pass the worktree path to the rePACT invocation so the sub-scope operates in its own filesystem
 
-**Persist scope state**: When creating per-scope sub-tasks, store the scope contract, worktree path, and nesting depth in task metadata:
-`TaskUpdate(scopeTaskId, metadata={"scope_contract": {"version": 1, "name": "...", "deliverables": [...], "interfaces": {...}, "constraints": {...}}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
-Version field enables schema evolution when decomposition gets real usage. The executor (rePACT) reads these values via `TaskGet(scopeTaskId).metadata` on entry — the spawn prompt provides a thin bootstrap only.
+**Persist scope state**: `TaskUpdate(scopeTaskId, metadata={"scope_contract": {...}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
 
 **Dispatch**: Invoke `/PACT:rePACT` for each sub-scope. Sub-scopes read their scope contract from task metadata (not the prompt). Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
 
@@ -1681,10 +1676,10 @@ Version field enables schema evolution when decomposition gets real usage. The e
 
 This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
 
-**Recover scope state**: Read scope contracts and worktree paths from per-scope sub-task metadata: `TaskGet(scopeTaskId).metadata.scope_contract` and `.worktree_path`. This enables contract verification even after compaction.
+**Recover scope state**: Read from `TaskGet(scopeTaskId).metadata` (`scope_contract`, `worktree_path`) for each sub-scope.
 
 **Merge sub-scope branches**: Before running contract verification, merge each sub-scope's work back:
-1. For each completed sub-scope, read its worktree path from `TaskGet(scopeTaskId).metadata.worktree_path`
+1. For each completed sub-scope, merge its suffix branch to the feature branch
 2. Merge: `git merge --no-ff {sub-scope-branch}` — the `--no-ff` preserves scope boundaries in git history
 3. On merge conflict → emit algedonic ALERT (cross-scope interference indicates a `shared_files` constraint violation or incomplete contract)
 4. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
@@ -1701,8 +1696,8 @@ This phase verifies that independently-developed sub-scopes are compatible befor
   - Confirm no shared file constraint violations occurred
 
 **Invoke each with**:
-- Feature description and scope contracts (read from `TaskGet(scopeTaskId).metadata.scope_contract` for each sub-scope)
-- All sub-scope handoffs (contract fulfillment sections from task metadata)
+- Feature description and scope contracts
+- All sub-scope handoffs (contract fulfillment sections)
 - "This is cross-scope integration verification. Focus on compatibility between scopes, not internal scope correctness."
 
 **On consolidation failure**: Route through `/PACT:imPACT` for triage. Possible outcomes:

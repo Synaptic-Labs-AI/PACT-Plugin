@@ -39,8 +39,8 @@ done
 # Format: "label|pattern"
 SCENARIOS=(
     "Scenario 1: PREPARE ran -> proceed|PREPARE ran|PREPARE.*phase runs"
-    "Scenario 2: PREPARE skipped with plan -> proceed|PREPARE.*skipped.*plan.*exists|PREPARE was skipped.*approved plan"
-    "Scenario 3: No input, Scope >= 3 -> force PREPARE|Scope >= 3.*Force PREPARE|Variety Scope >= 3.*Force PREPARE"
+    "Scenario 2: PREPARE skipped with plan -> proceed|PREPARE.*skipped.*plan|PREPARE output.*plan content"
+    "Scenario 3: No input, Scope >= 3 -> force PREPARE|Scope >= 3.*[Ff]orce PREPARE"
     "Scenario 4: No input, Scope < 3 -> skip detection|Scope < 3.*[Ss]kip.*detection|Variety Scope < 3.*[Ss]kip.*detection"
 )
 

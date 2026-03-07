@@ -93,7 +93,7 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
-> **State persistence**: All three input fields (`scope_contract`, `worktree_path`, `nesting_depth`) are stored in per-scope sub-task metadata by the parent orchestrator during ATOMIZE. The executor reads them via `TaskGet` on entry. This ensures decomposition state survives context compaction — the spawn prompt provides a thin bootstrap, not the authoritative source.
+> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read via `TaskGet` on entry.
 
 #### Current Executor: rePACT
 
