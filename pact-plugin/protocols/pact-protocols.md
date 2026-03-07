@@ -529,6 +529,7 @@ Before invoking parallel agents, the orchestrator must:
 2. **Define boundaries or sequencing**:
    - If conflicts exist, either sequence the work or assign clear file/component boundaries
    - If no conflicts, proceed with parallel invocation
+   - **Persist `s2_boundaries`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
 
 3. **Establish resolution authority**:
    - Technical disagreements → Architect arbitrates
@@ -575,6 +576,8 @@ When "first agent's choice becomes standard," subsequent agents need to discover
    - Orchestrator pre-defines conventions in all prompts
    - Or: Run one agent first to establish conventions, then invoke the rest concurrently
    - **Tie-breaker**: If agents complete simultaneously and no first-agent convention exists, use alphabetical domain order (backend, database, frontend) for convention precedence
+
+4. **Persist `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
 
 ### Shared Language
 
@@ -1411,10 +1414,13 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 ### Evaluation Timing
 
 1. **PREPARE** phase runs in single scope (always — research output is needed to evaluate signals)
-2. If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation section content against the same heuristics. If neither PREPARE output nor plan content is available, skip detection entirely (proceed single-scope).
-3. Orchestrator evaluates PREPARE output (or plan content) against heuristics
-4. Score **below threshold** → proceed with single-scope execution (today's default behavior)
-5. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
+2. If PREPARE was skipped but an approved plan exists, evaluate the plan's Preparation section content against the same heuristics.
+3. If neither PREPARE output nor plan content is available:
+   - **Variety Scope >= 3** → Force PREPARE to run (high cross-cutting complexity requires research input for reliable detection). Return to step 1.
+   - **Variety Scope < 3** → Skip detection entirely (proceed single-scope). Low scope makes multi-scope decomposition unlikely.
+4. Orchestrator evaluates PREPARE output (or plan content) against heuristics
+5. Score **below threshold** → proceed with single-scope execution (today's default behavior)
+6. Score **at or above threshold** → activate the appropriate tier (Confirmed or Autonomous)
 
 ### Bypass Rules
 
@@ -1558,10 +1564,10 @@ The executor interface defines the contract between the parent orchestrator and 
 
 ```
 Input:
-  scope_contract: {the scope contract for this sub-scope}
+  scope_contract: {read from TaskGet(taskId).metadata.scope_contract}
+  worktree_path: {read from TaskGet(taskId).metadata.worktree_path}
+  nesting_depth: {read from TaskGet(taskId).metadata.nesting_depth}
   feature_context: {parent feature description, branch, relevant docs}
-  branch: {current feature branch name}
-  nesting_depth: {current nesting level, 0-based}
 
 Output:
   handoff: {standard handoff (6 fields, 5 required) + contract fulfillment section}
@@ -1569,16 +1575,18 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
+> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read via `TaskGet` on entry.
+
 #### Current Executor: rePACT
 
 rePACT implements the executor interface as follows:
 
 | Interface Element | rePACT Implementation |
 |-------------------|-----------------------|
-| **Input: scope_contract** | Passed inline in the rePACT invocation prompt by the parent orchestrator |
+| **Input: scope_contract** | Read from `TaskGet(taskId).metadata.scope_contract` on entry (stored by parent during ATOMIZE) |
 | **Input: feature_context** | Inherited from parent orchestration context (branch, requirements, architecture) |
-| **Input: branch** | Uses the current feature branch (no new branch created) |
-| **Input: nesting_depth** | Tracked via orchestrator context; enforced at 1-level maximum |
+| **Input: worktree_path** | Read from `TaskGet(taskId).metadata.worktree_path` on entry (stored by parent during ATOMIZE) |
+| **Input: nesting_depth** | Read from `TaskGet(taskId).metadata.nesting_depth` on entry; enforced at 1-level maximum |
 | **Output: handoff** | Standard handoff (6 fields, 5 required) with Contract Fulfillment section appended (see [rePACT After Completion](../commands/rePACT.md#after-completion)) |
 | **Output: commits** | Code committed directly to the feature branch during Mini-Code phase |
 | **Output: status** | Always `completed`; non-happy-path uses metadata (`{"stalled": true, "reason": "..."}` or `{"blocked": true, "blocker_task": "..."}`) per task lifecycle conventions |
@@ -1599,7 +1607,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 |-------------------|---------------------|
 | **Input: scope_contract** | Passed in the teammate spawn prompt via `Task` tool (with `team_name` and `name` parameters) |
 | **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
-| **Input: branch** | Worktree working directory (teammate operates in the assigned worktree) |
+| **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
 | **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
 | **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
 | **Output: commits** | Teammate commits directly to the feature branch |
@@ -1648,7 +1656,9 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 1. Invoke `/PACT:worktree-setup` with suffix branch: `feature-X--{scope_id}`
 2. Pass the worktree path to the rePACT invocation so the sub-scope operates in its own filesystem
 
-**Dispatch**: Invoke `/PACT:rePACT` for each sub-scope with its scope contract and worktree path. Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
+**Persist scope state**: `TaskUpdate(scopeTaskId, metadata={"scope_contract": {...}, "worktree_path": "/path/to/worktree", "nesting_depth": 1})`
+
+**Dispatch**: Invoke `/PACT:rePACT` for each sub-scope. Sub-scopes read their scope contract from task metadata (not the prompt). Sub-scopes run concurrently (default) unless they share files. When generating scope contracts, ensure `shared_files` constraints are set per the generation process in [pact-scope-contract.md](pact-scope-contract.md) -- sibling scopes must not modify each other's owned files.
 
 **Sub-scope failure policy**: Sub-scope failure is isolated — sibling scopes continue independently. Individual scope failures route through `/PACT:imPACT` to the affected scope only. However, when a sub-scope emits HALT, the parent orchestrator stops ALL sub-scopes (consistent with algedonic protocol: "Stop ALL agents"). Preserve work-in-progress for all scopes. After HALT resolution, review interrupted scopes before resuming.
 
@@ -1666,10 +1676,14 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 
 This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
 
+**Recover scope state**: Read from `TaskGet(scopeTaskId).metadata` (`scope_contract`, `worktree_path`) for each sub-scope.
+
 **Merge sub-scope branches**: Before running contract verification, merge each sub-scope's work back:
 1. For each completed sub-scope, merge its suffix branch to the feature branch
-2. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
-3. Proceed to contract verification and integration tests (below) on the merged feature branch
+2. Merge: `git merge --no-ff {sub-scope-branch}` — the `--no-ff` preserves scope boundaries in git history
+3. On merge conflict → emit algedonic ALERT (cross-scope interference indicates a `shared_files` constraint violation or incomplete contract)
+4. Invoke `/PACT:worktree-cleanup` for each sub-scope worktree
+5. Proceed to contract verification and integration tests (below) on the merged feature branch
 
 **Delegate in parallel**:
 - **`pact-architect`**: Verify cross-scope contract compatibility
@@ -1682,7 +1696,7 @@ This phase verifies that independently-developed sub-scopes are compatible befor
   - Confirm no shared file constraint violations occurred
 
 **Invoke each with**:
-- Feature description and scope contract summaries
+- Feature description and scope contracts
 - All sub-scope handoffs (contract fulfillment sections)
 - "This is cross-scope integration verification. Focus on compatibility between scopes, not internal scope correctness."
 

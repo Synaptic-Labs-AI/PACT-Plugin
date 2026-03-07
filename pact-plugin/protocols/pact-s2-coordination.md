@@ -45,6 +45,7 @@ Before invoking parallel agents, the orchestrator must:
 2. **Define boundaries or sequencing**:
    - If conflicts exist, either sequence the work or assign clear file/component boundaries
    - If no conflicts, proceed with parallel invocation
+   - **Persist `s2_boundaries`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}})`
 
 3. **Establish resolution authority**:
    - Technical disagreements → Architect arbitrates
@@ -91,6 +92,8 @@ When "first agent's choice becomes standard," subsequent agents need to discover
    - Orchestrator pre-defines conventions in all prompts
    - Or: Run one agent first to establish conventions, then invoke the rest concurrently
    - **Tie-breaker**: If agents complete simultaneously and no first-agent convention exists, use alphabetical domain order (backend, database, frontend) for convention precedence
+
+4. **Persist `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
 
 ### Shared Language
 

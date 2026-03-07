@@ -84,12 +84,15 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 When waiting for teammates to complete their tasks, **do not narrate waiting** — saying "Waiting on X..." is a waste of your context window. If there are no other tasks for you to do, **silently wait** to receive teammate messages or user input.
 
-#### After Compaction
+#### State Recovery (After Compaction or Session Resume)
 
-If context was compacted, reconstruct state from the shared whiteboard:
-1. `TaskList` — see all tasks, their status, owners, and blockers
-2. `TaskGet` on tasks by priority: in-progress first (active work), then most-recent completed phase (current decisions), then earlier phases only if needed
-3. Resume orchestration from current state
+Reconstruct state:
+1. `git worktree list` — identify active feature work
+2. `TaskList` — tasks, status, owners, blockers
+3. `TaskGet` on priority tasks: in-progress first, then recent completed
+4. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
+
+**State persistence**: Computed state is persisted in task metadata (`TaskUpdate`/`TaskGet`). Keys: `variety`, `impact_cycle_count`, `scope_detection` (Feature task); `s2_boundaries`, `established_conventions` (CODE phase); `remediation_cycle_count` (Review); `scope_contract`, `worktree_path`, `nesting_depth` (per-scope). Workflow commands handle recovery automatically.
 
 The Task system survives compaction. Your context window doesn't.
 
