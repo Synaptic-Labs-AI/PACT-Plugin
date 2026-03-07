@@ -95,6 +95,8 @@ When "first agent's choice becomes standard," subsequent agents need to discover
 
 4. **Persist `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
 
+> **State recovery**: After compaction, read `TaskGet(codePhaseTaskId).metadata` to recover `s2_boundaries` and `established_conventions` before dispatching subsequent agents.
+
 ### Shared Language
 
 All agents operating in parallel must:

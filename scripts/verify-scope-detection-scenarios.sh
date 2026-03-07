@@ -15,18 +15,6 @@ DETECTION="pact-plugin/protocols/pact-scope-detection.md"
 PASS=0
 FAIL=0
 
-check_marker() {
-    local file="$1"
-    local label="$2"
-    local pattern="$3"
-
-    if grep -qE "$pattern" "$file"; then
-        return 0
-    else
-        return 1
-    fi
-}
-
 # Verify both files exist
 for f in "$ORCHESTRATE" "$DETECTION"; do
     if [ ! -f "$f" ]; then
@@ -72,6 +60,8 @@ done
 echo ""
 
 # Cross-check: verify the number of evaluation timing steps match
+# Patterns differ intentionally: orchestrate.md has all 4 scenario markers explicitly,
+# while detection.md omits "PREPARE ran" (scenario 1 is implicit — PREPARE always runs first).
 orch_steps=$(grep -cE "PREPARE ran|PREPARE skipped.*plan|Scope >= 3|Scope < 3" "$ORCHESTRATE" 2>/dev/null || echo 0)
 det_steps=$(grep -cE "PREPARE.*skipped|Scope >= 3|Scope < 3" "$DETECTION" 2>/dev/null || echo 0)
 

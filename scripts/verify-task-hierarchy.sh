@@ -68,11 +68,11 @@ verify_patterns() {
 # --- orchestrate.md ---
 echo "orchestrate.md:"
 verify_patterns "orchestrate.md" "Feature task lifecycle" \
-    "TaskCreate: Feature task" \
+    "TaskCreate.*Feature task" \
     "in_progress" \
     "completed"
 verify_patterns "orchestrate.md" "Phase task lifecycle" \
-    "TaskCreate: Phase tasks" \
+    "TaskCreate.*Phase tasks" \
     "in_progress" \
     "completed"
 verify_patterns "orchestrate.md" "Agent task lifecycle" \
@@ -88,7 +88,7 @@ echo ""
 # --- comPACT.md ---
 echo "comPACT.md:"
 verify_patterns "comPACT.md" "Feature task lifecycle" \
-    "TaskCreate: Feature task" \
+    "TaskCreate.*Feature task" \
     "in_progress" \
     "completed"
 verify_patterns "comPACT.md" "Agent task lifecycle" \
@@ -100,11 +100,11 @@ echo ""
 # --- peer-review.md ---
 echo "peer-review.md:"
 verify_patterns "peer-review.md" "Review task lifecycle" \
-    "TaskCreate: Review task" \
+    "TaskCreate.*Review task" \
     "in_progress" \
     "completed"
 verify_patterns "peer-review.md" "Reviewer task lifecycle" \
-    "TaskCreate: Reviewer" \
+    "TaskCreate.*Reviewer" \
     "in_progress" \
     "completed"
 echo ""
@@ -112,7 +112,7 @@ echo ""
 # --- plan-mode.md ---
 echo "plan-mode.md:"
 verify_patterns "plan-mode.md" "Planning task lifecycle" \
-    "TaskCreate: Planning task" \
+    "TaskCreate.*Planning task" \
     "in_progress" \
     "completed"
 verify_patterns "plan-mode.md" "Consultation task lifecycle" \
@@ -124,7 +124,7 @@ echo ""
 # --- rePACT.md ---
 echo "rePACT.md:"
 verify_patterns "rePACT.md" "Sub-feature task lifecycle" \
-    "TaskCreate: Sub-feature task" \
+    "TaskCreate.*Sub-feature task" \
     "in_progress" \
     "completed"
 echo ""
