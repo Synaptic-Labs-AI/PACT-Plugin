@@ -79,8 +79,7 @@ class TestAgentFilesExist:
     def test_no_unexpected_agents(self, agent_files):
         names = {f.stem for f in agent_files}
         unexpected = names - EXPECTED_AGENTS
-        # Allow unexpected but flag them
-        assert len(unexpected) == 0 or True  # Soft check
+        assert len(unexpected) == 0, f"Unexpected agent files: {unexpected}"
 
 
 class TestAgentFrontmatter:
