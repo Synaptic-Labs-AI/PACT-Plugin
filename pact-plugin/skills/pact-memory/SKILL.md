@@ -24,7 +24,11 @@ The PACT Memory skill provides:
 ## Quick Start
 
 ```python
-from pact_memory.scripts import PACTMemory
+import sys, glob
+versions = sorted(glob.glob('/Users/mj/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory'))
+if versions:
+    sys.path.insert(0, versions[-1])
+from scripts import PACTMemory
 
 # Initialize
 memory = PACTMemory()
@@ -120,7 +124,11 @@ class PACTMemory:
 ### Convenience Functions
 
 ```python
-from pact_memory.scripts import save_memory, search_memory, list_memories_simple
+import sys, glob
+versions = sorted(glob.glob('/Users/mj/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory'))
+if versions:
+    sys.path.insert(0, versions[-1])
+from scripts import save_memory, search_memory, list_memories_simple
 
 # Quick save
 memory_id = save_memory({
@@ -174,19 +182,27 @@ pip install sentence-transformers
 The skill uses a 24MB GGUF model for embeddings. Download automatically:
 
 ```python
-from pact_memory.scripts.setup_memory import ensure_initialized
+import sys, glob
+versions = sorted(glob.glob('/Users/mj/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory'))
+if versions:
+    sys.path.insert(0, versions[-1])
+from scripts.setup_memory import ensure_initialized
 ensure_initialized(download_model_if_missing=True)
 ```
 
 Or manually:
 ```bash
-python -m pact_memory.scripts.setup_memory model
+cd ~/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory && python -m scripts.setup_memory model
 ```
 
 ### Check Status
 
 ```python
-from pact_memory.scripts.setup_memory import get_setup_status
+import sys, glob
+versions = sorted(glob.glob('/Users/mj/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory'))
+if versions:
+    sys.path.insert(0, versions[-1])
+from scripts.setup_memory import get_setup_status
 status = get_setup_status()
 print(f"Semantic search: {'Available' if status['can_use_semantic_search'] else 'Unavailable'}")
 ```
