@@ -70,6 +70,7 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
             )
             if new_content != content:
                 target_file.write_text(new_content, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
                 return "Session info updated in project CLAUDE.md"
             return None
 
@@ -88,6 +89,7 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
             new_content = content + "\n" + session_block + "\n"
 
         target_file.write_text(new_content, encoding="utf-8")
+        os.chmod(str(target_file), 0o600)
         return "Session info added to project CLAUDE.md"
 
     except Exception as e:
@@ -135,6 +137,7 @@ def restore_last_session(
     try:
         # Overwrite any existing prev file
         prev_file.write_text(content, encoding="utf-8")
+        os.chmod(str(prev_file), 0o600)
         snapshot_file.unlink()
     except (IOError, OSError):
         pass  # Best-effort rotation; don't fail the restore
