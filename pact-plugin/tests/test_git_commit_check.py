@@ -370,6 +370,88 @@ class TestCheckHardcodedSecrets:
             errors = check_hardcoded_secrets(["db.py"])
         assert len(errors) >= 1
 
+    def test_detects_aws_access_key_id(self):
+        from git_commit_check import check_hardcoded_secrets
+        content = 'aws_key = "AKIAIOSFODNN7EXAMPLE"'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["config.py"])
+        assert len(errors) >= 1
+        assert any("aws" in e.lower() for e in errors)
+
+    def test_ignores_non_akia_aws_prefix(self):
+        """Only AKIA prefix indicates long-term AWS keys; ASIA is temporary."""
+        from git_commit_check import check_hardcoded_secrets
+        content = 'key = "NOTAKIA0000000000000"'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["config.py"])
+        assert not any("aws" in e.lower() for e in errors)
+
+    def test_detects_rsa_private_key(self):
+        from git_commit_check import check_hardcoded_secrets
+        content = '-----BEGIN RSA PRIVATE KEY-----\nMIIE...'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["deploy.py"])
+        assert len(errors) >= 1
+        assert any("private key" in e.lower() for e in errors)
+
+    def test_detects_generic_private_key(self):
+        from git_commit_check import check_hardcoded_secrets
+        content = '-----BEGIN PRIVATE KEY-----\nMIIE...'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["certs.py"])
+        assert len(errors) >= 1
+        assert any("private key" in e.lower() for e in errors)
+
+    def test_detects_ec_private_key(self):
+        from git_commit_check import check_hardcoded_secrets
+        content = '-----BEGIN EC PRIVATE KEY-----\nMHQC...'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["crypto.py"])
+        assert len(errors) >= 1
+        assert any("private key" in e.lower() for e in errors)
+
+    def test_detects_openssh_private_key(self):
+        from git_commit_check import check_hardcoded_secrets
+        content = '-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn...'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["ssh.py"])
+        assert len(errors) >= 1
+        assert any("private key" in e.lower() for e in errors)
+
+    def test_ignores_public_key_header(self):
+        """Public keys are not secrets and should not trigger."""
+        from git_commit_check import check_hardcoded_secrets
+        content = '-----BEGIN PUBLIC KEY-----\nMIIB...'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["keys.py"])
+        assert not any("private key" in e.lower() for e in errors)
+
+    def test_detects_jwt_token(self):
+        from git_commit_check import check_hardcoded_secrets
+        # Realistic JWT structure: header.payload.signature
+        content = 'token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456_signature"'
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["auth.py"])
+        assert len(errors) >= 1
+        assert any("jwt" in e.lower() for e in errors)
+
+    def test_ignores_short_eyj_string(self):
+        """Short 'eyJ' strings that aren't full JWTs should not trigger."""
+        from git_commit_check import check_hardcoded_secrets
+        content = 'x = "eyJhbGci"'  # Too short, missing dot-separated segments
+        with patch("git_commit_check.get_staged_file_content",
+                   return_value=content):
+            errors = check_hardcoded_secrets(["config.py"])
+        assert not any("jwt" in e.lower() for e in errors)
+
     def test_allows_short_values(self):
         """Short values (< 8 chars for password, < 20 for keys) should not trigger."""
         from git_commit_check import check_hardcoded_secrets
