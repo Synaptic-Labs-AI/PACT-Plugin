@@ -39,6 +39,7 @@ def setup_plugin_symlinks() -> str | None:
     protocols_src = plugin_root / "protocols"
     if protocols_src.exists():
         protocols_dst = claude_dir / "protocols" / "pact-plugin"
+        # mode=0o700 applies to the leaf directory only; parent dirs use umask
         protocols_dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         try:
@@ -57,6 +58,7 @@ def setup_plugin_symlinks() -> str | None:
     agents_src = plugin_root / "agents"
     if agents_src.exists():
         agents_dst = claude_dir / "agents"
+        # mode=0o700 applies to the leaf directory only; parent dirs use umask
         agents_dst.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         agents_updated = 0
