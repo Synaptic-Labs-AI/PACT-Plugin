@@ -73,6 +73,8 @@ Review task: in_progress (persists until merge-ready)
 
 **Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
 
+**Persist `remediation_cycle_count`**: `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N})` — increment at each cycle start; default 0 if absent.
+
 ### Verify-Only Re-Review
 
 After remediation fixes are applied, re-review is **verify-only** — not a fresh review:

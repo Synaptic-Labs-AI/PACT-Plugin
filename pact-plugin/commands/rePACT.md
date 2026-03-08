@@ -185,9 +185,10 @@ Branch behavior depends on whether rePACT is invoked with a scope contract:
 ### Phase 0: Assess
 
 Before starting, verify:
-1. **Nesting depth**: Are we within the 1-level limit?
-2. **Scope appropriateness**: Is this truly a sub-task of the parent?
-3. **Domain determination**: Single-domain or multi-domain?
+1. **Nesting depth**: Read `TaskGet(taskId).metadata.nesting_depth` — if > 1, reject (max depth exceeded). If absent, treat as 0.
+2. **Scope contract**: If this rePACT was dispatched from ATOMIZE, read the scope contract from `TaskGet(taskId).metadata.scope_contract` instead of expecting it inline in the prompt. This ensures scope state survives compaction.
+3. **Scope appropriateness**: Is this truly a sub-task of the parent?
+4. **Domain determination**: Single-domain or multi-domain?
 
 ### Phase 1: Mini-Prepare (if needed)
 
