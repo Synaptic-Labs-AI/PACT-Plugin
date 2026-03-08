@@ -55,14 +55,28 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """
     path = db_path or get_db_path()
 
+    # Track whether the DB file is newly created for permission hardening
+    is_new = not path.exists()
+
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Harden database file permissions (owner-only read/write)
-    try:
-        os.chmod(str(path), 0o600)
-    except OSError:
-        pass
+    # Harden database file permissions only on first creation (avoids
+    # redundant syscall on every connection)
+    if is_new:
+        try:
+            os.chmod(str(path), 0o600)
+        except OSError:
+            pass
+
+    # Harden WAL sidecar files if they exist (created by WAL mode below)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            try:
+                os.chmod(str(sidecar), 0o600)
+            except OSError:
+                pass
 
     # Enable WAL mode for corruption prevention and better concurrency
     conn.execute("PRAGMA journal_mode=WAL")
@@ -512,6 +526,16 @@ def update_memory(
     # Exclude id and created_at from updates
     data.pop("id", None)
     data.pop("created_at", None)
+
+    # Whitelist of columns allowed in SET clause to prevent SQL injection
+    # via crafted dict keys. Must match the memories table schema.
+    ALLOWED_COLUMNS = {
+        "context", "goal", "active_tasks", "lessons_learned",
+        "decisions", "entities", "reasoning_chains",
+        "agreements_reached", "disagreements_resolved",
+        "project_id", "session_id", "updated_at",
+    }
+    data = {k: v for k, v in data.items() if k in ALLOWED_COLUMNS}
 
     # Always update updated_at
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
