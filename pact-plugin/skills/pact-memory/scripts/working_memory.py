@@ -438,6 +438,7 @@ def sync_to_claude_md(
 
         # Write back to file
         claude_md_path.write_text(new_content, encoding="utf-8")
+        os.chmod(str(claude_md_path), 0o600)
 
         logger.info("Synced memory to CLAUDE.md Working Memory section")
         return True
@@ -650,6 +651,7 @@ def sync_retrieved_to_claude_md(
 
         # Write back to file
         claude_md_path.write_text(new_content, encoding="utf-8")
+        os.chmod(str(claude_md_path), 0o600)
 
         logger.info("Synced retrieved memories to CLAUDE.md Retrieved Context section")
         return True

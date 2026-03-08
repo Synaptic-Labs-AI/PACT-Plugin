@@ -12,14 +12,14 @@ generate_team_name():
 7. Output format validation (pact- prefix, hex suffix)
 8. None session_id: treated as falsy, falls back to random
 
-restore_last_session():
+restore_last_session() (from shared.session_resume):
 9. Returns None if no snapshot file exists
 10. Returns content with header if file exists
 11. Rotates file to last-session.prev.md
 12. Returns None if project_slug is empty
 13. Returns None if snapshot file is empty
 
-check_resumption_context():
+check_resumption_context() (from shared.session_resume):
 14. Returns None when no in_progress or pending tasks
 15. Returns feature task names
 16. Returns phase names
@@ -177,7 +177,7 @@ class TestRestoreLastSession:
 
     def test_returns_none_when_no_snapshot(self, tmp_path):
         """Should return None when no last-session.md exists."""
-        from session_init import restore_last_session
+        from shared.session_resume import restore_last_session
 
         result = restore_last_session(
             project_slug="nonexistent",
@@ -188,7 +188,7 @@ class TestRestoreLastSession:
 
     def test_returns_content_with_header(self, tmp_path):
         """Should return snapshot content with descriptive header."""
-        from session_init import restore_last_session
+        from shared.session_resume import restore_last_session
 
         proj_dir = tmp_path / "my-project"
         proj_dir.mkdir()
@@ -208,7 +208,7 @@ class TestRestoreLastSession:
 
     def test_rotates_file_to_prev(self, tmp_path):
         """Should move last-session.md to last-session.prev.md after reading."""
-        from session_init import restore_last_session
+        from shared.session_resume import restore_last_session
 
         proj_dir = tmp_path / "my-project"
         proj_dir.mkdir()
@@ -229,7 +229,7 @@ class TestRestoreLastSession:
 
     def test_returns_none_when_empty_slug(self, tmp_path):
         """Should return None when project_slug is empty."""
-        from session_init import restore_last_session
+        from shared.session_resume import restore_last_session
 
         result = restore_last_session(
             project_slug="",
@@ -240,7 +240,7 @@ class TestRestoreLastSession:
 
     def test_returns_none_when_empty_file(self, tmp_path):
         """Should return None when snapshot file exists but is empty."""
-        from session_init import restore_last_session
+        from shared.session_resume import restore_last_session
 
         proj_dir = tmp_path / "my-project"
         proj_dir.mkdir()
@@ -255,7 +255,7 @@ class TestRestoreLastSession:
 
     def test_overwrites_existing_prev_file(self, tmp_path):
         """Should overwrite any existing last-session.prev.md during rotation."""
-        from session_init import restore_last_session
+        from shared.session_resume import restore_last_session
 
         proj_dir = tmp_path / "my-project"
         proj_dir.mkdir()
@@ -277,7 +277,7 @@ class TestCheckResumptionContext:
 
     def test_returns_none_when_no_active_tasks(self):
         """Should return None when all tasks are completed."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {"id": "1", "subject": "auth feature", "status": "completed", "metadata": {}},
@@ -290,7 +290,7 @@ class TestCheckResumptionContext:
 
     def test_returns_none_when_empty_list(self):
         """Should return None for empty task list."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         result = check_resumption_context([])
 
@@ -298,7 +298,7 @@ class TestCheckResumptionContext:
 
     def test_returns_feature_task_names(self):
         """Should include feature task names in resumption context."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {"id": "1", "subject": "Implement auth system", "status": "in_progress", "metadata": {}},
@@ -312,7 +312,7 @@ class TestCheckResumptionContext:
 
     def test_returns_phase_names(self):
         """Should include phase names in resumption context."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {"id": "2", "subject": "ARCHITECT: design", "status": "in_progress", "metadata": {}},
@@ -326,7 +326,7 @@ class TestCheckResumptionContext:
 
     def test_returns_agent_count(self):
         """Should include count of active agents."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {"id": "3", "subject": "pact-backend-coder", "status": "in_progress", "metadata": {}},
@@ -340,7 +340,7 @@ class TestCheckResumptionContext:
 
     def test_returns_blocker_count(self):
         """Should include blocker count with bold formatting."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {
@@ -358,7 +358,7 @@ class TestCheckResumptionContext:
 
     def test_mixed_task_types(self):
         """Should handle mix of feature, phase, agent, and blocker tasks."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {"id": "1", "subject": "Implement auth", "status": "in_progress", "metadata": {}},
@@ -384,7 +384,7 @@ class TestCheckResumptionContext:
 
     def test_includes_pending_count(self):
         """Should append pending count when pending tasks exist."""
-        from session_init import check_resumption_context
+        from shared.session_resume import check_resumption_context
 
         tasks = [
             {"id": "1", "subject": "Implement auth", "status": "in_progress", "metadata": {}},

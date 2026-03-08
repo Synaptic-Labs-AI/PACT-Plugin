@@ -263,6 +263,11 @@ def check_hardcoded_secrets(staged_files):
         (r'-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----', 'Private key'),
         # JWT tokens (three base64url segments separated by dots)
         (r'["\']eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}["\']', 'JWT token'),
+        # Google Cloud service account key (JSON key file marker)
+        (r'"type"\s*:\s*"service_account"', 'Google Cloud service account key'),
+        # Azure connection strings
+        (r'DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=[^;]+', 'Azure Storage connection string'),
+        (r'Server=tcp:[^;]+;.*Password=[^;]+', 'Azure SQL connection string'),
         # Generic patterns
         (r'api[_-]?key\s*[=:]\s*["\'][a-zA-Z0-9]{20,}["\']', 'API key assignment'),
         (r'secret[_-]?key\s*[=:]\s*["\'][a-zA-Z0-9]{20,}["\']', 'Secret key assignment'),

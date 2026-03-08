@@ -58,30 +58,37 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     # Track whether the DB file is newly created for permission hardening
     is_new = not path.exists()
 
-    conn = sqlite3.connect(str(path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-
-    # Harden database file permissions only on first creation (avoids
-    # redundant syscall on every connection)
+    # TOCTOU mitigation: pre-create the file with 0o600 permissions atomically
+    # so it is never world-readable, even briefly before sqlite3.connect() creates it.
     if is_new:
         try:
-            os.chmod(str(path), 0o600)
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            # Race: another process created it between our check and os.open
+            is_new = False
         except OSError:
-            pass
+            pass  # Fall through to sqlite3.connect which will create it
 
-    # Harden WAL sidecar files if they exist (created by WAL mode below)
-    for suffix in ("-wal", "-shm"):
-        sidecar = Path(str(path) + suffix)
-        if sidecar.exists():
-            try:
-                os.chmod(str(sidecar), 0o600)
-            except OSError:
-                pass
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
 
     # Enable WAL mode for corruption prevention and better concurrency
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
+
+    # Harden WAL sidecar files only on first creation (avoids redundant
+    # syscall on every connection). WAL sidecars are created by the
+    # PRAGMA journal_mode=WAL statement above.
+    if is_new:
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(path) + suffix)
+            if sidecar.exists():
+                try:
+                    os.chmod(str(sidecar), 0o600)
+                except OSError:
+                    pass
 
     return conn
 
