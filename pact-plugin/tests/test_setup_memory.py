@@ -11,7 +11,7 @@ Tests cover:
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -69,25 +69,12 @@ class TestEnsureInitialized:
     def test_success(self, tmp_path):
         from scripts.setup_memory import ensure_initialized
         target = tmp_path / "pact-memory"
-        mock_init_db = MagicMock()
         with (
             patch("scripts.setup_memory.PACT_MEMORY_DIR", target),
-            patch("scripts.setup_memory.initialize_database", mock_init_db, create=True),
-            patch.dict("sys.modules", {"scripts.database": MagicMock(initialize_database=mock_init_db)}),
+            patch("scripts.setup_memory.ensure_directories"),
         ):
-            # Patch the deferred import inside ensure_initialized
-            with patch("scripts.setup_memory.ensure_directories"):
-                with patch("importlib.import_module") as mock_import:
-                    mock_module = MagicMock()
-                    mock_module.initialize_database = mock_init_db
-                    mock_import.return_value = mock_module
-                    # The function does `from .database import initialize_database`
-                    # which is a relative import — we need to patch at the source
-                    result = ensure_initialized()
-        # If the import succeeds (mocked), returns True
-        # But the actual function uses relative import which is hard to mock cleanly
-        # Let's test the simple path
-        assert isinstance(result, bool)
+            result = ensure_initialized()
+        assert result is True
 
     def test_returns_false_on_db_failure(self, tmp_path):
         from scripts.setup_memory import ensure_initialized
