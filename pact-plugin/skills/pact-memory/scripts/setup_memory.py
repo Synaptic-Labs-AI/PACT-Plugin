@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def ensure_directories() -> None:
     """Create required directories if they don't exist."""
-    PACT_MEMORY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    PACT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def check_dependencies() -> Dict[str, Any]:

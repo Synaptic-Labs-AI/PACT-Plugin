@@ -1,14 +1,10 @@
 """
 Location: pact-plugin/hooks/shared/__init__.py
 Summary: Package for shared hook utilities.
-Used by: Various PACT hooks that need common Task system integration,
-         symlink management, CLAUDE.md manipulation, and session resume.
+Used by: Various PACT hooks that need common Task system integration.
 
-This package provides shared utilities for hooks:
-- task_utils: Task system integration (used by multiple hooks)
-- symlinks: Plugin symlink management for @reference resolution
-- claude_md_manager: CLAUDE.md file creation and update
-- session_resume: Session info, snapshot restore, resumption context
+This package provides shared utilities for hooks, primarily Task system
+integration functions that are used across multiple hooks.
 """
 
 from .task_utils import (

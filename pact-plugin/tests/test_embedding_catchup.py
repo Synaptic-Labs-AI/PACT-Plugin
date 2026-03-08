@@ -80,8 +80,10 @@ def _load_embedding_catchup():
     spec = importlib.util.spec_from_file_location(
         f"{pkg_name}.embedding_catchup",
         Path(_scripts_path) / "embedding_catchup.py",
+        submodule_search_locations=[]
     )
     mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = pkg_name
     sys.modules[f"{pkg_name}.embedding_catchup"] = mod
     spec.loader.exec_module(mod)
 
