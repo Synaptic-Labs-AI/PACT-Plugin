@@ -51,6 +51,7 @@ def update_claude_md() -> str | None:
         if not target_file.exists():
             target_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             target_file.write_text(wrapped_source, encoding="utf-8")
+            os.chmod(str(target_file), 0o600)
             return "Created CLAUDE.md with PACT Orchestrator"
 
         target_content = target_file.read_text(encoding="utf-8")
@@ -68,6 +69,7 @@ def update_claude_md() -> str | None:
 
                 if new_full_content != target_content:
                     target_file.write_text(new_full_content, encoding="utf-8")
+                    os.chmod(str(target_file), 0o600)
                     return "PACT Orchestrator updated"
                 return None
 
@@ -84,6 +86,7 @@ def update_claude_md() -> str | None:
 
         new_content = f"{target_content}\n{wrapped_source}"
         target_file.write_text(new_content, encoding="utf-8")
+        os.chmod(str(target_file), 0o600)
         return "PACT Orchestrator added to CLAUDE.md"
 
     except Exception as e:
@@ -134,6 +137,7 @@ The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`.
 
     try:
         target_file.write_text(memory_template, encoding="utf-8")
+        os.chmod(str(target_file), 0o600)
         return "Created project CLAUDE.md with memory sections"
     except Exception as e:
         return f"Project CLAUDE.md failed: {str(e)[:30]}"
