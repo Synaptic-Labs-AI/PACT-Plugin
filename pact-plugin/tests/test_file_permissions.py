@@ -117,16 +117,24 @@ class TestSetupMemoryPermissions:
 # telegram/config.py Permission Tests (verify existing hardening)
 # =============================================================================
 
+@pytest.mark.skipif(
+    not any(
+        (Path(__file__).parent.parent / d / "telegram").is_dir()
+        for d in ("hooks", "skills", ".")
+    ),
+    reason="telegram package not present in this installation",
+)
 class TestTelegramConfigPermissions:
     """Verify that telegram/config.py already has permission hardening."""
 
     def test_ensure_config_dir_sets_700(self, tmp_path):
         """ensure_config_dir() should create directory with mode 0o700."""
+        telegram = pytest.importorskip("telegram.config")
+
         config_dir = tmp_path / "pact-telegram"
 
         with patch("telegram.config.CONFIG_DIR", config_dir):
-            from telegram.config import ensure_config_dir
-            result = ensure_config_dir()
+            result = telegram.ensure_config_dir()
 
         assert config_dir.exists()
         dir_mode = stat.S_IMODE(config_dir.stat().st_mode)

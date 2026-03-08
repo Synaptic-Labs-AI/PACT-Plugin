@@ -54,6 +54,6 @@ When an agent cannot complete normally, mark its task as `completed` with descri
 | Failure | `{"failed": true, "reason": "..."}` |
 | Blocked | `{"blocked": true, "blocker_task": "..."}` |
 
-**Convention**: All non-happy-path terminations use `completed` with metadata — no `failed` status exists. This preserves the `pending -> in_progress -> completed` lifecycle.
+**Convention**: All non-happy-path terminations use `completed` with metadata — no `failed` status exists. This preserves the `pending → in_progress → completed` lifecycle.
 
 ---

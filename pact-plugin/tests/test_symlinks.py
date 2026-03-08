@@ -192,3 +192,25 @@ class TestSetupPluginSymlinks:
         # Real file should not be replaced
         assert not (agents_dst / "pact-custom.md").is_symlink()
         assert (agents_dst / "pact-custom.md").read_text() == "user override"
+
+    def test_protocols_oserror_reports_failure(self, tmp_path, monkeypatch):
+        """Should include 'failed' in result when protocol symlink creation raises OSError."""
+        from shared.symlinks import setup_plugin_symlinks
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        (plugin_root / "protocols").mkdir()
+
+        claude_dir = tmp_path / "home" / ".claude"
+        protocols_dir = claude_dir / "protocols"
+        protocols_dir.mkdir(parents=True)
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        # Make symlink_to raise OSError
+        with patch.object(Path, "symlink_to", side_effect=OSError("Permission denied")):
+            result = setup_plugin_symlinks()
+
+        assert result is not None
+        assert "protocols failed" in result

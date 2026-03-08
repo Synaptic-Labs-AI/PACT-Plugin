@@ -229,3 +229,63 @@ class TestEnsureProjectMemoryMd:
         content = (tmp_path / "CLAUDE.md").read_text()
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content
+
+
+class TestUpdateClaudeMdErrorPaths:
+    """Tests for update_claude_md() exception handling."""
+
+    def test_returns_error_message_on_read_failure(self, tmp_path, monkeypatch):
+        """Should return truncated error message when source file read fails."""
+        from shared.claude_md_manager import update_claude_md
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        source = plugin_root / "CLAUDE.md"
+        source.write_text("content")
+
+        claude_dir = tmp_path / "home" / ".claude"
+        claude_dir.mkdir(parents=True)
+        target = claude_dir / "CLAUDE.md"
+        target.write_text("existing")
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        # Make target unreadable to trigger exception in read_text
+        from unittest.mock import patch
+        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+            result = update_claude_md()
+
+        assert result is not None
+        assert "PACT update failed:" in result
+
+    def test_returns_none_when_plugin_root_env_empty(self, monkeypatch):
+        """Should return None when CLAUDE_PLUGIN_ROOT is empty string."""
+        from shared.claude_md_manager import update_claude_md
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "")
+
+        result = update_claude_md()
+
+        assert result is None
+
+
+class TestEnsureProjectMemoryMdErrorPaths:
+    """Tests for ensure_project_memory_md() exception handling."""
+
+    def test_returns_error_message_on_write_failure(self, tmp_path, monkeypatch):
+        """Should return truncated error message when write fails."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        # Point to a directory where we can't write
+        read_only = tmp_path / "readonly"
+        read_only.mkdir()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(read_only))
+
+        from unittest.mock import patch
+        with patch.object(Path, "write_text", side_effect=OSError("No space left")):
+            result = ensure_project_memory_md()
+
+        assert result is not None
+        assert "Project CLAUDE.md failed:" in result

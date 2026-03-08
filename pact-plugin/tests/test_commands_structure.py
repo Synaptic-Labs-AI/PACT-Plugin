@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import parse_frontmatter
+
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
 
 EXPECTED_COMMANDS = {
@@ -25,20 +27,6 @@ EXPECTED_COMMANDS = {
     "telegram-setup",
     "wrap-up",
 }
-
-
-def _parse_simple_frontmatter(text):
-    """Parse YAML frontmatter from markdown text."""
-    if not text.startswith("---"):
-        return None
-    end = text.index("---", 3)
-    fm_text = text[3:end].strip()
-    result = {}
-    for line in fm_text.split("\n"):
-        if ":" in line:
-            key, _, value = line.partition(":")
-            result[key.strip()] = value.strip()
-    return result
 
 
 @pytest.fixture
@@ -66,7 +54,7 @@ class TestCommandFrontmatter:
     def test_has_description(self, command_files):
         for f in command_files:
             text = f.read_text(encoding="utf-8")
-            fm = _parse_simple_frontmatter(text)
+            fm = parse_frontmatter(text)
             assert fm is not None, f"{f.name} has invalid frontmatter"
             assert "description" in fm, f"{f.name} missing description"
             assert len(fm["description"]) > 0, f"{f.name} has empty description"

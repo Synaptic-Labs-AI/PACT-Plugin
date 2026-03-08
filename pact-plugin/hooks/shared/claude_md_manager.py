@@ -30,7 +30,11 @@ def update_claude_md() -> str | None:
     Returns:
         Status message or None if no change.
     """
-    plugin_root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", ""))
+    plugin_root_str = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    if not plugin_root_str:
+        return None
+
+    plugin_root = Path(plugin_root_str)
     if not plugin_root.exists():
         return None
 

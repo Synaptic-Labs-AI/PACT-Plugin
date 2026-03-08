@@ -1,19 +1,108 @@
 """
-Test helper functions for the refresh system tests.
+Test helper functions for pact-plugin tests.
 
 Location: pact-plugin/tests/helpers.py
-Purpose: Provides factory functions for generating realistic JSONL transcripts.
+Purpose: Provides shared utilities and factory functions used across test modules.
          These are importable utilities, separate from pytest fixtures in conftest.py.
 
 Usage:
-    from tests.helpers import create_peer_review_transcript, create_terminated_workflow_transcript
-    # or from within test files:
-    from helpers import create_peer_review_transcript
+    from helpers import parse_frontmatter, create_test_schema
+    from helpers import create_peer_review_transcript, create_terminated_workflow_transcript
 """
 
 import json
 from datetime import datetime, timezone
 from typing import Any
+
+
+# =============================================================================
+# Shared Utilities: Frontmatter Parser
+# =============================================================================
+
+def parse_frontmatter(text):
+    """Parse YAML frontmatter from markdown text.
+
+    Handles simple key: value pairs and multiline values using the | block
+    scalar indicator. Used by agent, command, and skill structure tests.
+    """
+    if not text.startswith("---"):
+        return None
+    end = text.index("---", 3)
+    fm_text = text[3:end].strip()
+    result = {}
+    current_key = None
+    for line in fm_text.split("\n"):
+        if line.startswith("  ") and current_key:
+            # Continuation of multiline value
+            if current_key not in result:
+                result[current_key] = ""
+            result[current_key] += line.strip() + " "
+        elif ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if value == "|":
+                current_key = key
+                result[key] = ""
+            else:
+                result[key] = value
+                current_key = key
+    return result
+
+
+# =============================================================================
+# Shared Utilities: Memory Database Schema
+# =============================================================================
+
+def create_test_schema(conn):
+    """Create the pact-memory database schema for testing.
+
+    Creates memories, files, memory_files, and file_relations tables with
+    all indexes. Bypasses pysqlite3 compatibility issues by using raw SQL.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            context TEXT, goal TEXT,
+            active_tasks TEXT, lessons_learned TEXT,
+            decisions TEXT, entities TEXT,
+            reasoning_chains TEXT, agreements_reached TEXT,
+            disagreements_resolved TEXT,
+            project_id TEXT, session_id TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL, project_id TEXT,
+            last_modified TEXT,
+            UNIQUE(path, project_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS memory_files (
+            memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
+            file_id TEXT REFERENCES files(id),
+            relationship TEXT DEFAULT 'modified',
+            PRIMARY KEY (memory_id, file_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS file_relations (
+            source_file TEXT REFERENCES files(id),
+            target_file TEXT REFERENCES files(id),
+            relationship TEXT,
+            PRIMARY KEY (source_file, target_file, relationship)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_files_file ON memory_files(file_id)")
+    conn.commit()
 
 
 # =============================================================================

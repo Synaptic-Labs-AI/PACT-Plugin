@@ -27,59 +27,14 @@ from unittest.mock import patch
 
 import pytest
 
+from helpers import create_test_schema
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
 
 # graph.py imports standard `import sqlite3` (not pysqlite3), so its
 # `except sqlite3.IntegrityError` catches the standard library exception.
 # We must use standard sqlite3 for test connections to match.
 import sqlite3
-
-
-def _create_test_schema(conn):
-    """Create the memory schema directly, bypassing pysqlite3 issues."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            context TEXT, goal TEXT,
-            active_tasks TEXT, lessons_learned TEXT,
-            decisions TEXT, entities TEXT,
-            reasoning_chains TEXT, agreements_reached TEXT,
-            disagreements_resolved TEXT,
-            project_id TEXT, session_id TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            id TEXT PRIMARY KEY,
-            path TEXT NOT NULL, project_id TEXT,
-            last_modified TEXT,
-            UNIQUE(path, project_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS memory_files (
-            memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
-            file_id TEXT REFERENCES files(id),
-            relationship TEXT DEFAULT 'modified',
-            PRIMARY KEY (memory_id, file_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS file_relations (
-            source_file TEXT REFERENCES files(id),
-            target_file TEXT REFERENCES files(id),
-            relationship TEXT,
-            PRIMARY KEY (source_file, target_file, relationship)
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_files_file ON memory_files(file_id)")
-    conn.commit()
 
 
 @pytest.fixture
@@ -89,7 +44,7 @@ def db_conn(tmp_path):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    _create_test_schema(conn)
+    create_test_schema(conn)
     with patch("scripts.graph.ensure_initialized"):
         yield conn
     conn.close()

@@ -163,7 +163,6 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
     """
     in_progress = [t for t in tasks if t.get("status") == "in_progress"]
     pending = [t for t in tasks if t.get("status") == "pending"]
-    completed = [t for t in tasks if t.get("status") == "completed"]
 
     if not in_progress and not pending:
         return None

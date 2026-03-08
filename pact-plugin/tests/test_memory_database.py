@@ -8,6 +8,8 @@ Tests cover:
 4. Text search: substring matching, project filtering, LIKE wildcard escaping
 5. Database maintenance: count, integrity check
 6. generate_id: uniqueness
+7. ALLOWED_COLUMNS whitelist: unknown columns filtered by update_memory
+8. TOCTOU mitigation: atomic file pre-creation, race handling, WAL sidecar chmod
 """
 import json
 import os
@@ -16,6 +18,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from helpers import create_test_schema
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
 
@@ -26,53 +30,6 @@ except ImportError:
     import sqlite3
 
 
-def _create_test_schema(conn):
-    """Create the memory schema directly, bypassing pysqlite3 issues."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            context TEXT, goal TEXT,
-            active_tasks TEXT, lessons_learned TEXT,
-            decisions TEXT, entities TEXT,
-            reasoning_chains TEXT, agreements_reached TEXT,
-            disagreements_resolved TEXT,
-            project_id TEXT, session_id TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            id TEXT PRIMARY KEY,
-            path TEXT NOT NULL, project_id TEXT,
-            last_modified TEXT,
-            UNIQUE(path, project_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS memory_files (
-            memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
-            file_id TEXT REFERENCES files(id),
-            relationship TEXT DEFAULT 'modified',
-            PRIMARY KEY (memory_id, file_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS file_relations (
-            source_file TEXT REFERENCES files(id),
-            target_file TEXT REFERENCES files(id),
-            relationship TEXT,
-            PRIMARY KEY (source_file, target_file, relationship)
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_files_file ON memory_files(file_id)")
-    conn.commit()
-
-
 @pytest.fixture
 def db_conn(tmp_path):
     """Create a fresh database with schema, patching ensure_initialized to no-op."""
@@ -80,7 +37,7 @@ def db_conn(tmp_path):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    _create_test_schema(conn)
+    create_test_schema(conn)
     with patch("scripts.database.ensure_initialized"):
         yield conn
     conn.close()
@@ -368,3 +325,150 @@ class TestMaintenance:
         from scripts.database import generate_id
         ids = {generate_id() for _ in range(100)}
         assert len(ids) == 100
+
+
+# ---------------------------------------------------------------------------
+# ALLOWED_COLUMNS whitelist (Item 12)
+# ---------------------------------------------------------------------------
+
+class TestAllowedColumnsWhitelist:
+    """Verify update_memory filters unknown column keys."""
+
+    def test_unknown_columns_are_filtered(self, db_conn):
+        """Unknown dict keys should be silently dropped, not injected into SQL."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"context": "Original"})
+        # Attempt to update with a mix of valid and invalid keys
+        result = update_memory(db_conn, mem_id, {
+            "context": "Updated",
+            "evil_column": "DROP TABLE memories",
+            "'; DROP TABLE memories; --": "injection attempt",
+        })
+        assert result is True
+        mem = get_memory(db_conn, mem_id)
+        assert mem["context"] == "Updated"
+
+    def test_only_whitelisted_columns_applied(self, db_conn):
+        """Only columns in ALLOWED_COLUMNS should be written."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"context": "Test"})
+        update_memory(db_conn, mem_id, {
+            "goal": "New goal",
+            "nonexistent_field": "should be ignored",
+        })
+        mem = get_memory(db_conn, mem_id)
+        assert mem["goal"] == "New goal"
+        # Verify the table still has correct schema (no extra columns)
+        cursor = db_conn.execute("PRAGMA table_info(memories)")
+        col_names = {row[1] for row in cursor.fetchall()}
+        assert "nonexistent_field" not in col_names
+
+    def test_id_and_created_at_excluded(self, db_conn):
+        """id and created_at should not be updatable even though they exist."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"context": "Test"})
+        original = get_memory(db_conn, mem_id)
+        update_memory(db_conn, mem_id, {
+            "id": "hijacked-id",
+            "created_at": "1970-01-01T00:00:00",
+        })
+        after = get_memory(db_conn, mem_id)
+        assert after["id"] == mem_id
+        assert after["created_at"] == original["created_at"]
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU mitigation in get_connection (Item 11)
+# ---------------------------------------------------------------------------
+
+class TestTOCTOUMitigation:
+    """Verify atomic file pre-creation and WAL sidecar permission hardening."""
+
+    def test_new_db_file_created_with_600(self, tmp_path):
+        """New database file should be created with mode 0o600 via O_CREAT|O_EXCL."""
+        import stat
+        import sqlite3 as stdlib_sqlite3
+
+        db_path = tmp_path / "new.db"
+        assert not db_path.exists()
+
+        with patch("scripts.database.sqlite3", stdlib_sqlite3):
+            from scripts.database import get_connection
+            conn = get_connection(db_path=db_path)
+            conn.close()
+
+        assert db_path.exists()
+        file_mode = stat.S_IMODE(db_path.stat().st_mode)
+        assert file_mode == 0o600, f"Expected 0o600, got {oct(file_mode)}"
+
+    def test_race_condition_file_exists_error_handled(self, tmp_path):
+        """FileExistsError during O_CREAT|O_EXCL should be handled gracefully."""
+        import sqlite3 as stdlib_sqlite3
+
+        db_path = tmp_path / "race.db"
+
+        # Simulate race: os.open raises FileExistsError
+        original_open = os.open
+        def mock_open(path, flags, mode=0):
+            if "race.db" in str(path) and (flags & os.O_EXCL):
+                raise FileExistsError("simulated race condition")
+            return original_open(path, flags, mode)
+
+        with patch("scripts.database.sqlite3", stdlib_sqlite3), \
+             patch("scripts.database.os.open", side_effect=mock_open):
+            from scripts.database import get_connection
+            conn = get_connection(db_path=db_path)
+            conn.close()
+
+        # Should still succeed via sqlite3.connect fallback
+        assert db_path.exists()
+
+    def test_wal_sidecar_permissions_set_on_new_db(self, tmp_path):
+        """WAL sidecar files should be chmod'd to 0o600 on new database creation."""
+        import stat
+        import sqlite3 as stdlib_sqlite3
+
+        db_path = tmp_path / "wal_test.db"
+
+        with patch("scripts.database.sqlite3", stdlib_sqlite3):
+            from scripts.database import get_connection
+            conn = get_connection(db_path=db_path)
+            # Force WAL creation by writing data
+            conn.execute("CREATE TABLE test (id TEXT)")
+            conn.execute("INSERT INTO test VALUES ('x')")
+            conn.commit()
+            conn.close()
+
+        # Check sidecar permissions if they exist
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(db_path) + suffix)
+            if sidecar.exists():
+                mode = stat.S_IMODE(sidecar.stat().st_mode)
+                assert mode == 0o600, (
+                    f"Sidecar {sidecar.name} should be 0o600, got {oct(mode)}"
+                )
+
+    def test_existing_db_skips_toctou(self, tmp_path):
+        """Pre-existing database file should not trigger O_CREAT|O_EXCL."""
+        import sqlite3 as stdlib_sqlite3
+
+        db_path = tmp_path / "existing.db"
+        # Pre-create the file
+        db_path.write_bytes(b"")
+
+        call_log = []
+        original_open = os.open
+        def tracking_open(path, flags, mode=0):
+            if "existing.db" in str(path):
+                call_log.append(flags)
+            return original_open(path, flags, mode)
+
+        with patch("scripts.database.sqlite3", stdlib_sqlite3), \
+             patch("scripts.database.os.open", side_effect=tracking_open):
+            from scripts.database import get_connection
+            conn = get_connection(db_path=db_path)
+            conn.close()
+
+        # os.open should NOT have been called with O_EXCL for existing file
+        for flags in call_log:
+            assert not (flags & os.O_EXCL), "Should not use O_EXCL on existing file"

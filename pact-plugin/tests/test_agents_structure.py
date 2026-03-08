@@ -9,10 +9,11 @@ Tests cover:
 5. Skills reference exists
 6. Agent body contains expected sections
 """
-import re
 from pathlib import Path
 
 import pytest
+
+from helpers import parse_frontmatter
 
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
@@ -32,33 +33,6 @@ EXPECTED_AGENTS = {
 }
 
 REQUIRED_FRONTMATTER_KEYS = {"name", "description"}
-
-
-def _parse_frontmatter(text):
-    """Parse YAML frontmatter from markdown text."""
-    if not text.startswith("---"):
-        return None
-    end = text.index("---", 3)
-    fm_text = text[3:end].strip()
-    result = {}
-    current_key = None
-    for line in fm_text.split("\n"):
-        if line.startswith("  ") and current_key:
-            # Continuation of multiline value
-            if current_key not in result:
-                result[current_key] = ""
-            result[current_key] += line.strip() + " "
-        elif ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-            if value == "|":
-                current_key = key
-                result[key] = ""
-            else:
-                result[key] = value
-                current_key = key
-    return result
 
 
 @pytest.fixture
@@ -89,7 +63,7 @@ class TestAgentFrontmatter:
         agents = {}
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
-            fm = _parse_frontmatter(text)
+            fm = parse_frontmatter(text)
             if fm:
                 agents[f.stem] = fm
         return agents

@@ -8,21 +8,24 @@ update_session_info():
 3. Replaces existing session block between markers
 4. Inserts session block before "## Retrieved Context" when no markers
 5. Appends session block at end as fallback
+6. Returns error message on exception
 
 restore_last_session():
-6. Returns None when no snapshot file exists
-7. Returns content with header if file exists
-8. Rotates file to last-session.prev.md
-9. Returns None when project_slug is empty
-10. Returns None when snapshot file is empty
+7. Returns None when no snapshot file exists
+8. Returns content with header if file exists
+9. Rotates file to last-session.prev.md
+10. Returns None when project_slug is empty
+11. Returns None when snapshot file is empty
+12. Returns None on IOError during read
+13. Continues on rotation failure (best-effort)
 
 check_resumption_context():
-11. Returns None when no in_progress or pending tasks
-12. Returns feature task names
-13. Returns phase names
-14. Returns agent count
-15. Returns blocker count with bold formatting
-16. Mixed task types
+14. Returns None when no in_progress or pending tasks
+15. Returns feature task names
+16. Returns phase names
+17. Returns agent count
+18. Returns blocker count with bold formatting
+19. Mixed task types
 """
 
 import sys
@@ -301,3 +304,93 @@ class TestCheckResumptionContext:
         assert "Active agents: 1" in result
         assert "**Blockers: 1**" in result
         assert "(1 pending)" in result
+
+
+class TestUpdateSessionInfoErrorPaths:
+    """Tests for update_session_info() exception handling."""
+
+    def test_returns_error_message_on_exception(self, tmp_path, monkeypatch):
+        """Should return truncated error message when file operations fail."""
+        from shared.session_resume import update_session_info
+        from unittest.mock import patch as mock_patch
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# Project\n")
+
+        with mock_patch.object(Path, "read_text", side_effect=IOError("disk error")):
+            result = update_session_info("sess-123", "pact-sess123")
+
+        assert result is not None
+        assert "Session info failed:" in result
+
+
+class TestRestoreLastSessionErrorPaths:
+    """Tests for restore_last_session() error handling paths."""
+
+    def test_returns_none_on_ioerror(self, tmp_path):
+        """Should return None when snapshot read raises IOError."""
+        from shared.session_resume import restore_last_session
+        from unittest.mock import patch as mock_patch
+
+        proj_dir = tmp_path / "my-project"
+        proj_dir.mkdir()
+        snapshot = proj_dir / "last-session.md"
+        snapshot.write_text("content")
+
+        with mock_patch.object(Path, "read_text", side_effect=IOError("read error")):
+            result = restore_last_session(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is None
+
+    def test_returns_none_on_unicode_error(self, tmp_path):
+        """Should return None when snapshot has encoding issues."""
+        from shared.session_resume import restore_last_session
+        from unittest.mock import patch as mock_patch
+
+        proj_dir = tmp_path / "my-project"
+        proj_dir.mkdir()
+        snapshot = proj_dir / "last-session.md"
+        snapshot.write_text("content")
+
+        with mock_patch.object(
+            Path, "read_text",
+            side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "bad"),
+        ):
+            result = restore_last_session(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is None
+
+    def test_continues_on_rotation_failure(self, tmp_path):
+        """Should still return content even when rotation to .prev fails."""
+        from shared.session_resume import restore_last_session
+        from unittest.mock import patch as mock_patch
+
+        proj_dir = tmp_path / "my-project"
+        proj_dir.mkdir()
+        content = "# Last Session\n## Tasks\n- #1\n"
+        snapshot = proj_dir / "last-session.md"
+        snapshot.write_text(content)
+
+        # Make prev file write fail, but original read should succeed
+        original_write = Path.write_text
+        def failing_write(self, *args, **kwargs):
+            if "last-session.prev.md" in str(self):
+                raise IOError("disk full")
+            return original_write(self, *args, **kwargs)
+
+        with mock_patch.object(Path, "write_text", failing_write):
+            result = restore_last_session(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "Previous session summary" in result
+        assert "# Last Session" in result

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import parse_frontmatter
+
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 EXPECTED_SKILLS = {
@@ -36,32 +38,6 @@ N8N_SKILLS = {
     "n8n-validation-expert",
     "n8n-workflow-patterns",
 }
-
-
-def _parse_skill_frontmatter(text):
-    """Parse YAML frontmatter from SKILL.md text."""
-    if not text.startswith("---"):
-        return None
-    end = text.index("---", 3)
-    fm_text = text[3:end].strip()
-    result = {}
-    current_key = None
-    for line in fm_text.split("\n"):
-        if line.startswith("  ") and current_key:
-            if current_key not in result:
-                result[current_key] = ""
-            result[current_key] += line.strip() + " "
-        elif ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-            if value == "|":
-                current_key = key
-                result[key] = ""
-            else:
-                result[key] = value
-                current_key = key
-    return result
 
 
 @pytest.fixture
@@ -100,7 +76,7 @@ class TestSkillMdFiles:
             if not skill_md.is_file():
                 continue
             text = skill_md.read_text(encoding="utf-8")
-            fm = _parse_skill_frontmatter(text)
+            fm = parse_frontmatter(text)
             if fm is None:
                 continue
             assert "name" in fm, f"{d.name}/SKILL.md missing name"
@@ -111,7 +87,7 @@ class TestSkillMdFiles:
             if not skill_md.is_file():
                 continue
             text = skill_md.read_text(encoding="utf-8")
-            fm = _parse_skill_frontmatter(text)
+            fm = parse_frontmatter(text)
             if fm is None:
                 continue
             assert "description" in fm, f"{d.name}/SKILL.md missing description"

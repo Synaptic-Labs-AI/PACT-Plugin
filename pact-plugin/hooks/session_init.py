@@ -56,13 +56,9 @@ from staleness import (  # noqa: F401
 )
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
-# Re-exported here (noqa: F401) so existing consumers that import from session_init
-# continue to work without updating their import paths. This is the backward-
-# compatibility shim for the decomposition — new code should import from the
-# shared submodules directly (shared.symlinks, shared.claude_md_manager, etc.).
-from shared.symlinks import setup_plugin_symlinks  # noqa: F401
-from shared.claude_md_manager import update_claude_md, ensure_project_memory_md  # noqa: F401
-from shared.session_resume import (  # noqa: F401
+from shared.symlinks import setup_plugin_symlinks
+from shared.claude_md_manager import update_claude_md, ensure_project_memory_md
+from shared.session_resume import (
     update_session_info,
     restore_last_session,
     check_resumption_context,

@@ -7,6 +7,7 @@ common fixtures used across multiple test modules.
 
 import json
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,15 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+# Add tests directory to path for helpers module imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Add hooks directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+
+# Add pact-memory scripts to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
 
 
 # =============================================================================
