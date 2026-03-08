@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def get_db_path() -> Path:
     """Get the database file path, creating parent directories if needed."""
-    PACT_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    PACT_MEMORY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     return DB_PATH
 
 
@@ -55,6 +55,21 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """
     path = db_path or get_db_path()
 
+    # Track whether the DB file is newly created for permission hardening
+    is_new = not path.exists()
+
+    # TOCTOU mitigation: pre-create the file with 0o600 permissions atomically
+    # so it is never world-readable, even briefly before sqlite3.connect() creates it.
+    if is_new:
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            # Race: another process created it between our check and os.open
+            is_new = False
+        except OSError:
+            pass  # Fall through to sqlite3.connect which will create it
+
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
@@ -62,6 +77,18 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
+
+    # Harden WAL sidecar files only on first creation (avoids redundant
+    # syscall on every connection). WAL sidecars are created by the
+    # PRAGMA journal_mode=WAL statement above.
+    if is_new:
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(path) + suffix)
+            if sidecar.exists():
+                try:
+                    os.chmod(str(sidecar), 0o600)
+                except OSError:
+                    pass
 
     return conn
 
@@ -506,6 +533,16 @@ def update_memory(
     # Exclude id and created_at from updates
     data.pop("id", None)
     data.pop("created_at", None)
+
+    # Whitelist of columns allowed in SET clause to prevent SQL injection
+    # via crafted dict keys. Must match the memories table schema.
+    ALLOWED_COLUMNS = {
+        "context", "goal", "active_tasks", "lessons_learned",
+        "decisions", "entities", "reasoning_chains",
+        "agreements_reached", "disagreements_resolved",
+        "project_id", "session_id", "updated_at",
+    }
+    data = {k: v for k, v in data.items() if k in ALLOWED_COLUMNS}
 
     # Always update updated_at
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
