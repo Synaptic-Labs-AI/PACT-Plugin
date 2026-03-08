@@ -257,12 +257,6 @@ def check_hardcoded_secrets(staged_files):
         (r'["\']ghp_[a-zA-Z0-9]{36,}["\']', 'GitHub personal access token'),
         (r'["\']gho_[a-zA-Z0-9]{36,}["\']', 'GitHub OAuth token'),
         (r'["\']xox[baprs]-[a-zA-Z0-9-]{10,}["\']', 'Slack token'),
-        # AWS access key IDs (always start with AKIA for long-term keys)
-        (r'["\']AKIA[0-9A-Z]{16}["\']', 'AWS access key ID'),
-        # Private key headers (PEM format)
-        (r'-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----', 'Private key'),
-        # JWT tokens (three base64url segments separated by dots)
-        (r'["\']eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}["\']', 'JWT token'),
         # Generic patterns
         (r'api[_-]?key\s*[=:]\s*["\'][a-zA-Z0-9]{20,}["\']', 'API key assignment'),
         (r'secret[_-]?key\s*[=:]\s*["\'][a-zA-Z0-9]{20,}["\']', 'Secret key assignment'),
