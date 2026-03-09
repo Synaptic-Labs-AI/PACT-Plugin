@@ -58,7 +58,7 @@ def is_dangerous_command(command: str) -> bool:
     return False
 
 
-def find_valid_token(token_dir: Path | None = None) -> dict | None:
+def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[None, None]:
     """Find a valid (unexpired) authorization token.
 
     Also cleans up any expired token files.
@@ -67,13 +67,15 @@ def find_valid_token(token_dir: Path | None = None) -> dict | None:
         token_dir: Override token directory (for testing)
 
     Returns:
-        The token data dict if a valid token exists, None otherwise
+        Tuple of (token_data, token_path) if a valid token exists,
+        (None, None) otherwise
     """
     if token_dir is None:
         token_dir = TOKEN_DIR
 
     now = time.time()
     valid_token = None
+    valid_path = None
     token_pattern = str(token_dir / f"{TOKEN_PREFIX}*")
 
     for token_path in glob.glob(token_pattern):
@@ -95,12 +97,13 @@ def find_valid_token(token_dir: Path | None = None) -> dict | None:
 
             # Valid token found
             valid_token = token_data
+            valid_path = token_path
 
         except (json.JSONDecodeError, OSError, KeyError, AttributeError, TypeError):
             # Corrupted or malformed token — clean up
             _safe_remove(token_path)
 
-    return valid_token
+    return valid_token, valid_path
 
 
 def _safe_remove(path: str):
@@ -114,6 +117,9 @@ def _safe_remove(path: str):
 def check_merge_authorization(command: str, token_dir: Path | None = None) -> str | None:
     """Check if a dangerous command is authorized.
 
+    Tokens are single-use: once a token authorizes a command, it is consumed
+    (deleted) so that each approval authorizes exactly one operation.
+
     Args:
         command: The bash command to check
         token_dir: Override token directory (for testing)
@@ -124,8 +130,10 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
     if not is_dangerous_command(command):
         return None
 
-    token = find_valid_token(token_dir)
+    token, token_path = find_valid_token(token_dir)
     if token is not None:
+        # Consume the token — one approval = one operation
+        _safe_remove(token_path)
         return None
 
     return (

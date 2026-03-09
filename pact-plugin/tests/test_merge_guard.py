@@ -416,15 +416,18 @@ class TestFindValidToken:
         token_file = tmp_path / "merge-authorized-12345"
         token_file.write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is not None
         assert result["context"]["test"] is True
+        assert path is not None
+        assert "merge-authorized-12345" in path
 
     def test_returns_none_when_no_tokens(self, tmp_path):
         from merge_guard_pre import find_valid_token
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
 
     def test_cleans_up_expired_token(self, tmp_path):
         from merge_guard_pre import find_valid_token
@@ -438,8 +441,9 @@ class TestFindValidToken:
         token_file = tmp_path / "merge-authorized-12345"
         token_file.write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert not token_file.exists()  # Cleaned up
 
     def test_cleans_up_corrupted_token(self, tmp_path):
@@ -448,8 +452,9 @@ class TestFindValidToken:
         token_file = tmp_path / "merge-authorized-12345"
         token_file.write_text("not json")
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert not token_file.exists()
 
     def test_cleans_up_invalid_expiry(self, tmp_path):
@@ -463,8 +468,9 @@ class TestFindValidToken:
         token_file = tmp_path / "merge-authorized-12345"
         token_file.write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert not token_file.exists()
 
     def test_ignores_non_token_files(self, tmp_path):
@@ -474,8 +480,9 @@ class TestFindValidToken:
         other_file = tmp_path / "some-other-file"
         other_file.write_text("not a token")
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert other_file.exists()  # Not cleaned up
 
 
@@ -681,7 +688,7 @@ class TestIntegration:
         assert exc_info.value.code == 0  # Allowed
 
     def test_multiple_valid_tokens(self, tmp_path):
-        """Multiple valid tokens: any valid one should authorize."""
+        """Multiple valid tokens: each authorizes one operation (consumed on use)."""
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
@@ -694,8 +701,17 @@ class TestIntegration:
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) >= 2
 
-        result = check_merge_authorization("gh pr merge 1", token_dir=tmp_path)
-        assert result is None
+        # First operation: consumes one token
+        result1 = check_merge_authorization("gh pr merge 1", token_dir=tmp_path)
+        assert result1 is None
+
+        # Second operation: consumes the other token
+        result2 = check_merge_authorization("git push --force origin main", token_dir=tmp_path)
+        assert result2 is None
+
+        # Third operation: blocked (all tokens consumed)
+        result3 = check_merge_authorization("git branch -D old", token_dir=tmp_path)
+        assert result3 is not None
 
     def test_expired_token_does_not_authorize(self, tmp_path):
         """Only expired tokens present — command should be blocked."""
@@ -713,6 +729,122 @@ class TestIntegration:
         assert result is not None
         # Expired token should have been cleaned up
         assert not (tmp_path / "merge-authorized-99999").exists()
+
+
+# =============================================================================
+# Single-use token tests
+# =============================================================================
+
+
+class TestSingleUseToken:
+    """Verify that tokens are consumed (deleted) after first use."""
+
+    def test_token_deleted_after_authorization(self, tmp_path):
+        """Token file is removed after it authorizes a command."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+        assert token_path is not None
+        assert Path(token_path).exists()
+
+        # First command: allowed, token consumed
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is None  # Allowed
+        assert not Path(token_path).exists()  # Token consumed
+
+    def test_second_command_blocked_after_consumption(self, tmp_path):
+        """Second dangerous command is blocked because token was consumed."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"pr": "42"}, token_dir=tmp_path)
+
+        # First command: allowed
+        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result1 is None
+
+        # Second command: blocked (token consumed)
+        result2 = check_merge_authorization("git push --force origin main", token_dir=tmp_path)
+        assert result2 is not None
+        assert "AskUserQuestion" in result2
+
+    def test_safe_commands_do_not_consume_token(self, tmp_path):
+        """Safe commands don't trigger token consumption."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+
+        # Safe command: allowed without consuming token
+        result = check_merge_authorization("git status", token_dir=tmp_path)
+        assert result is None
+        assert Path(token_path).exists()  # Token still present
+
+    def test_consumption_does_not_interfere_with_expired_cleanup(self, tmp_path):
+        """Expired tokens are cleaned up normally alongside consumption."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+
+        # Create an expired token
+        expired_data = {
+            "created_at": now - 600,
+            "expires_at": now - 300,
+            "context": {},
+        }
+        expired_file = tmp_path / "merge-authorized-00001"
+        expired_file.write_text(json.dumps(expired_data))
+
+        # Create a valid token
+        valid_path = write_token({"pr": "99"}, token_dir=tmp_path)
+
+        # Authorize: expired cleaned up, valid consumed
+        result = check_merge_authorization("gh pr merge 99", token_dir=tmp_path)
+        assert result is None
+        assert not expired_file.exists()  # Expired: cleaned up
+        assert not Path(valid_path).exists()  # Valid: consumed
+
+    def test_each_approval_authorizes_one_operation(self, tmp_path):
+        """Two approvals authorize exactly two operations."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # First approval
+        write_token({"op": "merge"}, token_dir=tmp_path)
+        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result1 is None  # Allowed
+
+        # Blocked without new approval
+        result2 = check_merge_authorization("gh pr merge 43", token_dir=tmp_path)
+        assert result2 is not None  # Blocked
+
+        # Second approval
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = time.time() + 1
+            write_token({"op": "force-push"}, token_dir=tmp_path)
+        result3 = check_merge_authorization("git push --force origin main", token_dir=tmp_path)
+        assert result3 is None  # Allowed
+
+        # Blocked again
+        result4 = check_merge_authorization("git branch -D old", token_dir=tmp_path)
+        assert result4 is not None  # Blocked
+
+    def test_concurrent_deletion_is_safe(self, tmp_path):
+        """If token is already deleted (race condition), authorization still works."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+
+        # Simulate concurrent deletion: remove the token before check_merge_authorization
+        # can consume it. The _safe_remove in consumption handles FileNotFoundError.
+        os.unlink(token_path)
+
+        # Command should be blocked because token no longer exists
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
 
 
 # =============================================================================
@@ -971,8 +1103,9 @@ class TestTokenEdgeCases:
         token_data = {"created_at": time.time(), "context": {}}
         (tmp_path / "merge-authorized-11111").write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         # Default expires_at=0 triggers the <= 0 check, token is cleaned up
         assert not (tmp_path / "merge-authorized-11111").exists()
 
@@ -987,8 +1120,9 @@ class TestTokenEdgeCases:
         }
         (tmp_path / "merge-authorized-22222").write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert not (tmp_path / "merge-authorized-22222").exists()
 
     def test_token_zero_expiry(self, tmp_path):
@@ -1002,8 +1136,9 @@ class TestTokenEdgeCases:
         }
         (tmp_path / "merge-authorized-33333").write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert not (tmp_path / "merge-authorized-33333").exists()
 
     def test_token_expiry_exactly_at_now(self, tmp_path):
@@ -1022,7 +1157,7 @@ class TestTokenEdgeCases:
         # writing and reading; test both paths by mocking
         with patch("merge_guard_pre.time") as mock_time:
             mock_time.time.return_value = now + 0.001  # Just past expiry
-            result = find_valid_token(token_dir=tmp_path)
+            result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
 
     def test_token_just_before_expiry(self, tmp_path):
@@ -1039,8 +1174,9 @@ class TestTokenEdgeCases:
 
         with patch("merge_guard_pre.time") as mock_time:
             mock_time.time.return_value = now  # Exactly at creation time
-            result = find_valid_token(token_dir=tmp_path)
+            result, path = find_valid_token(token_dir=tmp_path)
         assert result is not None
+        assert path is not None
 
     def test_token_with_empty_json_object(self, tmp_path):
         """Token that is just {} (no fields) is cleaned up."""
@@ -1048,8 +1184,9 @@ class TestTokenEdgeCases:
 
         (tmp_path / "merge-authorized-66666").write_text("{}")
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         # expires_at defaults to 0, which triggers cleanup
         assert not (tmp_path / "merge-authorized-66666").exists()
 
@@ -1059,8 +1196,9 @@ class TestTokenEdgeCases:
 
         (tmp_path / "merge-authorized-77777").write_text("[1, 2, 3]")
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         # list.get() raises AttributeError → caught by except clause
         assert not (tmp_path / "merge-authorized-77777").exists()
 
@@ -1077,7 +1215,7 @@ class TestTokenEdgeCases:
         }
         (tmp_path / "merge-authorized-88888").write_text(json.dumps(token_data))
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None  # 1 second since epoch is expired
 
     def test_empty_token_file(self, tmp_path):
@@ -1086,8 +1224,9 @@ class TestTokenEdgeCases:
 
         (tmp_path / "merge-authorized-99999").write_text("")
 
-        result = find_valid_token(token_dir=tmp_path)
+        result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
+        assert path is None
         assert not (tmp_path / "merge-authorized-99999").exists()
 
     def test_write_token_returns_none_on_readonly_dir(self, tmp_path):
@@ -1372,8 +1511,9 @@ class TestTokenSecurity:
         result = write_token(large_context, token_dir=tmp_path)
         assert result is not None
 
-        token = find_valid_token(token_dir=tmp_path)
+        token, path = find_valid_token(token_dir=tmp_path)
         assert token is not None
+        assert path is not None
         assert len(token["context"]["data"]) == 10000
 
     def test_post_hook_never_blocks(self, tmp_path):
