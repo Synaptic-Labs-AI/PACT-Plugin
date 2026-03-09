@@ -891,3 +891,39 @@ def create_repact_transcript(
         ))
 
     return create_transcript_lines(lines)
+
+
+# =============================================================================
+# CLI Test Factories
+# =============================================================================
+
+def make_cli_memory_dict(
+    context: str = "Working on CLI tests",
+    goal: str = "Verify pact-memory CLI entry point",
+    lessons_learned: list[str] | None = None,
+    decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Create a minimal memory dict suitable for CLI save command tests.
+
+    Returns a dict that json.dumps() can serialize and PACTMemory.save()
+    can accept. Keeps only the fields commonly used in CLI testing.
+
+    Args:
+        context: Context description for the memory.
+        goal: Goal description for the memory.
+        lessons_learned: Optional list of lesson strings.
+        decisions: Optional list of decision dicts.
+
+    Returns:
+        Dict suitable for CLI save command JSON input.
+    """
+    result: dict[str, Any] = {
+        "context": context,
+        "goal": goal,
+    }
+    if lessons_learned is not None:
+        result["lessons_learned"] = lessons_learned
+    if decisions is not None:
+        result["decisions"] = decisions
+    return result

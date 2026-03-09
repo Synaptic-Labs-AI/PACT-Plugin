@@ -986,3 +986,23 @@ def agent_teams_orchestrate_transcript() -> str:
         include_task="implement auth endpoint",
         include_termination=False,
     )
+
+
+# =============================================================================
+# CLI Test Factories
+# =============================================================================
+
+@pytest.fixture
+def cli_memory_dict():
+    """
+    Factory fixture wrapping make_cli_memory_dict from helpers.py.
+
+    Returns a function that creates a minimal memory dict suitable for
+    CLI save command tests. Mirrors helpers.make_cli_memory_dict().
+
+    Usage:
+        def test_something(cli_memory_dict):
+            memory = cli_memory_dict(context="my context")
+    """
+    from helpers import make_cli_memory_dict
+    return make_cli_memory_dict

@@ -23,52 +23,65 @@ The PACT Memory skill provides:
 
 ## Quick Start
 
-```python
-import sys, os, glob
-versions = sorted(
-    glob.glob(os.path.expanduser('~/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory')),
-    key=lambda p: list(map(int, p.split('/')[-3].split('.')))
-)
-if versions:
-    sys.path.insert(0, versions[-1])
-from scripts import PACTMemory
+All commands use the CLI entry point via `${CLAUDE_SKILL_DIR}`:
 
-# Initialize
-memory = PACTMemory()
-
+```bash
 # Save a memory
-memory_id = memory.save({
-    "context": "Implementing user authentication",
-    "goal": "Add JWT refresh token support",
-    "lessons_learned": [
-        "Redis INCR is atomic - perfect for rate limiting",
-        "Always validate refresh token rotation"
-    ],
-    "decisions": [
-        {
-            "decision": "Use Redis for token blacklist",
-            "rationale": "Fast TTL support, distributed access"
-        }
-    ],
-    "reasoning_chains": [
-        "Redis chosen because TTL support → needed for token expiry → simpler than DB cleanup"
-    ],
-    "entities": [
-        {"name": "AuthService", "type": "component"},
-        {"name": "TokenManager", "type": "class"}
-    ]
-})
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '{
+  "context": "Implementing user authentication",
+  "goal": "Add JWT refresh token support",
+  "lessons_learned": [
+    "Redis INCR is atomic - perfect for rate limiting",
+    "Always validate refresh token rotation"
+  ],
+  "decisions": [
+    {
+      "decision": "Use Redis for token blacklist",
+      "rationale": "Fast TTL support, distributed access"
+    }
+  ],
+  "reasoning_chains": [
+    "Redis chosen because TTL support → needed for token expiry → simpler than DB cleanup"
+  ],
+  "entities": [
+    {"name": "AuthService", "type": "component"},
+    {"name": "TokenManager", "type": "class"}
+  ]
+}'
 # See Memory Structure table below for all available fields
 # including agreements_reached and disagreements_resolved
 
 # Search memories
-results = memory.search("rate limiting tokens")
-for mem in results:
-    print(f"Context: {mem.context}")
-    print(f"Lessons: {mem.lessons_learned}")
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "rate limiting tokens"
+
+# Search with graph-enhanced boosting for current file
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth tokens" --current-file src/auth/refresh.ts
 
 # List recent memories
-recent = memory.list(limit=10)
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
+
+# Get a specific memory by ID
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id>
+
+# Update an existing memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update <memory_id> '{"goal": "Updated goal"}'
+
+# Delete a memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete <memory_id>
+
+# Check system status
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" status
+
+# Initialize/verify the memory system
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" setup
+```
+
+All commands output JSON to stdout: `{"ok": true, "result": ...}`.
+Errors output JSON to stderr: `{"ok": false, "error": "...", "message": "..."}`.
+
+For large JSON payloads (to avoid shell escaping issues), use `--stdin`:
+```bash
+echo '{"context": "...", "goal": "..."}' | python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save --stdin
 ```
 
 ## Memory Structure
@@ -109,44 +122,54 @@ Each memory can contain:
 {"name": "AuthService", "type": "component", "notes": "Handles all auth flows"}
 ```
 
-## API Reference
+## CLI Reference
 
-### PACTMemory Class
+### Commands
 
-```python
-class PACTMemory:
-    def save(self, memory: dict, files: list = None) -> str
-    def search(self, query: str, current_file: str = None, limit: int = 5) -> list[MemoryObject]
-    def get(self, memory_id: str) -> MemoryObject | None
-    def update(self, memory_id: str, updates: dict) -> bool
-    def delete(self, memory_id: str) -> bool
-    def list(self, limit: int = 20, session_only: bool = False) -> list[MemoryObject]
-    def get_status(self) -> dict
-```
+| Command | Description | Output |
+|---------|-------------|--------|
+| `save <json>` | Save a memory object | `{"memory_id": "<hex>"}` |
+| `save --stdin` | Save from piped JSON | `{"memory_id": "<hex>"}` |
+| `search <query>` | Semantic search | `[{"id": "...", "context": "...", ...}, ...]` |
+| `search <query> --limit N` | Search with limit | `[...]` (default: 5) |
+| `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
+| `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
+| `list --limit N` | List with limit | `[...]` (default: 20) |
+| `get <id>` | Get memory by ID | `{"id": "...", "context": "...", ...}` |
+| `update <id> <json>` | Update memory fields | `{"memory_id": "<hex>"}` |
+| `update <id> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
+| `delete <id>` | Delete a memory | `{"deleted": true, "memory_id": "<hex>"}` |
+| `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
+| `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 
-### Convenience Functions
+### Exit Codes
 
-```python
-import sys, os, glob
-versions = sorted(
-    glob.glob(os.path.expanduser('~/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory')),
-    key=lambda p: list(map(int, p.split('/')[-3].split('.')))
-)
-if versions:
-    sys.path.insert(0, versions[-1])
-from scripts import save_memory, search_memory, list_memories_simple
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | User error (bad args, invalid JSON) |
+| 2 | System error (DB failure, missing deps) |
 
-# Quick save
-memory_id = save_memory({
-    "context": "Bug fix",
-    "lessons_learned": ["Check null values first"]
-})
+### Examples
 
-# Quick search
-results = search_memory("authentication")
+```bash
+# Save a memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '{"context": "Bug fix", "lessons_learned": ["Check null values first"]}'
 
-# Quick list
-recent = list_memories_simple(10)
+# Search memories
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "authentication"
+
+# Search with file context for graph-enhanced results
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth patterns" --current-file src/auth/service.py
+
+# List recent memories
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 5
+
+# Update an existing memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update abc123 '{"goal": "Updated goal", "lessons_learned": ["New lesson"]}'
+
+# Delete a memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete abc123
 ```
 
 ## Search Capabilities
@@ -183,40 +206,14 @@ pip install sqlite-lembed
 pip install sentence-transformers
 ```
 
-### Model Download
+### Initialize and Check Status
 
-The skill uses a 24MB GGUF model for embeddings. Download automatically:
-
-```python
-import sys, os, glob
-versions = sorted(
-    glob.glob(os.path.expanduser('~/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory')),
-    key=lambda p: list(map(int, p.split('/')[-3].split('.')))
-)
-if versions:
-    sys.path.insert(0, versions[-1])
-from scripts.setup_memory import ensure_initialized
-ensure_initialized(download_model_if_missing=True)
-```
-
-Or manually:
 ```bash
-cd "$(ls -d ~/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory | sort -V | tail -1)" && python -m scripts.setup_memory model
-```
+# Initialize the memory system (creates directories, database schema)
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" setup
 
-### Check Status
-
-```python
-import sys, os, glob
-versions = sorted(
-    glob.glob(os.path.expanduser('~/.claude/plugins/cache/pact-marketplace/PACT/*/skills/pact-memory')),
-    key=lambda p: list(map(int, p.split('/')[-3].split('.')))
-)
-if versions:
-    sys.path.insert(0, versions[-1])
-from scripts.setup_memory import get_setup_status
-status = get_setup_status()
-print(f"Semantic search: {'Available' if status['can_use_semantic_search'] else 'Unavailable'}")
+# Check system status (memory count, capabilities, db path)
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" status
 ```
 
 ## Storage
@@ -231,11 +228,11 @@ Memories are stored in `~/.claude/pact-memory/memory.db` using SQLite with:
 When invoked via `/pact-memory <command> "<args>"`:
 
 ### Save Command
-```
-/pact-memory save "<description>"
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '<json>'
 ```
 
-**IMPORTANT**: The description argument is just a hint. You MUST construct a comprehensive memory object with ALL relevant fields. Never just save the raw string. Think of each memory as a detailed journal entry that your future self (or another agent) needs to fully understand what happened, why it mattered, and what was learned.
+**IMPORTANT**: The argument is just a hint. You MUST construct a comprehensive memory object with ALL relevant fields. Never just save the raw string. Think of each memory as a detailed journal entry that your future self (or another agent) needs to fully understand what happened, why it mattered, and what was learned.
 
 **Required fields for every save:**
 
@@ -262,10 +259,9 @@ GOOD (comprehensive):
 
 **Example transformation:**
 ```
-# User invokes:
-/pact-memory save "figured out the auth bug"
+# Agent is asked to save "figured out the auth bug"
 
-# You should construct:
+# Construct the full memory object and save:
 {
     "context": "Working on the fix/auth-refresh branch to resolve issue #234 where users reported intermittent 401 errors after being logged in for extended periods. The bug was reported by 3 enterprise customers last week and is blocking the v2.1 release. Initial investigation pointed to the token refresh mechanism, specifically a race condition between concurrent API requests. The authentication system uses JWT tokens with 15-minute expiry and a refresh token rotation pattern. This session focused on reproducing the bug locally by simulating high-latency conditions and tracing through the token refresh flow.",
     "goal": "Identify and fix the root cause of intermittent authentication failures that occur after extended user sessions, ensuring the fix doesn't introduce performance regressions.",
@@ -292,16 +288,16 @@ GOOD (comprehensive):
 ```
 
 ### Search Command
-```
-/pact-memory search "<query>"
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "<query>"
 ```
 Returns semantically similar memories. Use natural language queries.
 
 ### List Command
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
 ```
-/pact-memory list [limit]
-```
-Shows recent memories (default: 10).
+Shows recent memories (default: 20).
 
 ## Best Practices
 
