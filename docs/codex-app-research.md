@@ -364,6 +364,43 @@ Possible distribution approaches:
 
 ---
 
+## Codex App Server — A Key Integration Point
+
+The Codex desktop app is powered by the **Codex App Server**, an open-source bidirectional JSON-RPC API (`openai/codex/codex-rs/app-server/`). This is a significant integration point that could enable deeper PACT orchestration.
+
+### Protocol Details
+- **Transport**: JSON-RPC 2.0 over stdio (JSONL) or experimental WebSocket
+- **Client bindings**: Go, Python, TypeScript, Swift, Kotlin
+- **Start**: `codex app-server` (stdio) or `codex app-server --listen ws://127.0.0.1:4500` (WebSocket)
+
+### Key Methods
+| Method | Purpose |
+|--------|---------|
+| `review/start` | Initiate code review |
+| `command/exec` | Execute commands |
+| `model/list` | List available models |
+| `skills/list` | List installed skills |
+| `skills/config/write` | Configure skills |
+| `app/list` | List app instances |
+
+### Streaming & Approvals
+- Items stream with lifecycle events: `item/started`, `item/*/delta`, `item/completed`
+- Server-initiated approval requests for command execution and file changes
+- Network approvals grouped by destination (host, protocol, port)
+
+### What This Means for PACT
+The App Server protocol opens the door to building a **PACT orchestrator as an external process** that controls multiple Codex agents programmatically — potentially recovering some of the coordination capabilities lost from Claude Code's hook system. A PACT orchestrator could:
+
+1. Spawn and manage multiple agent threads via the JSON-RPC API
+2. Monitor agent progress via streaming events
+3. Implement approval policies programmatically (replacing hooks)
+4. Coordinate inter-agent communication externally
+5. Manage memory persistence across sessions
+
+This is a more advanced integration path but would yield the closest equivalent to PACT's current Claude Code architecture.
+
+---
+
 ## Sources
 
 - [Introducing the Codex App — OpenAI](https://openai.com/index/introducing-the-codex-app/)
@@ -382,3 +419,11 @@ Possible distribution approaches:
 - [Codex vs Claude Code — Builder.io](https://www.builder.io/blog/codex-vs-claude-code)
 - [Skills in OpenAI Codex — Jesse Vincent](https://blog.fsck.com/2025/12/19/codex-skills/)
 - [Codex Prompting Guide](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide/)
+- [Codex App Server Documentation](https://developers.openai.com/codex/app-server/)
+- [Unlocking the Codex Harness: How We Built the App Server — OpenAI](https://openai.com/index/unlocking-the-codex-harness/)
+- [Codex App Server Architecture — InfoQ](https://www.infoq.com/news/2026/02/opanai-codex-app-server/)
+- [Codex App Features](https://developers.openai.com/codex/app/features/)
+- [Codex Worktrees Documentation](https://developers.openai.com/codex/app/worktrees/)
+- [Codex Local Environments](https://developers.openai.com/codex/app/local-environments/)
+- [Use Codex with the Agents SDK](https://developers.openai.com/codex/guides/agents-sdk/)
+- [Codex GitHub Repository](https://github.com/openai/codex)
