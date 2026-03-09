@@ -28,7 +28,7 @@ from helpers import create_test_schema, make_cli_memory_dict
 # Add pact-memory skill root to path so `from scripts.cli import ...` works
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
 
-from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, main, _COMMANDS
+from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ class TestCliArgParsing:
     def test_list_limit_default(self):
         parser = build_parser()
         args = parser.parse_args(["list"])
-        assert args.limit == 10
+        assert args.limit == 20
 
     def test_list_limit_custom(self):
         parser = build_parser()
@@ -166,8 +166,39 @@ class TestCliArgParsing:
         args = parser.parse_args([])
         assert args.command is None
 
+    def test_update_subcommand_parsed(self):
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", '{"context": "updated"}'])
+        assert args.command == "update"
+        assert args.memory_id == "abc123"
+        assert args.json_data == '{"context": "updated"}'
+        assert args.stdin is False
+
+    def test_update_stdin_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "--stdin"])
+        assert args.command == "update"
+        assert args.memory_id == "abc123"
+        assert args.stdin is True
+
+    def test_delete_subcommand_parsed(self):
+        parser = build_parser()
+        args = parser.parse_args(["delete", "abc123"])
+        assert args.command == "delete"
+        assert args.memory_id == "abc123"
+
+    def test_search_current_file_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["search", "query", "--current-file", "/path/to/file.py"])
+        assert args.current_file == "/path/to/file.py"
+
+    def test_search_current_file_default_is_none(self):
+        parser = build_parser()
+        args = parser.parse_args(["search", "query"])
+        assert args.current_file is None
+
     def test_dispatch_table_covers_all_subcommands(self):
-        expected = {"save", "search", "list", "get", "status", "setup"}
+        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete"}
         assert set(_COMMANDS.keys()) == expected
 
 
@@ -281,7 +312,7 @@ class TestCliSearchCommand:
                 cmd_search(args)
         assert exc_info.value.code == 0
         mock_pact_memory.search.assert_called_once_with(
-            "auth tokens", limit=5, sync_to_claude=False
+            "auth tokens", current_file=None, limit=5, sync_to_claude=False
         )
 
     def test_search_with_limit(self, mock_pact_memory):
@@ -292,7 +323,7 @@ class TestCliSearchCommand:
             with pytest.raises(SystemExit):
                 cmd_search(args)
         mock_pact_memory.search.assert_called_once_with(
-            "query", limit=3, sync_to_claude=False
+            "query", current_file=None, limit=3, sync_to_claude=False
         )
 
     def test_search_empty_results(self, mock_pact_memory, capsys):
@@ -341,7 +372,7 @@ class TestCliListCommand:
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit):
                 cmd_list(args)
-        mock_pact_memory.list.assert_called_once_with(limit=10)
+        mock_pact_memory.list.assert_called_once_with(limit=20)
 
     def test_list_custom_limit(self, mock_pact_memory):
         parser = build_parser()
@@ -493,6 +524,144 @@ class TestCliSetupCommand:
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
         assert err_output["error"] == "SETUP_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Update Command
+# ---------------------------------------------------------------------------
+
+class TestCliUpdateCommand:
+    """Test the update subcommand handler."""
+
+    def test_update_existing_memory(self, mock_pact_memory, capsys):
+        mock_pact_memory.update.return_value = True
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", '{"context": "updated"}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.update.assert_called_once_with("abc123", {"context": "updated"})
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+        assert output["result"]["memory_id"] == "abc123"
+
+    def test_update_not_found(self, mock_pact_memory, capsys):
+        mock_pact_memory.update.return_value = False
+        parser = build_parser()
+        args = parser.parse_args(["update", "nonexistent", '{"context": "x"}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "NOT_FOUND"
+
+    def test_update_with_stdin(self, mock_pact_memory, monkeypatch):
+        mock_pact_memory.update.return_value = True
+        monkeypatch.setattr("sys.stdin", StringIO('{"context": "from stdin"}'))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "--stdin"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.update.assert_called_once_with("abc123", {"context": "from stdin"})
+
+    def test_update_invalid_json(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "not{valid"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "INVALID_JSON"
+
+    def test_update_non_dict_json(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", '["a list"]'])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "INVALID_INPUT"
+
+    def test_update_no_input(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "MISSING_INPUT"
+
+    def test_update_passes_db_path(self, mock_pact_memory):
+        mock_pact_memory.update.return_value = True
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", '{"context": "x"}', "--db-path", "/tmp/t.db"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory) as mock_cls:
+            with pytest.raises(SystemExit):
+                cmd_update(args, db_path=Path("/tmp/t.db"))
+        mock_cls.assert_called_once_with(db_path=Path("/tmp/t.db"))
+
+
+# ---------------------------------------------------------------------------
+# Delete Command
+# ---------------------------------------------------------------------------
+
+class TestCliDeleteCommand:
+    """Test the delete subcommand handler."""
+
+    def test_delete_existing_memory(self, mock_pact_memory, capsys):
+        mock_pact_memory.delete.return_value = True
+        parser = build_parser()
+        args = parser.parse_args(["delete", "abc123"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_delete(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.delete.assert_called_once_with("abc123")
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+        assert output["result"]["deleted"] is True
+        assert output["result"]["memory_id"] == "abc123"
+
+    def test_delete_not_found(self, mock_pact_memory, capsys):
+        mock_pact_memory.delete.return_value = False
+        parser = build_parser()
+        args = parser.parse_args(["delete", "nonexistent"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_delete(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "NOT_FOUND"
+
+    def test_delete_passes_db_path(self, mock_pact_memory):
+        mock_pact_memory.delete.return_value = True
+        parser = build_parser()
+        args = parser.parse_args(["delete", "abc123", "--db-path", "/tmp/t.db"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory) as mock_cls:
+            with pytest.raises(SystemExit):
+                cmd_delete(args, db_path=Path("/tmp/t.db"))
+        mock_cls.assert_called_once_with(db_path=Path("/tmp/t.db"))
 
 
 # ---------------------------------------------------------------------------
@@ -748,8 +917,11 @@ class TestCliSubprocess:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         output = json.loads(result.stdout)
         assert output["ok"] is True
-        # Search may or may not find results depending on search backend
-        # (keyword vs semantic), but should not error
+        # Note: graph_enhanced_search opens its own DB connection to the global
+        # database, bypassing --db-path. The subprocess search returns results
+        # from the global DB, not cli_db. We verify the envelope is correct and
+        # the result is a list — content assertion requires the search backend
+        # to honor --db-path, which is tracked as a known limitation.
         assert isinstance(output["result"], list)
 
     def test_get_not_found_exits_1(self, cli_script_path, cli_db):
@@ -801,3 +973,286 @@ class TestCliSubprocess:
         # Should parse without error
         output = json.loads(result.stdout)
         assert isinstance(output, dict)
+
+    def test_update_and_verify(self, cli_script_path, cli_db):
+        memory_dict = make_cli_memory_dict(context="original context")
+        json_str = json.dumps(memory_dict)
+
+        # Save
+        save_result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json_str,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert save_result.returncode == 0
+        memory_id = json.loads(save_result.stdout)["result"]["memory_id"]
+
+        # Update
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", memory_id,
+             '{"context": "updated context"}',
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        update_output = json.loads(update_result.stdout)
+        assert update_output["ok"] is True
+        assert update_output["result"]["memory_id"] == memory_id
+
+        # Verify via get
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0
+        get_output = json.loads(get_result.stdout)
+        assert get_output["result"]["context"] == "updated context"
+
+    def test_update_not_found_exits_1(self, cli_script_path, cli_db):
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "update", "nonexistent_id",
+             '{"context": "x"}', "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1
+        err_output = json.loads(result.stderr)
+        assert err_output["error"] == "NOT_FOUND"
+
+    def test_delete_and_verify(self, cli_script_path, cli_db):
+        memory_dict = make_cli_memory_dict(context="to be deleted")
+        json_str = json.dumps(memory_dict)
+
+        # Save
+        save_result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json_str,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert save_result.returncode == 0
+        memory_id = json.loads(save_result.stdout)["result"]["memory_id"]
+
+        # Delete
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        delete_output = json.loads(delete_result.stdout)
+        assert delete_output["ok"] is True
+        assert delete_output["result"]["deleted"] is True
+
+        # Verify deleted via get
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        err_output = json.loads(get_result.stderr)
+        assert err_output["error"] == "NOT_FOUND"
+
+    def test_delete_not_found_exits_1(self, cli_script_path, cli_db):
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", "nonexistent_id",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1
+        err_output = json.loads(result.stderr)
+        assert err_output["error"] == "NOT_FOUND"
+
+    def test_status_returns_system_info(self, cli_script_path, cli_db):
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "status",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["ok"] is True
+        assert isinstance(output["result"], dict)
+        # Status should include core fields from get_status()
+        assert "memory_count" in output["result"]
+        assert "project_id" in output["result"]
+
+
+# ---------------------------------------------------------------------------
+# Adversarial Save Input Tests
+# ---------------------------------------------------------------------------
+
+class TestCliSaveAdversarial:
+    """Test edge cases and adversarial inputs for the save command."""
+
+    def test_save_empty_dict(self, mock_pact_memory, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["save", "{}"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with({})
+
+    def test_save_deeply_nested_json(self, mock_pact_memory, capsys):
+        # Build a 50-level nested dict
+        nested = {"value": "leaf"}
+        for _ in range(50):
+            nested = {"nested": nested}
+        json_str = json.dumps(nested)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(nested)
+
+    def test_save_large_json_payload(self, mock_pact_memory, capsys):
+        # ~100KB payload
+        large_dict = {"context": "x" * 100_000}
+        json_str = json.dumps(large_dict)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(large_dict)
+
+    def test_save_unicode_emoji(self, mock_pact_memory, capsys):
+        memory_dict = {"context": "Testing emoji \U0001f680\U0001f525\U0001f4a5 support"}
+        json_str = json.dumps(memory_dict)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+
+    def test_save_unicode_cjk(self, mock_pact_memory, capsys):
+        memory_dict = {"context": "\u4e16\u754c\u3053\u3093\u306b\u3061\u306f\uc548\ub155\ud558\uc138\uc694"}
+        json_str = json.dumps(memory_dict)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_unicode_rtl(self, mock_pact_memory, capsys):
+        memory_dict = {"context": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645"}
+        json_str = json.dumps(memory_dict)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_special_chars_in_keys(self, mock_pact_memory, capsys):
+        memory_dict = {"key with spaces": "val", "key/with/slashes": "val", "key.with.dots": "val"}
+        json_str = json.dumps(memory_dict)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_null_values(self, mock_pact_memory, capsys):
+        memory_dict = {"context": None, "goal": None}
+        json_str = json.dumps(memory_dict)
+        parser = build_parser()
+        args = parser.parse_args(["save", json_str])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_numeric_scalar_json(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["save", "42"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "INVALID_INPUT"
+
+    def test_save_boolean_scalar_json(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["save", "true"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "INVALID_INPUT"
+
+    def test_save_null_scalar_json(self, capsys):
+        parser = build_parser()
+        args = parser.parse_args(["save", "null"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "INVALID_INPUT"
+
+
+# ---------------------------------------------------------------------------
+# Help Output Tests
+# ---------------------------------------------------------------------------
+
+class TestCliHelpOutput:
+    """Test argparse --help output renders correctly."""
+
+    def test_main_help_includes_program_name(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "pact-memory" in captured.out
+
+    def test_main_help_lists_subcommands(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        for cmd in ["save", "search", "list", "get", "status", "setup"]:
+            assert cmd in captured.out
+
+    def test_save_help_shows_options(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["save", "--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--stdin" in captured.out
+        assert "json_data" in captured.out.lower() or "json" in captured.out.lower()
+
+    def test_search_help_shows_options(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["search", "--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--limit" in captured.out
+        assert "query" in captured.out.lower()
