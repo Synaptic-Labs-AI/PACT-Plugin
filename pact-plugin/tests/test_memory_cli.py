@@ -197,6 +197,18 @@ class TestCliArgParsing:
         args = parser.parse_args(["search", "query"])
         assert args.current_file is None
 
+    def test_limit_zero_rejected(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["list", "--limit", "0"])
+        assert exc_info.value.code == 2
+
+    def test_limit_negative_rejected(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["search", "query", "--limit", "-1"])
+        assert exc_info.value.code == 2
+
     def test_dispatch_table_covers_all_subcommands(self):
         expected = {"save", "search", "list", "get", "status", "setup", "update", "delete"}
         assert set(_COMMANDS.keys()) == expected
@@ -337,6 +349,18 @@ class TestCliSearchCommand:
         output = json.loads(captured.out)
         assert output["ok"] is True
         assert output["result"] == []
+
+    def test_search_passes_current_file(self, mock_pact_memory):
+        parser = build_parser()
+        args = parser.parse_args(["search", "auth", "--current-file", "/src/auth.py"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_search(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.search.assert_called_once_with(
+            "auth", current_file="/src/auth.py", limit=5, sync_to_claude=False
+        )
 
     def test_search_with_results(self, mock_pact_memory, capsys):
         mock_memory_obj = MagicMock()

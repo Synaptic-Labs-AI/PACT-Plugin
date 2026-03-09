@@ -297,7 +297,7 @@ Returns semantically similar memories. Use natural language queries.
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
 ```
-Shows recent memories (default: 10).
+Shows recent memories (default: 20).
 
 ## Best Practices
 
