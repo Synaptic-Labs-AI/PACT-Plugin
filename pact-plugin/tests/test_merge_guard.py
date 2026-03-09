@@ -365,10 +365,11 @@ class TestIsDangerousCommand:
 
         assert is_dangerous_command("git branch --force --delete feat/old")
 
-    def test_safe_git_push(self):
+    def test_git_push_origin_main_is_dangerous(self):
+        """git push origin main pushes directly to default branch — dangerous."""
         from merge_guard_pre import is_dangerous_command
 
-        assert not is_dangerous_command("git push origin main")
+        assert is_dangerous_command("git push origin main")
 
     def test_safe_git_branch(self):
         from merge_guard_pre import is_dangerous_command
@@ -492,7 +493,7 @@ class TestCheckMergeAuthorization:
     def test_allows_safe_commands(self, tmp_path):
         from merge_guard_pre import check_merge_authorization
 
-        result = check_merge_authorization("git push origin main", token_dir=tmp_path)
+        result = check_merge_authorization("git push origin feature/my-branch", token_dir=tmp_path)
         assert result is None
 
     def test_blocks_dangerous_without_token(self, tmp_path):
@@ -889,9 +890,10 @@ class TestAdversarialCommandDetection:
         """git push --force-with-lease is allowed — it's a safer alternative."""
         from merge_guard_pre import is_dangerous_command
 
-        # --force-with-lease is intentionally excluded from dangerous patterns
-        # because it refuses to overwrite remote work not yet pulled locally
-        assert not is_dangerous_command("git push --force-with-lease origin main")
+        # --force-with-lease is intentionally excluded from force-push patterns
+        # because it refuses to overwrite remote work not yet pulled locally.
+        # Use a feature branch to isolate from "push to main" detection.
+        assert not is_dangerous_command("git push --force-with-lease origin feature/my-branch")
 
     def test_git_push_force_with_remote_url(self):
         """Force push to explicit remote URL is caught."""
@@ -1803,6 +1805,84 @@ class TestAPIBypassPatterns:
         assert not is_dangerous_command(
             "curl https://api.github.com/repos/owner/repo/pulls/42"
         )
+
+
+# =============================================================================
+# Direct push to main/master detection
+# =============================================================================
+
+
+class TestDirectPushToDefaultBranch:
+    """Tests for detecting regular pushes to main/master branches."""
+
+    def test_git_push_origin_main(self):
+        """git push origin main is dangerous — bypasses PR workflow."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push origin main")
+
+    def test_git_push_origin_master(self):
+        """git push origin master is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push origin master")
+
+    def test_git_push_u_origin_main(self):
+        """git push -u origin main with tracking flag is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push -u origin main")
+
+    def test_git_push_origin_feature_branch_is_safe(self):
+        """git push origin feature-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git push origin feature/my-branch")
+
+    def test_git_push_origin_main_with_c_flag(self):
+        """git -c ... push origin main with config flag is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git -c push.default=current push origin main"
+        )
+
+    def test_git_push_upstream_main(self):
+        """git push upstream main (different remote name) is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push upstream main")
+
+    def test_git_push_origin_main_with_valid_token(self, tmp_path):
+        """git push origin main is allowed with a valid authorization token."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"op": "push-main"}, token_dir=tmp_path)
+
+        result = check_merge_authorization("git push origin main", token_dir=tmp_path)
+        assert result is None  # Allowed
+
+    def test_git_push_origin_main_blocked_without_token(self, tmp_path):
+        """git push origin main is blocked without a token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("git push origin main", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
+
+    def test_git_push_set_upstream_origin_main(self):
+        """git push --set-upstream origin main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push --set-upstream origin main")
+
+    def test_git_push_origin_main_colon_refspec_safe(self):
+        """git push origin main:feature is safe — pushes local main to remote feature."""
+        from merge_guard_pre import is_dangerous_command
+
+        # 'main:feature' is a single token; 'main' is not at word boundary end
+        assert not is_dangerous_command("git push origin main:feature-branch")
 
 
 # =============================================================================

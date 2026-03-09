@@ -49,6 +49,10 @@ DANGEROUS_PATTERNS = [
     # Direct push to default branch (bypasses PR merge)
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:main\b"),
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:master\b"),
+    # Regular push to main/master (e.g., local merge then push)
+    # Negative lookahead (?!:) prevents matching refspecs like main:feature-branch
+    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+(?:-\S+\s+)*\S+\s+main(?!:)\b"),
+    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
 ]
 
 
