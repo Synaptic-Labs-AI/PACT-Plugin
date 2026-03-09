@@ -17,8 +17,10 @@ Usage:
 Commands:
     save <json>          Save a memory object (or --stdin for piped input)
     search <query>       Semantic search across memories
-    list [--limit N]     List recent memories (default: 10)
+    list [--limit N]     List recent memories (default: 20)
     get <id>             Retrieve a specific memory by ID
+    update <id> <json>   Update an existing memory (or --stdin for piped input)
+    delete <id>          Delete a memory by ID
     status               Show memory system status
     setup                Initialize/verify memory system
 """
@@ -78,7 +80,10 @@ def cmd_save(args, db_path=None):
 def cmd_search(args, db_path=None):
     """Handle the 'search' subcommand."""
     memory = PACTMemory(db_path=db_path)
-    results = memory.search(args.query, limit=args.limit, sync_to_claude=False)
+    current_file = getattr(args, "current_file", None)
+    results = memory.search(
+        args.query, current_file=current_file, limit=args.limit, sync_to_claude=False
+    )
     _success([r.to_dict() for r in results])
 
 
@@ -119,6 +124,50 @@ def cmd_setup(args, db_path=None):
         _error("SETUP_FAILED", "Memory system initialization failed", exit_code=2)
 
 
+def cmd_update(args, db_path=None):
+    """Handle the 'update' subcommand."""
+    if args.stdin:
+        raw = sys.stdin.read()
+    elif args.json_data:
+        raw = args.json_data
+    else:
+        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin")
+
+    try:
+        updates = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _error("INVALID_JSON", f"Failed to parse JSON: {exc}")
+
+    if not isinstance(updates, dict):
+        _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
+
+    memory = PACTMemory(db_path=db_path)
+    success = memory.update(args.memory_id, updates)
+    if not success:
+        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+    _success({"memory_id": args.memory_id})
+
+
+def cmd_delete(args, db_path=None):
+    """Handle the 'delete' subcommand."""
+    memory = PACTMemory(db_path=db_path)
+    success = memory.delete(args.memory_id)
+    if not success:
+        _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
+    _success({"deleted": True, "memory_id": args.memory_id})
+
+
+def _positive_int(value):
+    """Argparse type for positive integers. Rejects zero and negative values."""
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: '{value}'")
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"--limit must be a positive integer, got {ivalue}")
+    return ivalue
+
+
 def build_parser():
     """Build the argparse parser with all subcommands."""
     # Shared parent parser for the hidden --db-path flag.
@@ -151,7 +200,10 @@ def build_parser():
     )
     search_parser.add_argument("query", help="Search query text")
     search_parser.add_argument(
-        "--limit", type=int, default=5, help="Max results (default: 5)"
+        "--limit", type=_positive_int, default=5, help="Max results (default: 5)"
+    )
+    search_parser.add_argument(
+        "--current-file", help="Current file path for graph-enhanced relevance boosting"
     )
 
     # list
@@ -159,7 +211,7 @@ def build_parser():
         "list", help="List recent memories", parents=[parent]
     )
     list_parser.add_argument(
-        "--limit", type=int, default=10, help="Max results (default: 10)"
+        "--limit", type=_positive_int, default=20, help="Max results (default: 20)"
     )
 
     # get
@@ -178,6 +230,22 @@ def build_parser():
         "setup", help="Initialize the memory system", parents=[parent]
     )
 
+    # update
+    update_parser = subparsers.add_parser(
+        "update", help="Update an existing memory", parents=[parent]
+    )
+    update_parser.add_argument("memory_id", help="Memory ID to update")
+    update_parser.add_argument("json_data", nargs="?", help="JSON with fields to update")
+    update_parser.add_argument(
+        "--stdin", action="store_true", help="Read JSON from stdin"
+    )
+
+    # delete
+    delete_parser = subparsers.add_parser(
+        "delete", help="Delete a memory", parents=[parent]
+    )
+    delete_parser.add_argument("memory_id", help="Memory ID to delete")
+
     return parser
 
 
@@ -189,6 +257,8 @@ _COMMANDS = {
     "get": cmd_get,
     "status": cmd_status,
     "setup": cmd_setup,
+    "update": cmd_update,
+    "delete": cmd_delete,
 }
 
 
