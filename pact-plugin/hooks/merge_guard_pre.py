@@ -43,9 +43,9 @@ DANGEROUS_PATTERNS = [
     re.compile(r"\bgit\s+branch\s+.*-D\b"),
     re.compile(r"\bgit\s+branch\s+.*--delete\s+--force\b"),
     re.compile(r"\bgit\s+branch\s+--force\s+--delete\b"),
-    # API-based merge bypasses
-    re.compile(r"\bgh\s+api\b.*merge", re.IGNORECASE),
-    re.compile(r"\bcurl\b.*api.*merge", re.IGNORECASE),
+    # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
+    re.compile(r"\bgh\s+api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*-X\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
     # Direct push to default branch (bypasses PR merge)
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:main\b"),
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:master\b"),

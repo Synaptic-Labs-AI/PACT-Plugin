@@ -1718,11 +1718,83 @@ class TestAPIBypassPatterns:
 
         assert not is_dangerous_command("git push origin HEAD:feature/my-branch")
 
+    def test_gh_api_merge_with_method_flag(self):
+        """gh api with --method PUT and merge endpoint is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42/merge --method PUT"
+        )
+
+    def test_gh_api_merge_with_post_method(self):
+        """gh api with -X POST and merge endpoint is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X POST repos/owner/repo/pulls/42/merge"
+        )
+
+    def test_gh_api_merge_with_patch_method(self):
+        """gh api with --method PATCH and merge endpoint is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42/merge --method PATCH"
+        )
+
+    def test_gh_api_merge_readonly_is_safe(self):
+        """gh api with merge in URL but no mutating method is safe (GET)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42/merge"
+        )
+
+    def test_gh_api_merge_explicit_get_is_safe(self):
+        """gh api with -X GET and merge in URL is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42/merge -X GET"
+        )
+
+    def test_gh_api_mergeable_query_is_safe(self):
+        """gh api querying mergeable status is safe (read-only)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/pulls --jq .mergeable"
+        )
+
+    def test_gh_api_merge_workflow_is_safe(self):
+        """gh api referencing workflow with 'merge' in name is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/actions/workflows/merge-check.yml"
+        )
+
     def test_gh_api_without_merge_is_safe(self):
         """gh api without merge keyword is safe."""
         from merge_guard_pre import is_dangerous_command
 
         assert not is_dangerous_command("gh api repos/owner/repo/pulls/42")
+
+    def test_curl_merge_readonly_is_safe(self):
+        """curl to merge API without mutating method is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/pulls/42/merge"
+        )
+
+    def test_curl_merge_explicit_get_is_safe(self):
+        """curl -X GET to merge API is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl -X GET https://api.github.com/repos/owner/repo/pulls/42/merge"
+        )
 
     def test_curl_without_merge_is_safe(self):
         """curl without merge keyword is safe."""
