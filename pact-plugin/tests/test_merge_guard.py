@@ -886,12 +886,12 @@ class TestAdversarialCommandDetection:
         assert is_dangerous_command("false || gh pr merge 42")
 
     def test_git_push_force_with_lease(self):
-        """git push --force-with-lease contains --force as substring."""
+        """git push --force-with-lease is allowed — it's a safer alternative."""
         from merge_guard_pre import is_dangerous_command
 
-        # --force-with-lease contains --force, so this SHOULD match
-        # The guard is conservative — blocking --force-with-lease is safer
-        assert is_dangerous_command("git push --force-with-lease origin main")
+        # --force-with-lease is intentionally excluded from dangerous patterns
+        # because it refuses to overwrite remote work not yet pulled locally
+        assert not is_dangerous_command("git push --force-with-lease origin main")
 
     def test_git_push_force_with_remote_url(self):
         """Force push to explicit remote URL is caught."""
@@ -912,15 +912,12 @@ class TestAdversarialCommandDetection:
         # The \n breaks the regex match — documents a known limitation
         assert not is_dangerous_command("git push \\\n--force origin main")
 
-    def test_git_push_force_via_config_flag_not_detected(self):
-        """git -c ... push --force inserts tokens between git and push — not detected.
-
-        Known limitation: regex expects 'git push' adjacent. Interleaved flags
-        like -c break the pattern. This is a rare real-world scenario.
-        """
+    def test_git_push_force_via_config_flag_detected(self):
+        """git -c ... push --force with interleaved -c flags IS detected."""
         from merge_guard_pre import is_dangerous_command
 
-        assert not is_dangerous_command("git -c push.default=current push --force origin")
+        # Patterns now handle optional -c flags between git and push
+        assert is_dangerous_command("git -c push.default=current push --force origin")
 
     def test_safe_command_containing_merge_as_substring(self):
         """Commands that contain 'merge' as substring but aren't dangerous."""
@@ -1257,10 +1254,10 @@ class TestTokenEdgeCases:
             mock_time.time.return_value = now
             result = write_token({"test": True}, token_dir=tmp_path)
 
-        # Should succeed with fallback name
-        if result is not None:
-            assert Path(result).exists()
-            assert Path(result) != preexisting
+        # Must succeed with fallback name (not None)
+        assert result is not None
+        assert Path(result).exists()
+        assert Path(result) != preexisting
 
 
 # =============================================================================
@@ -1396,7 +1393,7 @@ class TestPreMainEdgeCases:
         assert exc_info.value.code == 0
 
     def test_tool_input_as_string(self):
-        """tool_input as a string instead of dict — exits 0."""
+        """tool_input as a string instead of dict — fails closed (exit 2)."""
         from merge_guard_pre import main
 
         input_data = json.dumps({"tool_input": "not a dict"})
@@ -1405,8 +1402,8 @@ class TestPreMainEdgeCases:
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
-        # str.get() raises AttributeError → caught by outer except
-        assert exc_info.value.code == 0
+        # str.get() raises AttributeError → caught by outer except → fail closed
+        assert exc_info.value.code == 2
 
     def test_empty_stdin(self):
         """Empty stdin — exits 0."""
@@ -1537,8 +1534,8 @@ class TestTokenSecurity:
         # Observer hook must NEVER block, even on errors
         assert exc_info.value.code == 0
 
-    def test_pre_hook_never_crashes_on_internal_error(self, tmp_path):
-        """Pre hook exits 0 (pass-through) on unexpected internal errors."""
+    def test_pre_hook_fails_closed_on_internal_error(self, tmp_path, capsys):
+        """Pre hook exits 2 (deny) on unexpected internal errors — fail closed."""
         from merge_guard_pre import main
 
         input_data = json.dumps({
@@ -1555,8 +1552,12 @@ class TestTokenSecurity:
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
-        # Internal errors must not block — fail open
-        assert exc_info.value.code == 0
+        # Security guard fails closed — deny on internal errors
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "internal error" in output["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
 
 # =============================================================================
@@ -1649,3 +1650,449 @@ class TestMergeGuardHooksRegistration:
         assert any("merge_guard_pre.py" in cmd for cmd in bash_commands), (
             "merge_guard_pre.py missing from PreToolUse Bash"
         )
+
+
+# =============================================================================
+# API bypass pattern detection
+# =============================================================================
+
+
+class TestAPIBypassPatterns:
+    """Tests for API-based merge bypass detection (gh api, curl, direct push)."""
+
+    def test_gh_api_merge(self):
+        """gh api with merge endpoint is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42/merge -X PUT"
+        )
+
+    def test_gh_api_merge_case_insensitive(self):
+        """gh api merge detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42/MERGE -X PUT"
+        )
+
+    def test_curl_api_merge(self):
+        """curl to GitHub merge API is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'curl -X PUT https://api.github.com/repos/owner/repo/pulls/42/merge'
+        )
+
+    def test_curl_api_merge_case_insensitive(self):
+        """curl merge detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'curl -X PUT https://api.github.com/repos/owner/repo/pulls/42/Merge'
+        )
+
+    def test_git_push_head_main(self):
+        """git push origin HEAD:main bypasses PR merge — dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push origin HEAD:main")
+
+    def test_git_push_head_master(self):
+        """git push origin HEAD:master bypasses PR merge — dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push origin HEAD:master")
+
+    def test_git_push_head_main_with_c_flag(self):
+        """git -c ... push origin HEAD:main with config flag is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git -c push.default=current push origin HEAD:main"
+        )
+
+    def test_git_push_head_feature_branch_is_safe(self):
+        """git push origin HEAD:feature-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git push origin HEAD:feature/my-branch")
+
+    def test_gh_api_without_merge_is_safe(self):
+        """gh api without merge keyword is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh api repos/owner/repo/pulls/42")
+
+    def test_curl_without_merge_is_safe(self):
+        """curl without merge keyword is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/pulls/42"
+        )
+
+
+# =============================================================================
+# Operation scoping (_token_matches_command)
+# =============================================================================
+
+
+class TestOperationScoping:
+    """Tests for _token_matches_command — operation scoping validation."""
+
+    def test_token_with_matching_pr_number(self):
+        """Token with PR context matches command with same PR number."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42"}}
+        assert _token_matches_command(token, "gh pr merge 42")
+
+    def test_token_with_mismatched_pr_number(self):
+        """Token with PR context does NOT match different PR number."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42"}}
+        assert not _token_matches_command(token, "gh pr merge 99")
+
+    def test_token_with_matching_branch(self):
+        """Token with branch context matches branch -D command."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "old-feature"}}
+        assert _token_matches_command(token, "git branch -D old-feature")
+
+    def test_token_with_mismatched_branch(self):
+        """Token with branch context does NOT match different branch."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "old-feature"}}
+        assert not _token_matches_command(token, "git branch -D other-branch")
+
+    def test_token_with_branch_delete_force(self):
+        """Token with branch context matches --delete --force command."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "cleanup"}}
+        assert _token_matches_command(token, "git branch --delete --force cleanup")
+
+    def test_token_without_context_allows_any(self):
+        """Token without context allows any command (no scoping)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {}}
+        assert _token_matches_command(token, "gh pr merge 42")
+        assert _token_matches_command(token, "git branch -D anything")
+
+    def test_token_with_malformed_context(self):
+        """Token with non-dict context allows through (graceful degradation)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": "not a dict"}
+        assert _token_matches_command(token, "gh pr merge 42")
+
+    def test_token_without_context_key(self):
+        """Token missing context key allows through."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {}
+        assert _token_matches_command(token, "gh pr merge 42")
+
+    def test_pr_context_with_non_pr_command(self):
+        """Token has PR context but command is force push — allows through."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42"}}
+        assert _token_matches_command(token, "git push --force origin main")
+
+    def test_branch_context_with_non_branch_command(self):
+        """Token has branch context but command is gh pr merge — allows through."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "old"}}
+        assert _token_matches_command(token, "gh pr merge 42")
+
+    def test_mismatched_token_blocks_in_check_merge_authorization(self, tmp_path):
+        """check_merge_authorization blocks when token context doesn't match."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Token scoped to PR #42
+        write_token({"question_snippet": "Merge #42?", "pr_number": "42"},
+                    token_dir=tmp_path)
+
+        # Attempt to merge PR #99 — should be blocked
+        result = check_merge_authorization("gh pr merge 99", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result
+
+        # Token should NOT be consumed (it belongs to PR #42)
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) == 1
+
+
+# =============================================================================
+# Session scoping (CLAUDE_SESSION_ID)
+# =============================================================================
+
+
+class TestSessionScoping:
+    """Tests for session-scoped token isolation."""
+
+    def test_token_includes_session_id(self, tmp_path):
+        """Token file includes session_id when env var is set."""
+        from merge_guard_post import write_token
+
+        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+            result = write_token({"test": True}, token_dir=tmp_path)
+
+        with open(result) as f:
+            data = json.load(f)
+        assert data["session_id"] == "session-abc"
+
+    def test_token_omits_session_id_when_not_set(self, tmp_path):
+        """Token file omits session_id when env var is not set."""
+        from merge_guard_post import write_token
+
+        with patch.dict(os.environ, {}, clear=True):
+            # Ensure CLAUDE_SESSION_ID is not in environment
+            os.environ.pop("CLAUDE_SESSION_ID", None)
+            result = write_token({"test": True}, token_dir=tmp_path)
+
+        with open(result) as f:
+            data = json.load(f)
+        assert "session_id" not in data
+
+    def test_same_session_token_accepted(self, tmp_path):
+        """Token from same session is accepted."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+            "session_id": "session-abc",
+        }
+        (tmp_path / "merge-authorized-11111").write_text(json.dumps(token_data))
+
+        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+            result, path = find_valid_token(token_dir=tmp_path)
+        assert result is not None
+
+    def test_different_session_token_rejected(self, tmp_path):
+        """Token from different session is skipped."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+            "session_id": "session-other",
+        }
+        (tmp_path / "merge-authorized-22222").write_text(json.dumps(token_data))
+
+        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+            result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        # Token NOT cleaned up — it may be valid for its own session
+        assert (tmp_path / "merge-authorized-22222").exists()
+
+    def test_no_session_id_accepts_any_token(self, tmp_path):
+        """When env has no session ID, any valid token is accepted."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+            "session_id": "session-xyz",
+        }
+        (tmp_path / "merge-authorized-33333").write_text(json.dumps(token_data))
+
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("CLAUDE_SESSION_ID", None)
+            result, path = find_valid_token(token_dir=tmp_path)
+        assert result is not None
+
+    def test_token_without_session_accepted_by_any_session(self, tmp_path):
+        """Token without session_id is accepted regardless of current session."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-44444").write_text(json.dumps(token_data))
+
+        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+            result, path = find_valid_token(token_dir=tmp_path)
+        assert result is not None
+
+
+# =============================================================================
+# Fail-closed behavior
+# =============================================================================
+
+
+class TestFailClosed:
+    """Tests for fail-closed behavior in the pre-hook."""
+
+    def test_fail_closed_on_exception_in_main(self, capsys):
+        """main() outputs deny JSON and exits 2 on unexpected exception."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({
+            "tool_input": {"command": "gh pr merge 42"}
+        })
+
+        with patch("merge_guard_pre.check_merge_authorization",
+                   side_effect=RuntimeError("boom")), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_fail_closed_stderr_includes_error(self, capsys):
+        """Fail-closed error is logged to stderr for debugging."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({
+            "tool_input": {"command": "gh pr merge 42"}
+        })
+
+        with patch("merge_guard_pre.check_merge_authorization",
+                   side_effect=RuntimeError("test boom")), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "merge_guard_pre" in captured.err
+        assert "test boom" in captured.err
+
+    def test_fail_closed_even_if_deny_output_fails(self):
+        """If deny JSON output itself fails, exit 2 still happens."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({
+            "tool_input": {"command": "gh pr merge 42"}
+        })
+
+        # Patch json.dumps to fail inside the except handler's try block,
+        # which causes the inner except Exception: pass to trigger.
+        # The sys.exit(2) still runs afterward.
+        original_dumps = json.dumps
+        call_count = [0]
+
+        def failing_dumps(*args, **kwargs):
+            call_count[0] += 1
+            # First call is from json.load succeeding (not dumps).
+            # The except handler calls json.dumps(output) — fail that one.
+            if call_count[0] >= 1:
+                raise TypeError("simulated dumps failure")
+            return original_dumps(*args, **kwargs)
+
+        with patch("merge_guard_pre.check_merge_authorization",
+                   side_effect=RuntimeError("boom")), \
+             patch("merge_guard_pre.json.dumps", side_effect=failing_dumps), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+
+
+# =============================================================================
+# Token write inner exception handler
+# =============================================================================
+
+
+class TestTokenWriteExceptionHandling:
+    """Tests for write_token's exception handling during file operations."""
+
+    def test_double_collision_returns_none(self, tmp_path):
+        """When both primary and fallback filenames exist, returns None."""
+        from merge_guard_post import write_token
+
+        now = time.time()
+        timestamp = int(now)
+        ms_suffix = int(now * 1000) % 1000
+
+        # Pre-create both the primary and fallback files
+        primary = tmp_path / f"merge-authorized-{timestamp}"
+        fallback = tmp_path / f"merge-authorized-{timestamp}-{ms_suffix}"
+        primary.write_text("taken")
+        fallback.write_text("taken")
+
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = now
+            result = write_token({"test": True}, token_dir=tmp_path)
+
+        assert result is None
+
+    def test_fdopen_failure_cleans_up_primary(self, tmp_path):
+        """If fdopen/json.dump fails after os.open, the created file is removed."""
+        from merge_guard_post import write_token
+
+        original_fdopen = os.fdopen
+
+        call_count = [0]
+
+        def failing_fdopen(fd, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Close the fd before raising to avoid resource leak
+                os.close(fd)
+                raise OSError("simulated fdopen failure")
+            return original_fdopen(fd, *args, **kwargs)
+
+        with patch("merge_guard_post.os.fdopen", side_effect=failing_fdopen):
+            result = write_token({"test": True}, token_dir=tmp_path)
+
+        # Should return None because the primary write failed and the retry
+        # path (FileExistsError) is not triggered (different exception type)
+        assert result is None
+
+    def test_tool_output_as_boolean_true(self, tmp_path):
+        """tool_output as boolean True — converted to 'True', not affirmative."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Merge?"},
+            "tool_output": True,
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # "True" does not match affirmative patterns
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_tool_output_as_boolean_false(self, tmp_path):
+        """tool_output as boolean False — empty string, no token created."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Merge?"},
+            "tool_output": False,
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
