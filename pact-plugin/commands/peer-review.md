@@ -213,6 +213,7 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
        - **Skip** — Don't track or address
        - **Address now** — Fix it in this PR
        - **More context** — Get additional details (if more detail is needed)
+     - > **Tool mapping**: Every option listed above MUST appear as a named `option` in the `AskUserQuestion` call. For minor recommendations: **Yes**, **No**, **More context**. For future recommendations: **Create GitHub issue**, **Skip**, **Address now**, **More context**. Do not omit any option and rely on the tool's built-in "Other" freeform input — each is a first-class option, not a fallback.
      - Note: Tool supports 2-4 options per question and 1-4 questions per call. If >4 recommendations exist, make multiple `AskUserQuestion` calls to cover all items.
        - **Handling "More context" responses**:
          - When user selects "More context", provide deeper explanation beyond the preemptive context (e.g., implementation specifics, examples, related patterns)
