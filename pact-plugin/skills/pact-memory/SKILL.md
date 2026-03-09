@@ -54,11 +54,20 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '{
 # Search memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "rate limiting tokens"
 
+# Search with graph-enhanced boosting for current file
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth tokens" --current-file src/auth/refresh.ts
+
 # List recent memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
 
 # Get a specific memory by ID
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id>
+
+# Update an existing memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update <memory_id> '{"goal": "Updated goal"}'
+
+# Delete a memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete <memory_id>
 
 # Check system status
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" status
@@ -123,9 +132,13 @@ Each memory can contain:
 | `save --stdin` | Save from piped JSON | `{"memory_id": "<hex>"}` |
 | `search <query>` | Semantic search | `[{"id": "...", "context": "...", ...}, ...]` |
 | `search <query> --limit N` | Search with limit | `[...]` (default: 5) |
+| `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
 | `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
-| `list --limit N` | List with limit | `[...]` (default: 10) |
+| `list --limit N` | List with limit | `[...]` (default: 20) |
 | `get <id>` | Get memory by ID | `{"id": "...", "context": "...", ...}` |
+| `update <id> <json>` | Update memory fields | `{"memory_id": "<hex>"}` |
+| `update <id> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
+| `delete <id>` | Delete a memory | `{"deleted": true, "memory_id": "<hex>"}` |
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 
@@ -146,8 +159,17 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '{"context": "Bug fix", "lesso
 # Search memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "authentication"
 
+# Search with file context for graph-enhanced results
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth patterns" --current-file src/auth/service.py
+
 # List recent memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 5
+
+# Update an existing memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update abc123 '{"goal": "Updated goal", "lessons_learned": ["New lesson"]}'
+
+# Delete a memory
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete abc123
 ```
 
 ## Search Capabilities
