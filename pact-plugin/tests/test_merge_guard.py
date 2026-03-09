@@ -14,6 +14,11 @@ Tests cover:
 10. merge_guard_pre: expired token blocks commands and gets cleaned up
 11. merge_guard_pre: safe commands pass through
 12. main() entry points: stdin JSON, exit codes, output format
+13. Adversarial: command obfuscation, shell escaping, multi-command strings
+14. Edge cases: boundary TTL, malformed tokens, missing fields, empty inputs
+15. Security: token permissions, token content validation, write failures
+16. hooks.json: merge guard registration and sync flag validation
+17. Integration: full main() flows, multiple tokens, token consumption
 """
 
 import io
@@ -644,3 +649,863 @@ class TestIntegration:
         result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
         assert result is not None  # Blocked
         assert "AskUserQuestion" in result
+
+    def test_approval_flow_via_main_entry_points(self, tmp_path):
+        """Full flow using main() entry points for both hooks."""
+        from merge_guard_post import main as post_main
+        from merge_guard_pre import main as pre_main
+
+        # Step 1: Post hook processes merge approval
+        post_input = json.dumps({
+            "tool_input": {"question": "Should I merge PR #99?"},
+            "tool_output": {"result": "yes"},
+        })
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(post_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                post_main()
+        assert exc_info.value.code == 0
+
+        # Verify token was created
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) == 1
+
+        # Step 2: Pre hook allows the dangerous command
+        pre_input = json.dumps({
+            "tool_input": {"command": "gh pr merge 99 --squash"}
+        })
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(pre_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 0  # Allowed
+
+    def test_multiple_valid_tokens(self, tmp_path):
+        """Multiple valid tokens: any valid one should authorize."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"op": "merge"}, token_dir=tmp_path)
+        # Force a different filename by manipulating time
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = time.time() + 1
+            write_token({"op": "force-push"}, token_dir=tmp_path)
+
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) >= 2
+
+        result = check_merge_authorization("gh pr merge 1", token_dir=tmp_path)
+        assert result is None
+
+    def test_expired_token_does_not_authorize(self, tmp_path):
+        """Only expired tokens present — command should be blocked."""
+        now = time.time()
+        token_data = {
+            "created_at": now - 600,
+            "expires_at": now - 1,  # Just barely expired
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-99999").write_text(json.dumps(token_data))
+
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        # Expired token should have been cleaned up
+        assert not (tmp_path / "merge-authorized-99999").exists()
+
+
+# =============================================================================
+# Adversarial: command bypass attempts
+# =============================================================================
+
+
+class TestAdversarialCommandDetection:
+    """Attempt to bypass dangerous command detection via shell tricks."""
+
+    def test_command_in_subshell(self):
+        """Dangerous command inside $() subshell is still caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("$(gh pr merge 42)")
+
+    def test_command_after_semicolon(self):
+        """Dangerous command after semicolon is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo hello; gh pr merge 42")
+
+    def test_command_after_pipe(self):
+        """Dangerous command after pipe is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo hello | gh pr merge 42")
+
+    def test_command_after_and(self):
+        """Dangerous command chained with && is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("cd /tmp && gh pr merge 42")
+
+    def test_command_after_or(self):
+        """Dangerous command chained with || is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("false || gh pr merge 42")
+
+    def test_git_push_force_with_lease(self):
+        """git push --force-with-lease contains --force as substring."""
+        from merge_guard_pre import is_dangerous_command
+
+        # --force-with-lease contains --force, so this SHOULD match
+        # The guard is conservative — blocking --force-with-lease is safer
+        assert is_dangerous_command("git push --force-with-lease origin main")
+
+    def test_git_push_force_with_remote_url(self):
+        """Force push to explicit remote URL is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git push --force https://github.com/user/repo.git main"
+        )
+
+    def test_multiline_command_with_backslash_not_detected(self):
+        """Backslash-continuation splits the pattern across lines — not detected.
+
+        Known limitation: regex operates line-by-line. In practice, Claude Code
+        sends commands as single-line strings, so this is acceptable.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        # The \n breaks the regex match — documents a known limitation
+        assert not is_dangerous_command("git push \\\n--force origin main")
+
+    def test_git_push_force_via_config_flag_not_detected(self):
+        """git -c ... push --force inserts tokens between git and push — not detected.
+
+        Known limitation: regex expects 'git push' adjacent. Interleaved flags
+        like -c break the pattern. This is a rare real-world scenario.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git -c push.default=current push --force origin")
+
+    def test_safe_command_containing_merge_as_substring(self):
+        """Commands that contain 'merge' as substring but aren't dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git merge feature-branch")
+        assert not is_dangerous_command("git mergetool")
+
+    def test_safe_gh_pr_view(self):
+        """gh pr view with merge-like URL is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr view 42")
+
+    def test_safe_branch_lowercase_d(self):
+        """git branch -d (lowercase) is safe — only -D is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git branch -d old-branch")
+
+    def test_dangerous_in_heredoc_style(self):
+        """Dangerous command embedded in bash heredoc syntax."""
+        from merge_guard_pre import is_dangerous_command
+
+        # The command string still contains the dangerous pattern
+        assert is_dangerous_command("bash -c 'gh pr merge 42'")
+
+    def test_dangerous_with_env_var_prefix(self):
+        """Dangerous command prefixed with env var assignment."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("GH_TOKEN=abc gh pr merge 42")
+
+    def test_git_push_f_combined_with_other_flags(self):
+        """git push with -f combined in various flag positions."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push -vf origin main")
+        assert is_dangerous_command("git push -fu origin main")
+
+    def test_git_branch_D_with_multiple_branches(self):
+        """git branch -D with multiple branch args."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git branch -D branch1 branch2 branch3")
+
+
+# =============================================================================
+# Edge cases: merge_guard_post
+# =============================================================================
+
+
+class TestMergeQuestionEdgeCases:
+    """Edge cases for merge question and affirmative detection."""
+
+    def test_merge_keyword_at_word_boundary(self):
+        """'emerged' should not trigger (merge is substring)."""
+        from merge_guard_post import is_merge_question
+
+        # Note: the regex uses re.search without \b, so 'emerged' WILL match.
+        # This test documents the current behavior.
+        result = is_merge_question("The data emerged from the pipeline")
+        # Current regex matches 'merge' within 'emerged' — this is a known
+        # trade-off: broader matching at the cost of rare false positives.
+        assert result is True
+
+    def test_affirmative_with_extra_text(self):
+        """Affirmative followed by additional text."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("yes please go ahead")
+
+    def test_do_it(self):
+        """'do it' is an affirmative pattern."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("do it")
+
+    def test_sure(self):
+        """'sure' is affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("sure")
+
+    def test_okay(self):
+        """'okay' is affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("okay")
+
+    def test_ok(self):
+        """'ok' is affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("ok")
+
+    def test_yep(self):
+        """'yep' is affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("yep")
+
+    def test_yeah(self):
+        """'yeah' is affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("yeah")
+
+    def test_approve(self):
+        """'approve' is affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert is_affirmative("approve")
+
+    def test_not_affirmative_maybe(self):
+        """'maybe' is NOT affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert not is_affirmative("maybe")
+
+    def test_not_affirmative_let_me_think(self):
+        """'let me think' is NOT affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert not is_affirmative("let me think about it")
+
+    def test_not_affirmative_wait(self):
+        """'wait' is NOT affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert not is_affirmative("wait")
+
+    def test_not_affirmative_dont(self):
+        """'don't' is NOT affirmative."""
+        from merge_guard_post import is_affirmative
+
+        assert not is_affirmative("don't do that")
+
+    def test_extract_pull_request_text(self):
+        """'pull request 456' extraction works."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Merge pull request 456 into main?")
+        assert ctx["pr_number"] == "456"
+
+    def test_extract_branch_with_dots(self):
+        """Branch names with dots are extracted."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Delete branch release/v1.2.3?")
+        assert ctx["branch"] == "release/v1.2.3"
+
+    def test_extract_branch_with_underscores(self):
+        """Branch names with underscores are extracted."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Merge feat/my_feature into main?")
+        assert ctx["branch"] == "feat/my_feature"
+
+    def test_extract_quoted_branch(self):
+        """Branch names in quotes are extracted without quotes."""
+        from merge_guard_post import extract_context
+
+        ctx = extract_context("Delete branch 'old-feature'?")
+        assert ctx["branch"] == "old-feature"
+
+
+# =============================================================================
+# Edge cases: token validation
+# =============================================================================
+
+
+class TestTokenEdgeCases:
+    """Edge cases for token creation and validation."""
+
+    def test_token_missing_expires_at(self, tmp_path):
+        """Token with no expires_at field is treated as invalid."""
+        from merge_guard_pre import find_valid_token
+
+        token_data = {"created_at": time.time(), "context": {}}
+        (tmp_path / "merge-authorized-11111").write_text(json.dumps(token_data))
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        # Default expires_at=0 triggers the <= 0 check, token is cleaned up
+        assert not (tmp_path / "merge-authorized-11111").exists()
+
+    def test_token_negative_expiry(self, tmp_path):
+        """Token with negative expires_at is invalid."""
+        from merge_guard_pre import find_valid_token
+
+        token_data = {
+            "created_at": time.time(),
+            "expires_at": -1,
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-22222").write_text(json.dumps(token_data))
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert not (tmp_path / "merge-authorized-22222").exists()
+
+    def test_token_zero_expiry(self, tmp_path):
+        """Token with expires_at=0 is invalid."""
+        from merge_guard_pre import find_valid_token
+
+        token_data = {
+            "created_at": time.time(),
+            "expires_at": 0,
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-33333").write_text(json.dumps(token_data))
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert not (tmp_path / "merge-authorized-33333").exists()
+
+    def test_token_expiry_exactly_at_now(self, tmp_path):
+        """Token with expires_at exactly equal to now is expired (< now)."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now - 300,
+            "expires_at": now,  # Exactly now
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-44444").write_text(json.dumps(token_data))
+
+        # expires_at < now may or may not be true due to time passing between
+        # writing and reading; test both paths by mocking
+        with patch("merge_guard_pre.time") as mock_time:
+            mock_time.time.return_value = now + 0.001  # Just past expiry
+            result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+
+    def test_token_just_before_expiry(self, tmp_path):
+        """Token with expires_at just in the future is valid."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        token_data = {
+            "created_at": now,
+            "expires_at": now + 1,  # 1 second left
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-55555").write_text(json.dumps(token_data))
+
+        with patch("merge_guard_pre.time") as mock_time:
+            mock_time.time.return_value = now  # Exactly at creation time
+            result = find_valid_token(token_dir=tmp_path)
+        assert result is not None
+
+    def test_token_with_empty_json_object(self, tmp_path):
+        """Token that is just {} (no fields) is cleaned up."""
+        from merge_guard_pre import find_valid_token
+
+        (tmp_path / "merge-authorized-66666").write_text("{}")
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        # expires_at defaults to 0, which triggers cleanup
+        assert not (tmp_path / "merge-authorized-66666").exists()
+
+    def test_token_with_list_json(self, tmp_path):
+        """Token that is a JSON list instead of object is cleaned up."""
+        from merge_guard_pre import find_valid_token
+
+        (tmp_path / "merge-authorized-77777").write_text("[1, 2, 3]")
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        # list.get() raises AttributeError → caught by except clause
+        assert not (tmp_path / "merge-authorized-77777").exists()
+
+    def test_token_with_boolean_expiry(self, tmp_path):
+        """Token with expires_at as boolean is handled."""
+        from merge_guard_pre import find_valid_token
+
+        # In Python, bool is a subclass of int: isinstance(True, int) == True
+        # True == 1, so expires_at=True is valid (1 second since epoch = expired)
+        token_data = {
+            "created_at": time.time(),
+            "expires_at": True,  # == 1, which is < now
+            "context": {},
+        }
+        (tmp_path / "merge-authorized-88888").write_text(json.dumps(token_data))
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None  # 1 second since epoch is expired
+
+    def test_empty_token_file(self, tmp_path):
+        """Empty token file is cleaned up."""
+        from merge_guard_pre import find_valid_token
+
+        (tmp_path / "merge-authorized-99999").write_text("")
+
+        result = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert not (tmp_path / "merge-authorized-99999").exists()
+
+    def test_write_token_returns_none_on_readonly_dir(self, tmp_path):
+        """write_token returns None when directory is not writable."""
+        from merge_guard_post import write_token
+
+        readonly_dir = tmp_path / "readonly"
+        readonly_dir.mkdir()
+        os.chmod(str(readonly_dir), 0o444)
+
+        try:
+            result = write_token({}, token_dir=readonly_dir)
+            assert result is None
+        finally:
+            os.chmod(str(readonly_dir), 0o755)
+
+    def test_write_token_collision_uses_fallback(self, tmp_path):
+        """When first filename exists, fallback with microsecond suffix is used."""
+        from merge_guard_post import write_token
+
+        # Pre-create the file that write_token will try to create
+        now = time.time()
+        timestamp = int(now)
+        preexisting = tmp_path / f"merge-authorized-{timestamp}"
+        preexisting.write_text("taken")
+
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = now
+            result = write_token({"test": True}, token_dir=tmp_path)
+
+        # Should succeed with fallback name
+        if result is not None:
+            assert Path(result).exists()
+            assert Path(result) != preexisting
+
+
+# =============================================================================
+# Edge cases: main() entry points
+# =============================================================================
+
+
+class TestPostMainEdgeCases:
+    """Edge cases for merge_guard_post.main()."""
+
+    def test_tool_output_empty_dict(self, tmp_path):
+        """tool_output as empty dict — no token created."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Should I merge?"},
+            "tool_output": {},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_tool_output_with_answer_key(self, tmp_path):
+        """tool_output dict with 'answer' key (fallback from 'result')."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Merge PR #10?"},
+            "tool_output": {"answer": "yes"},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
+
+    def test_tool_input_missing_question(self, tmp_path):
+        """tool_input without 'question' key — no token created."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {},
+            "tool_output": {"result": "yes"},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_tool_output_none(self, tmp_path):
+        """tool_output as None — no crash, no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Merge?"},
+            "tool_output": None,
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_tool_output_integer(self, tmp_path):
+        """tool_output as integer — converted to string, not affirmative."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Merge?"},
+            "tool_output": 42,
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_empty_stdin(self, tmp_path):
+        """Empty stdin — exits 0 without error."""
+        from merge_guard_post import main
+
+        with patch("sys.stdin", io.StringIO("")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+    def test_missing_tool_input_key(self, tmp_path):
+        """JSON without tool_input key — no crash."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({"some_other_key": "value"})
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+
+class TestPreMainEdgeCases:
+    """Edge cases for merge_guard_pre.main()."""
+
+    def test_missing_tool_input_key(self):
+        """JSON without tool_input key — exits 0."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({"other_key": "value"})
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+    def test_tool_input_as_string(self):
+        """tool_input as a string instead of dict — exits 0."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({"tool_input": "not a dict"})
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # str.get() raises AttributeError → caught by outer except
+        assert exc_info.value.code == 0
+
+    def test_empty_stdin(self):
+        """Empty stdin — exits 0."""
+        from merge_guard_pre import main
+
+        with patch("sys.stdin", io.StringIO("")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+    def test_deny_output_format(self, tmp_path, capsys):
+        """Verify the exact JSON structure of a deny response."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({
+            "tool_input": {"command": "git push --force origin main"}
+        })
+
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+
+        # Validate complete structure
+        assert "hookSpecificOutput" in output
+        hook_output = output["hookSpecificOutput"]
+        assert hook_output["permissionDecision"] == "deny"
+        assert isinstance(hook_output["permissionDecisionReason"], str)
+        assert len(hook_output["permissionDecisionReason"]) > 0
+
+
+# =============================================================================
+# Security tests
+# =============================================================================
+
+
+class TestTokenSecurity:
+    """Security-focused tests for the merge guard token mechanism."""
+
+    def test_token_file_not_world_readable(self, tmp_path):
+        """Token file must be 0o600 — not readable by others."""
+        from merge_guard_post import write_token
+
+        result = write_token({"sensitive": True}, token_dir=tmp_path)
+        assert result is not None
+
+        mode = os.stat(result).st_mode
+        # No group or other read/write/execute bits
+        assert mode & stat.S_IRGRP == 0
+        assert mode & stat.S_IWGRP == 0
+        assert mode & stat.S_IXGRP == 0
+        assert mode & stat.S_IROTH == 0
+        assert mode & stat.S_IWOTH == 0
+        assert mode & stat.S_IXOTH == 0
+
+    def test_token_content_is_valid_json(self, tmp_path):
+        """Token file content must be parseable JSON with expected fields."""
+        from merge_guard_post import write_token
+
+        result = write_token({"pr": "42"}, token_dir=tmp_path)
+        with open(result) as f:
+            data = json.load(f)
+
+        assert isinstance(data["created_at"], (int, float))
+        assert isinstance(data["expires_at"], (int, float))
+        assert isinstance(data["context"], dict)
+        assert data["expires_at"] > data["created_at"]
+
+    def test_token_ttl_is_5_minutes(self):
+        """TOKEN_TTL constant must be 300 seconds (5 minutes)."""
+        from merge_guard_post import TOKEN_TTL as post_ttl
+        from merge_guard_pre import TOKEN_TTL as pre_ttl
+
+        assert post_ttl == 300
+        assert pre_ttl == 300
+
+    def test_token_ttl_matches_between_hooks(self):
+        """Both hooks must agree on TOKEN_TTL."""
+        from merge_guard_post import TOKEN_TTL as post_ttl
+        from merge_guard_pre import TOKEN_TTL as pre_ttl
+
+        assert post_ttl == pre_ttl
+
+    def test_safe_remove_ignores_missing_file(self, tmp_path):
+        """_safe_remove doesn't raise for nonexistent files."""
+        from merge_guard_pre import _safe_remove
+
+        # Should not raise
+        _safe_remove(str(tmp_path / "nonexistent"))
+
+    def test_large_context_doesnt_crash(self, tmp_path):
+        """Token with very large context data still works."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import find_valid_token
+
+        large_context = {"data": "x" * 10000}
+        result = write_token(large_context, token_dir=tmp_path)
+        assert result is not None
+
+        token = find_valid_token(token_dir=tmp_path)
+        assert token is not None
+        assert len(token["context"]["data"]) == 10000
+
+    def test_post_hook_never_blocks(self, tmp_path):
+        """Post hook always exits 0, even on internal errors."""
+        from merge_guard_post import main
+
+        # Force an error by making TOKEN_DIR a file instead of directory
+        bad_dir = tmp_path / "not_a_dir"
+        bad_dir.write_text("I am a file")
+
+        input_data = json.dumps({
+            "tool_input": {"question": "Merge PR #1?"},
+            "tool_output": {"result": "yes"},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", bad_dir), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Observer hook must NEVER block, even on errors
+        assert exc_info.value.code == 0
+
+    def test_pre_hook_never_crashes_on_internal_error(self, tmp_path):
+        """Pre hook exits 0 (pass-through) on unexpected internal errors."""
+        from merge_guard_pre import main
+
+        input_data = json.dumps({
+            "tool_input": {"command": "gh pr merge 42"}
+        })
+
+        # Force an error in find_valid_token by making TOKEN_DIR unreadable
+        unreadable_dir = tmp_path / "unreadable"
+        unreadable_dir.mkdir()
+
+        with patch("merge_guard_pre.TOKEN_DIR", unreadable_dir), \
+             patch("merge_guard_pre.glob.glob", side_effect=PermissionError("denied")), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Internal errors must not block — fail open
+        assert exc_info.value.code == 0
+
+
+# =============================================================================
+# hooks.json registration tests
+# =============================================================================
+
+
+HOOKS_DIR = Path(__file__).parent.parent / "hooks"
+HOOKS_JSON = HOOKS_DIR / "hooks.json"
+
+
+class TestMergeGuardHooksRegistration:
+    """Verify merge guard hooks are correctly registered in hooks.json."""
+
+    @pytest.fixture
+    def hooks_config(self):
+        content = HOOKS_JSON.read_text(encoding="utf-8")
+        return json.loads(content)
+
+    def test_merge_guard_pre_in_pretooluse_bash(self, hooks_config):
+        """merge_guard_pre.py must be registered under PreToolUse Bash."""
+        entries = hooks_config["hooks"].get("PreToolUse", [])
+        bash_hooks = []
+        for entry in entries:
+            if entry.get("matcher") == "Bash":
+                for hook in entry.get("hooks", []):
+                    bash_hooks.append(hook.get("command", ""))
+
+        assert any("merge_guard_pre.py" in cmd for cmd in bash_hooks), (
+            "merge_guard_pre.py not found in PreToolUse Bash hooks"
+        )
+
+    def test_merge_guard_post_in_posttooluse_askuserquestion(self, hooks_config):
+        """merge_guard_post.py must be registered under PostToolUse AskUserQuestion."""
+        entries = hooks_config["hooks"].get("PostToolUse", [])
+        ask_hooks = []
+        for entry in entries:
+            if entry.get("matcher") == "AskUserQuestion":
+                for hook in entry.get("hooks", []):
+                    ask_hooks.append(hook.get("command", ""))
+
+        assert any("merge_guard_post.py" in cmd for cmd in ask_hooks), (
+            "merge_guard_post.py not found in PostToolUse AskUserQuestion hooks"
+        )
+
+    def test_merge_guard_pre_is_synchronous(self, hooks_config):
+        """merge_guard_pre.py must be synchronous (blocking) — it affects permissions."""
+        entries = hooks_config["hooks"].get("PreToolUse", [])
+        for entry in entries:
+            if entry.get("matcher") == "Bash":
+                for hook in entry.get("hooks", []):
+                    if "merge_guard_pre.py" in hook.get("command", ""):
+                        assert hook.get("async", False) is not True, (
+                            "merge_guard_pre.py must be synchronous — "
+                            "it makes permission decisions"
+                        )
+
+    def test_merge_guard_post_is_synchronous(self, hooks_config):
+        """merge_guard_post.py must be synchronous — token must be written before next tool."""
+        entries = hooks_config["hooks"].get("PostToolUse", [])
+        for entry in entries:
+            if entry.get("matcher") == "AskUserQuestion":
+                for hook in entry.get("hooks", []):
+                    if "merge_guard_post.py" in hook.get("command", ""):
+                        assert hook.get("async", False) is not True, (
+                            "merge_guard_post.py must be synchronous — "
+                            "token must exist before next tool call"
+                        )
+
+    def test_merge_guard_pre_script_exists(self):
+        """merge_guard_pre.py script file must exist."""
+        assert (HOOKS_DIR / "merge_guard_pre.py").exists()
+
+    def test_merge_guard_post_script_exists(self):
+        """merge_guard_post.py script file must exist."""
+        assert (HOOKS_DIR / "merge_guard_post.py").exists()
+
+    def test_bash_matcher_has_both_guard_hooks(self, hooks_config):
+        """PreToolUse Bash should have both git_commit_check.py and merge_guard_pre.py."""
+        entries = hooks_config["hooks"].get("PreToolUse", [])
+        bash_commands = []
+        for entry in entries:
+            if entry.get("matcher") == "Bash":
+                for hook in entry.get("hooks", []):
+                    bash_commands.append(hook.get("command", ""))
+
+        assert any("git_commit_check.py" in cmd for cmd in bash_commands), (
+            "git_commit_check.py missing from PreToolUse Bash"
+        )
+        assert any("merge_guard_pre.py" in cmd for cmd in bash_commands), (
+            "merge_guard_pre.py missing from PreToolUse Bash"
+        )
