@@ -15,7 +15,7 @@ Used by:
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .config import PACT_MEMORY_DIR
 
@@ -59,13 +59,16 @@ def check_dependencies() -> Dict[str, Any]:
     return status
 
 
-def ensure_initialized() -> bool:
+def ensure_initialized(db_path: Optional[Path] = None) -> bool:
     """
     Ensure the memory system is fully initialized.
 
     Performs all setup tasks:
     1. Creates required directories
     2. Initializes database schema
+
+    Args:
+        db_path: Optional custom database path. Uses default if not provided.
 
     Returns:
         True if system is ready for use.
@@ -76,7 +79,7 @@ def ensure_initialized() -> bool:
     # Initialize database
     try:
         from .database import initialize_database
-        initialize_database()
+        initialize_database(db_path)
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")

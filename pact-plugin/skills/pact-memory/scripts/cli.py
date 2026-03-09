@@ -107,7 +107,7 @@ def cmd_status(args, db_path=None):
 
 def cmd_setup(args, db_path=None):
     """Handle the 'setup' subcommand."""
-    ok = ensure_initialized()
+    ok = ensure_initialized(db_path=db_path)
     if ok:
         status = get_setup_status()
         _success({
