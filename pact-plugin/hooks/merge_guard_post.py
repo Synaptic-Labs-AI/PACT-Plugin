@@ -111,11 +111,17 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
 
     now = time.time()
     timestamp = int(now)
+
+    # Include session ID for cross-session scoping (graceful degradation)
+    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+
     token_data = {
         "created_at": now,
         "expires_at": now + TOKEN_TTL,
         "context": context,
     }
+    if session_id:
+        token_data["session_id"] = session_id
 
     token_path = token_dir / f"merge-authorized-{timestamp}"
 
@@ -138,8 +144,15 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         token_path = token_dir / f"merge-authorized-{timestamp}-{int(now * 1000) % 1000}"
         try:
             fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump(token_data, f, indent=2)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(token_data, f, indent=2)
+            except Exception:
+                try:
+                    token_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
             return str(token_path)
         except OSError:
             return None
