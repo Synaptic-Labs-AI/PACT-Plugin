@@ -96,8 +96,8 @@ def find_valid_token(token_dir: Path | None = None) -> dict | None:
             # Valid token found
             valid_token = token_data
 
-        except (json.JSONDecodeError, OSError, KeyError):
-            # Corrupted token — clean up
+        except (json.JSONDecodeError, OSError, KeyError, AttributeError, TypeError):
+            # Corrupted or malformed token — clean up
             _safe_remove(token_path)
 
     return valid_token
