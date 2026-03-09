@@ -6,7 +6,8 @@
 3. [Extension Points Mapping](#extension-points-mapping)
 4. [PACT Plugin Adaptation Strategy](#pact-plugin-adaptation-strategy)
 5. [Key Differences That Affect PACT Design](#key-differences-that-affect-pact-design)
-6. [Implementation Roadmap](#implementation-roadmap)
+6. [How PACT Orchestration Works From Within the Codex App](#how-pact-orchestration-works-from-within-the-codex-app)
+7. [Implementation Roadmap](#implementation-roadmap)
 
 ---
 
@@ -317,7 +318,344 @@ args = [".codex/mcp/telegram-bridge.py"]
 
 ---
 
-## Implementation Roadmap
+## How PACT Orchestration Works From Within the Codex App
+
+This section details how to build PACT as a native Codex App experience — no external processes needed. Everything runs from within the app using its built-in multi-agent system, skills, and configuration.
+
+### The Core Concept
+
+In Claude Code, PACT works like this:
+> User → CLAUDE.md (orchestrator prompt) → Orchestrator spawns Agent Teams → Agents use TaskCreate/SendMessage to coordinate → Hooks enforce guardrails
+
+In the Codex App, PACT would work like this:
+> User invokes `$pact-orchestrate` skill → Skill instructions turn the main agent into the PACT orchestrator → Orchestrator spawns sub-agents (specialist roles defined in config.toml) → Sub-agents work in isolated worktrees → Orchestrator collects results and coordinates phases
+
+### Layer 1: AGENTS.md — The Orchestrator Brain
+
+The root `AGENTS.md` defines the PACT orchestrator personality and rules. This loads automatically at session start — no hook needed.
+
+```markdown
+# PACT Orchestrator
+
+You are 🛠️ PACT Orchestrator, the Project Manager for this codebase.
+You coordinate; specialists execute. Never write application code yourself.
+
+## Core Rules (S5 Policy)
+- NEVER add, change, or remove application code directly
+- ALWAYS delegate to specialist sub-agents
+- Follow the PACT cycle: Prepare → Architect → Code → Test
+
+## How to Delegate
+When you receive a task:
+1. Assess complexity (simple → use $pact-compact, complex → use $pact-orchestrate)
+2. Spawn the right specialist sub-agents for the current phase
+3. Wait for results, then advance to the next phase
+4. After CODE phase, always run TEST phase before presenting results
+
+## Sub-Agent Roles Available
+Spawn these by asking Codex to "use the {role} agent":
+- preparer: Research and requirements
+- architect: System design
+- backend-coder: Server-side implementation
+- frontend-coder: Client-side implementation
+- database-engineer: Data layer
+- devops-engineer: CI/CD and infrastructure
+- test-engineer: Testing
+- security-engineer: Security review
+- qa-engineer: Runtime verification
+```
+
+### Layer 2: Agent Roles in config.toml — The Specialist Definitions
+
+Each PACT specialist becomes a Codex agent role with its own config file containing `developer_instructions`:
+
+```toml
+# .codex/config.toml (project-level)
+
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 6
+max_depth = 1
+
+[agents.preparer]
+description = "Research specialist. Gathers docs, maps dependencies, explores APIs. Use for PREPARE phase."
+config_file = ".codex/agents/preparer.toml"
+nickname_candidates = ["Scout", "Researcher"]
+
+[agents.architect]
+description = "System design specialist. Creates blueprints, defines interfaces, plans components. Use for ARCHITECT phase."
+config_file = ".codex/agents/architect.toml"
+nickname_candidates = ["Blueprint", "Designer"]
+
+[agents.backend-coder]
+description = "Server-side implementation specialist. Writes APIs, middleware, business logic. Use for CODE phase."
+config_file = ".codex/agents/backend-coder.toml"
+nickname_candidates = ["Backend", "ServerDev"]
+
+[agents.frontend-coder]
+description = "Client-side implementation specialist. Builds UI components, state management. Use for CODE phase."
+config_file = ".codex/agents/frontend-coder.toml"
+nickname_candidates = ["Frontend", "UIBuilder"]
+
+[agents.test-engineer]
+description = "Testing specialist. Writes and runs unit, integration, and E2E tests. Use for TEST phase."
+config_file = ".codex/agents/test-engineer.toml"
+nickname_candidates = ["Tester", "QA"]
+
+[agents.security-engineer]
+description = "Security review specialist. Adversarial code review, vulnerability scanning. Use for REVIEW phase."
+config_file = ".codex/agents/security-engineer.toml"
+nickname_candidates = ["SecOps", "Guardian"]
+```
+
+Each agent's `.toml` file contains role-specific instructions:
+
+```toml
+# .codex/agents/backend-coder.toml
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+developer_instructions = """
+You are pact-backend-coder, a server-side implementation specialist.
+
+## Your Role
+- Implement server-side code: APIs, middleware, business logic, data processing
+- Write clean, maintainable, secure code following project conventions
+
+## Before Starting
+1. Read the AGENTS.md in the current directory for project conventions
+2. Check docs/architecture/ for design decisions from the architect
+3. Check docs/preparation/ for research context from the preparer
+
+## When Done
+Create a structured HANDOFF summary:
+1. Files created/modified
+2. Key decisions with rationale
+3. Areas of uncertainty (HIGH/MEDIUM/LOW)
+4. Integration points affected
+5. Open questions
+
+Write this to docs/handoffs/backend-coder-{timestamp}.md
+"""
+```
+
+### Layer 3: Skills — The PACT Commands
+
+Each PACT command becomes a skill that the orchestrator (or user) invokes:
+
+#### `$pact-orchestrate` — Full Multi-Agent Workflow
+
+```
+.codex/skills/pact-orchestrate/
+├── SKILL.md
+├── scripts/
+│   └── assess_complexity.py    # Variety scoring script
+└── references/
+    ├── phase-transitions.md    # When/how to move between phases
+    └── delegation-rules.md     # What to delegate to whom
+```
+
+```yaml
+# .codex/skills/pact-orchestrate/SKILL.md
+---
+name: pact-orchestrate
+description: Full PACT multi-agent workflow. Use for complex tasks requiring multiple specialists across Prepare, Architect, Code, and Test phases.
+---
+
+## When to Use
+Use when a task requires:
+- Multiple phases (research → design → implementation → testing)
+- Multiple specialist domains (backend + frontend, or any combination)
+- Architectural decisions before coding
+
+## Workflow
+
+### Step 1: Assess Complexity
+Run `scripts/assess_complexity.py` to score the task on novelty, scope, uncertainty, and risk.
+
+### Step 2: PREPARE Phase
+Spawn a `preparer` sub-agent with the task context.
+Wait for their handoff in `docs/handoffs/`.
+The preparer will research documentation, map dependencies, and gather requirements.
+
+### Step 3: ARCHITECT Phase
+Spawn an `architect` sub-agent, pointing them to the preparer's handoff.
+Wait for their design documents in `docs/architecture/`.
+
+### Step 4: CODE Phase
+Based on the architect's design, spawn the appropriate coder sub-agents IN PARALLEL:
+- Backend changes → spawn `backend-coder`
+- Frontend changes → spawn `frontend-coder`
+- Database changes → spawn `database-engineer`
+- Multiple domains → spawn multiple coders simultaneously
+
+Each coder works in their own worktree. Wait for all to complete.
+
+### Step 5: TEST Phase
+Spawn a `test-engineer` sub-agent pointing to all coder handoffs.
+The test engineer writes and runs tests for everything produced in Step 4.
+
+### Step 6: Review
+Spawn `security-engineer` and the relevant domain coder in parallel for peer review.
+Collect findings in `docs/review/`.
+
+### Step 7: Present Results
+Summarize all phase outcomes to the user. Offer to create a PR.
+```
+
+#### `$pact-compact` — Single Specialist, Light Process
+
+```yaml
+# .codex/skills/pact-compact/SKILL.md
+---
+name: pact-compact
+description: Light PACT workflow using a single specialist agent. Use for focused tasks that need one domain expert.
+---
+
+## When to Use
+- Bug fixes in a single domain
+- Small features touching one area
+- Quick refactors
+
+## Workflow
+1. Identify the right specialist role for the task
+2. Spawn ONE sub-agent of that role
+3. Wait for their handoff
+4. Present results to user
+```
+
+#### `$pact-plan-mode` — Strategic Planning
+
+```yaml
+# .codex/skills/pact-plan-mode/SKILL.md
+---
+name: pact-plan-mode
+description: Strategic planning consultation. Spawns preparer and architect to create an implementation plan WITHOUT writing any code.
+---
+
+## Workflow
+1. Spawn `preparer` to research the task
+2. Spawn `architect` to design the approach based on research
+3. Combine into a plan document at `docs/plans/`
+4. Present plan to user for approval
+5. Do NOT proceed to CODE phase — this is planning only
+```
+
+### Layer 4: Handoff Communication via Files
+
+Since Codex sub-agents don't have Claude Code's `SendMessage`/`TaskGet`, PACT uses **file-based handoffs** — each agent writes structured results to `docs/handoffs/`:
+
+```
+docs/
+├── handoffs/
+│   ├── preparer-2026-03-09T10-30.md      # Preparer's research output
+│   ├── architect-2026-03-09T11-00.md      # Architect's design output
+│   ├── backend-coder-2026-03-09T12-00.md  # Backend coder's implementation notes
+│   └── test-engineer-2026-03-09T13-00.md  # Test engineer's results
+├── preparation/    # Detailed research artifacts
+├── architecture/   # Design documents
+├── plans/          # Implementation plans
+├── decision-logs/  # Why decisions were made
+└── review/         # Review findings
+```
+
+The orchestrator reads these files to understand what each agent produced and feed context to the next phase. This replaces Claude Code's `TaskGet(taskId).metadata.handoff` pattern.
+
+### Layer 5: Replacing Hooks with Skills + Instructions
+
+| Claude Code Hook | Codex App Replacement |
+|---|---|
+| `session_init.py` (SessionStart) | AGENTS.md auto-loads at session start; `$pact-init` skill for explicit setup |
+| `git_commit_check.py` (PreToolUse) | Git pre-commit hooks in `.git/hooks/` or `.husky/` |
+| `team_guard.py` (PreToolUse) | Strong instruction in AGENTS.md: "Before spawning agents, verify multi_agent is enabled" |
+| `validate_handoff.py` (SubagentStop) | Instruction in each agent's `developer_instructions`: "You MUST write a structured handoff to docs/handoffs/" |
+| `memory_enforce.py` (SubagentStop) | Instruction in `developer_instructions` + `$pact-memory` skill |
+| `track_files.py` (PostToolUse) | Instruction: "Maintain a file change log in docs/handoffs/" |
+| `compaction_refresh.py` | AGENTS.md re-reads automatically; handoff files persist on disk |
+| `phase_completion.py` (Stop) | `$pact-wrap-up` skill for explicit session cleanup |
+
+### Layer 6: The CSV Fan-Out Pattern for Parallel Work
+
+For tasks with many similar sub-items (e.g., "fix these 5 bugs"), PACT can use Codex's `spawn_agents_on_csv` pattern:
+
+```
+1. Orchestrator creates /tmp/pact-tasks.csv:
+   task_id,domain,description,phase
+   1,backend,"Fix auth token expiry",CODE
+   2,backend,"Add rate limiting to /api/users",CODE
+   3,frontend,"Fix dark mode toggle",CODE
+
+2. Orchestrator calls spawn_agents_on_csv with instruction:
+   "You are a {domain}-coder specialist. Implement: {description}.
+    Write handoff to docs/handoffs/{task_id}.md.
+    Call report_agent_job_result with your summary."
+
+3. Codex spawns 3 parallel agents, each in its own worktree
+4. Agents report results → orchestrator gets consolidated CSV
+```
+
+This maps directly to how Claude Code PACT dispatches "3 backend-coders in parallel for 3 independent bugs."
+
+### Layer 7: Automations for Recurring PACT Tasks
+
+Use Codex's built-in automations for tasks that PACT currently handles ad-hoc:
+
+```
+Automation: "pact-quality-check"
+Schedule: Every commit to main
+Skill: $pact-peer-review
+Action: Run security + architecture review on latest changes
+Output: Results in inbox (archive if clean)
+
+Automation: "pact-memory-cleanup"
+Schedule: Weekly
+Skill: $pact-memory
+Action: Prune stale handoffs, consolidate decision logs
+Output: Summary in inbox
+```
+
+### Putting It All Together — User Experience
+
+**From the user's perspective in the Codex App:**
+
+1. Open a project in the Codex App
+2. Type: `$pact-orchestrate Add user authentication with OAuth2`
+3. The skill loads → main agent becomes the PACT orchestrator
+4. Orchestrator spawns a `preparer` agent in a worktree → researches OAuth2 patterns
+5. Preparer writes handoff → orchestrator reads it
+6. Orchestrator spawns `architect` agent → designs the auth system
+7. Architect writes handoff → orchestrator reads it
+8. Orchestrator spawns `backend-coder` and `frontend-coder` in parallel (separate worktrees)
+9. Both coders write handoffs → orchestrator reads them
+10. Orchestrator spawns `test-engineer` → writes and runs tests
+11. Orchestrator spawns `security-engineer` → reviews auth implementation
+12. All results collected → orchestrator presents summary with diff review
+13. User reviews diffs, comments, stages/reverts, and commits
+
+The user sees multiple agent threads in the app sidebar, each working in isolation, with the orchestrator coordinating phases sequentially.
+
+### What You Gain vs. Lose Compared to Claude Code PACT
+
+**Gains:**
+- Native worktree isolation (no manual setup needed)
+- Visual multi-thread UI (see all agents at once)
+- Built-in diff review and inline commenting
+- Automations for scheduled PACT workflows
+- Cheaper per-token cost
+- Cross-platform desktop experience
+
+**Losses:**
+- No programmatic hooks (enforcement is instruction-based, not guaranteed)
+- No inter-agent messaging (file-based handoffs instead of SendMessage)
+- No persistent cross-session memory (needs custom MCP server)
+- 32KB AGENTS.md limit (must condense orchestrator prompt)
+- Multi-agent is experimental (may change)
+- No formal plugin manifest or marketplace
+
+---
+
+
 
 ### Phase 1: Foundation
 1. Create condensed `AGENTS.md` from `CLAUDE.md` (fit within 32KB)
