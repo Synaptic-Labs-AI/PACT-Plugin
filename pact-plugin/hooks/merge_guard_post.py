@@ -10,7 +10,7 @@ confirm a merge, force push, or branch deletion, and the user answers
 affirmatively, a token file is written to ~/.claude/. The companion hook
 (merge_guard_pre.py) checks for this token before allowing dangerous commands.
 
-Input: JSON from stdin with tool_input (question text) and tool_output (user answer)
+Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_output (answers dict)
 Output: None (side effect: writes token file on approval)
 """
 
@@ -171,11 +171,23 @@ def main():
         tool_input = input_data.get("tool_input", {})
         tool_output = input_data.get("tool_output", {})
 
-        # Extract question and answer
-        question = tool_input.get("question", "")
-        # tool_output may be a string (the answer) or a dict with a result field
+        # Extract question from AskUserQuestion schema:
+        # tool_input: {"questions": [{"question": "...", ...}]}
+        questions = tool_input.get("questions", [])
+        if isinstance(questions, list) and len(questions) > 0:
+            first_q = questions[0]
+            question = first_q.get("question", "") if isinstance(first_q, dict) else ""
+        else:
+            question = ""
+
+        # Extract answer from AskUserQuestion schema:
+        # tool_output: {"answers": {"question_text": "answer_text"}, ...}
         if isinstance(tool_output, dict):
-            answer = tool_output.get("result", tool_output.get("answer", ""))
+            answers = tool_output.get("answers", {})
+            if isinstance(answers, dict) and answers:
+                answer = str(next(iter(answers.values()), ""))
+            else:
+                answer = ""
         else:
             answer = str(tool_output) if tool_output else ""
 

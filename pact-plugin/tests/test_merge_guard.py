@@ -246,8 +246,8 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge #42?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Should I merge #42?"}]},
+            "tool_output": {"answers": {"Should I merge #42?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -264,8 +264,8 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I add logging?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Should I add logging?"}]},
+            "tool_output": {"answers": {"Should I add logging?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -282,8 +282,8 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge #42?"},
-            "tool_output": {"result": "no"},
+            "tool_input": {"questions": [{"question": "Should I merge #42?"}]},
+            "tool_output": {"answers": {"Should I merge #42?": "no"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -308,7 +308,7 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge?"},
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
             "tool_output": "yes",
         })
 
@@ -665,8 +665,8 @@ class TestIntegration:
 
         # Step 1: Post hook processes merge approval
         post_input = json.dumps({
-            "tool_input": {"question": "Should I merge PR #99?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Should I merge PR #99?"}]},
+            "tool_output": {"answers": {"Should I merge PR #99?": "yes"}},
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
              patch("sys.stdin", io.StringIO(post_input)):
@@ -1275,7 +1275,7 @@ class TestPostMainEdgeCases:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge?"},
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
             "tool_output": {},
         })
 
@@ -1287,13 +1287,13 @@ class TestPostMainEdgeCases:
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
-    def test_tool_output_with_answer_key(self, tmp_path):
-        """tool_output dict with 'answer' key (fallback from 'result')."""
+    def test_tool_output_with_answers_key(self, tmp_path):
+        """tool_output dict with 'answers' key (actual AskUserQuestion format)."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge PR #10?"},
-            "tool_output": {"answer": "yes"},
+            "tool_input": {"questions": [{"question": "Merge PR #10?"}]},
+            "tool_output": {"answers": {"Merge PR #10?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -1304,13 +1304,13 @@ class TestPostMainEdgeCases:
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
 
-    def test_tool_input_missing_question(self, tmp_path):
-        """tool_input without 'question' key — no token created."""
+    def test_tool_input_missing_questions(self, tmp_path):
+        """tool_input without 'questions' key — no token created."""
         from merge_guard_post import main
 
         input_data = json.dumps({
             "tool_input": {},
-            "tool_output": {"result": "yes"},
+            "tool_output": {"answers": {"anything": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -1326,7 +1326,7 @@ class TestPostMainEdgeCases:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": None,
         })
 
@@ -1343,7 +1343,7 @@ class TestPostMainEdgeCases:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": 42,
         })
 
@@ -1524,8 +1524,8 @@ class TestTokenSecurity:
         bad_dir.write_text("I am a file")
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge PR #1?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Merge PR #1?"}]},
+            "tool_output": {"answers": {"Merge PR #1?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", bad_dir), \
@@ -2219,7 +2219,7 @@ class TestTokenWriteExceptionHandling:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": True,
         })
 
@@ -2237,7 +2237,7 @@ class TestTokenWriteExceptionHandling:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": False,
         })
 
