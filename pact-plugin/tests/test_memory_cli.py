@@ -493,6 +493,41 @@ class TestApiSaveVerification:
             with pytest.raises(RuntimeError, match="not found after save"):
                 api_memory.save({"context": "test"})
 
+    def test_save_verifies_before_syncing_to_claude_md(self, tmp_path):
+        """get() (verification) is called BEFORE sync_to_claude_md().
+
+        Ensures we never write a phantom memory reference to CLAUDE.md.
+        Uses a call-order recording pattern to assert ordering.
+        """
+        import sqlite3
+        db_path = tmp_path / "order_test.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
+
+        call_order = []
+
+        original_get = PACTMemory.get
+
+        def recording_get(self_inner, *args, **kwargs):
+            call_order.append("get")
+            return original_get(self_inner, *args, **kwargs)
+
+        def recording_sync(*args, **kwargs):
+            call_order.append("sync")
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.sync_to_claude_md", side_effect=recording_sync), \
+             patch.object(PACTMemory, "get", recording_get):
+            memory = PACTMemory(
+                project_id="test-project",
+                session_id="test-session",
+                db_path=db_path,
+            )
+            memory.save({"context": "ordering test"})
+
+        assert call_order == ["get", "sync"]
+
 
 # ---------------------------------------------------------------------------
 # Agent Model Configuration
