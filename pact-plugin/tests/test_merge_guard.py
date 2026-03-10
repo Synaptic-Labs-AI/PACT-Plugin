@@ -304,7 +304,8 @@ class TestPostMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_handles_string_tool_output(self, tmp_path):
+    def test_main_rejects_string_tool_output(self, tmp_path):
+        """Non-dict tool_output exits early — no token created."""
         from merge_guard_post import main
 
         input_data = json.dumps({
@@ -318,8 +319,8 @@ class TestPostMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
-        tokens = list(tmp_path.glob("merge-authorized-*"))
-        assert len(tokens) == 1
+        # Non-dict tool_output rejected — only dict format trusted
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
 
 # =============================================================================
@@ -1322,7 +1323,7 @@ class TestPostMainEdgeCases:
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
     def test_tool_output_none(self, tmp_path):
-        """tool_output as None — no crash, no token."""
+        """tool_output as None — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
@@ -1339,7 +1340,7 @@ class TestPostMainEdgeCases:
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
     def test_tool_output_integer(self, tmp_path):
-        """tool_output as integer — converted to string, not affirmative."""
+        """tool_output as integer — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
@@ -2215,7 +2216,7 @@ class TestTokenWriteExceptionHandling:
         assert result is None
 
     def test_tool_output_as_boolean_true(self, tmp_path):
-        """tool_output as boolean True — converted to 'True', not affirmative."""
+        """tool_output as boolean True — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
@@ -2233,7 +2234,7 @@ class TestTokenWriteExceptionHandling:
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
     def test_tool_output_as_boolean_false(self, tmp_path):
-        """tool_output as boolean False — empty string, no token created."""
+        """tool_output as boolean False — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
@@ -2561,12 +2562,11 @@ class TestAnswerExtractionEdgeCases:
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
-    def test_formatted_string_rejected_by_anchor_pattern(self, tmp_path):
+    def test_formatted_string_rejected_as_non_dict(self, tmp_path):
         """tool_output is the formatted string from AskUserQuestion.
 
         When tool_output is a string like 'User has answered your questions:
-        "Confirm merge?"="yes"', the str() fallback path is taken. Since
-        is_affirmative() is ^-anchored, 'User has...' won't match — no token.
+        "Confirm merge?"="yes"', it is rejected as non-dict — no token.
         """
         from merge_guard_post import main
 
@@ -2581,7 +2581,7 @@ class TestAnswerExtractionEdgeCases:
                 main()
 
         assert exc_info.value.code == 0
-        # String format starts with "User", not an affirmative word — no token
+        # Non-dict tool_output rejected entirely — no token
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
 

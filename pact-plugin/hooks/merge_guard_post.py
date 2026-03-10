@@ -184,15 +184,14 @@ def main():
 
         # Extract answer from AskUserQuestion schema:
         # tool_output: {"answers": {"question_text": "answer_text"}, ...}
-        if isinstance(tool_output, dict):
-            answers = tool_output.get("answers", {})
-            if isinstance(answers, dict) and answers:
-                # Look up answer by exact question text; fall back to first value
-                answer = str(answers.get(question, next(iter(answers.values()), "")))
-            else:
-                answer = ""
+        if not isinstance(tool_output, dict):
+            sys.exit(0)
+        answers = tool_output.get("answers", {})
+        if isinstance(answers, dict) and answers:
+            # Look up answer by exact question text; fall back to first value
+            answer = str(answers.get(question, next(iter(answers.values()), "")))
         else:
-            answer = str(tool_output) if tool_output else ""
+            answer = ""
 
         # Only act on merge-related questions with affirmative answers
         if question and is_merge_question(question) and answer and is_affirmative(answer):
