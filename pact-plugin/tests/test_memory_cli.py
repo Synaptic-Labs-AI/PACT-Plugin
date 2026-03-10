@@ -46,6 +46,8 @@ def mock_pact_memory():
     mock.save.return_value = "abc123def456"
     mock.search.return_value = []
     mock.list.return_value = []
+    # Non-None default so save verification in PACTMemory.save() passes;
+    # override to None in tests that need NOT_FOUND behavior.
     mock.get.return_value = MagicMock()
     mock.get_status.return_value = {
         "project_id": "test-project",
@@ -440,85 +442,56 @@ class TestApiSaveVerification:
     Verification lives in the API layer so all callers benefit.
     PACTMemory.save() calls self.get(memory_id) after saving and raises
     RuntimeError if the result is None or if memory_id itself is None.
+
+    Tests use a properly initialized PACTMemory with a real temp database
+    where possible, mocking only _ensure_ready (to skip dependency checks)
+    and sync_to_claude_md (to skip file writes). Failure-path tests mock
+    the specific internal that needs to fail.
     """
 
-    def test_save_raises_on_none_memory_id(self):
-        """save() raises RuntimeError if create_memory returns None."""
-        memory = PACTMemory.__new__(PACTMemory)
-        memory._db_path = None
-        memory._project_id = "test"
-        memory._session_id = "test"
-        memory._session_files = []
-
+    @pytest.fixture
+    def api_memory(self, tmp_path):
+        """Create a PACTMemory instance with a real temp database."""
+        import sqlite3
+        db_path = tmp_path / "verify_test.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
         with patch("scripts.memory_api._ensure_ready"), \
-             patch("scripts.memory_api.db_connection") as mock_ctx, \
-             patch("scripts.memory_api.ensure_initialized"), \
-             patch("scripts.memory_api.create_memory", return_value=None), \
              patch("scripts.memory_api.sync_to_claude_md"):
-            mock_ctx.return_value.__enter__ = MagicMock()
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            memory = PACTMemory(
+                project_id="test-project",
+                session_id="test-session",
+                db_path=db_path,
+            )
+            yield memory
+
+    def test_save_succeeds_with_real_db(self, api_memory):
+        """save() returns a memory_id and verification passes against real DB."""
+        memory_id = api_memory.save({"context": "verification test"})
+        assert memory_id is not None
+        assert len(memory_id) > 0
+        # Confirm the memory is retrievable (verification already passed internally)
+        result = api_memory.get(memory_id)
+        assert result is not None
+
+    def test_save_verification_calls_get_with_returned_id(self, api_memory):
+        """Verification calls get() with the exact ID from the save."""
+        with patch.object(api_memory, "get", wraps=api_memory.get) as spy_get:
+            memory_id = api_memory.save({"context": "spy test"})
+        spy_get.assert_called_once_with(memory_id)
+
+    def test_save_raises_on_none_memory_id(self, api_memory):
+        """save() raises RuntimeError if create_memory returns None."""
+        with patch("scripts.memory_api.create_memory", return_value=None):
             with pytest.raises(RuntimeError, match="no memory_id returned"):
-                memory.save({"context": "test"})
+                api_memory.save({"context": "test"})
 
-    def test_save_raises_on_verification_failure(self):
+    def test_save_raises_on_verification_failure(self, api_memory):
         """save() raises RuntimeError if get() returns None after save."""
-        memory = PACTMemory.__new__(PACTMemory)
-        memory._db_path = None
-        memory._project_id = "test"
-        memory._session_id = "test"
-        memory._session_files = []
-
-        with patch("scripts.memory_api._ensure_ready"), \
-             patch("scripts.memory_api.db_connection") as mock_ctx, \
-             patch("scripts.memory_api.ensure_initialized"), \
-             patch("scripts.memory_api.create_memory", return_value="test_id"), \
-             patch("scripts.memory_api.sync_to_claude_md"), \
-             patch.object(memory, "_store_embedding"), \
-             patch.object(memory, "get", return_value=None):
-            mock_ctx.return_value.__enter__ = MagicMock()
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            with pytest.raises(RuntimeError, match="test_id not found after save"):
-                memory.save({"context": "test"})
-
-    def test_save_succeeds_when_verification_passes(self):
-        """save() returns memory_id when get() returns a non-None result."""
-        memory = PACTMemory.__new__(PACTMemory)
-        memory._db_path = None
-        memory._project_id = "test"
-        memory._session_id = "test"
-        memory._session_files = []
-
-        with patch("scripts.memory_api._ensure_ready"), \
-             patch("scripts.memory_api.db_connection") as mock_ctx, \
-             patch("scripts.memory_api.ensure_initialized"), \
-             patch("scripts.memory_api.create_memory", return_value="verified_id"), \
-             patch("scripts.memory_api.sync_to_claude_md"), \
-             patch.object(memory, "_store_embedding"), \
-             patch.object(memory, "get", return_value=MagicMock()):
-            mock_ctx.return_value.__enter__ = MagicMock()
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            result = memory.save({"context": "test"})
-        assert result == "verified_id"
-
-    def test_save_verification_calls_get_with_returned_id(self):
-        """Verification calls get() with the exact ID from create_memory."""
-        memory = PACTMemory.__new__(PACTMemory)
-        memory._db_path = None
-        memory._project_id = "test"
-        memory._session_id = "test"
-        memory._session_files = []
-
-        with patch("scripts.memory_api._ensure_ready"), \
-             patch("scripts.memory_api.db_connection") as mock_ctx, \
-             patch("scripts.memory_api.ensure_initialized"), \
-             patch("scripts.memory_api.create_memory", return_value="exact_id_123"), \
-             patch("scripts.memory_api.sync_to_claude_md"), \
-             patch.object(memory, "_store_embedding"), \
-             patch.object(memory, "get", return_value=MagicMock()) as mock_get:
-            mock_ctx.return_value.__enter__ = MagicMock()
-            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
-            memory.save({"context": "test"})
-        mock_get.assert_called_once_with("exact_id_123")
+        with patch.object(api_memory, "get", return_value=None):
+            with pytest.raises(RuntimeError, match="not found after save"):
+                api_memory.save({"context": "test"})
 
 
 # ---------------------------------------------------------------------------
