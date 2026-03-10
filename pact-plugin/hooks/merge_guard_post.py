@@ -173,6 +173,8 @@ def main():
 
         # Extract question from AskUserQuestion schema:
         # tool_input: {"questions": [{"question": "...", ...}]}
+        if not isinstance(tool_input, dict):
+            sys.exit(0)
         questions = tool_input.get("questions", [])
         if isinstance(questions, list) and len(questions) > 0:
             first_q = questions[0]

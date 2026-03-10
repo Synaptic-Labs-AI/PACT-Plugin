@@ -2561,7 +2561,7 @@ class TestAnswerExtractionEdgeCases:
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
-    def test_tool_output_formatted_string_fallback(self, tmp_path):
+    def test_formatted_string_rejected_by_anchor_pattern(self, tmp_path):
         """tool_output is the formatted string from AskUserQuestion.
 
         When tool_output is a string like 'User has answered your questions:
