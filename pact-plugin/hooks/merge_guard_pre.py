@@ -59,10 +59,23 @@ DANGEROUS_PATTERNS = [
 def _has_pipe_to_shell(command: str) -> bool:
     """Check if command pipes output to a shell interpreter.
 
-    Detects patterns like ``echo "..." | bash`` or ``printf "..." | sh``
-    where echo/printf content would be executed by the receiving shell.
+    Detects patterns like ``echo "..." | bash``, ``printf "..." | sh``,
+    and ``echo "..." | xargs bash`` where echo/printf content would be
+    executed by the receiving shell.
     """
-    return bool(re.search(r"\|\s*(?:bash|sh|zsh)\b", command))
+    return bool(
+        re.search(r"\|\s*(?:bash|sh|zsh)\b", command)
+        or re.search(r"\|\s*xargs\s+(?:.*\s+)?(?:bash|sh|zsh)\b", command)
+    )
+
+
+def _has_process_substitution_to_shell(command: str) -> bool:
+    """Check if command uses process substitution fed to a shell interpreter.
+
+    Detects patterns like ``bash <(echo "...")`` where the output of echo/printf
+    inside ``<(...)`` is executed by the shell interpreter.
+    """
+    return bool(re.search(r"\b(?:bash|sh|zsh)\s+<\(", command))
 
 
 def _has_eval_or_source(command: str) -> bool:
@@ -145,10 +158,15 @@ def _strip_non_executable_content(command: str) -> str:
     # 3. Strip echo/printf quoted arguments
     #    Match echo/printf followed by flags then quoted strings.
     #    Replace the quoted content but keep the echo command visible.
-    #    GUARD: Skip stripping if output is piped to a shell interpreter,
+    #    GUARD: Skip stripping if output is piped to a shell interpreter
+    #    (including via xargs), or fed via process substitution to a shell,
     #    because the echo/printf content would be executed by the shell.
+    #    NOTE: ``bash -c 'dangerous'`` is NOT affected by this stripping —
+    #    the echo/printf regex only matches echo/printf commands, so
+    #    ``bash -c`` content is implicitly preserved and correctly detected.
     piped_to_shell = _has_pipe_to_shell(command)
-    if not piped_to_shell:
+    process_sub_to_shell = _has_process_substitution_to_shell(command)
+    if not piped_to_shell and not process_sub_to_shell:
         # Double-quoted: also guard against command substitution inside
         def _strip_echo_dq(match: re.Match) -> str:
             if _has_command_substitution(match.group(0)):
@@ -219,6 +237,41 @@ def _strip_non_executable_content(command: str) -> str:
     result = re.sub(
         r"\b(git\s+commit)\s+-m\s+'[^']*'",
         r"\1 -m STRIPPED",
+        result,
+    )
+
+    # 6. Strip here-string quoted arguments: <<< "..." or <<< '...'
+    #    Here-strings pass text as stdin, not as a command.
+    #    GUARD: Skip stripping if a shell interpreter precedes the <<<
+    #    (e.g., bash <<< "dangerous"), because the content would execute.
+    #    GUARD: Check for command substitution in double-quoted content.
+    def _strip_herestring_dq(match: re.Match) -> str:
+        # Check what command precedes the <<<
+        start = match.start()
+        preceding = command[:start].rstrip()
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        if _has_command_substitution(match.group(0)):
+            return match.group(0)  # Preserve — $() executes
+        return "<<<STRIPPED"
+
+    result = re.sub(
+        r'<<<\s*"(?:[^"\\]|\\.)*"',
+        _strip_herestring_dq,
+        result,
+    )
+
+    def _strip_herestring_sq(match: re.Match) -> str:
+        # Check what command precedes the <<<
+        start = match.start()
+        preceding = command[:start].rstrip()
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        return "<<<STRIPPED"
+
+    result = re.sub(
+        r"<<<\s*'[^']*'",
+        _strip_herestring_sq,
         result,
     )
 

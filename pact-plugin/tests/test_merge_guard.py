@@ -1442,6 +1442,16 @@ class TestStripHelpers:
         assert not _has_pipe_to_shell("echo x | grep bash")
         assert not _has_pipe_to_shell("echo x")
 
+    def test_has_pipe_to_xargs_shell(self):
+        from merge_guard_pre import _has_pipe_to_shell
+
+        assert _has_pipe_to_shell("echo x | xargs bash")
+        assert _has_pipe_to_shell("echo x | xargs sh")
+        assert _has_pipe_to_shell("echo x | xargs zsh")
+        assert _has_pipe_to_shell("echo x | xargs -I {} bash -c {}")
+        assert not _has_pipe_to_shell("echo x | xargs grep")
+        assert not _has_pipe_to_shell("echo x | xargs echo")
+
     def test_has_eval_or_source(self):
         from merge_guard_pre import _has_eval_or_source
 
@@ -1458,6 +1468,16 @@ class TestStripHelpers:
         assert _has_command_substitution("`gh pr merge 42`")
         assert not _has_command_substitution("gh pr merge 42")
         assert not _has_command_substitution("safe string")
+
+    def test_has_process_substitution_to_shell(self):
+        from merge_guard_pre import _has_process_substitution_to_shell
+
+        assert _has_process_substitution_to_shell("bash <(echo x)")
+        assert _has_process_substitution_to_shell("sh <(echo x)")
+        assert _has_process_substitution_to_shell("zsh <(echo x)")
+        assert not _has_process_substitution_to_shell("cat <(echo x)")
+        assert not _has_process_substitution_to_shell("grep <(echo x)")
+        assert not _has_process_substitution_to_shell("echo x")
 
 
 class TestAdditionalDangerousPatterns:
@@ -3588,3 +3608,218 @@ class TestSchemaFixEndToEnd:
         # Token created — answers.get("Merge PR #42?") misses due to
         # trailing space, falls back to first value "Yes, merge"
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
+
+
+# =============================================================================
+# Process substitution bypass prevention
+# =============================================================================
+
+
+class TestProcessSubstitutionBypass:
+    """Verify that process substitution fed to a shell interpreter is NOT
+    stripped and remains detectable as dangerous.
+
+    ``bash <(echo 'gh pr merge 42')`` executes the echo output via the
+    shell, so echo content must not be stripped.
+    """
+
+    def test_bash_process_sub_is_dangerous(self):
+        """bash <(echo 'dangerous') is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash <(echo 'gh pr merge 42')")
+
+    def test_sh_process_sub_is_dangerous(self):
+        """sh <(printf 'dangerous') is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("sh <(printf 'gh pr merge 42')")
+
+    def test_zsh_process_sub_is_dangerous(self):
+        """zsh <(echo 'dangerous') is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("zsh <(echo 'gh pr merge 42')")
+
+    def test_bash_process_sub_double_quoted(self):
+        """bash <(echo "dangerous") with double quotes is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('bash <(echo "gh pr merge 42")')
+
+    def test_non_shell_process_sub_still_stripped(self):
+        """cat <(echo 'dangerous') is NOT a shell — still stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cat <(echo 'gh pr merge 42')")
+
+    def test_grep_process_sub_still_stripped(self):
+        """grep <(echo 'dangerous') is NOT a shell — still stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("grep <(echo 'gh pr merge 42')")
+
+    def test_strip_helper_process_sub(self):
+        """_strip_non_executable_content preserves echo args when process sub to shell."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("bash <(echo 'gh pr merge 42')")
+        assert "gh pr merge" in result
+
+
+# =============================================================================
+# xargs piping bypass prevention
+# =============================================================================
+
+
+class TestXargsBypass:
+    """Verify that echo/printf piped to xargs + shell interpreter is NOT
+    stripped and remains detectable as dangerous.
+
+    ``echo "gh pr merge 42" | xargs bash`` passes the echo output as
+    arguments to bash, which executes them.
+    """
+
+    def test_echo_xargs_bash_is_dangerous(self):
+        """echo piped to xargs bash is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 42" | xargs bash')
+
+    def test_echo_xargs_sh_is_dangerous(self):
+        """echo piped to xargs sh is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 42" | xargs sh')
+
+    def test_echo_xargs_zsh_is_dangerous(self):
+        """echo piped to xargs zsh is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 42" | xargs zsh')
+
+    def test_echo_xargs_with_flags_bash(self):
+        """echo piped to xargs with flags to bash is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'echo "gh pr merge 42" | xargs -I {} bash -c {}'
+        )
+
+    def test_printf_xargs_bash_is_dangerous(self):
+        """printf piped to xargs bash is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('printf "gh pr merge 42" | xargs bash')
+
+    def test_echo_xargs_grep_still_stripped(self):
+        """echo piped to xargs grep is NOT a shell — still stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "gh pr merge 42" | xargs grep')
+
+    def test_strip_helper_xargs(self):
+        """_strip_non_executable_content preserves echo args when piped to xargs shell."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content(
+            'echo "gh pr merge 42" | xargs bash'
+        )
+        assert "gh pr merge" in result
+
+
+# =============================================================================
+# Here-string false positive prevention
+# =============================================================================
+
+
+class TestHereStringStripping:
+    """Verify that here-strings (<<<) are stripped to prevent false positives,
+    with guards for shell interpreters and command substitution."""
+
+    def test_cat_herestring_single_quoted_not_dangerous(self):
+        """cat <<< 'dangerous' is not a command — stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cat <<< 'gh pr merge 42'")
+
+    def test_cat_herestring_double_quoted_not_dangerous(self):
+        """cat <<< "dangerous" is not a command — stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('cat <<< "gh pr merge 42"')
+
+    def test_grep_herestring_not_dangerous(self):
+        """grep <<< 'dangerous' is not a command — stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("grep <<< 'gh pr merge 42'")
+
+    def test_bash_herestring_single_quoted_is_dangerous(self):
+        """bash <<< 'dangerous' IS executed — preserved."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash <<< 'gh pr merge 42'")
+
+    def test_bash_herestring_double_quoted_is_dangerous(self):
+        """bash <<< "dangerous" IS executed — preserved."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('bash <<< "gh pr merge 42"')
+
+    def test_sh_herestring_is_dangerous(self):
+        """sh <<< 'dangerous' IS executed — preserved."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("sh <<< 'gh pr merge 42'")
+
+    def test_zsh_herestring_is_dangerous(self):
+        """zsh <<< 'dangerous' IS executed — preserved."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("zsh <<< 'gh pr merge 42'")
+
+    def test_herestring_cmd_substitution_is_dangerous(self):
+        """cat <<< "$(dangerous)" has command substitution — preserved."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('cat <<< "$(gh pr merge 42)"')
+
+    def test_herestring_backtick_substitution_is_dangerous(self):
+        """cat <<< "`dangerous`" has backtick substitution — preserved."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('cat <<< "`gh pr merge 42`"')
+
+    def test_strip_helper_herestring_single(self):
+        """_strip_non_executable_content strips single-quoted here-string."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("cat <<< 'gh pr merge 42'")
+        assert "gh pr merge" not in result
+
+    def test_strip_helper_herestring_double(self):
+        """_strip_non_executable_content strips double-quoted here-string."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content('cat <<< "gh pr merge 42"')
+        assert "gh pr merge" not in result
+
+    def test_strip_helper_herestring_bash_preserved(self):
+        """_strip_non_executable_content preserves bash here-string content."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("bash <<< 'gh pr merge 42'")
+        assert "gh pr merge" in result
+
+    def test_herestring_force_push_not_dangerous(self):
+        """Here-string with force push text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('cat <<< "git push --force origin main"')
+
+    def test_herestring_branch_delete_not_dangerous(self):
+        """Here-string with branch delete text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cat <<< 'git branch -D feat/old'")
