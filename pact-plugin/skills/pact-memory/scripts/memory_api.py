@@ -308,14 +308,8 @@ class PACTMemory:
 
             logger.info(f"Saved memory {memory_id} with {len(files_to_link)} files")
 
-        # Sync to CLAUDE.md working memory (outside db connection context)
-        # This is non-critical - failures are logged but don't fail the save
-        try:
-            sync_to_claude_md(memory, files_to_link if files_to_link else None, memory_id)
-        except Exception as e:
-            logger.warning(f"Failed to sync to CLAUDE.md: {e}")
-
-        # Verify the save persisted by reading back
+        # Verify the save persisted by reading back (before syncing to CLAUDE.md,
+        # so we never reference a phantom memory in working memory)
         if memory_id is None:
             raise RuntimeError("Save failed — no memory_id returned")
         verification = self.get(memory_id)
@@ -323,6 +317,13 @@ class PACTMemory:
             raise RuntimeError(
                 f"Save verification failed — memory_id {memory_id} not found after save"
             )
+
+        # Sync to CLAUDE.md working memory (outside db connection context)
+        # This is non-critical - failures are logged but don't fail the save
+        try:
+            sync_to_claude_md(memory, files_to_link if files_to_link else None, memory_id)
+        except Exception as e:
+            logger.warning(f"Failed to sync to CLAUDE.md: {e}")
 
         return memory_id
 
