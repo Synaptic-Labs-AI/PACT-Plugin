@@ -74,6 +74,16 @@ def _has_eval_or_source(command: str) -> bool:
     return bool(re.search(r"\b(?:eval|source)\b", command))
 
 
+def _var_is_expanded(var_name: str, command: str) -> bool:
+    """Check if a variable is expanded (used) elsewhere in the command.
+
+    Detects patterns like ``$VAR`` or ``${VAR}`` that would execute
+    the variable's value as a command when used bare (e.g., ``CMD="gh pr merge 42" && $CMD``).
+    """
+    # Match $VAR (word boundary) or ${VAR}
+    return bool(re.search(r"\$\{?" + re.escape(var_name) + r"\b", command))
+
+
 def _has_command_substitution(quoted_content: str) -> bool:
     """Check if double-quoted content contains command substitution.
 
@@ -121,7 +131,7 @@ def _strip_non_executable_content(command: str) -> str:
         return "<<HEREDOC_STRIPPED"
 
     result = re.sub(
-        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\1\b",
+        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
         _strip_heredoc,
         result,
         flags=re.DOTALL,
@@ -160,24 +170,57 @@ def _strip_non_executable_content(command: str) -> str:
     #    Only match simple assignments (NAME=VALUE), not command arguments.
     #    GUARD: Skip stripping if eval/source appears in the command,
     #    because the variable value could be executed.
+    #    GUARD: Skip stripping if $VAR or ${VAR} appears elsewhere in the
+    #    command, because bare expansion executes the value as a command
+    #    (e.g., CMD="gh pr merge 42" && $CMD).
     has_eval = _has_eval_or_source(command)
     if not has_eval:
-        # Double-quoted: also guard against command substitution inside
+        # Double-quoted: guard against command substitution and bare expansion
         def _strip_var_dq(match: re.Match) -> str:
             if _has_command_substitution(match.group(0)):
                 return match.group(0)  # Preserve — $() executes
-            return match.group(1) + "=STRIPPED"
+            var_name = match.group(1)
+            if _var_is_expanded(var_name, command):
+                return match.group(0)  # Preserve — $VAR executes
+            return var_name + "=STRIPPED"
 
         result = re.sub(
             r'\b([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"',
             _strip_var_dq,
             result,
         )
+
+        # Single-quoted: guard against bare expansion
+        def _strip_var_sq(match: re.Match) -> str:
+            var_name = match.group(1)
+            if _var_is_expanded(var_name, command):
+                return match.group(0)  # Preserve — $VAR executes
+            return var_name + "=STRIPPED"
+
         result = re.sub(
             r"\b([A-Za-z_][A-Za-z0-9_]*)='[^']*'",
-            r"\1=STRIPPED",
+            _strip_var_sq,
             result,
         )
+
+    # 5. Strip git commit -m quoted arguments
+    #    The -m argument to git commit is a message, never executed.
+    #    GUARD: Check for command substitution in double-quoted messages.
+    def _strip_commit_msg_dq(match: re.Match) -> str:
+        if _has_command_substitution(match.group(0)):
+            return match.group(0)  # Preserve — $() executes
+        return match.group(1) + ' -m STRIPPED'
+
+    result = re.sub(
+        r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
+        _strip_commit_msg_dq,
+        result,
+    )
+    result = re.sub(
+        r"\b(git\s+commit)\s+-m\s+'[^']*'",
+        r"\1 -m STRIPPED",
+        result,
+    )
 
     return result
 

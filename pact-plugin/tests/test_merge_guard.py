@@ -1489,6 +1489,162 @@ class TestAdditionalDangerousPatterns:
 
 
 # =============================================================================
+# Bare variable expansion bypass prevention
+# =============================================================================
+
+
+class TestBareVariableExpansion:
+    """Verify that bare $VAR / ${VAR} expansion of a variable containing
+    dangerous text is detected, even without eval/source."""
+
+    def test_bare_dollar_var_after_ampersand(self):
+        """CMD="gh pr merge 42" && $CMD — bare expansion executes."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr merge 42" && $CMD')
+
+    def test_bare_dollar_var_after_semicolon(self):
+        """CMD="gh pr merge 42"; $CMD — bare expansion executes."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr merge 42"; $CMD')
+
+    def test_bare_dollar_brace_var(self):
+        """CMD="gh pr merge 42" && ${CMD} — braced expansion executes."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr merge 42" && ${CMD}')
+
+    def test_bare_var_single_quoted(self):
+        """CMD='gh pr merge 42'; $CMD — single-quoted + bare expansion."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("CMD='gh pr merge 42'; $CMD")
+
+    def test_var_without_expansion_still_stripped(self):
+        """CMD="gh pr merge 42" alone (no $CMD) is still a false positive fix."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('CMD="gh pr merge 42"')
+
+    def test_different_var_expanded_not_affected(self):
+        """CMD="gh pr merge 42" with $OTHER expanded — CMD still stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('CMD="gh pr merge 42" && $OTHER')
+
+    def test_var_is_expanded_helper(self):
+        """_var_is_expanded detects $VAR and ${VAR} patterns."""
+        from merge_guard_pre import _var_is_expanded
+
+        assert _var_is_expanded("CMD", 'X && $CMD')
+        assert _var_is_expanded("CMD", 'X && ${CMD}')
+        assert not _var_is_expanded("CMD", 'X && $OTHER')
+        assert not _var_is_expanded("CMD", 'CMD="value"')
+
+
+# =============================================================================
+# Heredoc <<- with tab-indented closing marker
+# =============================================================================
+
+
+class TestHeredocIndentedMarker:
+    """Verify that <<- heredocs with tab-indented closing markers are
+    properly stripped (non-shell targets) or preserved (shell targets)."""
+
+    def test_heredoc_dash_indented_to_cat(self):
+        """<<- heredoc with tab-indented EOF to cat is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cat <<- EOF\n\tgh pr merge 42\n\tEOF")
+
+    def test_heredoc_dash_non_indented_to_cat(self):
+        """<<- heredoc with non-indented EOF to cat is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cat <<- EOF\n\tgh pr merge 42\nEOF")
+
+    def test_heredoc_dash_indented_to_bash(self):
+        """<<- heredoc with tab-indented EOF to bash is preserved (dangerous)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash <<- EOF\n\tgh pr merge 42\n\tEOF")
+
+    def test_heredoc_dash_non_indented_to_bash(self):
+        """<<- heredoc with non-indented EOF to bash is preserved (dangerous)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash <<- EOF\n\tgh pr merge 42\nEOF")
+
+    def test_strip_helper_indented_marker(self):
+        """_strip_non_executable_content handles tab-indented markers."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = "cat <<- EOF\n\tgh pr merge 42\n\tEOF"
+        result = _strip_non_executable_content(cmd)
+        assert "gh pr merge" not in result
+
+
+# =============================================================================
+# git commit -m false positive prevention
+# =============================================================================
+
+
+class TestGitCommitMessageStripping:
+    """Verify that git commit -m messages containing dangerous text
+    are stripped (false positive prevention) while real commands are detected."""
+
+    def test_commit_msg_merge_text(self):
+        """git commit -m with merge text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('git commit -m "gh pr merge 42"')
+
+    def test_commit_msg_force_push_text(self):
+        """git commit -m with force push text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('git commit -m "git push --force origin main"')
+
+    def test_commit_msg_branch_delete_text(self):
+        """git commit -m with branch delete text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('git commit -m "git branch -D feat/old"')
+
+    def test_commit_msg_single_quoted(self):
+        """git commit -m with single-quoted message is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git commit -m 'gh pr merge 42'")
+
+    def test_commit_msg_cmd_substitution_is_dangerous(self):
+        """git commit -m with command substitution IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('git commit -m "$(gh pr merge 42)"')
+
+    def test_commit_msg_push_main_text(self):
+        """git commit -m with push-to-main text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('git commit -m "git push origin main"')
+
+    def test_real_merge_still_detected(self):
+        """Real gh pr merge is still detected alongside commit."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('git commit -m "done" && gh pr merge 42')
+
+    def test_strip_helper_commit_msg(self):
+        """_strip_non_executable_content strips commit message."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content('git commit -m "gh pr merge 42"')
+        assert "gh pr merge" not in result
+
+
+# =============================================================================
 # Edge cases: merge_guard_post
 # =============================================================================
 
