@@ -13,7 +13,8 @@ Tests cover:
 9. Output format: JSON envelope consistency, stdout/stderr routing
 10. Error handling: exit codes, error types, unknown commands
 11. Subprocess E2E: true black-box tests via subprocess.run
-12. Agent configuration: model frontmatter verification
+12. E2E save verification: subprocess roundtrip confirming verification, error paths
+13. Agent configuration: model frontmatter verification
 """
 import json
 import os
@@ -1334,6 +1335,151 @@ class TestCliSubprocess:
         # Status should include core fields from get_status()
         assert "memory_count" in output["result"]
         assert "project_id" in output["result"]
+
+
+# ---------------------------------------------------------------------------
+# E2E Save Verification
+# ---------------------------------------------------------------------------
+
+class TestCliSaveVerificationE2E:
+    """E2E subprocess tests for save verification (#245).
+
+    The save-then-get verification lives in PACTMemory.save(). When it
+    fails, save() raises RuntimeError, which main()'s try/except catches
+    as SYSTEM_ERROR (exit 2). These tests exercise the full CLI binary
+    against real SQLite databases.
+    """
+
+    def test_save_roundtrip_confirms_verification_passed(self, cli_script_path, cli_db):
+        """Save succeeds (exit 0) only if internal verification passed.
+
+        Because PACTMemory.save() now verifies via get() before returning,
+        a successful save (exit 0) implies verification succeeded. We then
+        confirm the data is actually retrievable via a separate get call.
+        """
+        memory_dict = make_cli_memory_dict(context="verification roundtrip test")
+        json_str = json.dumps(memory_dict)
+
+        # Save — exit 0 means internal verification passed
+        save_result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json_str,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert save_result.returncode == 0, f"save stderr: {save_result.stderr}"
+        save_output = json.loads(save_result.stdout)
+        assert save_output["ok"] is True
+        memory_id = save_output["result"]["memory_id"]
+        assert memory_id  # Non-empty ID
+
+        # Confirm the memory is actually retrievable
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0, f"get stderr: {get_result.stderr}"
+        get_output = json.loads(get_result.stdout)
+        assert get_output["ok"] is True
+        assert get_output["result"]["context"] == "verification roundtrip test"
+
+    def test_save_via_stdin_confirms_verification_passed(self, cli_script_path, cli_db):
+        """Save via --stdin also exercises the verification path."""
+        memory_dict = make_cli_memory_dict(context="stdin verification test")
+        json_str = json.dumps(memory_dict)
+
+        save_result = subprocess.run(
+            [sys.executable, cli_script_path, "save", "--stdin",
+             "--db-path", str(cli_db)],
+            input=json_str,
+            capture_output=True, text=True, timeout=60,
+        )
+        assert save_result.returncode == 0, f"save stderr: {save_result.stderr}"
+        save_output = json.loads(save_result.stdout)
+        memory_id = save_output["result"]["memory_id"]
+
+        # Verify the saved memory is retrievable
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0
+        get_output = json.loads(get_result.stdout)
+        assert get_output["result"]["context"] == "stdin verification test"
+
+    def test_save_exits_2_on_unwritable_db(self, cli_script_path, tmp_path):
+        """Save exits 2 with SYSTEM_ERROR when DB is inaccessible.
+
+        This exercises the same error-handling path that a verification
+        failure would take: PACTMemory.save() raises an exception, main()
+        catches it as SYSTEM_ERROR with exit code 2.
+        """
+        # Create a directory where a file is expected — SQLite can't open it
+        bad_db = tmp_path / "not_a_file"
+        bad_db.mkdir()
+
+        memory_dict = make_cli_memory_dict(context="should fail")
+        json_str = json.dumps(memory_dict)
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json_str,
+             "--db-path", str(bad_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 2
+        assert result.stdout == ""
+        err_output = json.loads(result.stderr)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "SYSTEM_ERROR"
+
+    def test_save_exits_2_on_readonly_db(self, cli_script_path, cli_db):
+        """Save exits 2 when the database file is read-only.
+
+        A read-only DB prevents the INSERT in save() from succeeding,
+        triggering the SYSTEM_ERROR path (exit 2).
+        """
+        import stat
+        # Make the DB file read-only
+        cli_db.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        try:
+            memory_dict = make_cli_memory_dict(context="should fail readonly")
+            json_str = json.dumps(memory_dict)
+
+            result = subprocess.run(
+                [sys.executable, cli_script_path, "save", json_str,
+                 "--db-path", str(cli_db)],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert result.returncode == 2
+            err_output = json.loads(result.stderr)
+            assert err_output["ok"] is False
+            assert err_output["error"] == "SYSTEM_ERROR"
+        finally:
+            # Restore write permission for cleanup
+            cli_db.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_save_error_envelope_format(self, cli_script_path, tmp_path):
+        """SYSTEM_ERROR envelope has correct JSON structure."""
+        bad_db = tmp_path / "bad_dir"
+        bad_db.mkdir()
+
+        memory_dict = make_cli_memory_dict()
+        json_str = json.dumps(memory_dict)
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json_str,
+             "--db-path", str(bad_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 2
+        err_output = json.loads(result.stderr)
+        # Verify full envelope structure
+        assert set(err_output.keys()) == {"ok", "error", "message"}
+        assert err_output["ok"] is False
+        assert err_output["error"] == "SYSTEM_ERROR"
+        assert isinstance(err_output["message"], str)
+        assert len(err_output["message"]) > 0
 
 
 # ---------------------------------------------------------------------------
