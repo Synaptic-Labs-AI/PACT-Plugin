@@ -2845,3 +2845,38 @@ class TestSchemaFixEndToEnd:
 
         # No token — first question is not merge-related
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_multi_question_answer_mismatch_no_spurious_token(self, tmp_path):
+        """Merge question denied but other question affirmed — no token.
+
+        Regression test: when questions[0] is merge-related but the user
+        denied it, and a different question's affirmative answer appears
+        first in the answers dict, no token should be created. The fix
+        uses answers.get(question) for explicit key lookup instead of
+        next(iter(answers.values())).
+        """
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [
+                    {"question": "Merge PR #42 to main?"},
+                    {"question": "Update the changelog?"},
+                ]
+            },
+            "tool_output": {
+                "answers": {
+                    "Update the changelog?": "yes",
+                    "Merge PR #42 to main?": "no",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        # No token — user denied the merge question, even though
+        # "yes" from the changelog question appeared first in the dict
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0

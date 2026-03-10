@@ -185,7 +185,8 @@ def main():
         if isinstance(tool_output, dict):
             answers = tool_output.get("answers", {})
             if isinstance(answers, dict) and answers:
-                answer = str(next(iter(answers.values()), ""))
+                # Look up answer by exact question text; fall back to first value
+                answer = str(answers.get(question, next(iter(answers.values()), "")))
             else:
                 answer = ""
         else:
