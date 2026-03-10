@@ -14,6 +14,7 @@ Input: JSON from stdin with tool_input (AskUserQuestion questions array) and too
 Output: None (side effect: writes token file on approval)
 """
 
+import glob
 import json
 import os
 import re
@@ -96,6 +97,28 @@ def extract_context(question: str) -> dict:
     return context
 
 
+def _cleanup_consumed_tokens(token_dir: Path) -> None:
+    """Remove stale .consumed token files older than TOKEN_TTL.
+
+    Called during token creation to prevent accumulation of consumed tokens.
+
+    Args:
+        token_dir: Directory containing token files
+    """
+    consumed_pattern = str(token_dir / "merge-authorized-*.consumed")
+    now = time.time()
+    for consumed_path in glob.glob(consumed_pattern):
+        try:
+            mtime = os.path.getmtime(consumed_path)
+            if now - mtime > TOKEN_TTL:
+                try:
+                    os.unlink(consumed_path)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+
 def write_token(context: dict, token_dir: Path | None = None) -> str | None:
     """Write an authorization token file.
 
@@ -108,6 +131,9 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
     """
     if token_dir is None:
         token_dir = TOKEN_DIR
+
+    # Clean up stale .consumed token files from prior operations
+    _cleanup_consumed_tokens(token_dir)
 
     now = time.time()
     timestamp = int(now)

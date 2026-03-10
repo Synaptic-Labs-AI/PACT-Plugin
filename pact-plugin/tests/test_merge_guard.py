@@ -739,10 +739,10 @@ class TestIntegration:
 
 
 class TestSingleUseToken:
-    """Verify that tokens are consumed (deleted) after first use."""
+    """Verify that tokens are consumed (renamed to .consumed) after first use."""
 
-    def test_token_deleted_after_authorization(self, tmp_path):
-        """Token file is removed after it authorizes a command."""
+    def test_token_consumed_after_authorization(self, tmp_path):
+        """Token file is renamed to .consumed after it authorizes a command."""
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
@@ -753,7 +753,8 @@ class TestSingleUseToken:
         # First command: allowed, token consumed
         result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
         assert result is None  # Allowed
-        assert not Path(token_path).exists()  # Token consumed
+        assert not Path(token_path).exists()  # Original token gone
+        assert Path(token_path + ".consumed").exists()  # Renamed to .consumed
 
     def test_second_command_blocked_after_consumption(self, tmp_path):
         """Second dangerous command is blocked because token was consumed."""
@@ -802,11 +803,12 @@ class TestSingleUseToken:
         # Create a valid token
         valid_path = write_token({"pr": "99"}, token_dir=tmp_path)
 
-        # Authorize: expired cleaned up, valid consumed
+        # Authorize: expired cleaned up, valid consumed (renamed to .consumed)
         result = check_merge_authorization("gh pr merge 99", token_dir=tmp_path)
         assert result is None
         assert not expired_file.exists()  # Expired: cleaned up
-        assert not Path(valid_path).exists()  # Valid: consumed
+        assert not Path(valid_path).exists()  # Valid: original gone
+        assert Path(valid_path + ".consumed").exists()  # Valid: renamed to .consumed
 
     def test_each_approval_authorizes_one_operation(self, tmp_path):
         """Two approvals authorize exactly two operations."""
@@ -834,19 +836,36 @@ class TestSingleUseToken:
         assert result4 is not None  # Blocked
 
     def test_concurrent_deletion_is_safe(self, tmp_path):
-        """If token is already deleted (race condition), authorization still works."""
+        """If token is externally deleted (not renamed), command is blocked."""
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
         token_path = write_token({"pr": "42"}, token_dir=tmp_path)
 
-        # Simulate concurrent deletion: remove the token before check_merge_authorization
-        # can consume it. The _safe_remove in consumption handles FileNotFoundError.
+        # Simulate external deletion: remove the token before
+        # check_merge_authorization can consume it. Since neither the
+        # original nor a .consumed file exists, the command is blocked.
         os.unlink(token_path)
 
         # Command should be blocked because token no longer exists
         result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
         assert result is not None
+
+    def test_concurrent_consumption_is_idempotent(self, tmp_path):
+        """If token was already renamed to .consumed, second invocation allows."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token, check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+
+        # First consumption: rename to .consumed
+        assert _consume_token(token_path) is True
+        assert not Path(token_path).exists()
+        assert Path(token_path + ".consumed").exists()
+
+        # Second consumption attempt: original gone, but .consumed exists
+        # _consume_token recognizes this as success
+        assert _consume_token(token_path) is True
 
 
 # =============================================================================
@@ -3353,8 +3372,14 @@ class TestSchemaFixEndToEnd:
                 pre_main()
         assert exc_info.value.code == 0
 
-        # Token should be consumed
-        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+        # Token should be consumed (renamed to .consumed, original gone)
+        active_tokens = [
+            p for p in tmp_path.glob("merge-authorized-*")
+            if not p.name.endswith(".consumed")
+        ]
+        assert len(active_tokens) == 0
+        consumed_tokens = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed_tokens) == 1
 
     def test_force_push_approval_flow(self, tmp_path):
         """Full flow for force push approval."""
