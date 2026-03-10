@@ -147,7 +147,7 @@ Each memory can contain:
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | User error (bad args, invalid JSON, save verification failure) |
+| 1 | User error (bad args, invalid JSON) |
 | 2 | System error (DB failure, missing deps) |
 
 ### Examples
@@ -308,7 +308,7 @@ Shows recent memories (default: 20).
 5. **Search Before Acting**: Check for relevant past context before starting work
 6. **Write Complete Sentences**: Context should be a full description, not a fragment
 7. **Be Specific in Lessons**: "X didn't work because Y" is better than "X didn't work"
-8. **Check Save Results**: The `save` command verifies persistence by reading back the saved memory. If verification fails (exit code 1, error type `SAVE_VERIFICATION_FAILED`), the save silently failed — retry or check system status
+8. **Check Save Results**: The `save` command verifies persistence by reading back the saved memory. If verification fails (exit code 2, error type `SYSTEM_ERROR`), the save silently failed — retry or check system status
 
 ## Memory Layers: pact-memory vs Auto-Memory
 

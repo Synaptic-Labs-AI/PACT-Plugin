@@ -4,7 +4,7 @@ Tests for pact-memory/scripts/cli.py — CLI entry point.
 Tests cover:
 1. Arg parsing: subcommand dispatch, required arguments, defaults
 2. Save command: JSON arg, --stdin, invalid JSON, non-dict input
-3. Save verification: success path, failure path, error format, exception handling
+3. Save verification: CLI-level propagation of API-layer verification (RuntimeError → SYSTEM_ERROR)
 4. Search command: query dispatch, --limit
 5. List command: default and custom --limit
 6. Get command: existing and missing memory IDs
@@ -31,6 +31,7 @@ from helpers import create_test_schema, make_cli_memory_dict
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
 
 from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS
+from scripts.memory_api import PACTMemory
 
 
 # ---------------------------------------------------------------------------
@@ -315,16 +316,15 @@ class TestCliSaveCommand:
 # ---------------------------------------------------------------------------
 
 class TestCliSaveVerification:
-    """Test the save-then-verify logic added for reliability (#245).
+    """Test save verification behavior at the CLI layer (#245).
 
-    After memory.save() returns a memory_id, cmd_save now calls
-    memory.get(memory_id) to verify the write persisted. If get returns
-    None, it emits SAVE_VERIFICATION_FAILED and exits 1.
+    Verification (save-then-get) lives in PACTMemory.save() so all callers
+    benefit.  When verification fails, save() raises RuntimeError which
+    main()'s try/except catches as SYSTEM_ERROR (exit 2).
     """
 
-    def test_save_verification_success(self, mock_pact_memory, capsys):
-        """Verification passes when get() returns a non-None result."""
-        # mock_pact_memory.get already returns MagicMock() (non-None)
+    def test_save_success_when_save_returns_id(self, mock_pact_memory, capsys):
+        """Normal save succeeds when PACTMemory.save() returns an ID."""
         memory_dict = make_cli_memory_dict()
         parser = build_parser()
         args = parser.parse_args(["save", json.dumps(memory_dict)])
@@ -338,68 +338,56 @@ class TestCliSaveVerification:
         assert output["ok"] is True
         assert output["result"]["memory_id"] == "abc123def456"
 
-    def test_save_verification_calls_get_with_returned_id(self, mock_pact_memory):
-        """Verification calls get() with exactly the ID returned by save()."""
-        mock_pact_memory.save.return_value = "unique_test_id_789"
+    def test_save_verification_failure_exits_2(self, capsys):
+        """When save() raises RuntimeError (verification failure), exits 2."""
+        mock = MagicMock()
+        mock.save.side_effect = RuntimeError(
+            "Save verification failed — memory_id abc123 not found after save"
+        )
         memory_dict = make_cli_memory_dict()
-        parser = build_parser()
-        args = parser.parse_args(["save", json.dumps(memory_dict)])
 
-        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
-            with pytest.raises(SystemExit):
-                cmd_save(args)
-        mock_pact_memory.get.assert_called_once_with("unique_test_id_789")
-
-    def test_save_verification_failure_exits_1(self, mock_pact_memory):
-        """When get() returns None, cmd_save exits with code 1."""
-        mock_pact_memory.get.return_value = None
-        memory_dict = make_cli_memory_dict()
-        parser = build_parser()
-        args = parser.parse_args(["save", json.dumps(memory_dict)])
-
-        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+        with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
-                cmd_save(args)
-        assert exc_info.value.code == 1
+                main(["save", json.dumps(memory_dict)])
+        assert exc_info.value.code == 2
 
-    def test_save_verification_failure_error_format(self, mock_pact_memory, capsys):
-        """Verification failure outputs correct JSON error envelope to stderr."""
-        mock_pact_memory.get.return_value = None
+    def test_save_verification_failure_error_format(self, capsys):
+        """Verification failure outputs SYSTEM_ERROR JSON envelope to stderr."""
+        mock = MagicMock()
+        mock.save.side_effect = RuntimeError(
+            "Save verification failed — memory_id abc123def456 not found after save"
+        )
         memory_dict = make_cli_memory_dict()
-        parser = build_parser()
-        args = parser.parse_args(["save", json.dumps(memory_dict)])
 
-        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+        with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit):
-                cmd_save(args)
+                main(["save", json.dumps(memory_dict)])
         captured = capsys.readouterr()
-        # Nothing on stdout (error goes to stderr)
         assert captured.out == ""
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
-        assert err_output["error"] == "SAVE_VERIFICATION_FAILED"
+        assert err_output["error"] == "SYSTEM_ERROR"
         assert "abc123def456" in err_output["message"]
 
-    def test_save_verification_failure_message_contains_id(self, mock_pact_memory, capsys):
+    def test_save_verification_failure_message_contains_id(self, capsys):
         """Error message includes the memory_id that failed verification."""
-        mock_pact_memory.save.return_value = "custom_id_xyz"
-        mock_pact_memory.get.return_value = None
+        mock = MagicMock()
+        mock.save.side_effect = RuntimeError(
+            "Save verification failed — memory_id custom_id_xyz not found after save"
+        )
         memory_dict = make_cli_memory_dict()
-        parser = build_parser()
-        args = parser.parse_args(["save", json.dumps(memory_dict)])
 
-        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+        with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit):
-                cmd_save(args)
+                main(["save", json.dumps(memory_dict)])
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert "custom_id_xyz" in err_output["message"]
 
-    def test_save_verification_get_exception_via_main(self, capsys):
-        """When get() raises an exception, main() catches it as SYSTEM_ERROR."""
+    def test_save_exception_via_main_exits_2(self, capsys):
+        """Any exception from save() is caught by main() as SYSTEM_ERROR."""
         mock = MagicMock()
-        mock.save.return_value = "exc_test_id"
-        mock.get.side_effect = RuntimeError("DB connection lost")
+        mock.save.side_effect = RuntimeError("DB connection lost")
         memory_dict = make_cli_memory_dict()
 
         with patch("scripts.cli.PACTMemory", return_value=mock):
@@ -412,24 +400,25 @@ class TestCliSaveVerification:
         assert err_output["error"] == "SYSTEM_ERROR"
         assert "DB connection lost" in err_output["message"]
 
-    def test_save_verification_stdin_path(self, mock_pact_memory, monkeypatch, capsys):
-        """Verification also runs when input comes via --stdin."""
-        mock_pact_memory.get.return_value = None
+    def test_save_verification_stdin_path(self, monkeypatch, capsys):
+        """Verification failure propagates when input comes via --stdin."""
+        mock = MagicMock()
+        mock.save.side_effect = RuntimeError(
+            "Save verification failed — memory_id stdin_id not found after save"
+        )
         memory_dict = make_cli_memory_dict()
         monkeypatch.setattr("sys.stdin", StringIO(json.dumps(memory_dict)))
-        parser = build_parser()
-        args = parser.parse_args(["save", "--stdin"])
 
-        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+        with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
-                cmd_save(args)
-        assert exc_info.value.code == 1
+                main(["save", "--stdin"])
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
-        assert err_output["error"] == "SAVE_VERIFICATION_FAILED"
+        assert err_output["error"] == "SYSTEM_ERROR"
 
-    def test_save_verification_does_not_alter_save_call(self, mock_pact_memory):
-        """Verification logic does not interfere with the save() call itself."""
+    def test_save_calls_save_with_dict(self, mock_pact_memory):
+        """cmd_save passes the parsed dict to PACTMemory.save()."""
         memory_dict = make_cli_memory_dict(context="verification neutral")
         parser = build_parser()
         args = parser.parse_args(["save", json.dumps(memory_dict)])
@@ -437,12 +426,98 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit):
                 cmd_save(args)
-        # save is called before get, with the original dict
         mock_pact_memory.save.assert_called_once_with(memory_dict)
-        mock_pact_memory.get.assert_called_once_with("abc123def456")
-        # Confirm call order: save before get
-        assert mock_pact_memory.save.call_count == 1
-        assert mock_pact_memory.get.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Save Verification (API Layer)
+# ---------------------------------------------------------------------------
+
+class TestApiSaveVerification:
+    """Test save-then-get verification in PACTMemory.save() (#245).
+
+    Verification lives in the API layer so all callers benefit.
+    PACTMemory.save() calls self.get(memory_id) after saving and raises
+    RuntimeError if the result is None or if memory_id itself is None.
+    """
+
+    def test_save_raises_on_none_memory_id(self):
+        """save() raises RuntimeError if create_memory returns None."""
+        memory = PACTMemory.__new__(PACTMemory)
+        memory._db_path = None
+        memory._project_id = "test"
+        memory._session_id = "test"
+        memory._session_files = []
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.db_connection") as mock_ctx, \
+             patch("scripts.memory_api.ensure_initialized"), \
+             patch("scripts.memory_api.create_memory", return_value=None), \
+             patch("scripts.memory_api.sync_to_claude_md"):
+            mock_ctx.return_value.__enter__ = MagicMock()
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            with pytest.raises(RuntimeError, match="no memory_id returned"):
+                memory.save({"context": "test"})
+
+    def test_save_raises_on_verification_failure(self):
+        """save() raises RuntimeError if get() returns None after save."""
+        memory = PACTMemory.__new__(PACTMemory)
+        memory._db_path = None
+        memory._project_id = "test"
+        memory._session_id = "test"
+        memory._session_files = []
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.db_connection") as mock_ctx, \
+             patch("scripts.memory_api.ensure_initialized"), \
+             patch("scripts.memory_api.create_memory", return_value="test_id"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(memory, "_store_embedding"), \
+             patch.object(memory, "get", return_value=None):
+            mock_ctx.return_value.__enter__ = MagicMock()
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            with pytest.raises(RuntimeError, match="test_id not found after save"):
+                memory.save({"context": "test"})
+
+    def test_save_succeeds_when_verification_passes(self):
+        """save() returns memory_id when get() returns a non-None result."""
+        memory = PACTMemory.__new__(PACTMemory)
+        memory._db_path = None
+        memory._project_id = "test"
+        memory._session_id = "test"
+        memory._session_files = []
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.db_connection") as mock_ctx, \
+             patch("scripts.memory_api.ensure_initialized"), \
+             patch("scripts.memory_api.create_memory", return_value="verified_id"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(memory, "_store_embedding"), \
+             patch.object(memory, "get", return_value=MagicMock()):
+            mock_ctx.return_value.__enter__ = MagicMock()
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            result = memory.save({"context": "test"})
+        assert result == "verified_id"
+
+    def test_save_verification_calls_get_with_returned_id(self):
+        """Verification calls get() with the exact ID from create_memory."""
+        memory = PACTMemory.__new__(PACTMemory)
+        memory._db_path = None
+        memory._project_id = "test"
+        memory._session_id = "test"
+        memory._session_files = []
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.db_connection") as mock_ctx, \
+             patch("scripts.memory_api.ensure_initialized"), \
+             patch("scripts.memory_api.create_memory", return_value="exact_id_123"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(memory, "_store_embedding"), \
+             patch.object(memory, "get", return_value=MagicMock()) as mock_get:
+            mock_ctx.return_value.__enter__ = MagicMock()
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            memory.save({"context": "test"})
+        mock_get.assert_called_once_with("exact_id_123")
 
 
 # ---------------------------------------------------------------------------

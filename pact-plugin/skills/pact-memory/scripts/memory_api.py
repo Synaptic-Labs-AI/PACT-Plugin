@@ -315,6 +315,15 @@ class PACTMemory:
         except Exception as e:
             logger.warning(f"Failed to sync to CLAUDE.md: {e}")
 
+        # Verify the save persisted by reading back
+        if memory_id is None:
+            raise RuntimeError("Save failed — no memory_id returned")
+        verification = self.get(memory_id)
+        if verification is None:
+            raise RuntimeError(
+                f"Save verification failed — memory_id {memory_id} not found after save"
+            )
+
         return memory_id
 
     def _store_embedding(
