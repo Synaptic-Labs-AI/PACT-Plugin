@@ -42,7 +42,7 @@ def mock_pact_memory():
     mock.save.return_value = "abc123def456"
     mock.search.return_value = []
     mock.list.return_value = []
-    mock.get.return_value = None
+    mock.get.return_value = MagicMock()
     mock.get_status.return_value = {
         "project_id": "test-project",
         "memory_count": 5,
@@ -458,6 +458,7 @@ class TestCliGetCommand:
         assert output["result"]["id"] == "abc123"
 
     def test_get_not_found(self, mock_pact_memory, capsys):
+        mock_pact_memory.get.return_value = None
         parser = build_parser()
         args = parser.parse_args(["get", "nonexistent"])
 

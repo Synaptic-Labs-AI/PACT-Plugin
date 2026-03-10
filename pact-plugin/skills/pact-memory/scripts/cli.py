@@ -74,6 +74,15 @@ def cmd_save(args, db_path=None):
 
     memory = PACTMemory(db_path=db_path)
     memory_id = memory.save(memory_dict)
+
+    # Verify the save succeeded by retrieving the memory
+    verification = memory.get(memory_id)
+    if verification is None:
+        _error(
+            "SAVE_VERIFICATION_FAILED",
+            f"Save verification failed — memory_id {memory_id} not found after save",
+        )
+
     _success({"memory_id": memory_id})
 
 
