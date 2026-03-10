@@ -246,8 +246,8 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge #42?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Should I merge #42?"}]},
+            "tool_output": {"answers": {"Should I merge #42?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -264,8 +264,8 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I add logging?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Should I add logging?"}]},
+            "tool_output": {"answers": {"Should I add logging?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -282,8 +282,8 @@ class TestPostMainEntryPoint:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge #42?"},
-            "tool_output": {"result": "no"},
+            "tool_input": {"questions": [{"question": "Should I merge #42?"}]},
+            "tool_output": {"answers": {"Should I merge #42?": "no"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -304,11 +304,12 @@ class TestPostMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_handles_string_tool_output(self, tmp_path):
+    def test_main_rejects_string_tool_output(self, tmp_path):
+        """Non-dict tool_output exits early — no token created."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge?"},
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
             "tool_output": "yes",
         })
 
@@ -318,8 +319,8 @@ class TestPostMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
-        tokens = list(tmp_path.glob("merge-authorized-*"))
-        assert len(tokens) == 1
+        # Non-dict tool_output rejected — only dict format trusted
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
 
 # =============================================================================
@@ -665,8 +666,8 @@ class TestIntegration:
 
         # Step 1: Post hook processes merge approval
         post_input = json.dumps({
-            "tool_input": {"question": "Should I merge PR #99?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Should I merge PR #99?"}]},
+            "tool_output": {"answers": {"Should I merge PR #99?": "yes"}},
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
              patch("sys.stdin", io.StringIO(post_input)):
@@ -1275,7 +1276,7 @@ class TestPostMainEdgeCases:
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Should I merge?"},
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
             "tool_output": {},
         })
 
@@ -1287,13 +1288,13 @@ class TestPostMainEdgeCases:
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
-    def test_tool_output_with_answer_key(self, tmp_path):
-        """tool_output dict with 'answer' key (fallback from 'result')."""
+    def test_tool_output_with_answers_key(self, tmp_path):
+        """tool_output dict with 'answers' key (actual AskUserQuestion format)."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge PR #10?"},
-            "tool_output": {"answer": "yes"},
+            "tool_input": {"questions": [{"question": "Merge PR #10?"}]},
+            "tool_output": {"answers": {"Merge PR #10?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -1304,13 +1305,13 @@ class TestPostMainEdgeCases:
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
 
-    def test_tool_input_missing_question(self, tmp_path):
-        """tool_input without 'question' key — no token created."""
+    def test_tool_input_missing_questions(self, tmp_path):
+        """tool_input without 'questions' key — no token created."""
         from merge_guard_post import main
 
         input_data = json.dumps({
             "tool_input": {},
-            "tool_output": {"result": "yes"},
+            "tool_output": {"answers": {"anything": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
@@ -1322,11 +1323,11 @@ class TestPostMainEdgeCases:
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
     def test_tool_output_none(self, tmp_path):
-        """tool_output as None — no crash, no token."""
+        """tool_output as None — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": None,
         })
 
@@ -1339,11 +1340,11 @@ class TestPostMainEdgeCases:
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
     def test_tool_output_integer(self, tmp_path):
-        """tool_output as integer — converted to string, not affirmative."""
+        """tool_output as integer — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": 42,
         })
 
@@ -1524,8 +1525,8 @@ class TestTokenSecurity:
         bad_dir.write_text("I am a file")
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge PR #1?"},
-            "tool_output": {"result": "yes"},
+            "tool_input": {"questions": [{"question": "Merge PR #1?"}]},
+            "tool_output": {"answers": {"Merge PR #1?": "yes"}},
         })
 
         with patch("merge_guard_post.TOKEN_DIR", bad_dir), \
@@ -2215,11 +2216,11 @@ class TestTokenWriteExceptionHandling:
         assert result is None
 
     def test_tool_output_as_boolean_true(self, tmp_path):
-        """tool_output as boolean True — converted to 'True', not affirmative."""
+        """tool_output as boolean True — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": True,
         })
 
@@ -2233,11 +2234,11 @@ class TestTokenWriteExceptionHandling:
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
 
     def test_tool_output_as_boolean_false(self, tmp_path):
-        """tool_output as boolean False — empty string, no token created."""
+        """tool_output as boolean False — non-dict, exits early, no token."""
         from merge_guard_post import main
 
         input_data = json.dumps({
-            "tool_input": {"question": "Merge?"},
+            "tool_input": {"questions": [{"question": "Merge?"}]},
             "tool_output": False,
         })
 
@@ -2248,3 +2249,666 @@ class TestTokenWriteExceptionHandling:
 
         assert exc_info.value.code == 0
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+
+# =============================================================================
+# AskUserQuestion schema extraction edge cases (issue #253)
+# =============================================================================
+
+
+class TestQuestionExtractionEdgeCases:
+    """Tests for isinstance guards on the questions array extraction path.
+
+    The fix extracts question from tool_input["questions"][0]["question"] with
+    isinstance guards at each level. Every malformed input must result in
+    question="" which prevents token creation (fail-closed).
+    """
+
+    def test_questions_is_string_not_list(self, tmp_path):
+        """questions is a string instead of a list — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": "Should I merge?"},
+            "tool_output": {"answers": {"Should I merge?": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_is_integer(self, tmp_path):
+        """questions is an integer — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": 42},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_is_none(self, tmp_path):
+        """questions is None — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": None},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_is_empty_list(self, tmp_path):
+        """questions is an empty list — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": []},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_first_element_is_string(self, tmp_path):
+        """questions[0] is a string instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": ["Should I merge?"]},
+            "tool_output": {"answers": {"Should I merge?": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_first_element_is_int(self, tmp_path):
+        """questions[0] is an int instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [123]},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_first_element_is_none(self, tmp_path):
+        """questions[0] is None instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [None]},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_first_element_is_nested_list(self, tmp_path):
+        """questions[0] is a nested list instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [["nested", "list"]]},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_questions_dict_missing_question_key(self, tmp_path):
+        """questions[0] is a dict but has no 'question' key — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"header": "Merge", "options": []}]},
+            "tool_output": {"answers": {"q": "yes"}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+
+class TestAnswerExtractionEdgeCases:
+    """Tests for isinstance guards on the answers dict extraction path.
+
+    The fix extracts answer from tool_output["answers"] dict using
+    next(iter(values())). Every malformed input must result in
+    answer="" which prevents token creation (fail-closed).
+    """
+
+    def test_answers_is_list_not_dict(self, tmp_path):
+        """answers is a list instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": ["yes"]},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_is_string(self, tmp_path):
+        """answers is a string instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": "yes"},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_is_integer(self, tmp_path):
+        """answers is an integer instead of dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": 1},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_is_none(self, tmp_path):
+        """answers is None inside tool_output dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": None},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_is_empty_dict(self, tmp_path):
+        """answers is an empty dict — no token."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": {}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_value_is_integer(self, tmp_path):
+        """answers value is an integer — converted to str via str(), not affirmative."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": {"Should I merge?": 42}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_value_is_boolean_true(self, tmp_path):
+        """answers value is boolean True — str(True) = 'True', not affirmative."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": {"Should I merge?": True}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_answers_value_is_none(self, tmp_path):
+        """answers value is None — str(None) = 'None', not affirmative."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Should I merge?"}]},
+            "tool_output": {"answers": {"Should I merge?": None}},
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_formatted_string_rejected_as_non_dict(self, tmp_path):
+        """tool_output is the formatted string from AskUserQuestion.
+
+        When tool_output is a string like 'User has answered your questions:
+        "Confirm merge?"="yes"', it is rejected as non-dict — no token.
+        """
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {"questions": [{"question": "Confirm merge of PR #252?"}]},
+            "tool_output": 'User has answered your questions: "Confirm merge of PR #252?"="Yes, merge".',
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # Non-dict tool_output rejected entirely — no token
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+
+class TestSchemaFixEndToEnd:
+    """End-to-end tests using exact AskUserQuestion schema format.
+
+    These tests verify the complete flow: post-hook creates token from
+    correctly-formatted AskUserQuestion data, pre-hook reads and consumes it.
+    """
+
+    def test_exact_session_log_format(self, tmp_path):
+        """Test with the exact format observed in session logs (issue #253).
+
+        This is the canonical AskUserQuestion format with full question
+        structure including header, options, and multiSelect.
+        """
+        from merge_guard_post import main as post_main
+        from merge_guard_pre import main as pre_main
+
+        post_input = json.dumps({
+            "tool_input": {
+                "questions": [{
+                    "question": "Confirm merge of PR #252 to main?",
+                    "header": "Merge",
+                    "options": [
+                        {"label": "Yes, merge", "description": "Merge the PR"},
+                        {"label": "Cancel", "description": "Abort the merge"},
+                    ],
+                    "multiSelect": False,
+                }]
+            },
+            "tool_output": {
+                "questions": [{
+                    "question": "Confirm merge of PR #252 to main?",
+                    "header": "Merge",
+                    "options": [
+                        {"label": "Yes, merge", "description": "Merge the PR"},
+                        {"label": "Cancel", "description": "Abort the merge"},
+                    ],
+                    "multiSelect": False,
+                }],
+                "answers": {
+                    "Confirm merge of PR #252 to main?": "Yes, merge",
+                },
+            },
+        })
+
+        # Post hook: create token
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(post_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                post_main()
+        assert exc_info.value.code == 0
+
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) == 1
+
+        # Verify token content
+        token_data = json.loads(tokens[0].read_text())
+        assert "created_at" in token_data
+        assert "expires_at" in token_data
+        assert token_data["expires_at"] > token_data["created_at"]
+        assert "context" in token_data
+        assert token_data["context"]["pr_number"] == "252"
+
+        # Pre hook: consume token and allow merge
+        pre_input = json.dumps({
+            "tool_input": {"command": "gh pr merge 252 --squash --delete-branch"}
+        })
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(pre_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 0
+
+        # Token should be consumed
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_force_push_approval_flow(self, tmp_path):
+        """Full flow for force push approval."""
+        from merge_guard_post import main as post_main
+        from merge_guard_pre import main as pre_main
+
+        post_input = json.dumps({
+            "tool_input": {
+                "questions": [{
+                    "question": "Force push to origin/main? This will overwrite remote history.",
+                }]
+            },
+            "tool_output": {
+                "answers": {
+                    "Force push to origin/main? This will overwrite remote history.": "yes",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(post_input)):
+            with pytest.raises(SystemExit):
+                post_main()
+
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
+
+        pre_input = json.dumps({
+            "tool_input": {"command": "git push --force origin main"}
+        })
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(pre_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 0
+
+    def test_branch_delete_approval_flow(self, tmp_path):
+        """Full flow for branch deletion approval."""
+        from merge_guard_post import main as post_main
+        from merge_guard_pre import main as pre_main
+
+        post_input = json.dumps({
+            "tool_input": {
+                "questions": [{
+                    "question": "Delete branch feat/old-feature?",
+                }]
+            },
+            "tool_output": {
+                "answers": {
+                    "Delete branch feat/old-feature?": "go ahead",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(post_input)):
+            with pytest.raises(SystemExit):
+                post_main()
+
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
+
+        pre_input = json.dumps({
+            "tool_input": {"command": "git branch -D feat/old-feature"}
+        })
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(pre_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 0
+
+    def test_denial_creates_no_token(self, tmp_path):
+        """User denies merge — no token, subsequent command blocked."""
+        from merge_guard_post import main as post_main
+        from merge_guard_pre import main as pre_main
+
+        post_input = json.dumps({
+            "tool_input": {
+                "questions": [{
+                    "question": "Merge PR #100 to main?",
+                    "options": [
+                        {"label": "Yes, merge"},
+                        {"label": "Cancel"},
+                    ],
+                }]
+            },
+            "tool_output": {
+                "answers": {
+                    "Merge PR #100 to main?": "Cancel",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(post_input)):
+            with pytest.raises(SystemExit):
+                post_main()
+
+        # No token created for non-affirmative answer
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+        # Pre hook blocks the command
+        pre_input = json.dumps({
+            "tool_input": {"command": "gh pr merge 100"}
+        })
+        with patch("merge_guard_pre.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(pre_input)):
+            with pytest.raises(SystemExit) as exc_info:
+                pre_main()
+        assert exc_info.value.code == 2  # Blocked
+
+    def test_session_scoped_token_from_schema(self, tmp_path):
+        """Token includes session_id when CLAUDE_SESSION_ID is set."""
+        from merge_guard_post import main as post_main
+
+        post_input = json.dumps({
+            "tool_input": {
+                "questions": [{"question": "Should I merge PR #42?"}]
+            },
+            "tool_output": {
+                "answers": {"Should I merge PR #42?": "yes"}
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(post_input)), \
+             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session-123"}):
+            with pytest.raises(SystemExit):
+                post_main()
+
+        tokens = list(tmp_path.glob("merge-authorized-*"))
+        assert len(tokens) == 1
+        token_data = json.loads(tokens[0].read_text())
+        assert token_data["session_id"] == "test-session-123"
+
+    def test_multi_question_uses_first_only(self, tmp_path):
+        """When multiple questions exist, only the first is checked for merge keywords."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [
+                    {"question": "Should I merge PR #42?"},
+                    {"question": "Also update the changelog?"},
+                ]
+            },
+            "tool_output": {
+                "answers": {
+                    "Should I merge PR #42?": "yes",
+                    "Also update the changelog?": "yes",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        # Token created because first question contains merge keyword
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
+
+    def test_multi_question_first_not_merge(self, tmp_path):
+        """When first question is not merge-related, no token even if second is."""
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [
+                    {"question": "Update the changelog?"},
+                    {"question": "Then merge PR #42?"},
+                ]
+            },
+            "tool_output": {
+                "answers": {
+                    "Update the changelog?": "yes",
+                    "Then merge PR #42?": "yes",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        # No token — first question is not merge-related
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_multi_question_answer_mismatch_no_spurious_token(self, tmp_path):
+        """Merge question denied but other question affirmed — no token.
+
+        Regression test: when questions[0] is merge-related but the user
+        denied it, and a different question's affirmative answer appears
+        first in the answers dict, no token should be created. The fix
+        uses answers.get(question) for explicit key lookup instead of
+        next(iter(answers.values())).
+        """
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [
+                    {"question": "Merge PR #42 to main?"},
+                    {"question": "Update the changelog?"},
+                ]
+            },
+            "tool_output": {
+                "answers": {
+                    "Update the changelog?": "yes",
+                    "Merge PR #42 to main?": "no",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        # No token — user denied the merge question, even though
+        # "yes" from the changelog question appeared first in the dict
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_question_key_mismatch_falls_back_to_first_value(self, tmp_path):
+        """When question text doesn't exactly match any answers key, fallback
+        to first dict value is exercised.
+
+        This documents the intentional permissive fallback in
+        answers.get(question, next(iter(answers.values()), "")) — if
+        the platform delivers answers with slightly different key text
+        (e.g., trailing whitespace), the token is still created to avoid
+        false negatives on legitimate approvals.
+        """
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [{"question": "Merge PR #42?"}]
+            },
+            "tool_output": {
+                "answers": {
+                    "Merge PR #42? ": "Yes, merge",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        # Token created — answers.get("Merge PR #42?") misses due to
+        # trailing space, falls back to first value "Yes, merge"
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
