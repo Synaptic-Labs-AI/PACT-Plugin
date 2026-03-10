@@ -56,6 +56,34 @@ DANGEROUS_PATTERNS = [
 ]
 
 
+def _has_pipe_to_shell(command: str) -> bool:
+    """Check if command pipes output to a shell interpreter.
+
+    Detects patterns like ``echo "..." | bash`` or ``printf "..." | sh``
+    where echo/printf content would be executed by the receiving shell.
+    """
+    return bool(re.search(r"\|\s*(?:bash|sh|zsh)\b", command))
+
+
+def _has_eval_or_source(command: str) -> bool:
+    """Check if command contains eval or source that could execute variable values.
+
+    Detects patterns like ``CMD="..." && eval $CMD`` where a variable
+    assignment value would be executed via eval or source.
+    """
+    return bool(re.search(r"\b(?:eval|source)\b", command))
+
+
+def _has_command_substitution(quoted_content: str) -> bool:
+    """Check if double-quoted content contains command substitution.
+
+    ``$(...)`` and backticks inside double quotes are executed by the shell,
+    so double-quoted strings containing them must not be stripped.
+    Single-quoted strings never have substitution (handled separately).
+    """
+    return "$(" in quoted_content or "`" in quoted_content
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -63,6 +91,10 @@ def _strip_non_executable_content(command: str) -> str:
     execute as a command: heredocs, comments, echo/printf arguments, and
     variable assignments. This prevents false positives without removing content
     from genuinely dangerous contexts like ``bash -c '...'``.
+
+    Guards against execution-via-indirection: skips stripping when content
+    would actually execute (piped to shell, eval'd, command substitution,
+    heredoc fed to shell interpreter).
 
     Conservative: when in doubt, preserves text (false positive > missed threat).
 
@@ -77,9 +109,20 @@ def _strip_non_executable_content(command: str) -> str:
     # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
     #    Match the heredoc marker, then everything up to and including the
     #    closing marker on its own line.
+    #    GUARD: Skip stripping if the heredoc is fed to a shell interpreter
+    #    (e.g., bash << EOF ... EOF), because the body would execute.
+    def _strip_heredoc(match: re.Match) -> str:
+        # Check what command precedes the heredoc operator
+        start = match.start()
+        preceding = command[:start].rstrip()
+        # If the preceding command is a shell interpreter, preserve content
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        return "<<HEREDOC_STRIPPED"
+
     result = re.sub(
         r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\1\b",
-        "<<HEREDOC_STRIPPED",
+        _strip_heredoc,
         result,
         flags=re.DOTALL,
     )
@@ -92,29 +135,49 @@ def _strip_non_executable_content(command: str) -> str:
     # 3. Strip echo/printf quoted arguments
     #    Match echo/printf followed by flags then quoted strings.
     #    Replace the quoted content but keep the echo command visible.
-    result = re.sub(
-        r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
-        r"\1 STRIPPED",
-        result,
-    )
-    result = re.sub(
-        r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
-        r"\1 STRIPPED",
-        result,
-    )
+    #    GUARD: Skip stripping if output is piped to a shell interpreter,
+    #    because the echo/printf content would be executed by the shell.
+    piped_to_shell = _has_pipe_to_shell(command)
+    if not piped_to_shell:
+        # Double-quoted: also guard against command substitution inside
+        def _strip_echo_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return match.group(1) + " STRIPPED"
+
+        result = re.sub(
+            r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
+            _strip_echo_dq,
+            result,
+        )
+        result = re.sub(
+            r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
+            r"\1 STRIPPED",
+            result,
+        )
 
     # 4. Strip variable assignment values: VAR="..." or VAR='...'
     #    Only match simple assignments (NAME=VALUE), not command arguments.
-    result = re.sub(
-        r'\b([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"',
-        r"\1=STRIPPED",
-        result,
-    )
-    result = re.sub(
-        r"\b([A-Za-z_][A-Za-z0-9_]*)='[^']*'",
-        r"\1=STRIPPED",
-        result,
-    )
+    #    GUARD: Skip stripping if eval/source appears in the command,
+    #    because the variable value could be executed.
+    has_eval = _has_eval_or_source(command)
+    if not has_eval:
+        # Double-quoted: also guard against command substitution inside
+        def _strip_var_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return match.group(1) + "=STRIPPED"
+
+        result = re.sub(
+            r'\b([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"',
+            _strip_var_dq,
+            result,
+        )
+        result = re.sub(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)='[^']*'",
+            r"\1=STRIPPED",
+            result,
+        )
 
     return result
 

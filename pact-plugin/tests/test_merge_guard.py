@@ -1263,6 +1263,232 @@ class TestFalsePositivePrevention:
 
 
 # =============================================================================
+# Bypass vector prevention: execution-via-indirection
+# =============================================================================
+
+
+class TestBypassVectorPrevention:
+    """Verify that execution-via-indirection patterns are NOT stripped
+    and remain detectable as dangerous commands.
+
+    These are regression tests for bypass vectors introduced by the
+    _strip_non_executable_content() stripping — commands that LOOK like
+    non-executable contexts but actually execute the dangerous content.
+    """
+
+    # --- Pipe to shell interpreter ---
+
+    def test_echo_piped_to_bash_is_dangerous(self):
+        """echo piped to bash executes the content."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 42" | bash')
+
+    def test_echo_piped_to_sh_is_dangerous(self):
+        """echo piped to sh executes the content."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 42" | sh')
+
+    def test_echo_piped_to_zsh_is_dangerous(self):
+        """echo piped to zsh executes the content."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr merge 42" | zsh')
+
+    def test_printf_piped_to_bash_is_dangerous(self):
+        """printf piped to bash executes the content."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('printf "gh pr merge 42" | bash')
+
+    def test_printf_piped_to_sh_is_dangerous(self):
+        """printf piped to sh executes the content."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('printf "gh pr merge 42" | sh')
+
+    def test_echo_single_quoted_piped_to_bash_is_dangerous(self):
+        """echo single-quoted piped to bash executes the content."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo 'gh pr merge 42' | bash")
+
+    def test_echo_force_push_piped_to_bash(self):
+        """echo of force push piped to bash is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "git push --force origin main" | bash')
+
+    # --- Variable assignment + eval ---
+
+    def test_var_eval_double_ampersand_is_dangerous(self):
+        """Variable assignment followed by eval via && is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr merge 42" && eval $CMD')
+
+    def test_var_eval_semicolon_is_dangerous(self):
+        """Variable assignment followed by eval via ; is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr merge 42"; eval $CMD')
+
+    def test_var_source_is_dangerous(self):
+        """Variable assignment with source in command is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr merge 42"; source /dev/stdin <<< "$CMD"')
+
+    def test_export_eval_is_dangerous(self):
+        """export + eval pattern is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('export CMD="gh pr merge 42" && eval $CMD')
+
+    def test_var_single_quoted_eval_is_dangerous(self):
+        """Single-quoted variable with eval is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("CMD='gh pr merge 42'; eval $CMD")
+
+    # --- Command substitution in quotes ---
+
+    def test_cmd_sub_in_echo_is_dangerous(self):
+        """$() inside echo double quotes executes the command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "$(gh pr merge 42)"')
+
+    def test_cmd_sub_in_var_assignment_is_dangerous(self):
+        """$() inside variable assignment executes the command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="$(gh pr merge 42)"')
+
+    def test_backtick_in_echo_is_dangerous(self):
+        """Backtick inside echo double quotes executes the command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "`gh pr merge 42`"')
+
+    def test_backtick_in_var_assignment_is_dangerous(self):
+        """Backtick inside variable assignment executes the command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="`gh pr merge 42`"')
+
+    # --- Heredoc to shell interpreter ---
+
+    def test_heredoc_to_bash_is_dangerous(self):
+        """Heredoc fed to bash executes the body."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash << EOF\ngh pr merge 42\nEOF")
+
+    def test_heredoc_to_sh_is_dangerous(self):
+        """Heredoc fed to sh executes the body."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("sh << EOF\ngh pr merge 42\nEOF")
+
+    def test_heredoc_to_zsh_is_dangerous(self):
+        """Heredoc fed to zsh executes the body."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("zsh << EOF\ngh pr merge 42\nEOF")
+
+    # --- Ensure non-shell heredocs are still stripped (false positive prevention) ---
+
+    def test_heredoc_to_cat_not_dangerous(self):
+        """Heredoc to cat is not executable — still stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cat << EOF\ngh pr merge 42\nEOF")
+
+    def test_heredoc_to_python_not_dangerous(self):
+        """Heredoc to python is not executable by shell — still stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "python3 << EOF\nre.compile(r'gh pr merge')\nEOF"
+        )
+
+    # --- Ensure normal echo/var false-positive prevention still works ---
+
+    def test_echo_not_piped_still_stripped(self):
+        """echo NOT piped to shell is still stripped (false positive fix)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "gh pr merge 42"')
+
+    def test_var_no_eval_still_stripped(self):
+        """Variable without eval is still stripped (false positive fix)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('CMD="gh pr merge 42"')
+
+
+class TestStripHelpers:
+    """Tests for the execution-via-indirection detection helpers."""
+
+    def test_has_pipe_to_bash(self):
+        from merge_guard_pre import _has_pipe_to_shell
+
+        assert _has_pipe_to_shell("echo x | bash")
+        assert _has_pipe_to_shell("echo x | sh")
+        assert _has_pipe_to_shell("echo x | zsh")
+        assert _has_pipe_to_shell("echo x |bash")
+        assert not _has_pipe_to_shell("echo x | grep bash")
+        assert not _has_pipe_to_shell("echo x")
+
+    def test_has_eval_or_source(self):
+        from merge_guard_pre import _has_eval_or_source
+
+        assert _has_eval_or_source("eval $CMD")
+        assert _has_eval_or_source('CMD="x" && eval $CMD')
+        assert _has_eval_or_source("source script.sh")
+        assert not _has_eval_or_source('CMD="x"')
+        assert not _has_eval_or_source("echo evaluation")
+
+    def test_has_command_substitution(self):
+        from merge_guard_pre import _has_command_substitution
+
+        assert _has_command_substitution("$(gh pr merge 42)")
+        assert _has_command_substitution("`gh pr merge 42`")
+        assert not _has_command_substitution("gh pr merge 42")
+        assert not _has_command_substitution("safe string")
+
+
+class TestAdditionalDangerousPatterns:
+    """Additional dangerous command detection tests (minor gaps from review)."""
+
+    def test_bash_c_double_quoted_is_dangerous(self):
+        """bash -c with double-quoted dangerous command is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('bash -c "gh pr merge 42"')
+
+    def test_sh_c_single_quoted_is_dangerous(self):
+        """sh -c with single-quoted dangerous command is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("sh -c 'gh pr merge 42'")
+
+    def test_eval_double_quoted_is_dangerous(self):
+        """eval with double-quoted dangerous command is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('eval "gh pr merge 42"')
+
+    def test_echo_backtick_substitution_is_dangerous(self):
+        """echo with backtick command substitution is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "`gh pr merge 42`"')
+
+
+# =============================================================================
 # Edge cases: merge_guard_post
 # =============================================================================
 
