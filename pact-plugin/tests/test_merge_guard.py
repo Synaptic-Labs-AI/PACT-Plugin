@@ -3848,3 +3848,539 @@ class TestHereStringStripping:
         from merge_guard_pre import is_dangerous_command
 
         assert not is_dangerous_command("cat <<< 'git branch -D feat/old'")
+
+
+# =============================================================================
+# Idempotent Token Consumption — comprehensive tests
+# =============================================================================
+
+
+class TestIdempotentTokenConsumption:
+    """Comprehensive tests for the rename-to-.consumed idempotent consumption mechanism.
+
+    Covers: _consume_token(), _cleanup_consumed_tokens() (both hooks),
+    find_valid_token() skipping .consumed files, check_merge_authorization()
+    integration with _consume_token(), and edge cases.
+    """
+
+    # -------------------------------------------------------------------------
+    # _consume_token() unit tests
+    # -------------------------------------------------------------------------
+
+    def test_consume_token_successful_rename(self, tmp_path):
+        """_consume_token renames the file to .consumed and returns True."""
+        from merge_guard_pre import _consume_token
+
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text('{"test": true}')
+
+        result = _consume_token(str(token_file))
+
+        assert result is True
+        assert not token_file.exists()
+        assert (tmp_path / "merge-authorized-99999.consumed").exists()
+
+    def test_consume_token_idempotent_when_already_consumed(self, tmp_path):
+        """_consume_token returns True when .consumed file already exists (concurrent invocation)."""
+        from merge_guard_pre import _consume_token
+
+        token_path = str(tmp_path / "merge-authorized-99999")
+        # Simulate prior consumption: only .consumed exists
+        consumed_file = tmp_path / "merge-authorized-99999.consumed"
+        consumed_file.write_text('{"test": true}')
+
+        result = _consume_token(token_path)
+
+        assert result is True
+
+    def test_consume_token_returns_false_when_genuinely_lost(self, tmp_path):
+        """_consume_token returns False when original is gone AND no .consumed exists."""
+        from merge_guard_pre import _consume_token
+
+        # Neither the original nor .consumed exists
+        token_path = str(tmp_path / "merge-authorized-nonexistent")
+
+        result = _consume_token(token_path)
+
+        assert result is False
+
+    def test_consume_token_fails_closed_on_unexpected_oserror(self, tmp_path):
+        """_consume_token returns False on non-ENOENT OSError (fail-closed)."""
+        from merge_guard_pre import _consume_token
+
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text('{"test": true}')
+
+        # Mock os.rename to raise a PermissionError (which is an OSError subclass)
+        with patch("merge_guard_pre.os.rename", side_effect=PermissionError("Permission denied")):
+            result = _consume_token(str(token_file))
+
+        assert result is False
+
+    def test_consume_token_fails_closed_on_generic_oserror(self, tmp_path):
+        """_consume_token returns False on generic OSError (e.g., I/O error)."""
+        from merge_guard_pre import _consume_token
+
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text('{"test": true}')
+
+        with patch("merge_guard_pre.os.rename", side_effect=OSError(5, "I/O error")):
+            result = _consume_token(str(token_file))
+
+        assert result is False
+
+    def test_consume_token_preserves_consumed_file_content(self, tmp_path):
+        """_consume_token preserves the token data in the .consumed file."""
+        from merge_guard_pre import _consume_token
+
+        token_file = tmp_path / "merge-authorized-99999"
+        original_content = '{"pr": "42", "expires_at": 999999}'
+        token_file.write_text(original_content)
+
+        _consume_token(str(token_file))
+
+        consumed_file = tmp_path / "merge-authorized-99999.consumed"
+        assert consumed_file.read_text() == original_content
+
+    def test_consume_token_consumed_file_permissions(self, tmp_path):
+        """Consumed file inherits permissions from original (os.rename preserves)."""
+        from merge_guard_pre import _consume_token
+
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text('{"test": true}')
+        os.chmod(str(token_file), 0o600)
+
+        _consume_token(str(token_file))
+
+        consumed_file = tmp_path / "merge-authorized-99999.consumed"
+        mode = stat.S_IMODE(os.stat(str(consumed_file)).st_mode)
+        assert mode == 0o600
+
+    # -------------------------------------------------------------------------
+    # _cleanup_consumed_tokens() tests (pre-hook version)
+    # -------------------------------------------------------------------------
+
+    def test_cleanup_removes_expired_consumed_tokens(self, tmp_path):
+        """_cleanup_consumed_tokens removes .consumed files older than TOKEN_TTL."""
+        from merge_guard_pre import _cleanup_consumed_tokens
+
+        # Create a stale .consumed file (mtime far in the past)
+        stale = tmp_path / "merge-authorized-00001.consumed"
+        stale.write_text('{}')
+        old_mtime = time.time() - 600  # 10 minutes ago
+        os.utime(str(stale), (old_mtime, old_mtime))
+
+        _cleanup_consumed_tokens(tmp_path)
+
+        assert not stale.exists()
+
+    def test_cleanup_preserves_fresh_consumed_tokens(self, tmp_path):
+        """_cleanup_consumed_tokens preserves .consumed files within TOKEN_TTL."""
+        from merge_guard_pre import _cleanup_consumed_tokens
+
+        fresh = tmp_path / "merge-authorized-00002.consumed"
+        fresh.write_text('{}')
+        # mtime is now (fresh) — should not be cleaned up
+
+        _cleanup_consumed_tokens(tmp_path)
+
+        assert fresh.exists()
+
+    def test_cleanup_handles_empty_directory(self, tmp_path):
+        """_cleanup_consumed_tokens handles empty directory without error."""
+        from merge_guard_pre import _cleanup_consumed_tokens
+
+        _cleanup_consumed_tokens(tmp_path)  # Should not raise
+
+    def test_cleanup_only_removes_consumed_not_active_tokens(self, tmp_path):
+        """_cleanup_consumed_tokens does not remove active token files."""
+        from merge_guard_pre import _cleanup_consumed_tokens
+
+        active = tmp_path / "merge-authorized-00003"
+        active.write_text('{"active": true}')
+
+        _cleanup_consumed_tokens(tmp_path)
+
+        assert active.exists()
+
+    def test_cleanup_handles_concurrent_deletion(self, tmp_path):
+        """_cleanup_consumed_tokens handles file deleted by concurrent cleanup."""
+        from merge_guard_pre import _cleanup_consumed_tokens
+
+        stale = tmp_path / "merge-authorized-00001.consumed"
+        stale.write_text('{}')
+        old_mtime = time.time() - 600
+        os.utime(str(stale), (old_mtime, old_mtime))
+
+        # Mock os.path.getmtime to raise FileNotFoundError (concurrent deletion)
+        with patch("merge_guard_pre.os.path.getmtime", side_effect=FileNotFoundError):
+            _cleanup_consumed_tokens(tmp_path)  # Should not raise
+
+    def test_cleanup_mixed_expired_and_fresh(self, tmp_path):
+        """_cleanup_consumed_tokens removes only expired files from a mixed set."""
+        from merge_guard_pre import _cleanup_consumed_tokens
+
+        # Stale consumed token
+        stale = tmp_path / "merge-authorized-00001.consumed"
+        stale.write_text('{}')
+        old_mtime = time.time() - 600
+        os.utime(str(stale), (old_mtime, old_mtime))
+
+        # Fresh consumed token
+        fresh = tmp_path / "merge-authorized-00002.consumed"
+        fresh.write_text('{}')
+
+        _cleanup_consumed_tokens(tmp_path)
+
+        assert not stale.exists()
+        assert fresh.exists()
+
+    # -------------------------------------------------------------------------
+    # Post-hook _cleanup_consumed_tokens() tests
+    # -------------------------------------------------------------------------
+
+    def test_post_hook_cleanup_removes_expired_consumed(self, tmp_path):
+        """Post-hook _cleanup_consumed_tokens removes stale .consumed files."""
+        from merge_guard_post import _cleanup_consumed_tokens
+
+        stale = tmp_path / "merge-authorized-00001.consumed"
+        stale.write_text('{}')
+        old_mtime = time.time() - 600
+        os.utime(str(stale), (old_mtime, old_mtime))
+
+        _cleanup_consumed_tokens(tmp_path)
+
+        assert not stale.exists()
+
+    def test_post_hook_cleanup_preserves_fresh_consumed(self, tmp_path):
+        """Post-hook _cleanup_consumed_tokens preserves fresh .consumed files."""
+        from merge_guard_post import _cleanup_consumed_tokens
+
+        fresh = tmp_path / "merge-authorized-00002.consumed"
+        fresh.write_text('{}')
+
+        _cleanup_consumed_tokens(tmp_path)
+
+        assert fresh.exists()
+
+    # -------------------------------------------------------------------------
+    # write_token() triggers cleanup
+    # -------------------------------------------------------------------------
+
+    def test_write_token_cleans_up_stale_consumed(self, tmp_path):
+        """write_token() cleans up stale .consumed files during token creation."""
+        from merge_guard_post import write_token
+
+        # Create a stale .consumed file
+        stale = tmp_path / "merge-authorized-00001.consumed"
+        stale.write_text('{}')
+        old_mtime = time.time() - 600
+        os.utime(str(stale), (old_mtime, old_mtime))
+
+        # Create a new token — should clean up stale consumed files
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+
+        assert token_path is not None
+        assert not stale.exists()  # Stale consumed cleaned up
+
+    def test_write_token_preserves_fresh_consumed(self, tmp_path):
+        """write_token() preserves fresh .consumed files during token creation."""
+        from merge_guard_post import write_token
+
+        # Create a fresh .consumed file
+        fresh = tmp_path / "merge-authorized-00001.consumed"
+        fresh.write_text('{}')
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+
+        assert token_path is not None
+        assert fresh.exists()  # Fresh consumed preserved
+
+    # -------------------------------------------------------------------------
+    # find_valid_token() skips .consumed files
+    # -------------------------------------------------------------------------
+
+    def test_find_valid_token_skips_consumed_files(self, tmp_path):
+        """find_valid_token() ignores .consumed files when scanning for tokens."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        # Create a .consumed file with valid data
+        consumed = tmp_path / "merge-authorized-11111.consumed"
+        consumed.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+        }))
+
+        result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert path is None
+
+    def test_find_valid_token_returns_active_ignores_consumed(self, tmp_path):
+        """find_valid_token() returns active token when both active and consumed exist."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        # Consumed token
+        consumed = tmp_path / "merge-authorized-11111.consumed"
+        consumed.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"type": "consumed"},
+        }))
+
+        # Active token
+        active = tmp_path / "merge-authorized-22222"
+        active.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"type": "active"},
+        }))
+
+        result, path = find_valid_token(token_dir=tmp_path)
+        assert result is not None
+        assert result["context"]["type"] == "active"
+        assert "22222" in path
+        assert not path.endswith(".consumed")
+
+    def test_find_valid_token_calls_cleanup(self, tmp_path):
+        """find_valid_token() triggers cleanup of stale consumed tokens."""
+        from merge_guard_pre import find_valid_token
+
+        # Create a stale consumed token
+        stale = tmp_path / "merge-authorized-00001.consumed"
+        stale.write_text('{}')
+        old_mtime = time.time() - 600
+        os.utime(str(stale), (old_mtime, old_mtime))
+
+        find_valid_token(token_dir=tmp_path)
+
+        assert not stale.exists()
+
+    def test_find_valid_token_only_consumed_in_dir(self, tmp_path):
+        """find_valid_token() returns None when only .consumed files exist."""
+        from merge_guard_pre import find_valid_token
+
+        now = time.time()
+        # Only consumed files
+        for i in range(3):
+            consumed = tmp_path / f"merge-authorized-{i:05d}.consumed"
+            consumed.write_text(json.dumps({
+                "created_at": now,
+                "expires_at": now + 300,
+                "context": {},
+            }))
+
+        result, path = find_valid_token(token_dir=tmp_path)
+        assert result is None
+        assert path is None
+
+    # -------------------------------------------------------------------------
+    # check_merge_authorization() + _consume_token() integration
+    # -------------------------------------------------------------------------
+
+    def test_authorization_returns_error_on_consumption_failure(self, tmp_path):
+        """check_merge_authorization() returns error when _consume_token fails."""
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+        }))
+
+        # Mock _consume_token to return False (unexpected failure)
+        with patch("merge_guard_pre._consume_token", return_value=False):
+            result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+
+        assert result is not None
+        assert "internal error" in result.lower()
+        assert "AskUserQuestion" in result
+
+    def test_authorization_allows_when_consumption_succeeds(self, tmp_path):
+        """check_merge_authorization() returns None when _consume_token succeeds."""
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+        }))
+
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is None
+
+    def test_authorization_consumes_and_blocks_second_command(self, tmp_path):
+        """Full flow: first command consumes token, second is blocked."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+        assert token_path is not None
+
+        # First: allowed, token consumed
+        result1 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result1 is None
+        assert Path(token_path + ".consumed").exists()
+
+        # Second: blocked, no active tokens
+        result2 = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result2 is not None
+        assert "AskUserQuestion" in result2
+
+    def test_concurrent_authorization_both_succeed(self, tmp_path):
+        """Two concurrent check_merge_authorization calls for the same token both succeed.
+
+        This simulates the real scenario: PreToolUse hook fires twice for the same
+        tool call. The first call renames the token to .consumed. The second call
+        finds the original missing but the .consumed file present, so it also allows.
+        """
+        from merge_guard_post import write_token
+        from merge_guard_pre import _consume_token, check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+
+        # First invocation: consume via rename
+        assert _consume_token(token_path) is True
+        assert not Path(token_path).exists()
+        assert Path(token_path + ".consumed").exists()
+
+        # Second invocation: original gone but .consumed exists
+        assert _consume_token(token_path) is True
+
+    # -------------------------------------------------------------------------
+    # Edge cases
+    # -------------------------------------------------------------------------
+
+    def test_consumed_and_original_both_exist(self, tmp_path):
+        """Edge case: both original and .consumed exist (shouldn't happen normally).
+
+        _consume_token should still succeed by renaming (overwriting .consumed).
+        """
+        from merge_guard_pre import _consume_token
+
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text('{"original": true}')
+        consumed_file = tmp_path / "merge-authorized-99999.consumed"
+        consumed_file.write_text('{"already_consumed": true}')
+
+        result = _consume_token(str(token_file))
+
+        assert result is True
+        assert not token_file.exists()
+        assert consumed_file.exists()
+        # The rename overwrites the .consumed file with the original content
+        assert json.loads(consumed_file.read_text())["original"] is True
+
+    def test_empty_token_directory_no_consumed_files(self, tmp_path):
+        """check_merge_authorization handles empty token directory gracefully."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
+
+    def test_only_consumed_files_no_active_tokens(self, tmp_path):
+        """check_merge_authorization blocks when only .consumed files remain."""
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        consumed = tmp_path / "merge-authorized-99999.consumed"
+        consumed.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+        }))
+
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "AskUserQuestion" in result
+
+    def test_consumed_file_with_secure_permissions(self, tmp_path):
+        """Token created with write_token maintains 0o600 after consumption."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+        assert token_path is not None
+
+        # Verify original has secure permissions
+        original_mode = stat.S_IMODE(os.stat(token_path).st_mode)
+        assert original_mode == 0o600
+
+        # Consume via authorization
+        check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+
+        # Verify .consumed file retains secure permissions
+        consumed_path = token_path + ".consumed"
+        assert Path(consumed_path).exists()
+        consumed_mode = stat.S_IMODE(os.stat(consumed_path).st_mode)
+        assert consumed_mode == 0o600
+
+    # -------------------------------------------------------------------------
+    # Full lifecycle integration
+    # -------------------------------------------------------------------------
+
+    def test_full_lifecycle_create_consume_cleanup(self, tmp_path):
+        """Full lifecycle: create token -> consume -> cleanup after TTL."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import (
+            _cleanup_consumed_tokens,
+            check_merge_authorization,
+        )
+
+        # 1. Create token
+        token_path = write_token({"pr": "42"}, token_dir=tmp_path)
+        assert token_path is not None
+        assert Path(token_path).exists()
+
+        # 2. Consume via authorization
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is None
+        consumed_path = token_path + ".consumed"
+        assert Path(consumed_path).exists()
+        assert not Path(token_path).exists()
+
+        # 3. Consumed file persists during TTL
+        _cleanup_consumed_tokens(tmp_path)
+        assert Path(consumed_path).exists()  # Still within TTL
+
+        # 4. After TTL, consumed file is cleaned up
+        old_mtime = time.time() - 600
+        os.utime(consumed_path, (old_mtime, old_mtime))
+        _cleanup_consumed_tokens(tmp_path)
+        assert not Path(consumed_path).exists()
+
+    def test_multiple_tokens_only_matching_consumed(self, tmp_path):
+        """When multiple active tokens exist, only the matching one is consumed."""
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        # Token for PR merge
+        pr_token = tmp_path / "merge-authorized-10001"
+        pr_token.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42"},
+        }))
+
+        # Token for different operation (no pr_number context)
+        other_token = tmp_path / "merge-authorized-10002"
+        other_token.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {},
+        }))
+
+        # Merge command — one of the tokens will be consumed
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is None
+
+        # At least one consumed file should exist
+        consumed_files = list(tmp_path.glob("merge-authorized-*.consumed"))
+        assert len(consumed_files) >= 1
