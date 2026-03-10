@@ -56,8 +56,234 @@ DANGEROUS_PATTERNS = [
 ]
 
 
+def _has_pipe_to_shell(command: str) -> bool:
+    """Check if command pipes output to a shell interpreter.
+
+    Detects patterns like ``echo "..." | bash``, ``printf "..." | sh``,
+    and ``echo "..." | xargs bash`` where echo/printf content would be
+    executed by the receiving shell.
+    """
+    return bool(
+        re.search(r"\|\s*(?:bash|sh|zsh)\b", command)
+        or re.search(r"\|\s*xargs\s+(?:.*\s+)?(?:bash|sh|zsh)\b", command)
+    )
+
+
+def _has_process_substitution_to_shell(command: str) -> bool:
+    """Check if command uses process substitution fed to a shell interpreter.
+
+    Detects patterns like ``bash <(echo "...")`` where the output of echo/printf
+    inside ``<(...)`` is executed by the shell interpreter.
+    """
+    return bool(re.search(r"\b(?:bash|sh|zsh)\s+<\(", command))
+
+
+def _has_eval_or_source(command: str) -> bool:
+    """Check if command contains eval or source that could execute variable values.
+
+    Detects patterns like ``CMD="..." && eval $CMD`` where a variable
+    assignment value would be executed via eval or source.
+    """
+    return bool(re.search(r"\b(?:eval|source)\b", command))
+
+
+def _var_is_expanded(var_name: str, command: str) -> bool:
+    """Check if a variable is expanded (used) elsewhere in the command.
+
+    Detects patterns like ``$VAR`` or ``${VAR}`` that would execute
+    the variable's value as a command when used bare (e.g., ``CMD="gh pr merge 42" && $CMD``).
+    """
+    # Match $VAR (word boundary) or ${VAR}
+    return bool(re.search(r"\$\{?" + re.escape(var_name) + r"\b", command))
+
+
+def _has_command_substitution(quoted_content: str) -> bool:
+    """Check if double-quoted content contains command substitution.
+
+    ``$(...)`` and backticks inside double quotes are executed by the shell,
+    so double-quoted strings containing them must not be stripped.
+    Single-quoted strings never have substitution (handled separately).
+    """
+    return "$(" in quoted_content or "`" in quoted_content
+
+
+def _strip_non_executable_content(command: str) -> str:
+    """Strip shell content that is clearly non-executable before pattern matching.
+
+    Removes text from contexts where dangerous-pattern text would not actually
+    execute as a command: heredocs, comments, echo/printf arguments, and
+    variable assignments. This prevents false positives without removing content
+    from genuinely dangerous contexts like ``bash -c '...'``.
+
+    Guards against execution-via-indirection: skips stripping when content
+    would actually execute (piped to shell, eval'd, command substitution,
+    heredoc fed to shell interpreter).
+
+    Conservative: when in doubt, preserves text (false positive > missed threat).
+
+    Args:
+        command: The raw bash command string
+
+    Returns:
+        The command with non-executable content replaced by placeholders
+    """
+    result = command
+
+    # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
+    #    Match the heredoc marker, then everything up to and including the
+    #    closing marker on its own line.
+    #    GUARD: Skip stripping if the heredoc is fed to a shell interpreter
+    #    (e.g., bash << EOF ... EOF), because the body would execute.
+    def _strip_heredoc(match: re.Match) -> str:
+        # Check what command precedes the heredoc operator
+        start = match.start()
+        preceding = command[:start].rstrip()
+        # If the preceding command is a shell interpreter, preserve content
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        return "<<HEREDOC_STRIPPED"
+
+    result = re.sub(
+        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
+        _strip_heredoc,
+        result,
+        flags=re.DOTALL,
+    )
+
+    # 2. Strip comments: # to end of line
+    #    Only strip when # appears at start of line or after whitespace/semicolon
+    #    (not inside words like issue#42 or URLs with #fragment).
+    result = re.sub(r"(?:^|(?<=\s)|(?<=;))\#.*$", "", result, flags=re.MULTILINE)
+
+    # 3. Strip echo/printf quoted arguments
+    #    Match echo/printf followed by flags then quoted strings.
+    #    Replace the quoted content but keep the echo command visible.
+    #    GUARD: Skip stripping if output is piped to a shell interpreter
+    #    (including via xargs), or fed via process substitution to a shell,
+    #    because the echo/printf content would be executed by the shell.
+    #    NOTE: ``bash -c 'dangerous'`` is NOT affected by this stripping —
+    #    the echo/printf regex only matches echo/printf commands, so
+    #    ``bash -c`` content is implicitly preserved and correctly detected.
+    piped_to_shell = _has_pipe_to_shell(command)
+    process_sub_to_shell = _has_process_substitution_to_shell(command)
+    if not piped_to_shell and not process_sub_to_shell:
+        # Double-quoted: also guard against command substitution inside
+        def _strip_echo_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            return match.group(1) + " STRIPPED"
+
+        result = re.sub(
+            r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
+            _strip_echo_dq,
+            result,
+        )
+        result = re.sub(
+            r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
+            r"\1 STRIPPED",
+            result,
+        )
+
+    # 4. Strip variable assignment values: VAR="..." or VAR='...'
+    #    Only match simple assignments (NAME=VALUE), not command arguments.
+    #    GUARD: Skip stripping if eval/source appears in the command,
+    #    because the variable value could be executed.
+    #    GUARD: Skip stripping if $VAR or ${VAR} appears elsewhere in the
+    #    command, because bare expansion executes the value as a command
+    #    (e.g., CMD="gh pr merge 42" && $CMD).
+    has_eval = _has_eval_or_source(command)
+    if not has_eval:
+        # Double-quoted: guard against command substitution and bare expansion
+        def _strip_var_dq(match: re.Match) -> str:
+            if _has_command_substitution(match.group(0)):
+                return match.group(0)  # Preserve — $() executes
+            var_name = match.group(1)
+            if _var_is_expanded(var_name, command):
+                return match.group(0)  # Preserve — $VAR executes
+            return var_name + "=STRIPPED"
+
+        result = re.sub(
+            r'\b([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"',
+            _strip_var_dq,
+            result,
+        )
+
+        # Single-quoted: guard against bare expansion
+        def _strip_var_sq(match: re.Match) -> str:
+            var_name = match.group(1)
+            if _var_is_expanded(var_name, command):
+                return match.group(0)  # Preserve — $VAR executes
+            return var_name + "=STRIPPED"
+
+        result = re.sub(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)='[^']*'",
+            _strip_var_sq,
+            result,
+        )
+
+    # 5. Strip git commit -m quoted arguments
+    #    The -m argument to git commit is a message, never executed.
+    #    GUARD: Check for command substitution in double-quoted messages.
+    def _strip_commit_msg_dq(match: re.Match) -> str:
+        if _has_command_substitution(match.group(0)):
+            return match.group(0)  # Preserve — $() executes
+        return match.group(1) + ' -m STRIPPED'
+
+    result = re.sub(
+        r'\b(git\s+commit)\s+-m\s+"(?:[^"\\]|\\.)*"',
+        _strip_commit_msg_dq,
+        result,
+    )
+    result = re.sub(
+        r"\b(git\s+commit)\s+-m\s+'[^']*'",
+        r"\1 -m STRIPPED",
+        result,
+    )
+
+    # 6. Strip here-string quoted arguments: <<< "..." or <<< '...'
+    #    Here-strings pass text as stdin, not as a command.
+    #    GUARD: Skip stripping if a shell interpreter precedes the <<<
+    #    (e.g., bash <<< "dangerous"), because the content would execute.
+    #    GUARD: Check for command substitution in double-quoted content.
+    def _strip_herestring_dq(match: re.Match) -> str:
+        # Check what command precedes the <<<
+        start = match.start()
+        preceding = command[:start].rstrip()
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        if _has_command_substitution(match.group(0)):
+            return match.group(0)  # Preserve — $() executes
+        return "<<<STRIPPED"
+
+    result = re.sub(
+        r'<<<\s*"(?:[^"\\]|\\.)*"',
+        _strip_herestring_dq,
+        result,
+    )
+
+    def _strip_herestring_sq(match: re.Match) -> str:
+        # Check what command precedes the <<<
+        start = match.start()
+        preceding = command[:start].rstrip()
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        return "<<<STRIPPED"
+
+    result = re.sub(
+        r"<<<\s*'[^']*'",
+        _strip_herestring_sq,
+        result,
+    )
+
+    return result
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
+
+    Strips non-executable content (heredocs, comments, echo arguments, variable
+    assignments) before matching, to avoid false positives when dangerous-pattern
+    text appears in non-command contexts.
 
     Args:
         command: The bash command string
@@ -65,8 +291,9 @@ def is_dangerous_command(command: str) -> bool:
     Returns:
         True if the command matches a dangerous pattern
     """
+    stripped = _strip_non_executable_content(command)
     for pattern in DANGEROUS_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(stripped):
             return True
     return False
 
