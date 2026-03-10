@@ -2880,3 +2880,35 @@ class TestSchemaFixEndToEnd:
         # No token — user denied the merge question, even though
         # "yes" from the changelog question appeared first in the dict
         assert len(list(tmp_path.glob("merge-authorized-*"))) == 0
+
+    def test_question_key_mismatch_falls_back_to_first_value(self, tmp_path):
+        """When question text doesn't exactly match any answers key, fallback
+        to first dict value is exercised.
+
+        This documents the intentional permissive fallback in
+        answers.get(question, next(iter(answers.values()), "")) — if
+        the platform delivers answers with slightly different key text
+        (e.g., trailing whitespace), the token is still created to avoid
+        false negatives on legitimate approvals.
+        """
+        from merge_guard_post import main
+
+        input_data = json.dumps({
+            "tool_input": {
+                "questions": [{"question": "Merge PR #42?"}]
+            },
+            "tool_output": {
+                "answers": {
+                    "Merge PR #42? ": "Yes, merge",
+                },
+            },
+        })
+
+        with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit):
+                main()
+
+        # Token created — answers.get("Merge PR #42?") misses due to
+        # trailing space, falls back to first value "Yes, merge"
+        assert len(list(tmp_path.glob("merge-authorized-*"))) == 1
