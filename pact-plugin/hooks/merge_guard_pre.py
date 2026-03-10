@@ -56,8 +56,75 @@ DANGEROUS_PATTERNS = [
 ]
 
 
+def _strip_non_executable_content(command: str) -> str:
+    """Strip shell content that is clearly non-executable before pattern matching.
+
+    Removes text from contexts where dangerous-pattern text would not actually
+    execute as a command: heredocs, comments, echo/printf arguments, and
+    variable assignments. This prevents false positives without removing content
+    from genuinely dangerous contexts like ``bash -c '...'``.
+
+    Conservative: when in doubt, preserves text (false positive > missed threat).
+
+    Args:
+        command: The raw bash command string
+
+    Returns:
+        The command with non-executable content replaced by placeholders
+    """
+    result = command
+
+    # 1. Strip heredoc bodies: << 'EOF' ... EOF, << EOF ... EOF, << "EOF" ... EOF
+    #    Match the heredoc marker, then everything up to and including the
+    #    closing marker on its own line.
+    result = re.sub(
+        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\1\b",
+        "<<HEREDOC_STRIPPED",
+        result,
+        flags=re.DOTALL,
+    )
+
+    # 2. Strip comments: # to end of line
+    #    Only strip when # appears at start of line or after whitespace/semicolon
+    #    (not inside words like issue#42 or URLs with #fragment).
+    result = re.sub(r"(?:^|(?<=\s)|(?<=;))\#.*$", "", result, flags=re.MULTILINE)
+
+    # 3. Strip echo/printf quoted arguments
+    #    Match echo/printf followed by flags then quoted strings.
+    #    Replace the quoted content but keep the echo command visible.
+    result = re.sub(
+        r'\b(echo|printf)\s+(?:-[neE]+\s+)*"(?:[^"\\]|\\.)*"',
+        r"\1 STRIPPED",
+        result,
+    )
+    result = re.sub(
+        r"\b(echo|printf)\s+(?:-[neE]+\s+)*'[^']*'",
+        r"\1 STRIPPED",
+        result,
+    )
+
+    # 4. Strip variable assignment values: VAR="..." or VAR='...'
+    #    Only match simple assignments (NAME=VALUE), not command arguments.
+    result = re.sub(
+        r'\b([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"',
+        r"\1=STRIPPED",
+        result,
+    )
+    result = re.sub(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)='[^']*'",
+        r"\1=STRIPPED",
+        result,
+    )
+
+    return result
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a bash command is a dangerous git operation.
+
+    Strips non-executable content (heredocs, comments, echo arguments, variable
+    assignments) before matching, to avoid false positives when dangerous-pattern
+    text appears in non-command contexts.
 
     Args:
         command: The bash command string
@@ -65,8 +132,9 @@ def is_dangerous_command(command: str) -> bool:
     Returns:
         True if the command matches a dangerous pattern
     """
+    stripped = _strip_non_executable_content(command)
     for pattern in DANGEROUS_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(stripped):
             return True
     return False
 

@@ -969,6 +969,300 @@ class TestAdversarialCommandDetection:
 
 
 # =============================================================================
+# False-positive prevention: _strip_non_executable_content()
+# =============================================================================
+
+
+class TestStripNonExecutableContent:
+    """Tests for _strip_non_executable_content() helper."""
+
+    def test_strips_echo_double_quoted(self):
+        """echo with double-quoted dangerous text is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content('echo "gh pr merge 255"')
+        assert "gh pr merge" not in result
+
+    def test_strips_echo_single_quoted(self):
+        """echo with single-quoted dangerous text is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("echo 'gh pr merge 255'")
+        assert "gh pr merge" not in result
+
+    def test_strips_printf_quoted(self):
+        """printf with quoted dangerous text is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content('printf "gh pr merge %d" 42')
+        assert "gh pr merge" not in result
+
+    def test_strips_echo_with_flags(self):
+        """echo -n with quoted dangerous text is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content('echo -n "gh pr merge 42"')
+        assert "gh pr merge" not in result
+
+    def test_strips_variable_assignment_double_quoted(self):
+        """Variable assignment with double-quoted value is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content('CMD="gh pr merge 42"')
+        assert "gh pr merge" not in result
+
+    def test_strips_variable_assignment_single_quoted(self):
+        """Variable assignment with single-quoted value is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("CMD='gh pr merge 42'")
+        assert "gh pr merge" not in result
+
+    def test_strips_comment_at_line_start(self):
+        """Comment at start of line is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("# gh pr merge 42")
+        assert "gh pr merge" not in result
+
+    def test_strips_comment_after_command(self):
+        """Comment after a command is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("git status # gh pr merge 42")
+        assert "gh pr merge" not in result
+        assert "git status" in result
+
+    def test_strips_comment_after_semicolon(self):
+        """Comment after semicolon is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("echo done;# gh pr merge")
+        assert "gh pr merge" not in result
+
+    def test_strips_heredoc_body(self):
+        """Heredoc body content is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = "python3 << 'EOF'\nre.compile(r'gh pr merge')\nEOF"
+        result = _strip_non_executable_content(cmd)
+        assert "gh pr merge" not in result
+
+    def test_strips_heredoc_unquoted_marker(self):
+        """Heredoc with unquoted marker is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = "cat << EOF\ngh pr merge 42\nEOF"
+        result = _strip_non_executable_content(cmd)
+        assert "gh pr merge" not in result
+
+    def test_strips_heredoc_double_quoted_marker(self):
+        """Heredoc with double-quoted marker is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = 'cat << "PYEOF"\ngh pr merge 42\nPYEOF'
+        result = _strip_non_executable_content(cmd)
+        assert "gh pr merge" not in result
+
+    def test_preserves_bash_c_single_quoted(self):
+        """bash -c 'dangerous' is NOT stripped — it's executable."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("bash -c 'gh pr merge 42'")
+        assert "gh pr merge" in result
+
+    def test_preserves_bare_dangerous_command(self):
+        """Bare dangerous commands are preserved."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("gh pr merge 42")
+        assert "gh pr merge" in result
+
+    def test_preserves_chained_dangerous_command(self):
+        """Dangerous commands after && are preserved."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content("cd /tmp && gh pr merge 42")
+        assert "gh pr merge" in result
+
+    def test_variable_assignment_escaped_quotes(self):
+        """Variable assignment with escaped quotes inside is stripped."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        result = _strip_non_executable_content(r'X="gh pr merge \"42\""')
+        assert "gh pr merge" not in result
+
+    def test_empty_string(self):
+        """Empty string returns empty."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        assert _strip_non_executable_content("") == ""
+
+    def test_no_quotes_unchanged(self):
+        """Commands without quotes pass through unchanged."""
+        from merge_guard_pre import _strip_non_executable_content
+
+        cmd = "git push --force origin main"
+        assert _strip_non_executable_content(cmd) == cmd
+
+
+class TestFalsePositivePrevention:
+    """Verify that dangerous-pattern text in non-executable contexts
+    does NOT trigger is_dangerous_command()."""
+
+    def test_echo_double_quoted_not_dangerous(self):
+        """echo with quoted dangerous text is not a real command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "gh pr merge 255"')
+
+    def test_echo_single_quoted_not_dangerous(self):
+        """echo with single-quoted dangerous text is not a real command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo 'git push --force origin main'")
+
+    def test_variable_assignment_not_dangerous(self):
+        """Variable assignment containing dangerous text is not a command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('X="gh pr merge"')
+
+    def test_variable_assignment_single_quoted_not_dangerous(self):
+        """Single-quoted variable assignment is not a command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("CMD='git branch -D feat/old'")
+
+    def test_comment_not_dangerous(self):
+        """Commented-out dangerous command is not a real command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("# gh pr merge 42")
+
+    def test_inline_comment_not_dangerous(self):
+        """Inline comment after safe command is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git status # gh pr merge 42")
+
+    def test_heredoc_not_dangerous(self):
+        """Dangerous text inside heredoc body is not a command."""
+        from merge_guard_pre import is_dangerous_command
+
+        cmd = "python3 << 'PYEOF'\nre.compile(r\"\\bgh\\s+pr\\s+merge\\b\")\nPYEOF"
+        assert not is_dangerous_command(cmd)
+
+    def test_heredoc_unquoted_not_dangerous(self):
+        """Dangerous text inside unquoted heredoc is not a command."""
+        from merge_guard_pre import is_dangerous_command
+
+        cmd = "cat << EOF\ngh pr merge 42\nEOF"
+        assert not is_dangerous_command(cmd)
+
+    def test_printf_not_dangerous(self):
+        """printf with dangerous text is not a command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('printf "git push --force %s" origin')
+
+    def test_echo_with_flags_not_dangerous(self):
+        """echo -e with dangerous text is not a command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo -e "git branch -D feat/old"')
+
+    # --- Real dangerous commands still detected ---
+
+    def test_real_gh_pr_merge_still_detected(self):
+        """Bare gh pr merge is still caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr merge 42")
+
+    def test_real_force_push_still_detected(self):
+        """Bare git push --force is still caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push --force origin main")
+
+    def test_real_branch_D_still_detected(self):
+        """Bare git branch -D is still caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git branch -D feat/old")
+
+    def test_bash_c_still_detected(self):
+        """bash -c with dangerous command is still caught (genuinely dangerous)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash -c 'gh pr merge 42'")
+
+    def test_chained_after_echo_still_detected(self):
+        """Dangerous command chained after echo is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo done && gh pr merge 42")
+
+    def test_semicolon_after_echo_still_detected(self):
+        """Dangerous command after semicolon is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo hello; gh pr merge 42")
+
+    def test_env_var_prefix_still_detected(self):
+        """Dangerous command with env var prefix is caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("GH_TOKEN=abc gh pr merge 42")
+
+    def test_subshell_still_detected(self):
+        """Dangerous command in $() subshell is still caught."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("$(gh pr merge 42)")
+
+    # --- Edge cases: mixed contexts ---
+
+    def test_echo_then_real_command(self):
+        """echo of safe text followed by real dangerous command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "hello" && gh pr merge 42')
+
+    def test_comment_then_real_command_on_new_line(self):
+        """Comment on one line, real command on next."""
+        from merge_guard_pre import is_dangerous_command
+
+        cmd = "# just a comment\ngh pr merge 42"
+        assert is_dangerous_command(cmd)
+
+    def test_variable_then_real_command(self):
+        """Variable assignment followed by real dangerous command."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('X="value" && gh pr merge 42')
+
+    def test_echo_force_push_not_dangerous(self):
+        """echo of force push text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "git push --force origin main"')
+
+    def test_echo_branch_delete_not_dangerous(self):
+        """echo of branch delete text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "git branch -D feat/old"')
+
+    def test_echo_push_main_not_dangerous(self):
+        """echo of push to main text is not dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "git push origin main"')
+
+
+# =============================================================================
 # Edge cases: merge_guard_post
 # =============================================================================
 
