@@ -4,14 +4,16 @@ Tests for pact-memory/scripts/cli.py — CLI entry point.
 Tests cover:
 1. Arg parsing: subcommand dispatch, required arguments, defaults
 2. Save command: JSON arg, --stdin, invalid JSON, non-dict input
-3. Search command: query dispatch, --limit
-4. List command: default and custom --limit
-5. Get command: existing and missing memory IDs
-6. Status command: status dict output
-7. Setup command: success and failure paths
-8. Output format: JSON envelope consistency, stdout/stderr routing
-9. Error handling: exit codes, error types, unknown commands
-10. Subprocess E2E: true black-box tests via subprocess.run
+3. Save verification: success path, failure path, error format, exception handling
+4. Search command: query dispatch, --limit
+5. List command: default and custom --limit
+6. Get command: existing and missing memory IDs
+7. Status command: status dict output
+8. Setup command: success and failure paths
+9. Output format: JSON envelope consistency, stdout/stderr routing
+10. Error handling: exit codes, error types, unknown commands
+11. Subprocess E2E: true black-box tests via subprocess.run
+12. Agent configuration: model frontmatter verification
 """
 import json
 import os
@@ -306,6 +308,162 @@ class TestCliSaveCommand:
             with pytest.raises(SystemExit):
                 cmd_save(args, db_path=Path("/tmp/test.db"))
         mock_cls.assert_called_once_with(db_path=Path("/tmp/test.db"))
+
+
+# ---------------------------------------------------------------------------
+# Save Verification
+# ---------------------------------------------------------------------------
+
+class TestCliSaveVerification:
+    """Test the save-then-verify logic added for reliability (#245).
+
+    After memory.save() returns a memory_id, cmd_save now calls
+    memory.get(memory_id) to verify the write persisted. If get returns
+    None, it emits SAVE_VERIFICATION_FAILED and exits 1.
+    """
+
+    def test_save_verification_success(self, mock_pact_memory, capsys):
+        """Verification passes when get() returns a non-None result."""
+        # mock_pact_memory.get already returns MagicMock() (non-None)
+        memory_dict = make_cli_memory_dict()
+        parser = build_parser()
+        args = parser.parse_args(["save", json.dumps(memory_dict)])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+        assert output["result"]["memory_id"] == "abc123def456"
+
+    def test_save_verification_calls_get_with_returned_id(self, mock_pact_memory):
+        """Verification calls get() with exactly the ID returned by save()."""
+        mock_pact_memory.save.return_value = "unique_test_id_789"
+        memory_dict = make_cli_memory_dict()
+        parser = build_parser()
+        args = parser.parse_args(["save", json.dumps(memory_dict)])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit):
+                cmd_save(args)
+        mock_pact_memory.get.assert_called_once_with("unique_test_id_789")
+
+    def test_save_verification_failure_exits_1(self, mock_pact_memory):
+        """When get() returns None, cmd_save exits with code 1."""
+        mock_pact_memory.get.return_value = None
+        memory_dict = make_cli_memory_dict()
+        parser = build_parser()
+        args = parser.parse_args(["save", json.dumps(memory_dict)])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 1
+
+    def test_save_verification_failure_error_format(self, mock_pact_memory, capsys):
+        """Verification failure outputs correct JSON error envelope to stderr."""
+        mock_pact_memory.get.return_value = None
+        memory_dict = make_cli_memory_dict()
+        parser = build_parser()
+        args = parser.parse_args(["save", json.dumps(memory_dict)])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit):
+                cmd_save(args)
+        captured = capsys.readouterr()
+        # Nothing on stdout (error goes to stderr)
+        assert captured.out == ""
+        err_output = json.loads(captured.err)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "SAVE_VERIFICATION_FAILED"
+        assert "abc123def456" in err_output["message"]
+
+    def test_save_verification_failure_message_contains_id(self, mock_pact_memory, capsys):
+        """Error message includes the memory_id that failed verification."""
+        mock_pact_memory.save.return_value = "custom_id_xyz"
+        mock_pact_memory.get.return_value = None
+        memory_dict = make_cli_memory_dict()
+        parser = build_parser()
+        args = parser.parse_args(["save", json.dumps(memory_dict)])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit):
+                cmd_save(args)
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert "custom_id_xyz" in err_output["message"]
+
+    def test_save_verification_get_exception_via_main(self, capsys):
+        """When get() raises an exception, main() catches it as SYSTEM_ERROR."""
+        mock = MagicMock()
+        mock.save.return_value = "exc_test_id"
+        mock.get.side_effect = RuntimeError("DB connection lost")
+        memory_dict = make_cli_memory_dict()
+
+        with patch("scripts.cli.PACTMemory", return_value=mock):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["save", json.dumps(memory_dict)])
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "SYSTEM_ERROR"
+        assert "DB connection lost" in err_output["message"]
+
+    def test_save_verification_stdin_path(self, mock_pact_memory, monkeypatch, capsys):
+        """Verification also runs when input comes via --stdin."""
+        mock_pact_memory.get.return_value = None
+        memory_dict = make_cli_memory_dict()
+        monkeypatch.setattr("sys.stdin", StringIO(json.dumps(memory_dict)))
+        parser = build_parser()
+        args = parser.parse_args(["save", "--stdin"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "SAVE_VERIFICATION_FAILED"
+
+    def test_save_verification_does_not_alter_save_call(self, mock_pact_memory):
+        """Verification logic does not interfere with the save() call itself."""
+        memory_dict = make_cli_memory_dict(context="verification neutral")
+        parser = build_parser()
+        args = parser.parse_args(["save", json.dumps(memory_dict)])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit):
+                cmd_save(args)
+        # save is called before get, with the original dict
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+        mock_pact_memory.get.assert_called_once_with("abc123def456")
+        # Confirm call order: save before get
+        assert mock_pact_memory.save.call_count == 1
+        assert mock_pact_memory.get.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Agent Model Configuration
+# ---------------------------------------------------------------------------
+
+class TestAgentModelConfig:
+    """Verify agent frontmatter configuration (#245)."""
+
+    def test_memory_agent_uses_sonnet_model(self):
+        """pact-memory-agent.md should specify model: sonnet."""
+        agent_path = (
+            Path(__file__).resolve().parent.parent
+            / "agents" / "pact-memory-agent.md"
+        )
+        content = agent_path.read_text()
+        # Extract frontmatter (between --- markers)
+        parts = content.split("---", 2)
+        assert len(parts) >= 3, "Agent file should have YAML frontmatter"
+        frontmatter = parts[1]
+        assert "model: sonnet" in frontmatter
 
 
 # ---------------------------------------------------------------------------
