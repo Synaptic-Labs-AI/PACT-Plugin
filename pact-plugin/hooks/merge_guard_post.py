@@ -14,7 +14,6 @@ Input: JSON from stdin with tool_input (AskUserQuestion questions array) and too
 Output: None (side effect: writes token file on approval)
 """
 
-import glob
 import json
 import os
 import re
@@ -22,11 +21,13 @@ import sys
 import time
 from pathlib import Path
 
-# Token TTL in seconds (5 minutes)
-TOKEN_TTL = 300
-
-# Directory for token files
-TOKEN_DIR = Path.home() / ".claude"
+# Shared constants and cleanup — single source of truth for both hooks
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.merge_guard_common import (
+    TOKEN_TTL,
+    TOKEN_DIR,
+    cleanup_consumed_tokens as _cleanup_consumed_tokens,
+)
 
 # Keywords that indicate a merge-related question
 MERGE_KEYWORDS = re.compile(
@@ -95,28 +96,6 @@ def extract_context(question: str) -> dict:
         context["branch"] = branch_match.group(1) or branch_match.group(2)
 
     return context
-
-
-def _cleanup_consumed_tokens(token_dir: Path) -> None:
-    """Remove stale .consumed token files older than TOKEN_TTL.
-
-    Called during token creation to prevent accumulation of consumed tokens.
-
-    Args:
-        token_dir: Directory containing token files
-    """
-    consumed_pattern = str(token_dir / "merge-authorized-*.consumed")
-    now = time.time()
-    for consumed_path in glob.glob(consumed_pattern):
-        try:
-            mtime = os.path.getmtime(consumed_path)
-            if now - mtime > TOKEN_TTL:
-                try:
-                    os.unlink(consumed_path)
-                except OSError:
-                    pass
-        except OSError:
-            pass
 
 
 def write_token(context: dict, token_dir: Path | None = None) -> str | None:

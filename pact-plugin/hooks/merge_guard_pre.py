@@ -22,14 +22,14 @@ import sys
 import time
 from pathlib import Path
 
-# Token TTL in seconds (must match merge_guard_post.py)
-TOKEN_TTL = 300
-
-# Directory for token files
-TOKEN_DIR = Path.home() / ".claude"
-
-# Token file prefix
-TOKEN_PREFIX = "merge-authorized-"
+# Shared constants and cleanup — single source of truth for both hooks
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.merge_guard_common import (
+    TOKEN_TTL,
+    TOKEN_DIR,
+    TOKEN_PREFIX,
+    cleanup_consumed_tokens as _cleanup_consumed_tokens,
+)
 
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
@@ -379,6 +379,10 @@ def _consume_token(token_path: str) -> bool:
     file was already renamed by a concurrent invocation, that IS the success
     case — the token was already consumed for this operation.
 
+    The fallback verification uses an atomic open() instead of os.path.exists()
+    to avoid a TOCTOU race where the .consumed file could be deleted between
+    the existence check and any subsequent read.
+
     Args:
         token_path: Path to the token file to consume
 
@@ -391,31 +395,23 @@ def _consume_token(token_path: str) -> bool:
         os.rename(token_path, consumed_path)
         return True
     except FileNotFoundError:
-        # Token already renamed by a concurrent invocation — check if
-        # the .consumed file exists (confirming it was consumed, not lost)
-        return os.path.exists(consumed_path)
+        # Token already renamed by a concurrent invocation — verify the
+        # .consumed file exists atomically by trying to open it. This avoids
+        # a TOCTOU race with os.path.exists() where the file could vanish
+        # between the check and any subsequent use.
+        try:
+            fd = os.open(consumed_path, os.O_RDONLY)
+            os.close(fd)
+            return True
+        except FileNotFoundError:
+            # Neither original nor .consumed exists — token was genuinely lost
+            return False
+        except OSError:
+            # Unexpected error accessing .consumed — fail closed
+            return False
     except OSError:
         # Unexpected error — fail closed (return False to block)
         return False
-
-
-def _cleanup_consumed_tokens(token_dir: Path) -> None:
-    """Remove stale .consumed token files older than TOKEN_TTL.
-
-    Args:
-        token_dir: Directory containing token files
-    """
-    consumed_pattern = str(token_dir / f"{TOKEN_PREFIX}*.consumed")
-    now = time.time()
-    for consumed_path in glob.glob(consumed_pattern):
-        try:
-            # Use file modification time as a proxy for consumption time
-            mtime = os.path.getmtime(consumed_path)
-            if now - mtime > TOKEN_TTL:
-                _safe_remove(consumed_path)
-        except OSError:
-            # File may have been cleaned up concurrently — ignore
-            pass
 
 
 def _token_matches_command(token: dict, command: str) -> bool:

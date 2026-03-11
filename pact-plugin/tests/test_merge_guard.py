@@ -4013,7 +4013,8 @@ class TestIdempotentTokenConsumption:
         os.utime(str(stale), (old_mtime, old_mtime))
 
         # Mock os.path.getmtime to raise FileNotFoundError (concurrent deletion)
-        with patch("merge_guard_pre.os.path.getmtime", side_effect=FileNotFoundError):
+        # Target the shared module where cleanup_consumed_tokens now lives
+        with patch("shared.merge_guard_common.os.path.getmtime", side_effect=FileNotFoundError):
             _cleanup_consumed_tokens(tmp_path)  # Should not raise
 
     def test_cleanup_mixed_expired_and_fresh(self, tmp_path):
