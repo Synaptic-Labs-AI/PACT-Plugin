@@ -22,14 +22,14 @@ import sys
 import time
 from pathlib import Path
 
-# Token TTL in seconds (must match merge_guard_post.py)
-TOKEN_TTL = 300
-
-# Directory for token files
-TOKEN_DIR = Path.home() / ".claude"
-
-# Token file prefix
-TOKEN_PREFIX = "merge-authorized-"
+# Shared constants and cleanup — single source of truth for both hooks
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.merge_guard_common import (
+    TOKEN_TTL,
+    TOKEN_DIR,
+    TOKEN_PREFIX,
+    cleanup_consumed_tokens as _cleanup_consumed_tokens,
+)
 
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
@@ -323,6 +323,10 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     token_pattern = str(token_dir / f"{TOKEN_PREFIX}*")
 
     for token_path in glob.glob(token_pattern):
+        # Skip consumed tokens — they were already used by a prior invocation
+        if token_path.endswith(".consumed"):
+            continue
+
         try:
             with open(token_path, "r") as f:
                 token_data = json.load(f)
@@ -354,6 +358,9 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
             # Corrupted or malformed token — clean up
             _safe_remove(token_path)
 
+    # Clean up stale consumed tokens while we're scanning
+    _cleanup_consumed_tokens(token_dir)
+
     return valid_token, valid_path
 
 
@@ -363,6 +370,48 @@ def _safe_remove(path: str):
         os.unlink(path)
     except OSError:
         pass
+
+
+def _consume_token(token_path: str) -> bool:
+    """Consume a token by renaming it to .consumed (idempotent).
+
+    Uses os.rename() for POSIX atomicity. If the rename fails because the
+    file was already renamed by a concurrent invocation, that IS the success
+    case — the token was already consumed for this operation.
+
+    The fallback verification uses an atomic open() instead of os.path.exists()
+    to avoid a TOCTOU race where the .consumed file could be deleted between
+    the existence check and any subsequent read.
+
+    Args:
+        token_path: Path to the token file to consume
+
+    Returns:
+        True if the token was consumed (either by us or by a prior invocation),
+        False if consumption failed for an unexpected reason
+    """
+    consumed_path = token_path + ".consumed"
+    try:
+        os.rename(token_path, consumed_path)
+        return True
+    except FileNotFoundError:
+        # Token already renamed by a concurrent invocation — verify the
+        # .consumed file exists atomically by trying to open it. This avoids
+        # a TOCTOU race with os.path.exists() where the file could vanish
+        # between the check and any subsequent use.
+        try:
+            fd = os.open(consumed_path, os.O_RDONLY)
+            os.close(fd)
+            return True
+        except FileNotFoundError:
+            # Neither original nor .consumed exists — token was genuinely lost
+            return False
+        except OSError:
+            # Unexpected error accessing .consumed — fail closed
+            return False
+    except OSError:
+        # Unexpected error — fail closed (return False to block)
+        return False
 
 
 def _token_matches_command(token: dict, command: str) -> bool:
@@ -412,9 +461,12 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
     """Check if a dangerous command is authorized.
 
     Tokens are single-use: once a token authorizes a command, it is consumed
-    (deleted) so that each approval authorizes exactly one operation. The token's
-    context is validated against the command to ensure the approved operation
-    matches what is being executed.
+    (renamed to .consumed) so that each approval authorizes exactly one operation.
+    The rename is atomic on POSIX filesystems and idempotent — if a concurrent
+    hook invocation already consumed the token, the second invocation recognizes
+    the .consumed file and allows the command. The token's context is validated
+    against the command to ensure the approved operation matches what is being
+    executed.
 
     Args:
         command: The bash command to check
@@ -430,8 +482,15 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
     if token is not None:
         if _token_matches_command(token, command):
             # Consume the token — one approval = one operation
-            _safe_remove(token_path)
-            return None
+            # Uses rename for idempotent consumption: if a concurrent
+            # invocation already consumed it, that's the success case.
+            if _consume_token(token_path):
+                return None
+            # Consumption failed for unexpected reason — fail closed
+            return (
+                "Merge guard internal error — could not consume authorization token. "
+                "Use AskUserQuestion to get approval again."
+            )
         else:
             # Token exists but doesn't match this command — don't consume it,
             # block the mismatched command

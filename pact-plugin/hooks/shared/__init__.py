@@ -9,6 +9,7 @@ This package provides shared utilities for hooks:
 - symlinks: Plugin symlink management for @reference resolution
 - claude_md_manager: CLAUDE.md file creation and update
 - session_resume: Session info, snapshot restore, resumption context
+- merge_guard_common: Shared constants and cleanup for merge guard hooks
 """
 
 from .task_utils import (
@@ -25,6 +26,12 @@ from .session_resume import (
     restore_last_session,
     check_resumption_context,
 )
+from .merge_guard_common import (
+    TOKEN_TTL,
+    TOKEN_DIR,
+    TOKEN_PREFIX,
+    cleanup_consumed_tokens,
+)
 
 __all__ = [
     "get_task_list",
@@ -38,4 +45,8 @@ __all__ = [
     "update_session_info",
     "restore_last_session",
     "check_resumption_context",
+    "TOKEN_TTL",
+    "TOKEN_DIR",
+    "TOKEN_PREFIX",
+    "cleanup_consumed_tokens",
 ]

@@ -21,11 +21,13 @@ import sys
 import time
 from pathlib import Path
 
-# Token TTL in seconds (5 minutes)
-TOKEN_TTL = 300
-
-# Directory for token files
-TOKEN_DIR = Path.home() / ".claude"
+# Shared constants and cleanup — single source of truth for both hooks
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.merge_guard_common import (
+    TOKEN_TTL,
+    TOKEN_DIR,
+    cleanup_consumed_tokens as _cleanup_consumed_tokens,
+)
 
 # Keywords that indicate a merge-related question
 MERGE_KEYWORDS = re.compile(
@@ -108,6 +110,9 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
     """
     if token_dir is None:
         token_dir = TOKEN_DIR
+
+    # Clean up stale .consumed token files from prior operations
+    _cleanup_consumed_tokens(token_dir)
 
     now = time.time()
     timestamp = int(now)
