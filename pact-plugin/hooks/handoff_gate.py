@@ -27,7 +27,7 @@ REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration"
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
 
-# PACT agents that do work requiring memory saves (mirrors memory_enforce.py)
+# PACT agents that do work requiring memory saves (mirrors hooks/memory_enforce.py)
 # Explicitly excludes pact-memory-agent to avoid recursion
 PACT_WORK_AGENTS = [
     "pact-preparer",
@@ -151,7 +151,7 @@ def is_pact_work_agent(teammate_name: str) -> bool:
     if not teammate_name:
         return False
     name_lower = teammate_name.lower()
-    return any(agent in name_lower for agent in PACT_WORK_AGENTS)
+    return any(name_lower == agent or name_lower.startswith(agent + "-") for agent in PACT_WORK_AGENTS)
 
 
 def check_memory_metadata(
