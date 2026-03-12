@@ -1,6 +1,7 @@
 """
 Tests for handoff_gate.py — TaskCompleted hook that blocks task completion
-if handoff metadata is missing or incomplete.
+if handoff metadata is missing or incomplete, and warns if memory_used
+metadata is absent for PACT work agents.
 
 Tests cover:
 1. Complete handoff metadata -> allow (exit 0)
@@ -12,6 +13,9 @@ Tests cover:
 7. Algedonic task (metadata.type: "algedonic") -> allow (bypass)
 8. Subject starts with "BLOCKER:" -> allow (bypass)
 9. No teammate_name in input -> allow (non-agent completion)
+10. is_pact_work_agent identifies PACT agents correctly
+11. check_memory_metadata warns when memory_used is missing for PACT agents
+12. main() emits memory warning on stderr without blocking (exit 0)
 """
 import json
 import io
@@ -302,3 +306,164 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+
+    def test_main_exits_0_with_memory_warning_for_pact_agent(self, capsys):
+        """PACT agent with valid handoff but no memory_used -> exit 0 + warning on stderr."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "pact-backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value={"handoff": VALID_HANDOFF}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "MEMORY NOT SAVED" in captured.err
+
+    def test_main_exits_0_no_warning_when_memory_used(self, capsys):
+        """PACT agent with valid handoff + memory_used: true -> exit 0, no warning."""
+        from handoff_gate import main
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_used": True}
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "pact-backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "MEMORY NOT SAVED" not in captured.err
+
+
+class TestIsPactWorkAgent:
+    """Tests for handoff_gate.is_pact_work_agent()."""
+
+    def test_recognizes_pact_backend_coder(self):
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent("pact-backend-coder") is True
+
+    def test_recognizes_scope_suffixed_agent(self):
+        """Scope-prefixed names like pact-backend-coder-auth-scope should match."""
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent("pact-backend-coder-auth-scope") is True
+
+    def test_excludes_pact_memory_agent(self):
+        """pact-memory-agent is explicitly excluded to avoid recursion."""
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent("pact-memory-agent") is False
+
+    def test_rejects_non_pact_agent(self):
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent("random-agent") is False
+
+    def test_rejects_empty_string(self):
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent("") is False
+
+    def test_rejects_none(self):
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent(None) is False
+
+    def test_rejects_false_positive_prefix(self):
+        """Name containing but not starting with a PACT agent name should not match."""
+        from handoff_gate import is_pact_work_agent
+
+        assert is_pact_work_agent("not-pact-backend-coder") is False
+
+
+class TestCheckMemoryMetadata:
+    """Tests for handoff_gate.check_memory_metadata()."""
+
+    def test_no_warning_when_memory_used_true(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={"memory_used": True},
+            teammate_name="pact-backend-coder"
+        )
+        assert result is None
+
+    def test_warns_when_memory_used_absent(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="pact-backend-coder"
+        )
+        assert result is not None
+        assert "MEMORY NOT SAVED" in result
+
+    def test_warns_when_memory_used_false(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={"memory_used": False},
+            teammate_name="pact-backend-coder"
+        )
+        assert result is not None
+        assert "MEMORY NOT SAVED" in result
+
+    def test_no_warning_for_non_pact_agent(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="random-agent"
+        )
+        assert result is None
+
+    def test_no_warning_when_no_teammate(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name=None
+        )
+        assert result is None
+
+    def test_bypasses_skipped_task(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={"skipped": True},
+            teammate_name="pact-backend-coder"
+        )
+        assert result is None
+
+    def test_bypasses_blocker_type(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={"type": "blocker"},
+            teammate_name="pact-backend-coder"
+        )
+        assert result is None
+
+    def test_bypasses_algedonic_type(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={"type": "algedonic"},
+            teammate_name="pact-backend-coder"
+        )
+        assert result is None
