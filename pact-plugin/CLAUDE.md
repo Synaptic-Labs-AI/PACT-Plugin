@@ -108,7 +108,12 @@ You manage the project's long-term memory by delegating to the `pact-memory-agen
 
 **Specialist Role (Skill Usage)**:
 Specialist agents (Coders, Architects) **cannot delegate** to other agents.
-*   **Instruction**: When dispatching a specialist, ensure they know to load the `pact-memory` skill *first* to retrieve relevant context before they start working.
+*   **Instruction**: When dispatching a specialist, include the Memory Lifecycle Protocol (MLP) in the task description. Specialists MUST:
+    1. Load `pact-memory` skill at start
+    2. Search for prior context before work
+    3. Report memory findings in teachback
+    4. Save memory before HANDOFF
+    5. Include `memory_used: true` in task metadata
 
 #### When to Delegate (Save/Retrieve)
 
@@ -489,9 +494,10 @@ HANDOFF:
    - [LOW] {description}
 5. Integration points: Other components touched
 6. Open questions: Unresolved items
+7. Memory: memory_used=true, memory_id={id}
 ```
 
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
+Items 1-2 and 4-7 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 

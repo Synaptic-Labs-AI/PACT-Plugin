@@ -190,6 +190,15 @@ If a specialist fails entirely (timeout, error):
 **Dispatch each consultant**:
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
    - Add to description: "Send a teachback to lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
+   - Include in description:
+     ```
+     **Memory Lifecycle (MANDATORY)**:
+     - Load `pact-memory` skill at start
+     - Search for prior context on this topic: `memory.search("{feature} {domain}")`
+     - Include MEMORY REPORT at the start of your analysis
+     - After analysis, save key insights: `memory.save({...})`
+     - Include `memory_used: true` in task metadata
+     ```
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -253,7 +262,12 @@ After collecting all specialist outputs, use extended thinking to synthesize:
    - Assess overall project risk
    - Identify mitigation strategies
 
-7. **Synthesis Validation Checkpoint**
+7. **Save plan context**: Delegate to `pact-memory-agent` to save:
+   - Planning decisions and rationale
+   - Conflicts identified and how they were resolved
+   - Key constraints and risks discovered
+
+8. **Synthesis Validation Checkpoint**
 
    Before proceeding to Phase 3, verify:
    - [ ] At least 2 specialists contributed meaningful input

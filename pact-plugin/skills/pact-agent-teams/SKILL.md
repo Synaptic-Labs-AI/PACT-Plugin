@@ -199,16 +199,20 @@ If task complexity differs significantly from what was delegated:
 
 ## Before Completing
 
-Before returning your final output:
+Before returning your final output, you MUST complete these steps. Your work is NOT done until memory is saved.
 
-1. **Save Project Memory**: Invoke the `pact-memory` skill to save **project-wide institutional knowledge**:
+1. **Save Project Memory (MANDATORY)**: You MUST invoke the `pact-memory` skill and save **project-wide institutional knowledge** before completing your task:
    - Context: What you were working on and why
    - Goal: What you were trying to achieve
    - Lessons learned: What worked, what didn't, gotchas discovered
    - Decisions: Key choices made with rationale
    - Entities: Components, files, services involved
 
+   After saving, include `memory_used: true` and `memory_id: "{saved_id}"` in your task metadata via `TaskUpdate`.
+
 This saves cross-agent, cross-session knowledge searchable by future agents. For **agent-level domain learnings** (patterns you personally encounter, debugging tricks, domain expertise), use your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) — this is managed automatically by the SDK `memory: user` frontmatter in your agent definition.
+
+> **Memory before shutdown**: If you receive a `shutdown_request`, you MUST save project memory (if not already done) BEFORE approving the shutdown. Your process terminates on approval — unsaved knowledge is lost permanently.
 
 ## Shutdown
 
@@ -219,7 +223,7 @@ When you receive a `shutdown_request`:
 | Idle, consultant with no active questions, or domain no longer relevant | Approve |
 | Mid-task, awaiting response, or remediation may need your input | Reject with reason |
 
-> **Save memory before approving**: If you haven't already saved project-wide knowledge via `pact-memory`, do so before approving — your process terminates on approval. Agent-level learnings in your persistent memory directory are saved automatically.
+> **MANDATORY: Save memory before approving**: You MUST save project-wide knowledge via `pact-memory` before approving shutdown — your process terminates on approval and unsaved knowledge is lost permanently. Include `memory_used: true` in task metadata. Agent-level learnings in your persistent memory directory are saved automatically.
 
 ## Completion Integrity (SACROSANCT)
 

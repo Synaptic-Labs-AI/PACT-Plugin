@@ -97,6 +97,7 @@ Before triaging, quickly check for existing context:
 - **Plan**: Check `docs/plans/` for related plan (broader feature context)
 - **Prior phase outputs**: Check `docs/preparation/`, `docs/architecture/` for relevant artifacts
 - **Progress signals**: If progress monitoring was requested for this agent, review the signal history — was the agent converging, exploring, or stuck before the blocker? This informs the Conversation Failure Taxonomy diagnosis.
+- **Memory search**: Search pact-memory for `"{blocker topic} blocker"` and `"{feature} lessons_learned"` — prior blockers on similar issues may inform triage.
 
 This context informs whether the blocker is isolated or systemic.
 
@@ -118,6 +119,11 @@ Answer three questions:
 | **Terminate agent** | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop: terminates immediately, non-cooperative) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` |
 | **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
+
+**After resolution**: Delegate to `pact-memory-agent` to save the blocker context:
+- What caused the blocker
+- How it was resolved (or why it was escalated)
+- Lessons learned for avoiding similar blockers
 
 **When to consider rePACT**:
 If the blocker reveals that a sub-task is more complex than expected and needs its own research/design phase, use `/PACT:rePACT` instead of just augmenting:
