@@ -494,10 +494,11 @@ HANDOFF:
    - [LOW] {description}
 5. Integration points: Other components touched
 6. Open questions: Unresolved items
-7. Memory: memory_used=true, memory_id={id}
 ```
 
-Items 1-2 and 4-7 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
+
+> **Note**: Memory metadata (`memory_used`, `memory_id`) is set via separate `TaskUpdate` call on top-level task metadata, not inside the HANDOFF structure. See the Memory Lifecycle Protocol in agent definitions.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 

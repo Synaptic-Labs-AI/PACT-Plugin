@@ -197,7 +197,7 @@ If a specialist fails entirely (timeout, error):
      - Search for prior context on this topic: `memory.search("{feature} {domain}")`
      - Include MEMORY REPORT at the start of your analysis
      - After analysis, save key insights: `memory.save({...})`
-     - Include `memory_used: true` in task metadata
+     - Include `memory_used: true` and `memory_id` in task metadata
      ```
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`

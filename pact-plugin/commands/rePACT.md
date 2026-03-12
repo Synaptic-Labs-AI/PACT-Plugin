@@ -220,7 +220,7 @@ For each specialist needed:
      - Search for prior context: `memory.search("{sub-task-topic}")`
      - Include MEMORY REPORT in your teachback
      - Save memory before HANDOFF
-     - Include `memory_used: true` in task metadata
+     - Include `memory_used: true` and `memory_id` in task metadata
      ```
 2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
 3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`

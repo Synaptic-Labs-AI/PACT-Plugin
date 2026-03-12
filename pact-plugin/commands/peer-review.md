@@ -135,7 +135,7 @@ For each reviewer:
      - Search for prior context: `memory.search("{feature} review")`
      - Include MEMORY REPORT in your review output
      - Save review findings: `memory.save({...})`
-     - Include `memory_used: true` in task metadata
+     - Include `memory_used: true` and `memory_id` in task metadata
      ```
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
 3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
