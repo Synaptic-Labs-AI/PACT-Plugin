@@ -136,6 +136,7 @@ When your work is done, follow the Agent Teams HANDOFF protocol:
    TaskUpdate(taskId, metadata={"handoff": {
      "produced": ["memory_id: {id} — {topic}", ...],
      "decisions": ["Chose semantic search over keyword because...", ...],
+     "reasoning_chain": "Searched by entity first because topic query returned too many results, which led to filtering by date range to isolate recent context",
      "uncertainty": ["[LOW] Memory coverage gap in {area}"],
      "integration": ["Updated Working Memory in CLAUDE.md"],
      "open_questions": ["Should older memories on {topic} be consolidated?"]
@@ -151,7 +152,7 @@ When your work is done, follow the Agent Teams HANDOFF protocol:
 
 This replaces informal output — always use the structured HANDOFF so the lead and downstream agents can programmatically read your results.
 
-## Output Structure
+# OUTPUT FORMAT
 
 For the content of your memory operations, structure results clearly:
 
