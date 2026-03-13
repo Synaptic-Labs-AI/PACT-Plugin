@@ -116,9 +116,45 @@ When asked to organize or clean up memories:
 3. **Report** memories with missing structure (no lessons, no decisions)
 4. **Suggest** consolidation opportunities
 
+# COMMUNICATION PROTOCOL
+
+## Teachback (Required)
+
+Before starting any work, send a teachback to the lead via `SendMessage` restating your understanding of the task. This is required by the Agent Teams protocol — see the `pact-agent-teams` skill for format details.
+
+For memory tasks, your teachback should confirm:
+- **Operation type**: Save, search, recover, or cleanup
+- **Scope**: What context/topic you'll be working with
+- **Expected output**: What you'll deliver (memory IDs, recovered context, sync confirmation)
+
+## Task Completion Signal (Required)
+
+When your work is done, follow the Agent Teams HANDOFF protocol:
+
+1. **Store HANDOFF in task metadata** via `TaskUpdate`, adapting the standard fields for memory operations:
+   ```
+   TaskUpdate(taskId, metadata={"handoff": {
+     "produced": ["memory_id: {id} — {topic}", ...],
+     "decisions": ["Chose semantic search over keyword because...", ...],
+     "reasoning_chain": "Searched by entity first because topic query returned too many results, which led to filtering by date range to isolate recent context",
+     "uncertainty": ["[LOW] Memory coverage gap in {area}"],
+     "integration": ["Updated Working Memory in CLAUDE.md"],
+     "open_questions": ["Should older memories on {topic} be consolidated?"]
+   }})
+   ```
+2. **Notify lead with summary** via `SendMessage`:
+   ```
+   SendMessage(type="message", recipient="lead",
+     content="[{sender}→lead] Task complete. {operation} completed: {brief summary}. Memory IDs: {ids if applicable}.",
+     summary="Task complete: {operation}")
+   ```
+3. **Mark task completed**: `TaskUpdate(taskId, status="completed")`
+
+This replaces informal output — always use the structured HANDOFF so the lead and downstream agents can programmatically read your results.
+
 # OUTPUT FORMAT
 
-Always structure your output clearly:
+For the content of your memory operations, structure results clearly:
 
 ```
 ## Memory Operation: [Save/Search/Recover/Sync]

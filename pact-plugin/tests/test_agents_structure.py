@@ -101,8 +101,6 @@ class TestAgentBody:
 
     def test_pact_agents_reference_skills(self, agent_files):
         for f in agent_files:
-            if f.stem == "pact-memory-agent":
-                continue  # Memory agent may not need skills
             text = f.read_text(encoding="utf-8")
             # Check frontmatter has skills or body references skills
             assert "skill" in text.lower(), f"{f.name} doesn't reference skills"
