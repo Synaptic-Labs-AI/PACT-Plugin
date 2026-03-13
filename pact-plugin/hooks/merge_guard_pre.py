@@ -33,13 +33,18 @@ from shared.merge_guard_common import (
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
 )
 
+# Optional gh global flags (--repo, -R, --hostname) between 'gh' and subcommand.
+# These flags can appear between 'gh' and the subcommand (e.g., gh --repo owner/repo pr merge 42).
+# (?:\S+\s+)* matches zero or more flag+value tokens.
+_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
     # PR merge via gh CLI
-    re.compile(r"\bgh\s+pr\s+merge\b"),
+    re.compile(r"\bgh\s+" + _GH_GLOBAL_FLAGS + r"pr\s+merge\b"),
     # PR close with --delete-branch via gh CLI (bare close is reversible)
-    re.compile(r"\bgh\s+pr\s+close\b(?=.*--delete-branch)"),
-    re.compile(r"--delete-branch.*\bgh\s+pr\s+close\b"),
+    re.compile(r"\bgh\s+" + _GH_GLOBAL_FLAGS + r"pr\s+close\b(?=.*--delete-branch)"),
+    re.compile(r"--delete-branch.*\bgh\s+" + _GH_GLOBAL_FLAGS + r"pr\s+close\b"),
     # Force push (excludes --force-with-lease which is a safer alternative)
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*--force(?!-with-lease)\b"),
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*-f\b"),
@@ -49,7 +54,7 @@ DANGEROUS_PATTERNS = [
     re.compile(r"\bgit\s+branch\s+.*--delete\s+--force\b"),
     re.compile(r"\bgit\s+branch\s+--force\s+--delete\b"),
     # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
-    re.compile(r"\bgh\s+api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    re.compile(r"\bgh\s+" + _GH_GLOBAL_FLAGS + r"api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
     re.compile(r"\bcurl\b(?=.*-X\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
     # Direct push to default branch (bypasses PR merge)
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:main\b"),
@@ -429,9 +434,9 @@ def _detect_command_operation_type(command: str) -> str | None:
         "merge" for gh pr merge, "close" for gh pr close (any variant),
         or None for other operation types (force push, branch delete, etc.)
     """
-    if re.search(r"\bgh\s+pr\s+merge\b", command):
+    if re.search(r"\bgh\s+" + _GH_GLOBAL_FLAGS + r"pr\s+merge\b", command):
         return "merge"
-    if re.search(r"\bgh\s+pr\s+close\b", command):
+    if re.search(r"\bgh\s+" + _GH_GLOBAL_FLAGS + r"pr\s+close\b", command):
         return "close"
     return None
 
@@ -468,7 +473,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
 
     # If token has a PR number, check gh pr merge/close commands match
     if pr_number:
-        pr_match = re.search(r"\bgh\s+pr\s+(?:merge|close)\s+(\d+)", command)
+        pr_match = re.search(r"\bgh\s+" + _GH_GLOBAL_FLAGS + r"pr\s+(?:merge|close)\s+(\d+)", command)
         if pr_match:
             return pr_match.group(1) == str(pr_number)
 
