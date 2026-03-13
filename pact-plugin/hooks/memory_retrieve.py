@@ -49,7 +49,7 @@ DOMAIN_HINTS = {
 
 def is_pact_work_agent(agent_type: str) -> bool:
     """Check if this agent type is a PACT work agent that should receive retrieval context."""
-    if not agent_type:
+    if not agent_type or not isinstance(agent_type, str):
         return False
     agent_lower = agent_type.lower()
     return any(agent_lower == agent or agent_lower.startswith(agent + "-") for agent in PACT_WORK_AGENTS)
@@ -124,6 +124,9 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        sys.exit(0)
+
+    if not isinstance(input_data, dict):
         sys.exit(0)
 
     agent_type = input_data.get("agent_type", "")
