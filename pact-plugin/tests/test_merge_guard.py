@@ -2523,6 +2523,969 @@ class TestAPIBypassPatterns:
 
 
 # =============================================================================
+# API-based branch deletion detection (gh api + curl DELETE git/refs)
+# =============================================================================
+
+
+class TestAPIBranchDeletion:
+    """Tests for API-based branch deletion via DELETE to git/refs endpoint."""
+
+    # --- gh api: dangerous DELETE commands ---
+
+    def test_gh_api_delete_branch_ref(self):
+        """gh api -X DELETE to git/refs/heads is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X DELETE repos/owner/repo/git/refs/heads/feature-branch"
+        )
+
+    def test_gh_api_delete_branch_ref_method_flag(self):
+        """gh api --method DELETE to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api --method DELETE repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_delete_tag_ref(self):
+        """gh api -X DELETE to git/refs/tags is dangerous (defense-in-depth)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X DELETE repos/owner/repo/git/refs/tags/v1.0"
+        )
+
+    def test_gh_api_delete_ref_case_insensitive(self):
+        """gh api DELETE detection is case-insensitive for HTTP method."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X delete repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_delete_ref_mixed_case(self):
+        """gh api Delete (mixed case) is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X Delete repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_delete_ref_method_after_url(self):
+        """gh api with -X DELETE after the URL is still detected (lookahead)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/feature -X DELETE"
+        )
+
+    def test_gh_api_delete_ref_method_flag_after_url(self):
+        """gh api with --method DELETE after the URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/feature --method DELETE"
+        )
+
+    def test_gh_api_delete_ref_with_repo_flag(self):
+        """gh --repo owner/repo api -X DELETE git/refs is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo api -X DELETE repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_delete_ref_with_R_flag(self):
+        """gh -R owner/repo api -X DELETE git/refs is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh -R owner/repo api -X DELETE repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_delete_ref_with_hostname_flag(self):
+        """gh --hostname host api -X DELETE git/refs is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --hostname github.example.com api -X DELETE repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_delete_ref_with_multiple_global_flags(self):
+        """gh --repo X --hostname Y api -X DELETE git/refs is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo --hostname github.example.com api -X DELETE repos/owner/repo/git/refs/heads/feature"
+        )
+
+    # --- curl: dangerous DELETE commands ---
+
+    def test_curl_delete_branch_ref(self):
+        """curl -X DELETE to git/refs API endpoint is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X DELETE https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_delete_ref_request_flag(self):
+        """curl --request DELETE to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl --request DELETE https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_delete_ref_case_insensitive(self):
+        """curl DELETE detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X delete https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_delete_ref_method_after_url(self):
+        """curl with -X DELETE after the URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/feature -X DELETE"
+        )
+
+    def test_curl_delete_ref_request_after_url(self):
+        """curl with --request DELETE after the URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/feature --request DELETE"
+        )
+
+    def test_curl_delete_tag_ref(self):
+        """curl -X DELETE to git/refs/tags is dangerous (defense-in-depth)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X DELETE https://api.github.com/repos/owner/repo/git/refs/tags/v1.0"
+        )
+
+    def test_curl_delete_ref_with_auth_header(self):
+        """curl with auth header and DELETE to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'curl -H "Authorization: token ghp_xxx" -X DELETE https://api.github.com/repos/owner/repo/git/refs/heads/feature'
+        )
+
+    # --- Safe GET operations (must NOT be detected) ---
+
+    def test_gh_api_get_ref_is_safe(self):
+        """gh api to git/refs without mutating method is safe (default GET)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_gh_api_explicit_get_ref_is_safe(self):
+        """gh api -X GET to git/refs is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api -X GET repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_gh_api_list_refs_is_safe(self):
+        """gh api to git/refs (list all refs) is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/git/refs"
+        )
+
+    def test_curl_get_ref_is_safe(self):
+        """curl to git/refs without -X flag is safe (default GET)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_explicit_get_ref_is_safe(self):
+        """curl -X GET to git/refs is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl -X GET https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+
+# =============================================================================
+# API-based ref mutation / force push detection (PATCH/POST/PUT to git/refs)
+# =============================================================================
+
+
+class TestAPIRefMutation:
+    """Tests for API-based ref mutation via PATCH/POST/PUT to git/refs endpoint."""
+
+    # --- gh api: dangerous mutating commands ---
+
+    def test_gh_api_patch_ref(self):
+        """gh api -X PATCH to git/refs is dangerous (ref update)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/feature -f sha=abc123 -f force=true"
+        )
+
+    def test_gh_api_post_ref(self):
+        """gh api -X POST to git/refs is dangerous (ref creation)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X POST repos/owner/repo/git/refs -f ref=refs/heads/new-branch -f sha=abc123"
+        )
+
+    def test_gh_api_put_ref(self):
+        """gh api -X PUT to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PUT repos/owner/repo/git/refs/heads/feature -f sha=abc123"
+        )
+
+    def test_gh_api_method_patch_ref(self):
+        """gh api --method PATCH to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api --method PATCH repos/owner/repo/git/refs/heads/feature -f sha=abc123"
+        )
+
+    def test_gh_api_method_post_ref(self):
+        """gh api --method POST to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api --method POST repos/owner/repo/git/refs -f ref=refs/heads/new -f sha=abc"
+        )
+
+    def test_gh_api_method_put_ref(self):
+        """gh api --method PUT to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api --method PUT repos/owner/repo/git/refs/heads/feature -f sha=abc123"
+        )
+
+    def test_gh_api_patch_ref_case_insensitive(self):
+        """gh api PATCH detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X patch repos/owner/repo/git/refs/heads/feature -f sha=abc"
+        )
+
+    def test_gh_api_post_ref_case_insensitive(self):
+        """gh api POST detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X Post repos/owner/repo/git/refs/heads/feature -f sha=abc"
+        )
+
+    def test_gh_api_put_ref_case_insensitive(self):
+        """gh api PUT detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X put repos/owner/repo/git/refs/heads/feature -f sha=abc"
+        )
+
+    def test_gh_api_patch_ref_method_after_url(self):
+        """gh api with -X PATCH after URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/feature -X PATCH -f sha=abc123"
+        )
+
+    def test_gh_api_ref_mutation_with_repo_flag(self):
+        """gh --repo flag with api ref mutation is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo api -X PATCH repos/owner/repo/git/refs/heads/feature -f sha=abc"
+        )
+
+    def test_gh_api_ref_mutation_with_R_flag(self):
+        """gh -R flag with api ref mutation is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh -R owner/repo api -X POST repos/owner/repo/git/refs -f ref=refs/heads/new -f sha=abc"
+        )
+
+    def test_gh_api_ref_mutation_with_hostname(self):
+        """gh --hostname flag with api ref mutation is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --hostname github.example.com api -X PATCH repos/owner/repo/git/refs/heads/feature -f sha=abc"
+        )
+
+    # --- curl: dangerous mutating commands ---
+
+    def test_curl_patch_ref(self):
+        """curl -X PATCH to git/refs API is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'curl -X PATCH https://api.github.com/repos/owner/repo/git/refs/heads/feature -d \'{"sha":"abc","force":true}\''
+        )
+
+    def test_curl_post_ref(self):
+        """curl -X POST to git/refs API is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'curl -X POST https://api.github.com/repos/owner/repo/git/refs -d \'{"ref":"refs/heads/new","sha":"abc"}\''
+        )
+
+    def test_curl_put_ref(self):
+        """curl -X PUT to git/refs API is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X PUT https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_request_patch_ref(self):
+        """curl --request PATCH to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl --request PATCH https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_request_post_ref(self):
+        """curl --request POST to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl --request POST https://api.github.com/repos/owner/repo/git/refs"
+        )
+
+    def test_curl_request_put_ref(self):
+        """curl --request PUT to git/refs is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl --request PUT https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_patch_ref_case_insensitive(self):
+        """curl PATCH detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X patch https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_ref_mutation_method_after_url(self):
+        """curl with -X PATCH after URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/feature -X PATCH"
+        )
+
+    def test_curl_ref_mutation_request_after_url(self):
+        """curl with --request POST after URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/feature --request POST"
+        )
+
+    # --- Safe operations (must NOT be detected) ---
+
+    def test_gh_api_get_ref_info_is_safe(self):
+        """gh api to git/refs without mutating method is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_explicit_get_ref_info_is_safe(self):
+        """gh api -X GET to git/refs is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api -X GET repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_get_ref_info_is_safe(self):
+        """curl to git/refs without -X flag is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_curl_explicit_get_ref_is_safe(self):
+        """curl -X GET to git/refs is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl -X GET https://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+
+# =============================================================================
+# API-based push to main/master detection (PATCH/POST/PUT to git/refs/heads/main|master)
+# =============================================================================
+
+
+class TestAPIPushToMain:
+    """Tests for API-based push to main/master via mutating method to git/refs/heads/main|master."""
+
+    # --- gh api: dangerous mutating commands to main/master ---
+
+    def test_gh_api_patch_main_ref(self):
+        """gh api -X PATCH to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc123"
+        )
+
+    def test_gh_api_patch_master_ref(self):
+        """gh api -X PATCH to git/refs/heads/master is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/master -f sha=abc123"
+        )
+
+    def test_gh_api_post_main_ref(self):
+        """gh api -X POST to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X POST repos/owner/repo/git/refs/heads/main -f sha=abc123"
+        )
+
+    def test_gh_api_put_main_ref(self):
+        """gh api -X PUT to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PUT repos/owner/repo/git/refs/heads/main -f sha=abc123"
+        )
+
+    def test_gh_api_method_patch_main_ref(self):
+        """gh api --method PATCH to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api --method PATCH repos/owner/repo/git/refs/heads/main -f sha=abc123"
+        )
+
+    def test_gh_api_method_post_master_ref(self):
+        """gh api --method POST to git/refs/heads/master is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api --method POST repos/owner/repo/git/refs/heads/master -f sha=abc123"
+        )
+
+    def test_gh_api_patch_main_case_insensitive(self):
+        """gh api PATCH detection for main is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X patch repos/owner/repo/git/refs/heads/main -f sha=abc"
+        )
+
+    def test_gh_api_patch_main_method_after_url(self):
+        """gh api with -X PATCH after main URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/main -X PATCH -f sha=abc123"
+        )
+
+    def test_gh_api_patch_main_with_repo_flag(self):
+        """gh --repo flag with api PATCH to main is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"
+        )
+
+    def test_gh_api_patch_main_with_R_flag(self):
+        """gh -R flag with api PATCH to main is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh -R owner/repo api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"
+        )
+
+    def test_gh_api_patch_master_with_hostname(self):
+        """gh --hostname flag with api PATCH to master is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --hostname github.example.com api -X PATCH repos/owner/repo/git/refs/heads/master -f sha=abc"
+        )
+
+    def test_gh_api_patch_main_with_multiple_global_flags(self):
+        """gh --repo X --hostname Y api PATCH to main is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo --hostname github.example.com api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"
+        )
+
+    # --- curl: dangerous mutating commands to main/master ---
+
+    def test_curl_patch_main_ref(self):
+        """curl -X PATCH to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X PATCH https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_patch_master_ref(self):
+        """curl -X PATCH to git/refs/heads/master is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X PATCH https://api.github.com/repos/owner/repo/git/refs/heads/master"
+        )
+
+    def test_curl_post_main_ref(self):
+        """curl -X POST to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X POST https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_put_main_ref(self):
+        """curl -X PUT to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X PUT https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_request_patch_main(self):
+        """curl --request PATCH to git/refs/heads/main is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl --request PATCH https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_request_patch_master(self):
+        """curl --request PATCH to git/refs/heads/master is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl --request PATCH https://api.github.com/repos/owner/repo/git/refs/heads/master"
+        )
+
+    def test_curl_patch_main_case_insensitive(self):
+        """curl PATCH to main detection is case-insensitive."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X patch https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_patch_main_method_after_url(self):
+        """curl with -X PATCH after main URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/main -X PATCH"
+        )
+
+    def test_curl_request_post_master_after_url(self):
+        """curl with --request POST after master URL is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/master --request POST"
+        )
+
+    # --- Safe operations (must NOT be detected) ---
+
+    def test_gh_api_get_main_ref_is_safe(self):
+        """gh api to git/refs/heads/main without mutating method is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_gh_api_explicit_get_main_ref_is_safe(self):
+        """gh api -X GET to git/refs/heads/main is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api -X GET repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_gh_api_get_master_ref_is_safe(self):
+        """gh api to git/refs/heads/master without mutating method is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/git/refs/heads/master"
+        )
+
+    def test_curl_get_main_ref_is_safe(self):
+        """curl to git/refs/heads/main without -X flag is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_curl_explicit_get_main_is_safe(self):
+        """curl -X GET to git/refs/heads/main is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl -X GET https://api.github.com/repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_gh_api_patch_feature_branch_not_main(self):
+        """gh api PATCH to feature branch ref matches generic ref mutation but NOT main/master pattern."""
+        from merge_guard_pre import is_dangerous_command
+
+        # This IS dangerous (caught by generic ref mutation), just not by the main/master-specific pattern.
+        # Testing it here to confirm detection works regardless of branch name.
+        assert is_dangerous_command(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/feature -f sha=abc"
+        )
+
+
+# =============================================================================
+# API bypass — false positive prevention via stripping pipeline
+# =============================================================================
+
+
+class TestAPIBypassFalsePositivePrevention:
+    """Tests that the stripping pipeline correctly handles API bypass patterns
+    in non-executable contexts (echo, variable assignments, etc.)."""
+
+    def test_echo_gh_api_delete_ref_stripped(self):
+        """echo 'gh api -X DELETE ...' is stripped and NOT flagged."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'echo "gh api -X DELETE repos/owner/repo/git/refs/heads/main"'
+        )
+
+    def test_echo_single_quote_gh_api_delete_stripped(self):
+        """echo 'gh api -X DELETE ...' (single quotes) is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "echo 'gh api -X DELETE repos/owner/repo/git/refs/heads/main'"
+        )
+
+    def test_var_assignment_gh_api_delete_stripped(self):
+        """VAR='gh api -X DELETE ...' is stripped and NOT flagged."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'CMD="gh api -X DELETE repos/owner/repo/git/refs/heads/main"'
+        )
+
+    def test_var_assignment_single_quote_stripped(self):
+        """VAR='gh api -X DELETE ...' (single quotes) is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "CMD='gh api -X DELETE repos/owner/repo/git/refs/heads/main'"
+        )
+
+    def test_echo_curl_delete_ref_stripped(self):
+        """echo 'curl -X DELETE ...' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'echo "curl -X DELETE https://api.github.com/repos/o/r/git/refs/heads/main"'
+        )
+
+    def test_echo_gh_api_patch_ref_stripped(self):
+        """echo 'gh api -X PATCH ... git/refs ...' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'echo "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"'
+        )
+
+    def test_var_assignment_curl_patch_main_stripped(self):
+        """VAR='curl -X PATCH ... git/refs/heads/main' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'CMD="curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main"'
+        )
+
+    def test_comment_gh_api_delete_stripped(self):
+        """# gh api -X DELETE ... is stripped as a comment."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "# gh api -X DELETE repos/owner/repo/git/refs/heads/main"
+        )
+
+    def test_git_commit_msg_gh_api_delete_stripped(self):
+        """git commit -m 'gh api -X DELETE ...' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'git commit -m "Blocked: gh api -X DELETE repos/o/r/git/refs/heads/main"'
+        )
+
+    def test_printf_gh_api_patch_ref_stripped(self):
+        """printf 'gh api -X PATCH ... git/refs ...' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'printf "gh api -X PATCH repos/owner/repo/git/refs/heads/main"'
+        )
+
+    # --- Guard: echo piped to shell preserves content ---
+
+    def test_echo_gh_api_delete_piped_to_bash_preserved(self):
+        """echo 'gh api -X DELETE ...' | bash is NOT stripped (executes)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'echo "gh api -X DELETE repos/owner/repo/git/refs/heads/main" | bash'
+        )
+
+    def test_echo_curl_patch_ref_piped_to_sh_preserved(self):
+        """echo 'curl ...' | sh is NOT stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'echo "curl -X PATCH https://api.github.com/repos/o/r/git/refs/heads/main" | sh'
+        )
+
+    # --- Guard: eval preserves variable content ---
+
+    def test_var_with_eval_preserved(self):
+        """CMD='gh api -X DELETE ...' && eval $CMD is NOT stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'CMD="gh api -X DELETE repos/owner/repo/git/refs/heads/main" && eval $CMD'
+        )
+
+    # --- Guard: command substitution inside echo preserves ---
+
+    def test_echo_with_command_substitution_preserved(self):
+        """echo \"$(gh api -X DELETE ...)\" is NOT stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'echo "$(gh api -X DELETE repos/owner/repo/git/refs/heads/main)"'
+        )
+
+    # --- Non-ref API operations are safe ---
+
+    def test_gh_api_issues_close_is_safe(self):
+        """gh api to close an issue (not PR) is safe — no git/refs involvement."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api -X PATCH repos/owner/repo/issues/42 -f state=closed"
+        )
+
+    def test_gh_api_read_pr_info_is_safe(self):
+        """gh api to read PR info is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh api repos/owner/repo/pulls/42"
+        )
+
+    def test_curl_read_refs_with_jq_is_safe(self):
+        """curl to read refs piped to jq is safe (no mutating method)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "curl https://api.github.com/repos/owner/repo/git/refs | jq '.'"
+        )
+
+
+# =============================================================================
+# API bypass — line continuation normalization
+# =============================================================================
+
+
+class TestAPIBypassLineContinuation:
+    """Tests that line continuations in API bypass commands are normalized."""
+
+    def test_gh_api_delete_ref_line_continuation(self):
+        """gh api -X DELETE \\ repos/.../git/refs is detected after normalization."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X DELETE \\\nrepos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_patch_main_line_continuation(self):
+        """gh api -X PATCH \\ to main is detected after normalization."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PATCH \\\nrepos/owner/repo/git/refs/heads/main \\\n-f sha=abc123"
+        )
+
+    def test_curl_delete_ref_line_continuation(self):
+        """curl -X DELETE \\ to git/refs is detected after normalization."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "curl -X DELETE \\\nhttps://api.github.com/repos/owner/repo/git/refs/heads/feature"
+        )
+
+    def test_gh_api_with_repo_flag_line_continuation(self):
+        """gh --repo \\ api -X PATCH git/refs is detected after normalization."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo \\\napi -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc"
+        )
+
+
+# =============================================================================
+# API bypass — authorization flow integration
+# =============================================================================
+
+
+class TestAPIBypassAuthorizationFlow:
+    """Integration tests for API bypass commands with the token authorization system."""
+
+    def test_gh_api_delete_ref_blocked_without_token(self, tmp_path):
+        """gh api DELETE to git/refs is blocked without authorization token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "gh api -X DELETE repos/owner/repo/git/refs/heads/feature",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+        assert "approval" in result.lower() or "AskUserQuestion" in result
+
+    def test_gh_api_patch_ref_blocked_without_token(self, tmp_path):
+        """gh api PATCH to git/refs is blocked without token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/feature -f sha=abc",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+        assert "approval" in result.lower() or "AskUserQuestion" in result
+
+    def test_gh_api_patch_main_blocked_without_token(self, tmp_path):
+        """gh api PATCH to main is blocked without token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+        assert "approval" in result.lower() or "AskUserQuestion" in result
+
+    def test_curl_delete_ref_blocked_without_token(self, tmp_path):
+        """curl DELETE to git/refs is blocked without token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "curl -X DELETE https://api.github.com/repos/owner/repo/git/refs/heads/feature",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+        assert "approval" in result.lower() or "AskUserQuestion" in result
+
+    def test_curl_patch_main_blocked_without_token(self, tmp_path):
+        """curl PATCH to main is blocked without token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "curl -X PATCH https://api.github.com/repos/owner/repo/git/refs/heads/main",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+        assert "approval" in result.lower() or "AskUserQuestion" in result
+
+    def test_gh_api_delete_ref_allowed_with_token(self, tmp_path):
+        """gh api DELETE to git/refs is allowed with valid authorization token."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"op": "api-delete-ref"}, token_dir=tmp_path)
+
+        result = check_merge_authorization(
+            "gh api -X DELETE repos/owner/repo/git/refs/heads/feature",
+            token_dir=tmp_path,
+        )
+        assert result is None  # Allowed
+
+    def test_gh_api_patch_main_allowed_with_token(self, tmp_path):
+        """gh api PATCH to main is allowed with valid authorization token."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"op": "api-patch-main"}, token_dir=tmp_path)
+
+        result = check_merge_authorization(
+            "gh api -X PATCH repos/owner/repo/git/refs/heads/main -f sha=abc",
+            token_dir=tmp_path,
+        )
+        assert result is None  # Allowed
+
+    def test_curl_patch_ref_allowed_with_token(self, tmp_path):
+        """curl PATCH to git/refs is allowed with valid token."""
+        from merge_guard_post import write_token
+        from merge_guard_pre import check_merge_authorization
+
+        write_token({"op": "api-patch-ref"}, token_dir=tmp_path)
+
+        result = check_merge_authorization(
+            "curl -X PATCH https://api.github.com/repos/owner/repo/git/refs/heads/feature",
+            token_dir=tmp_path,
+        )
+        assert result is None  # Allowed
+
+    def test_gh_api_get_ref_not_blocked(self, tmp_path):
+        """gh api GET to git/refs does not require a token (safe operation)."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "gh api repos/owner/repo/git/refs/heads/main",
+            token_dir=tmp_path,
+        )
+        assert result is None  # Not blocked
+
+
+# =============================================================================
 # Direct push to main/master detection
 # =============================================================================
 
