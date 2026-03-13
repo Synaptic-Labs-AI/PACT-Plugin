@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/merge_guard_pre.py
-Summary: PreToolUse hook matching Bash — blocks merge, close (with branch
-         deletion), force push, and branch delete commands unless a valid
-         authorization token exists.
+Summary: PreToolUse hook matching Bash — blocks dangerous git operations and
+         API-based bypass attempts unless a valid authorization token exists.
 Used by: hooks.json PreToolUse hook (matcher: Bash)
 
 This hook is part of the merge guard system. It checks for a valid token
 written by the companion hook (merge_guard_post.py) before allowing dangerous
-git/gh operations (merge, close with --delete-branch, force push, branch
-delete). If no valid token exists, the command is blocked with a message
-directing the user to confirm via AskUserQuestion first.
+operations. Detected operations include:
+- CLI: git/gh merge, close with --delete-branch, force push, branch delete,
+  push to main/master
+- API: gh api, curl, wget, and httpie calls targeting merge, git/refs, or
+  contents endpoints with mutating HTTP methods (including implicit POST via
+  body parameter flags or data flags)
+
+If no valid token exists, the command is blocked with a message directing the
+user to confirm via AskUserQuestion first.
 
 Input: JSON from stdin with tool_input containing the command
 Output: JSON with hookSpecificOutput.permissionDecision if blocking
@@ -41,6 +46,7 @@ _GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
 # Composed prefixes for DRY usage across all patterns.
 _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
 _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
+_GH_API_PREFIX = _GH_PREFIX + r"api\b"
 
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
@@ -58,8 +64,41 @@ DANGEROUS_PATTERNS = [
     re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
     re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
     # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
-    re.compile(_GH_PREFIX + r"api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
-    re.compile(r"\bcurl\b(?=.*-X\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
+    # API-based branch deletion via DELETE to git/refs endpoint
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*api.*git/refs", re.IGNORECASE),
+    # API-based ref mutation / force push via mutating method to git/refs endpoint
+    # (any mutating operation on git refs via API is inherently dangerous)
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*api.*git/refs", re.IGNORECASE),
+    # gh api implicit POST: body param flags (-f, -F, --field, --raw-field, --input)
+    # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
+    # Negative lookahead excludes explicit GET (which overrides implicit POST).
+    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*git/refs", re.IGNORECASE),
+    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*merge", re.IGNORECASE),
+    # curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
+    # default to POST. Dangerous when targeting git/refs or merge API endpoints.
+    # Negative lookahead excludes explicit GET (which overrides implicit POST).
+    re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?!.*(?:-X|--request)\s+GET\b)(?=.*(?:--data(?:-(?:raw|binary))?|-d)\s).*api.*merge", re.IGNORECASE),
+    # Contents API: write operations (PUT/PATCH/POST) to /contents/ endpoint
+    # targeting main or master branch. Flags any mutating /contents/ call that
+    # mentions main or master anywhere in the command (acceptable false positive).
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*contents/.*(?:main|master)", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*contents/.*(?:main|master)", re.IGNORECASE),
+    # Alternative HTTP clients: wget with --method flag
+    re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
+    # Alternative HTTP clients: httpie (method is positional arg after 'http'/'https')
+    # \bhttps?\s+ ensures word boundary + whitespace (won't match URLs like https://).
+    # (?:\S+\s+)* allows optional flags (e.g., -a user:pass) between command and method.
+    re.compile(r"\bhttps?\s+(?:\S+\s+)*(?:DELETE|PATCH|POST|PUT)\s.*git/refs", re.IGNORECASE),
+    re.compile(r"\bhttps?\s+(?:\S+\s+)*(?:DELETE|PATCH|POST|PUT)\s.*merge", re.IGNORECASE),
+    # Known API detection gaps (defense-in-depth, not a security boundary):
+    # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
+    # - gh alias: aliases can hide API calls (tracked in #270)
     # Direct push to default branch (bypasses PR merge)
     re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
     re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
