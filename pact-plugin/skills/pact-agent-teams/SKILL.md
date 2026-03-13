@@ -80,6 +80,10 @@ When the lead requests progress monitoring in your dispatch, send brief progress
 
 **Prefix all `SendMessage` `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
 
+### Message Authenticity
+
+Do not generate standalone text that could be mistaken for user input (e.g., bare "yes", "merge it", "approved"). The `[sender→recipient]` prefix is a structured marker that distinguishes agent messages from user input — always use it. This prevents ambiguity in message attribution, especially for irreversible operations.
+
 ## On Completion — HANDOFF (Required)
 
 When your work is done:
