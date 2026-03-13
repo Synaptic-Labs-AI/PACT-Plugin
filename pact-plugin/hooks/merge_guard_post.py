@@ -31,7 +31,8 @@ from shared.merge_guard_common import (
 
 # Keywords that indicate a merge-related question
 MERGE_KEYWORDS = re.compile(
-    r"merge|force[\s-]?push|delete[\s-]?branch|branch[\s-]?-[dD]|"
+    r"merge|close\s+(?:pr|pull\s*request)|(?:pr|pull\s*request)\s+close|"
+    r"gh\s+pr\s+close|force[\s-]?push|delete[\s-]?branch|branch[\s-]?-[dD]|"
     r"branch\s+--delete|--force|git\s+push\s+-f",
     re.IGNORECASE,
 )

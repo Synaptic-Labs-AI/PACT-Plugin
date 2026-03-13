@@ -35,6 +35,8 @@ from shared.merge_guard_common import (
 DANGEROUS_PATTERNS = [
     # PR merge via gh CLI
     re.compile(r"\bgh\s+pr\s+merge\b"),
+    # PR close via gh CLI
+    re.compile(r"\bgh\s+pr\s+close\b"),
     # Force push (excludes --force-with-lease which is a safer alternative)
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*--force(?!-with-lease)\b"),
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*-f\b"),
@@ -435,11 +437,11 @@ def _token_matches_command(token: dict, command: str) -> bool:
     pr_number = context.get("pr_number")
     branch = context.get("branch")
 
-    # If token has a PR number, check gh pr merge commands match
+    # If token has a PR number, check gh pr merge/close commands match
     if pr_number:
-        pr_merge_match = re.search(r"\bgh\s+pr\s+merge\s+(\d+)", command)
-        if pr_merge_match:
-            return pr_merge_match.group(1) == str(pr_number)
+        pr_match = re.search(r"\bgh\s+pr\s+(?:merge|close)\s+(\d+)", command)
+        if pr_match:
+            return pr_match.group(1) == str(pr_number)
 
     # If token has a branch, check branch deletion commands match
     if branch:
@@ -500,7 +502,7 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
             )
 
     return (
-        "Merge/force-push/branch-delete requires user approval via AskUserQuestion. "
+        "Merge/close/force-push/branch-delete requires user approval via AskUserQuestion. "
         "Use AskUserQuestion to confirm with the user before proceeding."
     )
 
