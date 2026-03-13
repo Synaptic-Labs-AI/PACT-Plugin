@@ -253,9 +253,7 @@ After collecting all specialist outputs, use extended thinking to synthesize:
    - Assess overall project risk
    - Identify mitigation strategies
 
-7. **Save plan context**: Create memory save tasks for specialists who contributed. When plan is finalized, unblock save tasks so idle agents can load `Skill("pact-memory")` and save planning decisions, conflict resolutions, and key constraints discovered.
-
-8. **Synthesis Validation Checkpoint**
+7. **Synthesis Validation Checkpoint**
 
    Before proceeding to Phase 3, verify:
    - [ ] At least 2 specialists contributed meaningful input
