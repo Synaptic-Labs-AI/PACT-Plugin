@@ -467,3 +467,285 @@ class TestCheckMemoryMetadata:
             teammate_name="pact-backend-coder"
         )
         assert result is None
+
+
+# =============================================================================
+# Comprehensive: Nudge fires for ALL PACT agent types
+# =============================================================================
+
+class TestCheckMemoryNudgeAllAgents:
+    """Verify the memory nudge fires for every PACT work agent type."""
+
+    @pytest.mark.parametrize("agent_name", [
+        "pact-preparer",
+        "pact-architect",
+        "pact-backend-coder",
+        "pact-frontend-coder",
+        "pact-database-engineer",
+        "pact-devops-engineer",
+        "pact-n8n",
+        "pact-test-engineer",
+        "pact-security-engineer",
+        "pact-qa-engineer",
+    ])
+    def test_nudge_fires_for_all_pact_agents(self, agent_name):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name=agent_name,
+            task_id="99"
+        )
+        assert result is not None
+        assert "ACTION REQUIRED" in result
+        assert agent_name in result
+        assert "task #99" in result
+
+    @pytest.mark.parametrize("agent_name", [
+        "pact-preparer",
+        "pact-architect",
+        "pact-backend-coder",
+        "pact-frontend-coder",
+        "pact-database-engineer",
+        "pact-devops-engineer",
+        "pact-n8n",
+        "pact-test-engineer",
+        "pact-security-engineer",
+        "pact-qa-engineer",
+    ])
+    def test_no_nudge_when_memory_saved_for_all_agents(self, agent_name):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={"memory_saved": True},
+            teammate_name=agent_name
+        )
+        assert result is None
+
+
+class TestCheckMemoryNudgeNonPactAgents:
+    """Verify the memory nudge does NOT fire for non-PACT agents."""
+
+    @pytest.mark.parametrize("agent_name", [
+        "random-agent",
+        "backend-coder",  # no pact- prefix
+        "explorer",
+        "team-lead",
+        "pact-memory-agent",
+        "not-pact-backend-coder",
+    ])
+    def test_no_nudge_for_non_pact_agents(self, agent_name):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name=agent_name
+        )
+        assert result is None
+
+
+class TestNudgeMessageContent:
+    """Verify the ACTION REQUIRED message includes all expected components."""
+
+    def test_nudge_includes_agent_name(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="pact-frontend-coder",
+            task_id="7"
+        )
+        assert "pact-frontend-coder" in result
+
+    def test_nudge_includes_task_id(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="pact-backend-coder",
+            task_id="42"
+        )
+        assert "task #42" in result
+
+    def test_nudge_omits_task_ref_when_no_id(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="pact-backend-coder",
+            task_id=""
+        )
+        assert result is not None
+        assert "ACTION REQUIRED" in result
+        assert "task #" not in result
+
+    def test_nudge_includes_save_task_instruction(self):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="pact-backend-coder",
+            task_id="1"
+        )
+        assert "save task" in result.lower()
+        assert "pact-memory" in result
+
+    def test_nudge_contains_clipboard_emoji(self):
+        """The nudge should start with the clipboard emoji."""
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name="pact-backend-coder",
+            task_id="1"
+        )
+        assert "\U0001f4cb" in result  # clipboard emoji
+
+
+class TestScopeSuffixedAgentsInHandoffGate:
+    """Scope-suffixed agent names should be recognized by handoff_gate."""
+
+    @pytest.mark.parametrize("agent_name", [
+        "pact-backend-coder-auth-scope",
+        "pact-frontend-coder-dashboard",
+        "pact-test-engineer-unit",
+        "pact-n8n-workflow-builder",
+    ])
+    def test_scope_suffixed_agents_get_nudge(self, agent_name):
+        from handoff_gate import check_memory_metadata
+
+        result = check_memory_metadata(
+            task_metadata={},
+            teammate_name=agent_name,
+            task_id="10"
+        )
+        assert result is not None
+        assert "ACTION REQUIRED" in result
+        assert agent_name in result
+
+
+class TestHandoffAndMemoryInteraction:
+    """Both handoff validation (blocking) and memory check (non-blocking)
+    should fire correctly on the same task completion."""
+
+    def test_valid_handoff_no_memory_yields_nudge_only(self, capsys):
+        """Valid handoff + no memory_saved = exit 0 + nudge on stderr."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: implement feature",
+            "teammate_name": "pact-backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata",
+                    return_value={"handoff": VALID_HANDOFF}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "ACTION REQUIRED" in captured.err
+        assert "pact-backend-coder" in captured.err
+        assert "task #5" in captured.err
+
+    def test_missing_handoff_blocks_even_with_memory_saved(self, capsys):
+        """Missing handoff blocks (exit 2) regardless of memory_saved status."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: implement feature",
+            "teammate_name": "pact-backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata",
+                    return_value={"memory_saved": True}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "handoff" in captured.err.lower()
+
+    def test_valid_handoff_with_memory_saved_no_output(self, capsys):
+        """Valid handoff + memory_saved: true = exit 0, no stderr output."""
+        from handoff_gate import main
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: implement feature",
+            "teammate_name": "pact-backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.err.strip() == ""
+
+    def test_non_pact_agent_valid_handoff_no_nudge(self, capsys):
+        """Non-PACT agent with valid handoff = exit 0, no nudge."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: implement feature",
+            "teammate_name": "regular-agent",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata",
+                    return_value={"handoff": VALID_HANDOFF}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "ACTION REQUIRED" not in captured.err
+
+
+class TestReadTaskMetadataEdgeCases:
+    """Additional edge cases for read_task_metadata."""
+
+    def test_path_traversal_sanitization(self, tmp_path):
+        from handoff_gate import read_task_metadata
+
+        # Attempt path traversal
+        result = read_task_metadata("../../../etc/passwd", "team", tasks_base_dir=str(tmp_path))
+        assert result == {}
+
+    def test_task_id_with_slashes_sanitized(self, tmp_path):
+        from handoff_gate import read_task_metadata
+
+        result = read_task_metadata("foo/bar", "team", tasks_base_dir=str(tmp_path))
+        assert result == {}
+
+    def test_reads_without_team_name(self, tmp_path):
+        from handoff_gate import read_task_metadata
+
+        task_data = {"metadata": {"handoff": VALID_HANDOFF}}
+        (tmp_path / "42.json").write_text(json.dumps(task_data))
+
+        result = read_task_metadata("42", None, tasks_base_dir=str(tmp_path))
+        assert "handoff" in result
+
+    def test_task_file_missing_metadata_key(self, tmp_path):
+        from handoff_gate import read_task_metadata
+
+        # Valid JSON but no metadata key
+        task_data = {"subject": "test", "status": "completed"}
+        (tmp_path / "42.json").write_text(json.dumps(task_data))
+
+        result = read_task_metadata("42", None, tasks_base_dir=str(tmp_path))
+        assert result == {}
