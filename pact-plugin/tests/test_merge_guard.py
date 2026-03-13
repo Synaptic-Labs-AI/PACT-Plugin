@@ -923,16 +923,15 @@ class TestAdversarialCommandDetection:
             "git push --force https://github.com/user/repo.git main"
         )
 
-    def test_multiline_command_with_backslash_not_detected(self):
-        """Backslash-continuation splits the pattern across lines — not detected.
+    def test_multiline_command_with_backslash_detected(self):
+        """Backslash-continuation across lines IS detected after normalization.
 
-        Known limitation: regex operates line-by-line. In practice, Claude Code
-        sends commands as single-line strings, so this is acceptable.
+        Line continuations (\\<newline>) are normalized to spaces before pattern
+        matching, closing a bypass vector.
         """
         from merge_guard_pre import is_dangerous_command
 
-        # The \n breaks the regex match — documents a known limitation
-        assert not is_dangerous_command("git push \\\n--force origin main")
+        assert is_dangerous_command("git push \\\n--force origin main")
 
     def test_git_push_force_via_config_flag_detected(self):
         """git -c ... push --force with interleaved -c flags IS detected."""
@@ -4385,3 +4384,1247 @@ class TestIdempotentTokenConsumption:
         # At least one consumed file should exist
         consumed_files = list(tmp_path.glob("merge-authorized-*.consumed"))
         assert len(consumed_files) >= 1
+
+
+# =============================================================================
+# gh pr close: dangerous command detection
+# =============================================================================
+
+
+class TestGhPrCloseDetection:
+    """Tests for gh pr close detection in merge guard pre-hook.
+
+    Only 'gh pr close --delete-branch' is dangerous. Bare 'gh pr close'
+    (without --delete-branch) is trivially reversible and ALLOWED.
+
+    Covers: --delete-branch position variants, bare close (safe), flags,
+    chained commands, false positive prevention, and edge cases.
+    """
+
+    # -------------------------------------------------------------------------
+    # Bare gh pr close (no --delete-branch) is SAFE
+    # -------------------------------------------------------------------------
+
+    def test_gh_pr_close_bare_is_safe(self):
+        """Bare 'gh pr close' without --delete-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close")
+
+    def test_gh_pr_close_with_number_is_safe(self):
+        """'gh pr close 123' without --delete-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close 123")
+
+    def test_gh_pr_close_with_large_number_is_safe(self):
+        """'gh pr close 99999' without --delete-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close 99999")
+
+    def test_gh_pr_close_with_comment_flag_is_safe(self):
+        """'gh pr close --comment' without --delete-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close 42 --comment 'closing as wontfix'")
+
+    def test_gh_pr_close_with_repo_flag_is_safe(self):
+        """'gh pr close --repo' without --delete-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close 42 --repo owner/repo")
+
+    # -------------------------------------------------------------------------
+    # gh pr close --delete-branch IS dangerous
+    # -------------------------------------------------------------------------
+
+    def test_gh_pr_close_delete_branch_after_number(self):
+        """'gh pr close 42 --delete-branch' is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 --delete-branch")
+
+    def test_gh_pr_close_delete_branch_before_number(self):
+        """'gh pr close --delete-branch 42' is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close --delete-branch 42")
+
+    def test_gh_pr_close_delete_branch_no_number(self):
+        """'gh pr close --delete-branch' (no PR number) is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close --delete-branch")
+
+    def test_gh_pr_close_delete_branch_with_comment(self):
+        """'gh pr close --delete-branch --comment' is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 --delete-branch --comment 'done'")
+
+    def test_gh_pr_close_delete_branch_with_repo(self):
+        """'gh pr close --delete-branch --repo' is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 --delete-branch --repo owner/repo")
+
+    # -------------------------------------------------------------------------
+    # Whitespace and formatting edge cases
+    # -------------------------------------------------------------------------
+
+    def test_gh_pr_close_delete_branch_extra_whitespace(self):
+        """'gh  pr  close' with extra whitespace + --delete-branch is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh  pr  close 42 --delete-branch")
+
+    def test_gh_pr_close_delete_branch_tab_separated(self):
+        """'gh pr close' with tabs + --delete-branch is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh\tpr\tclose 42 --delete-branch")
+
+    def test_gh_pr_close_bare_extra_whitespace_safe(self):
+        """'gh  pr  close' without --delete-branch is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh  pr  close 42")
+
+    # -------------------------------------------------------------------------
+    # Chained commands with --delete-branch
+    # -------------------------------------------------------------------------
+
+    def test_gh_pr_close_delete_branch_after_and(self):
+        """'gh pr close --delete-branch' after && is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("cd /tmp && gh pr close 42 --delete-branch")
+
+    def test_gh_pr_close_delete_branch_after_semicolon(self):
+        """'gh pr close --delete-branch' after semicolon is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo done; gh pr close 42 --delete-branch")
+
+    def test_gh_pr_close_delete_branch_after_or(self):
+        """'gh pr close --delete-branch' after || is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("false || gh pr close 42 --delete-branch")
+
+    def test_gh_pr_close_delete_branch_in_subshell(self):
+        """'gh pr close --delete-branch' in $() subshell is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("$(gh pr close 42 --delete-branch)")
+
+    def test_gh_pr_close_delete_branch_with_env_var(self):
+        """'gh pr close --delete-branch' with env var prefix is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("GH_TOKEN=abc gh pr close 42 --delete-branch")
+
+    def test_gh_pr_close_delete_branch_in_bash_c(self):
+        """'gh pr close --delete-branch' inside bash -c is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash -c 'gh pr close 42 --delete-branch'")
+
+    # -------------------------------------------------------------------------
+    # Bare close in chained commands is SAFE
+    # -------------------------------------------------------------------------
+
+    def test_gh_pr_close_bare_after_and_safe(self):
+        """Bare 'gh pr close' (no --delete-branch) after && is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cd /tmp && gh pr close 42")
+
+    def test_gh_pr_close_bare_after_semicolon_safe(self):
+        """Bare 'gh pr close' after semicolon is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo done; gh pr close 42")
+
+    # -------------------------------------------------------------------------
+    # False positive prevention (stripping logic) with --delete-branch
+    # -------------------------------------------------------------------------
+
+    def test_echo_gh_pr_close_delete_branch_not_dangerous(self):
+        """echo with 'gh pr close --delete-branch' text is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "gh pr close 42 --delete-branch"')
+
+    def test_echo_single_quoted_gh_pr_close_delete_branch_not_dangerous(self):
+        """echo with single-quoted 'gh pr close --delete-branch' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo 'gh pr close 42 --delete-branch'")
+
+    def test_comment_gh_pr_close_delete_branch_not_dangerous(self):
+        """Commented-out 'gh pr close --delete-branch' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("# gh pr close 42 --delete-branch")
+
+    def test_variable_assignment_gh_pr_close_delete_branch_not_dangerous(self):
+        """Variable assignment containing 'gh pr close --delete-branch' is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('CMD="gh pr close 42 --delete-branch"')
+
+    def test_heredoc_gh_pr_close_delete_branch_not_dangerous(self):
+        """'gh pr close --delete-branch' inside heredoc is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        cmd = "cat << 'EOF'\ngh pr close 42 --delete-branch\nEOF"
+        assert not is_dangerous_command(cmd)
+
+    def test_git_commit_msg_gh_pr_close_delete_branch_not_dangerous(self):
+        """'gh pr close --delete-branch' in commit message is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('git commit -m "gh pr close 42 --delete-branch"')
+
+    def test_echo_push_main_not_dangerous_still(self):
+        """Ensure other false positive prevention still works alongside new pattern."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "git push origin main"')
+
+    # -------------------------------------------------------------------------
+    # Bypass vector prevention with --delete-branch
+    # -------------------------------------------------------------------------
+
+    def test_pipe_to_bash_gh_pr_close_delete_branch_detected(self):
+        """echo piped to bash with 'gh pr close --delete-branch' IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo 'gh pr close 42 --delete-branch' | bash")
+
+    def test_eval_var_gh_pr_close_delete_branch_detected(self):
+        """eval with variable containing 'gh pr close --delete-branch' IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr close 42 --delete-branch" && eval $CMD')
+
+    def test_bare_var_expansion_gh_pr_close_delete_branch_detected(self):
+        """Bare variable expansion with 'gh pr close --delete-branch' IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr close 42 --delete-branch" && $CMD')
+
+    # -------------------------------------------------------------------------
+    # Negative tests: similar but safe commands
+    # -------------------------------------------------------------------------
+
+    def test_gh_pr_list_safe(self):
+        """'gh pr list' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr list")
+
+    def test_gh_pr_view_safe(self):
+        """'gh pr view' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr view 42")
+
+    def test_gh_pr_create_safe(self):
+        """'gh pr create' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr create --title 'test'")
+
+    def test_gh_pr_checkout_safe(self):
+        """'gh pr checkout' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr checkout 42")
+
+    def test_gh_pr_review_safe(self):
+        """'gh pr review' is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr review 42 --approve")
+
+    def test_gh_issue_close_safe(self):
+        """'gh issue close' is NOT dangerous (intentionally excluded per #265)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh issue close 42")
+
+    def test_close_as_substring_safe(self):
+        """Words containing 'close' as substring are NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo 'disclosure notice'")
+
+
+# =============================================================================
+# gh pr close: merge_guard_post keyword detection
+# =============================================================================
+
+
+class TestGhPrClosePostHook:
+    """Tests for gh pr close keyword detection in merge_guard_post.
+
+    Ensures the post-hook creates authorization tokens when
+    AskUserQuestion text mentions closing PRs.
+    """
+
+    def test_close_pr_keyword_detected(self):
+        """'close PR' triggers merge question detection."""
+        from merge_guard_post import is_merge_question
+
+        assert is_merge_question("Should I close PR #42?")
+
+    def test_close_pull_request_keyword_detected(self):
+        """'close pull request' triggers merge question detection."""
+        from merge_guard_post import is_merge_question
+
+        assert is_merge_question("Should I close pull request 42?")
+
+    def test_pr_close_keyword_detected(self):
+        """'PR close' triggers merge question detection."""
+        from merge_guard_post import is_merge_question
+
+        assert is_merge_question("PR close requested for #42")
+
+    def test_gh_pr_close_keyword_detected(self):
+        """'gh pr close' triggers merge question detection."""
+        from merge_guard_post import is_merge_question
+
+        assert is_merge_question("Run gh pr close 42?")
+
+    def test_close_pr_case_insensitive(self):
+        """'Close PR' detection is case-insensitive."""
+        from merge_guard_post import is_merge_question
+
+        assert is_merge_question("Close PR #42 now?")
+        assert is_merge_question("CLOSE PR #42?")
+
+    def test_close_without_pr_not_detected(self):
+        """Bare 'close' without PR context is NOT a merge question."""
+        from merge_guard_post import is_merge_question
+
+        assert not is_merge_question("Should I close the file handle?")
+
+    def test_close_issue_not_detected(self):
+        """'close issue' is NOT a merge question (intentionally excluded)."""
+        from merge_guard_post import is_merge_question
+
+        assert not is_merge_question("Should I close issue #42?")
+
+
+# =============================================================================
+# gh pr close: token context matching
+# =============================================================================
+
+
+class TestGhPrCloseTokenMatching:
+    """Tests for _token_matches_command with gh pr close commands."""
+
+    def test_token_matches_gh_pr_close_same_pr(self):
+        """Token with PR number matches gh pr close for same PR."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42", "operation_type": "close"}}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+    def test_token_rejects_gh_pr_close_different_pr(self):
+        """Token with PR number rejects gh pr close for different PR."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42", "operation_type": "close"}}
+        assert not _token_matches_command(token, "gh pr close 99 --delete-branch")
+
+    def test_token_no_context_allows_gh_pr_close(self):
+        """Token with no context allows gh pr close (ambiguous = permissive)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {}}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+    def test_token_branch_context_allows_gh_pr_close(self):
+        """Token with branch context (no PR number) allows gh pr close (ambiguous)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "feat/old"}}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+    def test_close_token_rejects_merge_command(self):
+        """Close token does NOT authorize merge (operation_type mismatch)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42", "operation_type": "close"}}
+        assert not _token_matches_command(token, "gh pr merge 42")
+
+    def test_merge_token_rejects_close_command(self):
+        """Merge token does NOT authorize close (operation_type mismatch)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42", "operation_type": "merge"}}
+        assert not _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+    def test_token_without_operation_type_allows_any(self):
+        """Old tokens without operation_type allow any command (backward compat)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42"}}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+        assert _token_matches_command(token, "gh pr merge 42")
+
+
+# =============================================================================
+# gh pr close: full authorization flow
+# =============================================================================
+
+
+class TestGhPrCloseAuthorization:
+    """Integration tests for gh pr close --delete-branch through check_merge_authorization."""
+
+    def test_gh_pr_close_delete_branch_blocked_without_token(self, tmp_path):
+        """gh pr close --delete-branch is blocked when no token exists."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+        assert "approval" in result.lower()
+
+    def test_gh_pr_close_bare_allowed_without_token(self, tmp_path):
+        """Bare gh pr close (no --delete-branch) is allowed without token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("gh pr close 42", token_dir=tmp_path)
+        assert result is None
+
+    def test_gh_pr_close_delete_branch_allowed_with_valid_token(self, tmp_path):
+        """gh pr close --delete-branch allowed when valid token exists."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42", "operation_type": "close"},
+        }))
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is None
+
+    def test_gh_pr_close_delete_branch_blocked_with_mismatched_pr(self, tmp_path):
+        """gh pr close --delete-branch blocked with different PR number."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "99", "operation_type": "close"},
+        }))
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result.lower()
+
+    def test_gh_pr_close_delete_branch_blocked_with_expired_token(self, tmp_path):
+        """gh pr close --delete-branch blocked when token is expired."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now - 600,
+            "expires_at": now - 300,
+            "context": {"pr_number": "42", "operation_type": "close"},
+        }))
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+
+    def test_gh_pr_close_delete_branch_consumes_token(self, tmp_path):
+        """gh pr close --delete-branch consumes token (single-use)."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"operation_type": "close"},
+        }))
+
+        # First call — allowed and consumes token
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is None
+
+        # Second call — blocked (token consumed)
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+
+    def test_error_message_mentions_close(self, tmp_path):
+        """Error message includes 'close' in the list of guarded operations."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert "close" in result.lower()
+
+    def test_merge_token_cannot_authorize_close(self, tmp_path):
+        """A merge token cannot authorize a close --delete-branch."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42", "operation_type": "merge"},
+        }))
+
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result.lower()
+
+    def test_close_token_cannot_authorize_merge(self, tmp_path):
+        """A close token cannot authorize a merge."""
+        import time
+
+        from merge_guard_pre import check_merge_authorization
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42", "operation_type": "close"},
+        }))
+
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result.lower()
+
+
+# =============================================================================
+# gh pr close: adversarial bypass vector tests (TEST phase)
+# =============================================================================
+
+
+class TestGhPrCloseBypassVectors:
+    """Adversarial tests for gh pr close --delete-branch — execution-via-indirection.
+
+    Only tests with --delete-branch should be dangerous. Bare close bypass
+    vectors are now safe (bare close is allowed).
+    """
+
+    # --- Process substitution bypass ---
+
+    def test_bash_process_sub_gh_pr_close_delete_branch(self):
+        """bash <(echo 'gh pr close 42 --delete-branch') executes — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash <(echo 'gh pr close 42 --delete-branch')")
+
+    def test_sh_process_sub_gh_pr_close_delete_branch(self):
+        """sh <(printf 'gh pr close 42 --delete-branch') executes — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("sh <(printf 'gh pr close 42 --delete-branch')")
+
+    def test_bash_process_sub_bare_close_safe(self):
+        """bash <(echo 'gh pr close 42') without --delete-branch — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("bash <(echo 'gh pr close 42')")
+
+    # --- xargs bypass ---
+
+    def test_echo_xargs_bash_gh_pr_close_delete_branch(self):
+        """echo piped to xargs bash with gh pr close --delete-branch — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "gh pr close 42 --delete-branch" | xargs bash')
+
+    def test_echo_xargs_bash_bare_close_safe(self):
+        """echo piped to xargs bash with bare gh pr close — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "gh pr close 42" | xargs bash')
+
+    # --- Here-string bypass ---
+
+    def test_bash_herestring_sq_gh_pr_close_delete_branch(self):
+        """bash <<< 'gh pr close 42 --delete-branch' IS executed — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash <<< 'gh pr close 42 --delete-branch'")
+
+    def test_bash_herestring_bare_close_safe(self):
+        """bash <<< 'gh pr close 42' without --delete-branch — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("bash <<< 'gh pr close 42'")
+
+    # --- Heredoc to shell bypass ---
+
+    def test_heredoc_to_bash_gh_pr_close_delete_branch(self):
+        """bash << EOF with gh pr close --delete-branch — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("bash << EOF\ngh pr close 42 --delete-branch\nEOF")
+
+    def test_heredoc_to_bash_bare_close_safe(self):
+        """bash << EOF with bare gh pr close — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("bash << EOF\ngh pr close 42\nEOF")
+
+    # --- Command substitution ---
+
+    def test_cmd_sub_gh_pr_close_delete_branch(self):
+        """echo "$(gh pr close 42 --delete-branch)" — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('echo "$(gh pr close 42 --delete-branch)"')
+
+    def test_cmd_sub_bare_close_safe(self):
+        """echo "$(gh pr close 42)" without --delete-branch — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('echo "$(gh pr close 42)"')
+
+    # --- Pipe to shell variants ---
+
+    def test_echo_piped_to_sh_gh_pr_close_delete_branch(self):
+        """echo piped to sh with gh pr close --delete-branch — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("echo 'gh pr close 42 --delete-branch' | sh")
+
+    def test_echo_piped_to_sh_bare_close_safe(self):
+        """echo piped to sh with bare gh pr close — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo 'gh pr close 42' | sh")
+
+    # --- eval/source variants ---
+
+    def test_var_eval_gh_pr_close_delete_branch(self):
+        """Variable + eval with gh pr close --delete-branch — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('CMD="gh pr close 42 --delete-branch"; eval $CMD')
+
+    def test_var_eval_bare_close_safe(self):
+        """Variable + eval with bare gh pr close — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('CMD="gh pr close 42"; eval $CMD')
+
+
+# =============================================================================
+# gh pr close: additional edge cases (TEST phase)
+# =============================================================================
+
+
+class TestGhPrCloseEdgeCases:
+    """Edge cases and boundary conditions for gh pr close detection.
+
+    With the --delete-branch requirement, bare close edge cases are now safe.
+    """
+
+    def test_gh_pr_close_delete_branch_multiple_in_chain(self):
+        """Multiple gh pr close --delete-branch in a chain — dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 1 --delete-branch && gh pr close 2 --delete-branch")
+
+    def test_gh_pr_close_bare_multiple_in_chain_safe(self):
+        """Multiple bare gh pr close in a chain — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close 1 && gh pr close 2")
+
+    def test_gh_pr_close_mixed_with_merge(self):
+        """Bare gh pr close alongside gh pr merge — merge makes it dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 1 && gh pr merge 2")
+
+    def test_gh_pr_close_bare_with_newlines_safe(self):
+        """Bare gh pr close in multi-line command — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo start\ngh pr close 42\necho done")
+
+    def test_gh_pr_close_delete_branch_with_redirect(self):
+        """gh pr close --delete-branch with redirection — dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 --delete-branch > /dev/null 2>&1")
+
+    def test_gh_pr_close_bare_with_redirect_safe(self):
+        """Bare gh pr close with redirection — safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh pr close 42 > /dev/null 2>&1")
+
+    def test_gh_pr_close_delete_branch_in_if_block(self):
+        """gh pr close --delete-branch inside if block — dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("if true; then gh pr close 42 --delete-branch; fi")
+
+    def test_gh_pr_close_delete_branch_with_url(self):
+        """gh pr close --delete-branch with URL — dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh pr close https://github.com/owner/repo/pull/42 --delete-branch"
+        )
+
+    def test_gh_issue_close_with_flags_safe(self):
+        """gh issue close with flags is still NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh issue close 42 --reason completed")
+
+    def test_gh_issue_close_with_comment_safe(self):
+        """gh issue close with --comment is still NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh issue close 42 --comment 'done'")
+
+    def test_gh_issue_close_in_chain_safe(self):
+        """gh issue close in chained command is NOT dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("cd /tmp && gh issue close 42")
+
+    def test_gh_pr_close_no_word_boundary_prefix(self):
+        """'agh pr close --delete-branch' is NOT detected (word boundary)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("agh pr close 42 --delete-branch")
+
+    def test_gh_pr_closed_not_detected(self):
+        """'gh pr closed' (past tense) is NOT detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo 'gh pr closed yesterday'")
+
+    def test_gh_pr_closeable_not_detected(self):
+        """'gh pr closeable' is NOT detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("echo 'gh pr closeable'")
+
+    def test_herestring_cmd_sub_gh_pr_close_delete_branch(self):
+        """cat <<< "$(gh pr close 42 --delete-branch)" — detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command('cat <<< "$(gh pr close 42 --delete-branch)"')
+
+    def test_herestring_cmd_sub_bare_close_safe(self):
+        """cat <<< "$(gh pr close 42)" — safe (no --delete-branch)."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command('cat <<< "$(gh pr close 42)"')
+
+
+# =============================================================================
+# gh pr close: regression tests for existing patterns (TEST phase)
+# =============================================================================
+
+
+class TestGhPrCloseRegressionExistingPatterns:
+    """Verify that adding gh pr close did not break existing dangerous patterns.
+
+    Spot-check each existing DANGEROUS_PATTERNS entry to ensure they still work
+    correctly alongside the new pattern.
+    """
+
+    def test_gh_pr_merge_still_detected(self):
+        """gh pr merge is still detected after adding close pattern."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr merge 42")
+
+    def test_force_push_still_detected(self):
+        """git push --force is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push --force origin main")
+
+    def test_force_push_f_flag_still_detected(self):
+        """git push -f is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push -f origin main")
+
+    def test_branch_D_still_detected(self):
+        """git branch -D is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git branch -D feature-branch")
+
+    def test_branch_delete_force_still_detected(self):
+        """git branch --delete --force is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git branch --delete --force feature-branch")
+
+    def test_api_merge_bypass_still_detected(self):
+        """gh api merge bypass is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh api -X PUT repos/owner/repo/pulls/42/merge"
+        )
+
+    def test_push_to_main_still_detected(self):
+        """git push origin main is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push origin main")
+
+    def test_push_head_main_still_detected(self):
+        """git push origin HEAD:main is still detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push origin HEAD:main")
+
+    def test_safe_commands_still_safe(self):
+        """Safe commands are still not flagged."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git status")
+        assert not is_dangerous_command("gh pr list")
+        assert not is_dangerous_command("git push origin feature-branch")
+        assert not is_dangerous_command("git branch -d feature-branch")
+
+    def test_force_with_lease_still_allowed(self):
+        """--force-with-lease to a non-default branch is excluded from force push detection."""
+        from merge_guard_pre import is_dangerous_command
+
+        # --force-with-lease to a feature branch is safe
+        assert not is_dangerous_command("git push --force-with-lease origin feature-branch")
+        # But --force-with-lease to main is STILL dangerous (matches push-to-main pattern)
+        assert is_dangerous_command("git push --force-with-lease origin main")
+
+
+# =============================================================================
+# gh pr close: pre-hook main() entry point E2E (TEST phase)
+# =============================================================================
+
+
+class TestGhPrClosePreHookE2E:
+    """End-to-end tests for the pre-hook main() with gh pr close commands."""
+
+    def test_pre_hook_blocks_gh_pr_close_delete_branch(self, tmp_path, capsys):
+        """Pre-hook main() blocks gh pr close --delete-branch and exits 2."""
+        from merge_guard_pre import main
+
+        input_data = {
+            "tool_input": {"command": "gh pr close 42 --delete-branch"}
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_pre.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_pre_hook_allows_bare_gh_pr_close(self, tmp_path, capsys):
+        """Pre-hook main() allows bare gh pr close (no --delete-branch) — exits 0."""
+        from merge_guard_pre import main
+
+        input_data = {
+            "tool_input": {"command": "gh pr close 42"}
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_pre.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+    def test_pre_hook_allows_gh_pr_close_delete_branch_with_token(self, tmp_path, capsys):
+        """Pre-hook main() allows gh pr close --delete-branch with valid token."""
+        from merge_guard_pre import main
+
+        now = time.time()
+        token_file = tmp_path / "merge-authorized-99999"
+        token_file.write_text(json.dumps({
+            "created_at": now,
+            "expires_at": now + 300,
+            "context": {"pr_number": "42", "operation_type": "close"},
+        }))
+
+        input_data = {
+            "tool_input": {"command": "gh pr close 42 --delete-branch"}
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_pre.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+
+# =============================================================================
+# gh pr close: post-hook main() E2E (TEST phase)
+# =============================================================================
+
+
+class TestGhPrClosePostHookE2E:
+    """End-to-end tests for the post-hook main() with gh pr close questions."""
+
+    def test_post_hook_writes_token_for_close_pr_question(self, tmp_path, capsys):
+        """Post-hook main() creates token when user approves closing a PR."""
+        from merge_guard_post import main
+
+        input_data = {
+            "tool_input": {
+                "questions": [{"question": "Should I close PR #42?"}]
+            },
+            "tool_output": {
+                "answers": {"Should I close PR #42?": "yes"}
+            },
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_post.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        # Token file should exist
+        token_files = list(tmp_path.glob("merge-authorized-*"))
+        assert len(token_files) == 1
+
+        token_data = json.loads(token_files[0].read_text())
+        assert "context" in token_data
+        assert token_data["context"]["pr_number"] == "42"
+        assert token_data["context"]["operation_type"] == "close"
+
+    def test_post_hook_writes_token_for_gh_pr_close_question(self, tmp_path, capsys):
+        """Post-hook main() creates token for 'gh pr close' phrased question."""
+        from merge_guard_post import main
+
+        input_data = {
+            "tool_input": {
+                "questions": [{"question": "Run gh pr close 99?"}]
+            },
+            "tool_output": {
+                "answers": {"Run gh pr close 99?": "yes"}
+            },
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_post.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        token_files = list(tmp_path.glob("merge-authorized-*"))
+        assert len(token_files) == 1
+
+    def test_post_hook_no_token_for_negative_close_answer(self, tmp_path, capsys):
+        """Post-hook does NOT create token when user declines closing a PR."""
+        from merge_guard_post import main
+
+        input_data = {
+            "tool_input": {
+                "questions": [{"question": "Should I close PR #42?"}]
+            },
+            "tool_output": {
+                "answers": {"Should I close PR #42?": "no"}
+            },
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_post.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        token_files = list(tmp_path.glob("merge-authorized-*"))
+        assert len(token_files) == 0
+
+    def test_post_hook_no_token_for_close_issue_question(self, tmp_path, capsys):
+        """Post-hook does NOT create token for 'close issue' questions."""
+        from merge_guard_post import main
+
+        input_data = {
+            "tool_input": {
+                "questions": [{"question": "Should I close issue #42?"}]
+            },
+            "tool_output": {
+                "answers": {"Should I close issue #42?": "yes"}
+            },
+        }
+        stdin = io.StringIO(json.dumps(input_data))
+
+        with (
+            patch("sys.stdin", stdin),
+            patch("merge_guard_post.TOKEN_DIR", tmp_path),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        token_files = list(tmp_path.glob("merge-authorized-*"))
+        assert len(token_files) == 0
+
+
+# =============================================================================
+# gh pr close: token matching edge cases (TEST phase)
+# =============================================================================
+
+
+class TestGhPrCloseTokenMatchingEdgeCases:
+    """Additional token matching edge cases for gh pr close commands."""
+
+    def test_token_without_op_type_matches_both(self):
+        """Old token (no operation_type) matches both merge and close."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42"}}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+        assert _token_matches_command(token, "gh pr merge 42")
+        assert not _token_matches_command(token, "gh pr close 99 --delete-branch")
+        assert not _token_matches_command(token, "gh pr merge 99")
+
+    def test_token_with_malformed_context_allows_close(self):
+        """Token with non-dict context allows through (permissive)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": "not-a-dict"}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+    def test_token_with_no_context_key_allows_close(self):
+        """Token with no context key allows through."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {}
+        assert _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+    def test_close_token_cross_operation_blocked(self):
+        """Close token cannot authorize merge (operation_type enforced)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42", "operation_type": "close"}}
+        assert not _token_matches_command(token, "gh pr merge 42")
+
+    def test_merge_token_cross_operation_blocked(self):
+        """Merge token cannot authorize close (operation_type enforced)."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": "42", "operation_type": "merge"}}
+        assert not _token_matches_command(token, "gh pr close 42 --delete-branch")
+
+
+# =============================================================================
+# gh pr close: full pre-to-post integration (TEST phase)
+# =============================================================================
+
+
+class TestGhPrCloseFullIntegration:
+    """Integration tests for the complete close flow: question -> token -> command.
+
+    Tests the full pipeline: post-hook writes token on approval,
+    pre-hook reads token and authorizes the matching command.
+    """
+
+    def test_close_flow_approve_then_execute(self, tmp_path):
+        """Full flow: user approves close → token created → command allowed."""
+        from merge_guard_post import extract_context, is_merge_question, write_token
+        from merge_guard_pre import check_merge_authorization
+
+        # Step 1: Post-hook detects the close question
+        question = "Should I close PR #42?"
+        assert is_merge_question(question)
+
+        # Step 2: Post-hook writes a token with operation_type
+        context = extract_context(question)
+        assert context["pr_number"] == "42"
+        assert context["operation_type"] == "close"
+        token_path = write_token(context, token_dir=tmp_path)
+        assert token_path is not None
+
+        # Step 3: Pre-hook authorizes the matching close --delete-branch command
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is None
+
+    def test_close_flow_token_consumed_blocks_second(self, tmp_path):
+        """After first close is authorized, second attempt is blocked (single-use)."""
+        from merge_guard_post import extract_context, write_token
+        from merge_guard_pre import check_merge_authorization
+
+        context = extract_context("Close PR #42?")
+        write_token(context, token_dir=tmp_path)
+
+        # First — allowed
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is None
+
+        # Second — blocked (consumed)
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+
+    def test_close_flow_token_rejects_wrong_pr(self, tmp_path):
+        """Token for PR #42 does not authorize closing PR #99."""
+        from merge_guard_post import extract_context, write_token
+        from merge_guard_pre import check_merge_authorization
+
+        context = extract_context("Close PR #42?")
+        write_token(context, token_dir=tmp_path)
+
+        result = check_merge_authorization("gh pr close 99 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result.lower()
+
+    def test_close_token_does_not_authorize_merge(self, tmp_path):
+        """Token for close PR #42 does NOT authorize merge (operation_type enforced)."""
+        from merge_guard_post import extract_context, write_token
+        from merge_guard_pre import check_merge_authorization
+
+        context = extract_context("Close PR #42?")
+        write_token(context, token_dir=tmp_path)
+
+        # Close token cannot authorize merge
+        result = check_merge_authorization("gh pr merge 42", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result.lower()
+
+    def test_merge_token_does_not_authorize_close(self, tmp_path):
+        """Token from merge question does NOT authorize close (operation_type enforced)."""
+        from merge_guard_post import extract_context, write_token
+        from merge_guard_pre import check_merge_authorization
+
+        context = extract_context("Do you want to merge PR #42?")
+        write_token(context, token_dir=tmp_path)
+
+        # Merge token cannot authorize close --delete-branch
+        result = check_merge_authorization("gh pr close 42 --delete-branch", token_dir=tmp_path)
+        assert result is not None
+        assert "does not match" in result.lower()
+
+    def test_bare_close_allowed_without_token(self, tmp_path):
+        """Bare gh pr close (no --delete-branch) is allowed without any token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization("gh pr close 42", token_dir=tmp_path)
+        assert result is None
+
+
+# =============================================================================
+# _detect_command_operation_type unit tests
+# =============================================================================
+
+
+class TestDetectCommandOperationType:
+    """Direct unit tests for _detect_command_operation_type helper."""
+
+    def test_merge_command(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("gh pr merge 42") == "merge"
+
+    def test_close_command(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("gh pr close 42") == "close"
+
+    def test_force_push_returns_none(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git push --force origin main") is None
+
+    def test_branch_delete_returns_none(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git branch -D feature") is None
+
+
+# =============================================================================
+# Line continuation normalization tests
+# =============================================================================
+
+
+class TestLineContinuationNormalization:
+    """Tests that bash line continuations (\\<newline>) don't bypass pattern matching."""
+
+    def test_close_with_delete_branch_split(self):
+        """gh pr close with --delete-branch split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 \\\n--delete-branch")
+
+    def test_merge_split_across_lines(self):
+        """gh pr merge split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr merge \\\n42")
+
+    def test_force_push_split_across_lines(self):
+        """git push --force split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push \\\n--force origin main")
+
+    def test_branch_delete_split_across_lines(self):
+        """git branch -D split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git branch \\\n-D feature")
+
+    def test_multiple_continuations(self):
+        """Multiple line continuations in a single command are all normalized."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh \\\npr \\\nmerge \\\n42")
+
+    def test_no_false_positive_on_literal_backslash_n(self):
+        """Literal backslash-n in text (not a line continuation) is not affected."""
+        from merge_guard_pre import is_dangerous_command
+
+        # This is a literal \\n inside a string, not a line continuation
+        assert not is_dangerous_command("echo 'line1\\nline2'")
