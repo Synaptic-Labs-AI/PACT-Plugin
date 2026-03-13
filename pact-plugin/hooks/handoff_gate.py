@@ -2,20 +2,16 @@
 """
 Location: pact-plugin/hooks/handoff_gate.py
 Summary: TaskCompleted hook that blocks task completion if handoff metadata
-         is missing or incomplete, and nudges the orchestrator if memory_saved
-         metadata is absent. Exit code 2 prevents completion; nudges go to
-         stderr without blocking.
+         is missing or incomplete. Exit code 2 prevents completion.
 Used by: hooks.json TaskCompleted hook
 
 This is the highest-leverage hook in the SDK leverage design — by ensuring
 upstream tasks always have proper metadata, downstream chain-reads via
-TaskGet are guaranteed to find data. Additionally, it surfaces an explicit
-action instruction when PACT work agents complete without saving to
-pact-memory, prompting the orchestrator to create a deferred save task.
+TaskGet are guaranteed to find data.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name
-Output: stderr message on block (exit 2), nudges on stderr (exit 0)
+Output: stderr message on block (exit 2), nothing on allow (exit 0)
 """
 
 import json
@@ -23,11 +19,6 @@ import re
 import sys
 import os
 from pathlib import Path
-
-# Add shared module to path for hook execution context
-sys.path.insert(0, str(Path(__file__).parent))
-
-from shared.constants import PACT_WORK_AGENTS
 
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
@@ -138,56 +129,6 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
     return {}
 
 
-def is_pact_work_agent(teammate_name: str) -> bool:
-    """Check if this teammate is a PACT agent that requires memory saves."""
-    if not teammate_name or not isinstance(teammate_name, str):
-        return False
-    name_lower = teammate_name.lower()
-    return any(name_lower == agent or name_lower.startswith(agent + "-") for agent in PACT_WORK_AGENTS)
-
-
-def check_memory_metadata(
-    task_metadata: dict,
-    teammate_name: str | None,
-    task_id: str = "",
-) -> str | None:
-    """
-    Check if a PACT work agent included memory_saved metadata.
-
-    This is a non-blocking nudge — task completion is NOT prevented,
-    but the orchestrator receives an explicit action instruction to
-    create a deferred save task for the agent.
-
-    Args:
-        task_metadata: Task metadata dict
-        teammate_name: Name of completing teammate
-        task_id: Task identifier for the action message
-
-    Returns:
-        Action message if memory_saved is missing, None if OK or not applicable
-    """
-    if not teammate_name or not is_pact_work_agent(teammate_name):
-        return None
-
-    # Skip signal/bypass tasks (same conditions as handoff validation)
-    if task_metadata.get("skipped"):
-        return None
-    if task_metadata.get("type") in ("blocker", "algedonic"):
-        return None
-
-    memory_saved = task_metadata.get("memory_saved", False)
-    if not memory_saved:
-        task_ref = f" (task #{task_id})" if task_id else ""
-        return (
-            f"\U0001f4cb ACTION REQUIRED: Create memory save task for "
-            f"{teammate_name}{task_ref} if not already tracked. "
-            f"Agent completed without saving to pact-memory. "
-            f"Add save task to task list, deferred until work stabilizes."
-        )
-
-    return None
-
-
 def main():
     try:
         input_data = json.load(sys.stdin)
@@ -211,15 +152,6 @@ def main():
     if error:
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
-
-    # Non-blocking: nudge orchestrator to create deferred save task
-    memory_warning = check_memory_metadata(
-        task_metadata=task_metadata,
-        teammate_name=teammate_name,
-        task_id=task_id,
-    )
-    if memory_warning:
-        print(memory_warning, file=sys.stderr)
 
     sys.exit(0)
 

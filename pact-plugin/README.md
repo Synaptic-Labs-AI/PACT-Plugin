@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.9.19
+> **Version**: 3.9.18
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -18,10 +18,10 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Prof
 
 ## What You Get
 
-- **10 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers
+- **11 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Memory Agent
 - **9 Commands** — From full orchestration to quick single-specialist fixes
 - **16 Skills** — On-demand domain knowledge for architecture, coding, testing, security, n8n, plus operational skills
-- **Persistent Memory** — Automatic retrieval at agent spawn + deferred orchestrator-driven saves via SQLite + vector embeddings
+- **Persistent Memory** — SQLite + vector embeddings for cross-session learning
 - **Adaptive Complexity** — Light process for simple tasks, full ceremony for complex ones
 
 ## Quick Start
@@ -37,7 +37,6 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Prof
 - **Agent Teams**: Specialists run as coordinated Claude Code instances with shared tasks and direct messaging
 - **Persistent Teammates**: Completed-phase agents remain available as consultants
 - **Conversation Theory**: Teachback protocols ensure shared understanding between agents
-- **Memory Redesign**: Hook-based retrieval at agent spawn, structural save tasks, skills-only model (no dedicated memory agent)
 
 ## Full Documentation
 

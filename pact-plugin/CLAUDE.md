@@ -101,37 +101,29 @@ The Task system survives compaction. Your context window doesn't.
 
 ### Memory Management
 
-**Two-mechanism model**: Memory retrieval is automatic (SubagentStart hook injects search instructions). Memory saves are structural — part of the task hierarchy.
+**Orchestrator Role (Delegation)**:
+You manage the project's long-term memory by delegating to the `pact-memory-agent`.
+*   **To SAVE context**: Delegate to `pact-memory-agent` when work is done, decisions are made, or lessons are learned.
+*   **To RETRIEVE context**: Delegate to `pact-memory-agent` to search for past decisions, patterns, or dropped context.
 
-#### Memory Retrieval (Automatic)
+**Specialist Role (Skill Usage)**:
+Specialist agents (Coders, Architects) **cannot delegate** to other agents.
+*   **Instruction**: When dispatching a specialist, ensure they know to load the `pact-memory` skill *first* to retrieve relevant context before they start working.
 
-A SubagentStart hook (`memory_retrieve.py`) fires automatically when any PACT agent spawns. It injects lightweight retrieval instructions (~500 tokens) into the agent's context. No skill load needed, no protocol to read. Agents search for prior context as part of their teachback.
+#### When to Delegate (Save/Retrieve)
 
-#### Memory Save Workflow (Structural)
+**Delegate to `pact-memory-agent` when:**
+- **Saving**: You completed a task, made a key decision, or solved a tricky bug.
+- **Retrieving**: You are starting a new session, recovering from compaction, or facing a blocker.
 
-Memory saves are part of the standard task hierarchy (QDCL). For every agent work task, create a corresponding save task:
+#### How to Delegate
 
-```
-[Feature] "Add auth endpoints"
-├── [Agent]  "backend-coder: implement auth"       ✅ completed
-├── [Agent]  "test-engineer: test auth"            ✅ completed
-├── [Save]   "backend-coder: save memory"          ⏳ deferred until stable
-└── [Save]   "test-engineer: save memory"          ⏳ deferred until stable
-```
+Delegate to `pact-memory-agent` using the standard Agent Teams dispatch pattern (`TaskCreate` + `TaskUpdate` + Task with name/team_name). The memory agent uses the same dispatch model as all other specialists.
 
-**Lifecycle**:
-1. Orchestrator creates agent work task (standard QDCL)
-2. Orchestrator creates corresponding save task, deferred until work stabilizes
-3. Agent completes work — handoff includes `memory_saved: false`
-4. Handoff gate fires explicit instruction if save task wasn't tracked
-5. Work stabilizes (bugs fixed, tests pass, reviews clean)
-6. Orchestrator unblocks save tasks, messages each idle agent
-7. Agent loads `Skill("pact-memory")`, saves learnings, updates `memory_saved: true`
+- **Save**: Include in task description: `"Save memory: [context of what was done, decisions, lessons]"`
+- **Search**: Include in task description: `"Retrieve memories about: [topic/query]"`
 
-**Key rules**:
-- Save tasks do NOT block feature completion — they are best-effort alongside it
-- The handoff gate is a safety net: if the orchestrator didn't create a save task, the gate fires an action item
-- Saves happen at the right time (after stabilization), not mid-churn
+**Reuse pattern**: Once spawned, the memory agent stays alive as a consultant. Subsequent memory requests go via `SendMessage` to the existing memory agent — no need to spawn a new one.
 
 #### Three-Layer Memory Architecture
 
@@ -418,6 +410,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🛡️ pact-security-engineer** (Review): Adversarial security code review
 - **🔍 pact-qa-engineer** (Review): Runtime verification, exploratory testing
+- **🧠 pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
 
 ### Agent Teams Dispatch
 
@@ -499,8 +492,6 @@ HANDOFF:
 ```
 
 Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
-
-> **Note**: Memory metadata (`memory_saved`, `memory_id`) is set via separate `TaskUpdate` call on top-level task metadata, not inside the HANDOFF structure. Save tasks handle this after work stabilizes.
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 
