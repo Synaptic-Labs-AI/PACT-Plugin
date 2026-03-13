@@ -21,7 +21,7 @@ Create a simpler Task hierarchy than full orchestrate:
 4. `TaskCreate`: Agent task(s) — direct children of feature
 5. `TaskUpdate`: Agent tasks status = "in_progress"
 6. `TaskUpdate`: Feature task addBlockedBy = [all agent IDs]
-7. `TaskCreate`: Save task(s) — one per agent, blocked until work stabilizes
+7. `TaskCreate`: Save task(s) — one per agent, deferred until work stabilizes
 8. Dispatch agents concurrently with task IDs
 9. Monitor via `TaskList` until all agents complete
 10. `TaskUpdate`: Agent tasks status = "completed" (as each completes)
@@ -36,9 +36,9 @@ Create a simpler Task hierarchy than full orchestrate:
 ├── [Agent] "backend-coder: fix bug A"
 ├── [Agent] "backend-coder: fix bug B"
 ├── [Agent] "backend-coder: fix bug C"
-├── [Save]  "backend-coder-1: save memory"  (blocked until stable)
-├── [Save]  "backend-coder-2: save memory"  (blocked until stable)
-└── [Save]  "backend-coder-3: save memory"  (blocked until stable)
+├── [Save]  "backend-coder-1: save memory"  (deferred until stable)
+├── [Save]  "backend-coder-2: save memory"  (deferred until stable)
+└── [Save]  "backend-coder-3: save memory"  (deferred until stable)
 ```
 
 ---
@@ -209,7 +209,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 - [ ] **Receive handoff** from specialist(s)
 - [ ] Agent tasks marked `completed` (agents self-manage their task status via `TaskUpdate`)
-- [ ] **Create memory save task** — `TaskCreate(subject="{agent-name}: save memory")` blocked until work stabilizes. After commit, unblock and message idle agent to load `Skill("pact-memory")` and save.
+- [ ] **Create memory save task** — `TaskCreate(subject="{agent-name}: save memory")` deferred until work stabilizes. After commit, message idle agent to load `Skill("pact-memory")` and save.
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding

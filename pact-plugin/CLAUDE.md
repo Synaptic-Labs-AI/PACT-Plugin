@@ -115,13 +115,13 @@ Memory saves are part of the standard task hierarchy (QDCL). For every agent wor
 [Feature] "Add auth endpoints"
 ├── [Agent]  "backend-coder: implement auth"       ✅ completed
 ├── [Agent]  "test-engineer: test auth"            ✅ completed
-├── [Save]   "backend-coder: save memory"          ⏳ blocked until stable
-└── [Save]   "test-engineer: save memory"          ⏳ blocked until stable
+├── [Save]   "backend-coder: save memory"          ⏳ deferred until stable
+└── [Save]   "test-engineer: save memory"          ⏳ deferred until stable
 ```
 
 **Lifecycle**:
 1. Orchestrator creates agent work task (standard QDCL)
-2. Orchestrator creates corresponding save task, blocked until work stabilizes
+2. Orchestrator creates corresponding save task, deferred until work stabilizes
 3. Agent completes work — handoff includes `memory_saved: false`
 4. Handoff gate fires explicit instruction if save task wasn't tracked
 5. Work stabilizes (bugs fixed, tests pass, reviews clean)

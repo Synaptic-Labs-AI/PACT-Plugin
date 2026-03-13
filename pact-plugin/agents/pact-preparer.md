@@ -36,12 +36,6 @@ Save these files in a `docs/<feature-name>/preparation` folder.
 
 **Your Workflow:**
 
-0. **Check Prior Research** (BEFORE analysis)
-   - Search pact-memory: `memory.search("{topic} research preparation")`
-   - Review any prior preparation docs on the same or similar topics
-   - Avoid duplicating research that already exists
-   - Build on prior findings rather than starting from scratch
-
 1. **Documentation Needs Analysis**
    - Identify all required documentation types: official API docs, library references, framework guides
    - Determine best practices documentation needs

@@ -509,7 +509,7 @@ Spawn multiple coders in parallel (multiple `Task` calls in one response). Inclu
 **Memory save tasks**: For each coder dispatched, also create a corresponding save task:
 ```
 TaskCreate(subject="{coder-name}: save memory", description="Load Skill('pact-memory') and save learnings from task #{work_task_id}. After saving, TaskUpdate(taskId, metadata={'memory_saved': true, 'memory_id': '{id}'}).")
-TaskUpdate(save_task_id, status="pending")  // blocked until work stabilizes
+TaskUpdate(save_task_id, status="pending")  // deferred until work stabilizes
 ```
 Save tasks are unblocked after work stabilizes (tests pass, reviews clean). They do not block feature completion.
 

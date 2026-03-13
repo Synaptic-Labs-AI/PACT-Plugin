@@ -15,22 +15,12 @@ Output: JSON with hookSpecificOutput.additionalContext
 
 import json
 import sys
+from pathlib import Path
 
+# Add shared module to path for hook execution context
+sys.path.insert(0, str(Path(__file__).parent))
 
-# PACT agents that do substantive work requiring memory retrieval.
-# Mirrors handoff_gate.py PACT_WORK_AGENTS (minus pact-memory-agent, which is removed).
-PACT_WORK_AGENTS = [
-    "pact-preparer",
-    "pact-architect",
-    "pact-backend-coder",
-    "pact-frontend-coder",
-    "pact-database-engineer",
-    "pact-devops-engineer",
-    "pact-n8n",
-    "pact-test-engineer",
-    "pact-security-engineer",
-    "pact-qa-engineer",
-]
+from shared.constants import PACT_WORK_AGENTS
 
 # Map agent types to domain hints for search queries
 DOMAIN_HINTS = {

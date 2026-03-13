@@ -24,25 +24,15 @@ import sys
 import os
 from pathlib import Path
 
+# Add shared module to path for hook execution context
+sys.path.insert(0, str(Path(__file__).parent))
+
+from shared.constants import PACT_WORK_AGENTS
+
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
-
-# PACT agents that do substantive work — memory saves are deferred and
-# orchestrator-driven via structural save tasks (not enforced at handoff time)
-PACT_WORK_AGENTS = [
-    "pact-preparer",
-    "pact-architect",
-    "pact-backend-coder",
-    "pact-frontend-coder",
-    "pact-database-engineer",
-    "pact-devops-engineer",
-    "pact-n8n",
-    "pact-test-engineer",
-    "pact-security-engineer",
-    "pact-qa-engineer",
-]
 
 
 def validate_task_handoff(
@@ -150,7 +140,7 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
 
 def is_pact_work_agent(teammate_name: str) -> bool:
     """Check if this teammate is a PACT agent that requires memory saves."""
-    if not teammate_name:
+    if not teammate_name or not isinstance(teammate_name, str):
         return False
     name_lower = teammate_name.lower()
     return any(name_lower == agent or name_lower.startswith(agent + "-") for agent in PACT_WORK_AGENTS)
@@ -192,7 +182,7 @@ def check_memory_metadata(
             f"\U0001f4cb ACTION REQUIRED: Create memory save task for "
             f"{teammate_name}{task_ref} if not already tracked. "
             f"Agent completed without saving to pact-memory. "
-            f"Add save task to task list, blocked until work stabilizes."
+            f"Add save task to task list, deferred until work stabilizes."
         )
 
     return None

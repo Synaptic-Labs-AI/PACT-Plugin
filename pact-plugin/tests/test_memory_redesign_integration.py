@@ -25,28 +25,28 @@ sys.path.insert(0, str(HOOKS_DIR))
 
 
 class TestPactWorkAgentsConsistency:
-    """PACT_WORK_AGENTS must be identical in memory_retrieve.py and handoff_gate.py."""
+    """PACT_WORK_AGENTS is imported from shared.constants by both hooks."""
 
-    def test_lists_are_identical(self):
+    def test_both_hooks_use_shared_constant(self):
         from memory_retrieve import PACT_WORK_AGENTS as retrieve_agents
         from handoff_gate import PACT_WORK_AGENTS as gate_agents
+        from shared.constants import PACT_WORK_AGENTS as shared_agents
 
-        assert retrieve_agents == gate_agents, (
-            f"PACT_WORK_AGENTS mismatch:\n"
-            f"memory_retrieve.py: {retrieve_agents}\n"
-            f"handoff_gate.py:    {gate_agents}"
+        assert retrieve_agents is shared_agents, (
+            "memory_retrieve.py should import PACT_WORK_AGENTS from shared.constants"
+        )
+        assert gate_agents is shared_agents, (
+            "handoff_gate.py should import PACT_WORK_AGENTS from shared.constants"
         )
 
     def test_lists_have_10_agents(self):
-        from memory_retrieve import PACT_WORK_AGENTS
+        from shared.constants import PACT_WORK_AGENTS
         assert len(PACT_WORK_AGENTS) == 10
 
-    def test_no_memory_agent_in_either_list(self):
-        from memory_retrieve import PACT_WORK_AGENTS as retrieve_agents
-        from handoff_gate import PACT_WORK_AGENTS as gate_agents
+    def test_no_memory_agent_in_list(self):
+        from shared.constants import PACT_WORK_AGENTS
 
-        assert "pact-memory-agent" not in retrieve_agents
-        assert "pact-memory-agent" not in gate_agents
+        assert "pact-memory-agent" not in PACT_WORK_AGENTS
 
     def test_is_pact_work_agent_functions_agree(self):
         """Both modules' is_pact_work_agent() should agree on all agent types."""
