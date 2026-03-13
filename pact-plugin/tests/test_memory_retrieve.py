@@ -329,15 +329,16 @@ class TestMalformedStdinHandling:
         captured = capsys.readouterr()
         assert captured.out.strip() == ""
 
-    def test_json_array_instead_of_object(self):
-        """JSON array input causes AttributeError — non-blocking hook, crash is acceptable.
-        BUG: main() does not guard against non-dict JSON. Low severity since
-        SubagentStart stdin is always a dict in practice."""
+    def test_json_array_instead_of_object(self, capsys):
+        """JSON array input should exit 0 gracefully (non-dict guard)."""
         from memory_retrieve import main
 
-        with pytest.raises((SystemExit, AttributeError)):
+        with pytest.raises(SystemExit) as exc_info:
             with patch("sys.stdin", io.StringIO("[]")):
                 main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == ""
 
     def test_missing_agent_type_field(self, capsys):
         from memory_retrieve import main
@@ -351,15 +352,16 @@ class TestMalformedStdinHandling:
         assert captured.out.strip() == ""
 
     def test_agent_type_is_integer(self, capsys):
-        """Non-string agent_type causes AttributeError in is_pact_work_agent.
-        BUG: is_pact_work_agent does not guard against non-string input beyond
-        None/empty. Low severity since SubagentStart agent_type is always a string."""
+        """Non-string agent_type should exit 0 gracefully (isinstance guard)."""
         from memory_retrieve import main
 
         input_data = json.dumps({"agent_type": 42})
-        with pytest.raises((SystemExit, AttributeError)):
+        with pytest.raises(SystemExit) as exc_info:
             with patch("sys.stdin", io.StringIO(input_data)):
                 main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == ""
 
     def test_agent_type_is_null(self, capsys):
         from memory_retrieve import main
