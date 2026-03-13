@@ -145,7 +145,7 @@ When your work is done, follow the Agent Teams HANDOFF protocol:
 2. **Notify lead with summary** via `SendMessage`:
    ```
    SendMessage(type="message", recipient="lead",
-     content="[memory-agent→lead] Task complete. {operation} completed: {brief summary}. Memory IDs: {ids if applicable}.",
+     content="[{sender}→lead] Task complete. {operation} completed: {brief summary}. Memory IDs: {ids if applicable}.",
      summary="Task complete: {operation}")
    ```
 3. **Mark task completed**: `TaskUpdate(taskId, status="completed")`
