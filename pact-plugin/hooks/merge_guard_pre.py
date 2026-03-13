@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/merge_guard_pre.py
-Summary: PreToolUse hook matching Bash — blocks merge, close (with branch
-         deletion), force push, and branch delete commands unless a valid
-         authorization token exists.
+Summary: PreToolUse hook matching Bash — blocks dangerous git operations and
+         API-based bypass attempts unless a valid authorization token exists.
 Used by: hooks.json PreToolUse hook (matcher: Bash)
 
 This hook is part of the merge guard system. It checks for a valid token
 written by the companion hook (merge_guard_post.py) before allowing dangerous
-git/gh operations (merge, close with --delete-branch, force push, branch
-delete). If no valid token exists, the command is blocked with a message
-directing the user to confirm via AskUserQuestion first.
+operations. Detected operations include:
+- CLI: git/gh merge, close with --delete-branch, force push, branch delete,
+  push to main/master
+- API: gh api, curl, wget, and httpie calls targeting merge, git/refs, or
+  contents endpoints with mutating HTTP methods (including implicit POST via
+  body parameter flags or data flags)
+
+If no valid token exists, the command is blocked with a message directing the
+user to confirm via AskUserQuestion first.
 
 Input: JSON from stdin with tool_input containing the command
 Output: JSON with hookSpecificOutput.permissionDecision if blocking
