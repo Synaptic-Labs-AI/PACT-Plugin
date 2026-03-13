@@ -923,16 +923,15 @@ class TestAdversarialCommandDetection:
             "git push --force https://github.com/user/repo.git main"
         )
 
-    def test_multiline_command_with_backslash_not_detected(self):
-        """Backslash-continuation splits the pattern across lines — not detected.
+    def test_multiline_command_with_backslash_detected(self):
+        """Backslash-continuation across lines IS detected after normalization.
 
-        Known limitation: regex operates line-by-line. In practice, Claude Code
-        sends commands as single-line strings, so this is acceptable.
+        Line continuations (\\<newline>) are normalized to spaces before pattern
+        matching, closing a bypass vector.
         """
         from merge_guard_pre import is_dangerous_command
 
-        # The \n breaks the regex match — documents a known limitation
-        assert not is_dangerous_command("git push \\\n--force origin main")
+        assert is_dangerous_command("git push \\\n--force origin main")
 
     def test_git_push_force_via_config_flag_detected(self):
         """git -c ... push --force with interleaved -c flags IS detected."""
@@ -5554,3 +5553,78 @@ class TestGhPrCloseFullIntegration:
 
         result = check_merge_authorization("gh pr close 42", token_dir=tmp_path)
         assert result is None
+
+
+# =============================================================================
+# _detect_command_operation_type unit tests
+# =============================================================================
+
+
+class TestDetectCommandOperationType:
+    """Direct unit tests for _detect_command_operation_type helper."""
+
+    def test_merge_command(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("gh pr merge 42") == "merge"
+
+    def test_close_command(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("gh pr close 42") == "close"
+
+    def test_force_push_returns_none(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git push --force origin main") is None
+
+    def test_branch_delete_returns_none(self):
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type("git branch -D feature") is None
+
+
+# =============================================================================
+# Line continuation normalization tests
+# =============================================================================
+
+
+class TestLineContinuationNormalization:
+    """Tests that bash line continuations (\\<newline>) don't bypass pattern matching."""
+
+    def test_close_with_delete_branch_split(self):
+        """gh pr close with --delete-branch split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr close 42 \\\n--delete-branch")
+
+    def test_merge_split_across_lines(self):
+        """gh pr merge split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh pr merge \\\n42")
+
+    def test_force_push_split_across_lines(self):
+        """git push --force split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git push \\\n--force origin main")
+
+    def test_branch_delete_split_across_lines(self):
+        """git branch -D split across lines is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git branch \\\n-D feature")
+
+    def test_multiple_continuations(self):
+        """Multiple line continuations in a single command are all normalized."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh \\\npr \\\nmerge \\\n42")
+
+    def test_no_false_positive_on_literal_backslash_n(self):
+        """Literal backslash-n in text (not a line continuation) is not affected."""
+        from merge_guard_pre import is_dangerous_command
+
+        # This is a literal \\n inside a string, not a line continuation
+        assert not is_dangerous_command("echo 'line1\\nline2'")

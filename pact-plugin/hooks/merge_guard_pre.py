@@ -296,6 +296,9 @@ def is_dangerous_command(command: str) -> bool:
     Returns:
         True if the command matches a dangerous pattern
     """
+    # Normalize bash line continuations (\<newline>) before any matching.
+    # Without this, patterns split across lines bypass all regex detection.
+    command = command.replace("\\\n", " ")
     stripped = _strip_non_executable_content(command)
     for pattern in DANGEROUS_PATTERNS:
         if pattern.search(stripped):
@@ -423,7 +426,7 @@ def _detect_command_operation_type(command: str) -> str | None:
     """Detect the operation type of a dangerous command.
 
     Returns:
-        "merge" for gh pr merge, "close" for gh pr close --delete-branch,
+        "merge" for gh pr merge, "close" for gh pr close (any variant),
         or None for other operation types (force push, branch delete, etc.)
     """
     if re.search(r"\bgh\s+pr\s+merge\b", command):
