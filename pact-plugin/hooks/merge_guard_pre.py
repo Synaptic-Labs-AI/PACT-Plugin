@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/merge_guard_pre.py
-Summary: PreToolUse hook matching Bash — blocks merge, force push, and branch
-         delete commands unless a valid authorization token exists.
+Summary: PreToolUse hook matching Bash — blocks merge, close (with branch
+         deletion), force push, and branch delete commands unless a valid
+         authorization token exists.
 Used by: hooks.json PreToolUse hook (matcher: Bash)
 
 This hook is part of the merge guard system. It checks for a valid token
 written by the companion hook (merge_guard_post.py) before allowing dangerous
-git operations. If no valid token exists, the command is blocked with a message
+git/gh operations (merge, close with --delete-branch, force push, branch
+delete). If no valid token exists, the command is blocked with a message
 directing the user to confirm via AskUserQuestion first.
 
 Input: JSON from stdin with tool_input containing the command
@@ -35,8 +37,9 @@ from shared.merge_guard_common import (
 DANGEROUS_PATTERNS = [
     # PR merge via gh CLI
     re.compile(r"\bgh\s+pr\s+merge\b"),
-    # PR close via gh CLI
-    re.compile(r"\bgh\s+pr\s+close\b"),
+    # PR close with --delete-branch via gh CLI (bare close is reversible)
+    re.compile(r"\bgh\s+pr\s+close\b(?=.*--delete-branch)"),
+    re.compile(r"--delete-branch.*\bgh\s+pr\s+close\b"),
     # Force push (excludes --force-with-lease which is a safer alternative)
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*--force(?!-with-lease)\b"),
     re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*-f\b"),
@@ -416,12 +419,26 @@ def _consume_token(token_path: str) -> bool:
         return False
 
 
+def _detect_command_operation_type(command: str) -> str | None:
+    """Detect the operation type of a dangerous command.
+
+    Returns:
+        "merge" for gh pr merge, "close" for gh pr close --delete-branch,
+        or None for other operation types (force push, branch delete, etc.)
+    """
+    if re.search(r"\bgh\s+pr\s+merge\b", command):
+        return "merge"
+    if re.search(r"\bgh\s+pr\s+close\b", command):
+        return "close"
+    return None
+
+
 def _token_matches_command(token: dict, command: str) -> bool:
     """Check if a token's context is consistent with the command being executed.
 
-    If the token has specific context (PR number, branch name), verify the command
-    matches. If parsing is ambiguous or no context is available, allow through
-    to avoid false negatives.
+    If the token has specific context (PR number, branch name, operation type),
+    verify the command matches. If parsing is ambiguous or no context is
+    available, allow through to avoid false negatives.
 
     Args:
         token: Token data dict with optional context fields
@@ -436,6 +453,15 @@ def _token_matches_command(token: dict, command: str) -> bool:
 
     pr_number = context.get("pr_number")
     branch = context.get("branch")
+    token_op_type = context.get("operation_type")
+
+    # Check operation type: a merge token should not authorize a close and
+    # vice versa. If either side has no operation_type, skip the check
+    # (ambiguous is permissive for backward compatibility with old tokens).
+    if token_op_type:
+        cmd_op_type = _detect_command_operation_type(command)
+        if cmd_op_type and token_op_type != cmd_op_type:
+            return False
 
     # If token has a PR number, check gh pr merge/close commands match
     if pr_number:

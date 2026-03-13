@@ -2,13 +2,15 @@
 """
 Location: pact-plugin/hooks/merge_guard_post.py
 Summary: PostToolUse hook matching AskUserQuestion — writes a short-lived
-         authorization token when the user approves a merge-related question.
+         authorization token when the user approves a merge, close (with branch
+         deletion), force push, or branch delete question.
 Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion)
 
 This hook is part of the merge guard system. When AskUserQuestion is used to
-confirm a merge, force push, or branch deletion, and the user answers
-affirmatively, a token file is written to ~/.claude/. The companion hook
-(merge_guard_pre.py) checks for this token before allowing dangerous commands.
+confirm a merge, close (with branch deletion), force push, or branch deletion,
+and the user answers affirmatively, a token file is written to ~/.claude/. The
+companion hook (merge_guard_pre.py) checks for this token before allowing
+dangerous commands.
 
 Input: JSON from stdin with tool_input (AskUserQuestion questions array) and tool_output (answers dict)
 Output: None (side effect: writes token file on approval)
@@ -71,13 +73,14 @@ def is_affirmative(answer: str) -> bool:
 def extract_context(question: str) -> dict:
     """Extract operation context from the question text.
 
-    Attempts to find PR numbers and branch names from the question.
+    Attempts to find PR numbers, branch names, and operation type from the
+    question.
 
     Args:
         question: The question text
 
     Returns:
-        Dict with extracted context fields
+        Dict with extracted context fields including operation_type
     """
     context = {"question_snippet": question[:200]}
 
@@ -95,6 +98,13 @@ def extract_context(question: str) -> dict:
     )
     if branch_match:
         context["branch"] = branch_match.group(1) or branch_match.group(2)
+
+    # Detect operation type for token scoping
+    question_lower = question.lower()
+    if re.search(r"\bclose\b.*(?:pr|pull\s*request)|(?:pr|pull\s*request).*\bclose\b|gh\s+pr\s+close", question_lower):
+        context["operation_type"] = "close"
+    elif re.search(r"\bmerge\b", question_lower):
+        context["operation_type"] = "merge"
 
     return context
 
