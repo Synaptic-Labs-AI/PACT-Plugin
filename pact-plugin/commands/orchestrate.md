@@ -333,15 +333,6 @@ When a phase is skipped but a coder encounters a decision that would have been h
 **Dispatch `pact-preparer`**:
 1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
-   - Include in description:
-     ```
-     **Memory Lifecycle (MANDATORY)**:
-     - Load `pact-memory` skill at start
-     - Search for prior context: `memory.search("{feature} research preparation")`
-     - Include MEMORY REPORT in your teachback
-     - Save memory before HANDOFF with `memory.save({...})`
-     - Include `memory_used: true` and `memory_id` in task metadata
-     ```
 2. `TaskUpdate(taskId, owner="preparer")`
 3. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -351,7 +342,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Memory: [agents saved / not verified: {which}]
+- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -415,15 +406,6 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    - Include upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
    - Do not read phase output files yourself or paste their content into the task description.
    - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
-   - Include in description:
-     ```
-     **Memory Lifecycle (MANDATORY)**:
-     - Load `pact-memory` skill at start
-     - Search for prior context: `memory.search("{feature} architecture design")`
-     - Include MEMORY REPORT in your teachback
-     - Save memory before HANDOFF with `memory.save({...})`
-     - Include `memory_used: true` and `memory_id` in task metadata
-     ```
 2. `TaskUpdate(taskId, owner="architect")`
 3. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -433,7 +415,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/architecture/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable? Memory: [agents saved / not verified: {which}]
+- [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 **Concurrent dispatch within ARCHITECT**: If designing multiple independent components (e.g., "design user service AND notification service"), invoke multiple architects simultaneously. Ensure interface contracts between components are defined as a coordination checkpoint.
 
@@ -519,19 +501,17 @@ For each coder needed:
    - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
    - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
    - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
-   - Include in description:
-     ```
-     **Memory Lifecycle (MANDATORY)**:
-     - Load `pact-memory` skill at start
-     - Search for prior context: `memory.search("{feature} {domain} implementation")`
-     - Include MEMORY REPORT in your teachback
-     - Save memory before HANDOFF with `memory.save({...})`
-     - Include `memory_used: true` and `memory_id` in task metadata
-     ```
 2. `TaskUpdate(taskId, owner="{coder-name}")`
 3. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
+
+**Memory save tasks**: For each coder dispatched, also create a corresponding save task:
+```
+TaskCreate(subject="{coder-name}: save memory", description="Load Skill('pact-memory') and save learnings from task #{work_task_id}. After saving, TaskUpdate(taskId, metadata={'memory_saved': true, 'memory_id': '{id}'}).")
+TaskUpdate(save_task_id, status="pending")  // blocked until work stabilizes
+```
+Save tasks are unblocked after work stabilizes (tests pass, reviews clean). They do not block feature completion.
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -541,7 +521,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
-- [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable? Memory: [agents saved / not verified: {which}]
+- [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE
 
@@ -593,15 +573,6 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
    - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
-   - Include in description:
-     ```
-     **Memory Lifecycle (MANDATORY)**:
-     - Load `pact-memory` skill at start
-     - Search for prior context: `memory.search("{feature} testing")`
-     - Include MEMORY REPORT in your teachback
-     - Save memory before HANDOFF with `memory.save({...})`
-     - Include `memory_used: true` and `memory_id` in task metadata
-     ```
 2. `TaskUpdate(taskId, owner="test-engineer")`
 3. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -666,4 +637,4 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **Save orchestration context**: Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned. This applies to ALL completed orchestrations, not just high-variety tasks.
+7. **Save orchestration context**: Create memory save tasks for agents that completed work. Unblock save tasks so idle agents can load `Skill("pact-memory")` and save their learnings. This applies to ALL completed orchestrations, not just high-variety tasks.

@@ -2,18 +2,20 @@
 """
 Location: pact-plugin/hooks/handoff_gate.py
 Summary: TaskCompleted hook that blocks task completion if handoff metadata
-         is missing or incomplete, and warns if memory_used metadata is absent.
-         Exit code 2 prevents completion; warnings go to stderr without blocking.
+         is missing or incomplete, and nudges the orchestrator if memory_saved
+         metadata is absent. Exit code 2 prevents completion; nudges go to
+         stderr without blocking.
 Used by: hooks.json TaskCompleted hook
 
 This is the highest-leverage hook in the SDK leverage design — by ensuring
 upstream tasks always have proper metadata, downstream chain-reads via
-TaskGet are guaranteed to find data. Additionally, it verifies that PACT
-work agents saved to pact-memory as part of the Memory Lifecycle Protocol.
+TaskGet are guaranteed to find data. Additionally, it surfaces an explicit
+action instruction when PACT work agents complete without saving to
+pact-memory, prompting the orchestrator to create a deferred save task.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name
-Output: stderr message on block (exit 2), warnings on stderr (exit 0)
+Output: stderr message on block (exit 2), nudges on stderr (exit 0)
 """
 
 import json
@@ -27,8 +29,8 @@ REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration"
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
 
-# PACT agents that do work requiring memory saves (mirrors hooks/memory_enforce.py)
-# Explicitly excludes pact-memory-agent to avoid recursion
+# PACT agents that do substantive work — memory saves are deferred and
+# orchestrator-driven via structural save tasks (not enforced at handoff time)
 PACT_WORK_AGENTS = [
     "pact-preparer",
     "pact-architect",
@@ -157,19 +159,22 @@ def is_pact_work_agent(teammate_name: str) -> bool:
 def check_memory_metadata(
     task_metadata: dict,
     teammate_name: str | None,
+    task_id: str = "",
 ) -> str | None:
     """
-    Check if a PACT work agent included memory_used metadata.
+    Check if a PACT work agent included memory_saved metadata.
 
-    This is a non-blocking warning — task completion is NOT prevented,
-    but the orchestrator is alerted that memory was not saved.
+    This is a non-blocking nudge — task completion is NOT prevented,
+    but the orchestrator receives an explicit action instruction to
+    create a deferred save task for the agent.
 
     Args:
         task_metadata: Task metadata dict
         teammate_name: Name of completing teammate
+        task_id: Task identifier for the action message
 
     Returns:
-        Warning message if memory_used is missing, None if OK or not applicable
+        Action message if memory_saved is missing, None if OK or not applicable
     """
     if not teammate_name or not is_pact_work_agent(teammate_name):
         return None
@@ -180,12 +185,14 @@ def check_memory_metadata(
     if task_metadata.get("type") in ("blocker", "algedonic"):
         return None
 
-    memory_used = task_metadata.get("memory_used", False)
-    if not memory_used:
+    memory_saved = task_metadata.get("memory_saved", False)
+    if not memory_saved:
+        task_ref = f" (task #{task_id})" if task_id else ""
         return (
-            "⚠️ MEMORY NOT SAVED: Agent completed without saving to pact-memory. "
-            "This agent should have included memory_used: true in task metadata. "
-            "Consider requesting the agent save its learnings before proceeding."
+            f"\U0001f4cb ACTION REQUIRED: Create memory save task for "
+            f"{teammate_name}{task_ref} if not already tracked. "
+            f"Agent completed without saving to pact-memory. "
+            f"Add save task to task list, blocked until work stabilizes."
         )
 
     return None
@@ -215,10 +222,11 @@ def main():
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
 
-    # Non-blocking: warn if memory_used metadata is missing
+    # Non-blocking: nudge orchestrator to create deferred save task
     memory_warning = check_memory_metadata(
         task_metadata=task_metadata,
         teammate_name=teammate_name,
+        task_id=task_id,
     )
     if memory_warning:
         print(memory_warning, file=sys.stderr)

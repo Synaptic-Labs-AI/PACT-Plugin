@@ -21,20 +21,24 @@ Create a simpler Task hierarchy than full orchestrate:
 4. `TaskCreate`: Agent task(s) — direct children of feature
 5. `TaskUpdate`: Agent tasks status = "in_progress"
 6. `TaskUpdate`: Feature task addBlockedBy = [all agent IDs]
-7. Dispatch agents concurrently with task IDs
-8. Monitor via `TaskList` until all agents complete
-9. `TaskUpdate`: Agent tasks status = "completed" (as each completes)
-10. `TaskUpdate`: Feature task status = "completed"
+7. `TaskCreate`: Save task(s) — one per agent, blocked until work stabilizes
+8. Dispatch agents concurrently with task IDs
+9. Monitor via `TaskList` until all agents complete
+10. `TaskUpdate`: Agent tasks status = "completed" (as each completes)
+11. `TaskUpdate`: Feature task status = "completed"
 ```
 
-> Steps 8-10 are detailed in the [After Specialist Completes](#after-specialist-completes) section below (includes test verification and commit steps).
+> Steps 9-11 are detailed in the [After Specialist Completes](#after-specialist-completes) section below (includes test verification and commit steps).
 
 **Example structure:**
 ```
 [Feature] "Fix 3 backend bugs"           (blockedBy: agent1, agent2, agent3)
 ├── [Agent] "backend-coder: fix bug A"
 ├── [Agent] "backend-coder: fix bug B"
-└── [Agent] "backend-coder: fix bug C"
+├── [Agent] "backend-coder: fix bug C"
+├── [Save]  "backend-coder-1: save memory"  (blocked until stable)
+├── [Save]  "backend-coder-2: save memory"  (blocked until stable)
+└── [Save]  "backend-coder-3: save memory"  (blocked until stable)
 ```
 
 ---
@@ -164,7 +168,7 @@ Before invoking multiple specialists concurrently, perform this coordination che
 When the task contains multiple independent items, invoke multiple specialists together with boundary context:
 
 For each specialist needed:
-1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\n**Memory Lifecycle (MANDATORY)**:\n- Load `pact-memory` skill at start\n- Search for prior context: `memory.search(\"{task-topic}\")`\n- Include MEMORY REPORT in your teachback\n- Save memory before HANDOFF with `memory.save({...})`\n- Include `memory_used: true` and `memory_id` in task metadata\n\nTask: [this agent's specific sub-task]")`
+1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [this agent's specific sub-task]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -183,7 +187,7 @@ Use a single specialist agent only when:
 - Conventions haven't been established yet (run one first to set patterns)
 
 **Dispatch the specialist**:
-1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\n**Memory Lifecycle (MANDATORY)**:\n- Load `pact-memory` skill at start\n- Search for prior context: `memory.search(\"{task-topic}\")`\n- Include MEMORY REPORT in your teachback\n- Save memory before HANDOFF with `memory.save({...})`\n- Include `memory_used: true` and `memory_id` in task metadata\n\nTask: [user's task description]")`
+1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [user's task description]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -205,7 +209,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 - [ ] **Receive handoff** from specialist(s)
 - [ ] Agent tasks marked `completed` (agents self-manage their task status via `TaskUpdate`)
-- [ ] **Verify memory saved** — check agent task metadata for `memory_used: true`. If missing, request the agent save its learnings before proceeding.
+- [ ] **Create memory save task** — `TaskCreate(subject="{agent-name}: save memory")` blocked until work stabilizes. After commit, unblock and message idle agent to load `Skill("pact-memory")` and save.
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding

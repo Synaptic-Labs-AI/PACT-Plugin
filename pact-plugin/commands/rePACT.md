@@ -213,15 +213,6 @@ Implement the sub-component:
 
 For each specialist needed:
 1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
-   - Include in description:
-     ```
-     **Memory Lifecycle (MANDATORY)**:
-     - Load `pact-memory` skill at start
-     - Search for prior context: `memory.search("{sub-task-topic}")`
-     - Include MEMORY REPORT in your teachback
-     - Save memory before HANDOFF
-     - Include `memory_used: true` and `memory_id` in task metadata
-     ```
 2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
 3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -372,7 +363,7 @@ When nested cycle completes:
 2. **Summarize** what was done in the nested cycle
 3. **Report** any decisions that affect the parent task
 4. **Continue** with parent orchestration (parent task now unblocked)
-5. **Save sub-cycle context**: Delegate to `pact-memory-agent` to save nested cycle decisions and lessons learned.
+5. **Save sub-cycle context**: Create memory save tasks for agents that completed nested work. Unblock when work stabilizes so agents can load `Skill("pact-memory")` and save.
 
 **Handoff format**: Use the standard handoff structure (Produced, Key decisions, Reasoning chain [recommended], Areas of uncertainty, Integration points, Open questions — 5 required fields, 1 recommended).
 

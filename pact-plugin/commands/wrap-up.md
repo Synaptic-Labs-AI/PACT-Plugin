@@ -13,7 +13,7 @@ Before other cleanup, audit and optionally clean up Task state:
 1. `TaskList`: Review all session tasks
 2. For abandoned in_progress tasks: complete or document reason
 3. Verify Feature task reflects final state
-4. Archive key context to memory (via pact-memory-agent)
+4. Archive key context to memory (unblock save tasks for idle agents)
 5. Report task summary: "Session has N tasks (X completed, Y pending)"
 6. IF multi-session mode (CLAUDE_CODE_TASK_LIST_ID set):
    - Offer: "Clean up completed workflows? (Context archived to memory)"
@@ -73,7 +73,7 @@ Before closing the session, perform a brief self-assessment. Compare your initia
 3. **Specialist fit**: Were specialists well-matched to tasks? Any that should have been different?
 4. **Estimation pattern**: Does this match a recurring pattern from prior sessions? (Search pact-memory for `orchestration_calibration` entries)
 
-**Save as pact-memory** (delegate to pact-memory-agent):
+**Save as pact-memory** (create save task, unblock when ready, agent loads `Skill("pact-memory")`):
 ```
 context: "Orchestration retrospective for {feature}"
 goal: "Calibrate orchestration judgment via second-order observation"

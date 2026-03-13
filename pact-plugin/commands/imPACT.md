@@ -120,7 +120,7 @@ Answer three questions:
 | **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
-**After resolution**: Delegate to `pact-memory-agent` to save the blocker context:
+**After resolution**: Create a memory save task for the blocker context:
 - What caused the blocker
 - How it was resolved (or why it was escalated)
 - Lessons learned for avoiding similar blockers

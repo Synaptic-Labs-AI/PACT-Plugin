@@ -1,7 +1,8 @@
 """
 Tests for handoff_gate.py — TaskCompleted hook that blocks task completion
-if handoff metadata is missing or incomplete, and warns if memory_used
-metadata is absent for PACT work agents.
+if handoff metadata is missing or incomplete, and nudges the orchestrator
+to create a deferred save task when memory_saved metadata is absent for
+PACT work agents.
 
 Tests cover:
 1. Complete handoff metadata -> allow (exit 0)
@@ -14,8 +15,8 @@ Tests cover:
 8. Subject starts with "BLOCKER:" -> allow (bypass)
 9. No teammate_name in input -> allow (non-agent completion)
 10. is_pact_work_agent identifies PACT agents correctly
-11. check_memory_metadata warns when memory_used is missing for PACT agents
-12. main() emits memory warning on stderr without blocking (exit 0)
+11. check_memory_metadata nudges when memory_saved is missing for PACT agents
+12. main() emits action-required nudge on stderr without blocking (exit 0)
 """
 import json
 import io
@@ -307,8 +308,8 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_with_memory_warning_for_pact_agent(self, capsys):
-        """PACT agent with valid handoff but no memory_used -> exit 0 + warning on stderr."""
+    def test_main_exits_0_with_action_required_for_pact_agent(self, capsys):
+        """PACT agent with valid handoff but no memory_saved -> exit 0 + action nudge on stderr."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -325,13 +326,15 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "MEMORY NOT SAVED" in captured.err
+        assert "ACTION REQUIRED" in captured.err
+        assert "pact-backend-coder" in captured.err
+        assert "task #1" in captured.err
 
-    def test_main_exits_0_no_warning_when_memory_used(self, capsys):
-        """PACT agent with valid handoff + memory_used: true -> exit 0, no warning."""
+    def test_main_exits_0_no_nudge_when_memory_saved(self, capsys):
+        """PACT agent with valid handoff + memory_saved: true -> exit 0, no nudge."""
         from handoff_gate import main
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_used": True}
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
         input_data = json.dumps({
             "task_id": "1",
             "task_subject": "CODE: auth",
@@ -346,7 +349,7 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "MEMORY NOT SAVED" not in captured.err
+        assert "ACTION REQUIRED" not in captured.err
 
 
 class TestIsPactWorkAgent:
@@ -362,12 +365,6 @@ class TestIsPactWorkAgent:
         from handoff_gate import is_pact_work_agent
 
         assert is_pact_work_agent("pact-backend-coder-auth-scope") is True
-
-    def test_excludes_pact_memory_agent(self):
-        """pact-memory-agent is explicitly excluded to avoid recursion."""
-        from handoff_gate import is_pact_work_agent
-
-        assert is_pact_work_agent("pact-memory-agent") is False
 
     def test_rejects_non_pact_agent(self):
         from handoff_gate import is_pact_work_agent
@@ -394,34 +391,37 @@ class TestIsPactWorkAgent:
 class TestCheckMemoryMetadata:
     """Tests for handoff_gate.check_memory_metadata()."""
 
-    def test_no_warning_when_memory_used_true(self):
+    def test_no_nudge_when_memory_saved_true(self):
         from handoff_gate import check_memory_metadata
 
         result = check_memory_metadata(
-            task_metadata={"memory_used": True},
+            task_metadata={"memory_saved": True},
             teammate_name="pact-backend-coder"
         )
         assert result is None
 
-    def test_warns_when_memory_used_absent(self):
+    def test_nudges_when_memory_saved_absent(self):
         from handoff_gate import check_memory_metadata
 
         result = check_memory_metadata(
             task_metadata={},
-            teammate_name="pact-backend-coder"
+            teammate_name="pact-backend-coder",
+            task_id="42"
         )
         assert result is not None
-        assert "MEMORY NOT SAVED" in result
+        assert "ACTION REQUIRED" in result
+        assert "pact-backend-coder" in result
+        assert "task #42" in result
 
-    def test_warns_when_memory_used_false(self):
+    def test_nudges_when_memory_saved_false(self):
         from handoff_gate import check_memory_metadata
 
         result = check_memory_metadata(
-            task_metadata={"memory_used": False},
+            task_metadata={"memory_saved": False},
             teammate_name="pact-backend-coder"
         )
         assert result is not None
-        assert "MEMORY NOT SAVED" in result
+        assert "ACTION REQUIRED" in result
 
     def test_no_warning_for_non_pact_agent(self):
         from handoff_gate import check_memory_metadata
