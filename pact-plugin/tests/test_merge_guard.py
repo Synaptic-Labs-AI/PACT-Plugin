@@ -5883,3 +5883,523 @@ class TestGhGlobalFlagBypass:
         assert is_dangerous_command(
             "gh --repo owner/repo \\\npr close 42 --delete-branch"
         )
+
+
+# =============================================================================
+# gh global flag bypass — comprehensive edge cases, adversarial, integration
+# =============================================================================
+
+
+class TestGhGlobalFlagBypassEdgeCases:
+    """Comprehensive edge case, adversarial, and integration tests for the
+    gh global flag bypass fix (issue #267).
+
+    Supplements TestGhGlobalFlagBypass (coder smoke tests) with:
+    - Unusual flag values (dots, slashes, special chars, long values)
+    - Greedy matching concerns (over-match into unrelated commands)
+    - Stripping helper interactions (echo, var assign, heredoc, comment)
+    - Adversarial bypass vectors (creative flag placement, obfuscation)
+    - Token matching with global flags (PR extraction, operation type)
+    """
+
+    # --- Unusual flag values ---
+
+    def test_repo_with_nested_org(self):
+        """Repo value with nested org path (org/suborg/repo) is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo my-org/my-subrepo pr merge 42"
+        )
+
+    def test_repo_with_dots_in_name(self):
+        """Repo value containing dots (e.g., example.com/repo) is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh --repo my-org/my.repo.name pr merge 42")
+
+    def test_repo_with_hyphens_and_underscores(self):
+        """Repo value with mixed separators is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo my_org-name/my_repo-name pr merge 42"
+        )
+
+    def test_hostname_with_port(self):
+        """Hostname value including port number is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --hostname github.example.com:8443 pr merge 42"
+        )
+
+    def test_repo_equals_with_special_chars(self):
+        """--repo=value with special chars in value is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh --repo=my-org/my.repo pr merge 42")
+
+    def test_short_repo_with_long_path(self):
+        """-R with a long repo path is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh -R very-long-organization-name/very-long-repository-name pr merge 42"
+        )
+
+    # --- Many flags chained ---
+
+    def test_three_global_flags(self):
+        """Three global flags before subcommand is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo --hostname host.com --help pr merge 42"
+        )
+
+    def test_five_flag_tokens(self):
+        """Five flag+value tokens before subcommand is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo --hostname host.com -R other/repo --verbose --debug pr merge 42"
+        )
+
+    # --- Greedy matching: false positive defense ---
+    # (?:\S+\s+)* can over-match. These verify the KNOWN behavior:
+    # commands with 'pr merge' or 'pr close' appearing as arguments to
+    # other gh subcommands will match. This is acceptable (false positive >
+    # missed threat per the codebase philosophy), but we document it.
+
+    def test_gh_issue_with_pr_merge_in_args_is_false_positive(self):
+        """gh search issues 'pr merge' matches — known false positive.
+
+        The (?:\\S+\\s+)* pattern eats 'search issues' tokens, then matches
+        'pr merge'. This is a conservative false positive, not a bypass.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        # Document the known false positive behavior
+        result = is_dangerous_command("gh search issues pr merge")
+        assert result is True  # Known false positive — acceptable
+
+    def test_gh_pr_view_no_false_positive(self):
+        """gh pr view (without 'merge' as separate word) is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh --repo owner/repo pr view 42")
+
+    def test_gh_pr_list_no_false_positive(self):
+        """gh pr list with --repo is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh --repo owner/repo pr list")
+
+    def test_gh_pr_create_no_false_positive(self):
+        """gh pr create with --repo is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh --repo owner/repo pr create --fill")
+
+    def test_gh_pr_checkout_no_false_positive(self):
+        """gh pr checkout with --repo is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh --repo owner/repo pr checkout 42")
+
+    def test_gh_issue_list_no_false_positive(self):
+        """gh issue list with --repo is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh --repo owner/repo issue list")
+
+    def test_gh_release_create_no_false_positive(self):
+        """gh release create with --repo is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("gh --repo owner/repo release create v1.0")
+
+    def test_bare_close_with_multiple_flags_is_safe(self):
+        """gh --repo X --hostname Y pr close (no --delete-branch) is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "gh --repo owner/repo --hostname host.com pr close 42"
+        )
+
+    # --- Stripping helper interactions ---
+
+    def test_echo_flagged_merge_stripped(self):
+        """echo of 'gh --repo ... pr merge' is stripped and not detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'echo "gh --repo owner/repo pr merge 42"'
+        )
+
+    def test_echo_flagged_close_delete_branch_stripped(self):
+        """echo of 'gh --repo ... pr close --delete-branch' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'echo "gh --repo owner/repo pr close 42 --delete-branch"'
+        )
+
+    def test_var_assign_flagged_merge_stripped(self):
+        """Variable assignment of flagged merge command is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'CMD="gh --repo owner/repo pr merge 42"'
+        )
+
+    def test_comment_flagged_merge_stripped(self):
+        """Comment containing flagged merge command is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "# gh --repo owner/repo pr merge 42"
+        )
+
+    def test_heredoc_flagged_merge_stripped(self):
+        """Heredoc containing flagged merge command is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "cat << 'EOF'\ngh --repo owner/repo pr merge 42\nEOF"
+        )
+
+    def test_echo_flagged_api_merge_stripped(self):
+        """echo of 'gh --repo ... api ... merge -X PUT' is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'echo "gh --repo owner/repo api repos/o/r/pulls/1/merge -X PUT"'
+        )
+
+    def test_printf_flagged_merge_stripped(self):
+        """printf of flagged merge command is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "printf 'gh --repo owner/repo pr merge 42'"
+        )
+
+    def test_git_commit_msg_flagged_merge_stripped(self):
+        """git commit -m with flagged merge text is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'git commit -m "feat: gh --repo owner/repo pr merge 42"'
+        )
+
+    def test_herestring_flagged_merge_stripped(self):
+        """Here-string containing flagged merge command is stripped."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            'grep -c merge <<< "gh --repo owner/repo pr merge 42"'
+        )
+
+    # --- Stripping helpers that PRESERVE dangerous content ---
+
+    def test_echo_piped_to_bash_with_flags_detected(self):
+        """echo of flagged merge piped to bash IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'echo "gh --repo owner/repo pr merge 42" | bash'
+        )
+
+    def test_eval_var_with_flags_detected(self):
+        """Variable with flagged merge passed to eval IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'CMD="gh --repo owner/repo pr merge 42" && eval $CMD'
+        )
+
+    def test_var_expanded_with_flags_detected(self):
+        """Variable with flagged merge expanded bare IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'CMD="gh --repo owner/repo pr merge 42" && $CMD'
+        )
+
+    def test_heredoc_to_bash_with_flags_detected(self):
+        """Heredoc with flagged merge fed to bash IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "bash << 'EOF'\ngh --repo owner/repo pr merge 42\nEOF"
+        )
+
+    def test_command_substitution_in_echo_with_flags_detected(self):
+        """echo with $() containing flagged merge IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'echo "$(gh --repo owner/repo pr merge 42)"'
+        )
+
+    def test_process_substitution_to_bash_with_flags_detected(self):
+        """bash <(echo 'flagged merge') IS dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "bash <(echo 'gh --repo owner/repo pr merge 42')"
+        )
+
+    # --- Chained commands with flags ---
+
+    def test_chained_and_flagged_merge(self):
+        """Safe command && flagged merge is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "echo done && gh --repo owner/repo pr merge 42"
+        )
+
+    def test_chained_semicolon_flagged_merge(self):
+        """Safe command ; flagged merge is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "echo done; gh --repo owner/repo pr merge 42"
+        )
+
+    def test_subshell_flagged_merge(self):
+        """$(flagged merge) in subshell is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "$(gh --repo owner/repo pr merge 42)"
+        )
+
+    def test_env_var_prefix_flagged_merge(self):
+        """ENV=val flagged merge is dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "GH_TOKEN=abc gh --repo owner/repo pr merge 42"
+        )
+
+    # --- Line continuation combined with global flags (extended) ---
+
+    def test_flag_value_split_by_line_continuation(self):
+        """Flag value split across line continuation is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        # gh --repo \<newline>owner/repo pr merge 42
+        assert is_dangerous_command("gh --repo \\\nowner/repo pr merge 42")
+
+    def test_multiple_flags_with_line_continuations(self):
+        """Multiple flags each split by line continuation is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo \\\nowner/repo \\\n--hostname \\\nhost.com \\\npr merge 42"
+        )
+
+    def test_api_merge_with_flags_and_line_continuation(self):
+        """API merge with flags and line continuation is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --repo owner/repo \\\napi repos/o/r/pulls/1/merge \\\n-X PUT"
+        )
+
+    def test_close_delete_branch_flags_all_line_continued(self):
+        """Close --delete-branch with flags and max line continuations."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh \\\n--repo \\\nowner/repo \\\npr \\\nclose \\\n42 \\\n--delete-branch"
+        )
+
+    # --- Adversarial: creative bypass attempts ---
+
+    def test_repo_value_contains_pr_merge(self):
+        """--repo value that itself contains 'pr merge' is still dangerous.
+
+        gh --repo pr merge — this looks like --repo flag with value 'pr'
+        followed by actual 'merge', but the pattern catches it because
+        (?:\\S+\\s+)* eats '--repo' and 'pr' is left as subcommand.
+        Actually 'gh --repo pr merge' would parse as gh --repo=pr merge=subcommand.
+        """
+        from merge_guard_pre import is_dangerous_command
+
+        # This is ambiguous but should be caught (conservative)
+        assert is_dangerous_command("gh --repo pr merge 42")
+
+    def test_flag_that_looks_like_subcommand(self):
+        """Flag value 'pr' followed by real subcommand tokens."""
+        from merge_guard_pre import is_dangerous_command
+
+        # gh --hostname pr merge 42 — hostname=pr, subcommand=merge
+        # Pattern sees: gh + '--hostname pr ' (eaten by flags) + 'merge' — but
+        # we need 'pr\s+merge' to match, so this should still match
+        assert is_dangerous_command("gh --hostname pr merge 42")
+
+    def test_double_pr_merge_in_command(self):
+        """Command with 'pr merge' appearing twice — still dangerous."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "echo 'test pr merge' && gh --repo owner/repo pr merge 42"
+        )
+
+    def test_tabs_instead_of_spaces(self):
+        """Tabs between gh and flags and subcommand — still matches \\s+."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("gh\t--repo\towner/repo\tpr\tmerge\t42")
+
+    def test_multiple_spaces_between_tokens(self):
+        """Multiple spaces between tokens — still matches \\s+."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh   --repo   owner/repo   pr   merge   42"
+        )
+
+    def test_mixed_whitespace(self):
+        """Mixed tabs and spaces — still matches \\s+."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh \t --repo \t owner/repo \t pr \t merge 42"
+        )
+
+    # --- Token matching: PR number extraction with global flags ---
+
+    def test_token_pr_extraction_with_two_flags(self):
+        """PR number extracted correctly with two global flags."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(
+            token, "gh --repo owner/repo --hostname host.com pr merge 42"
+        )
+
+    def test_token_pr_extraction_with_equals_syntax(self):
+        """PR number extracted correctly with --repo=value syntax."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(
+            token, "gh --repo=owner/repo pr merge 42"
+        )
+
+    def test_token_pr_mismatch_with_multiple_flags(self):
+        """PR number mismatch detected with multiple global flags."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert not _token_matches_command(
+            token, "gh --repo owner/repo --hostname host.com pr merge 99"
+        )
+
+    def test_token_pr_extraction_close_with_flags(self):
+        """PR number extracted from close command with global flags."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 100}}
+        assert _token_matches_command(
+            token, "gh -R owner/repo pr close 100 --delete-branch"
+        )
+
+    def test_token_pr_mismatch_close_with_flags(self):
+        """PR number mismatch in close command with global flags."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 100}}
+        assert not _token_matches_command(
+            token, "gh -R owner/repo pr close 200 --delete-branch"
+        )
+
+    def test_token_op_type_close_with_multiple_flags(self):
+        """Operation type 'close' detected with multiple global flags."""
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type(
+            "gh --repo owner/repo --hostname host.com pr close 42"
+        ) == "close"
+
+    def test_token_op_type_merge_with_equals_syntax(self):
+        """Operation type 'merge' detected with --repo=value syntax."""
+        from merge_guard_pre import _detect_command_operation_type
+
+        assert _detect_command_operation_type(
+            "gh --repo=owner/repo pr merge 42"
+        ) == "merge"
+
+    # --- Full authorization flow with flags and valid tokens ---
+
+    def test_flagged_merge_authorized_with_matching_token(self, tmp_path):
+        """Flagged merge command authorized by matching token."""
+        from merge_guard_pre import check_merge_authorization, TOKEN_PREFIX
+        import time, json, os
+
+        token_data = {
+            "expires_at": time.time() + 300,
+            "context": {"operation_type": "merge", "pr_number": 42},
+        }
+        token_path = tmp_path / f"{TOKEN_PREFIX}test"
+        token_path.write_text(json.dumps(token_data))
+        os.chmod(token_path, 0o600)
+
+        result = check_merge_authorization(
+            "gh --repo owner/repo pr merge 42", token_dir=tmp_path
+        )
+        assert result is None  # Authorized
+
+    def test_flagged_close_blocked_by_merge_token(self, tmp_path):
+        """Flagged close command blocked when only merge token exists."""
+        from merge_guard_pre import check_merge_authorization, TOKEN_PREFIX
+        import time, json, os
+
+        token_data = {
+            "expires_at": time.time() + 300,
+            "context": {"operation_type": "merge"},
+        }
+        token_path = tmp_path / f"{TOKEN_PREFIX}test"
+        token_path.write_text(json.dumps(token_data))
+        os.chmod(token_path, 0o600)
+
+        result = check_merge_authorization(
+            "gh --repo owner/repo pr close 42 --delete-branch",
+            token_dir=tmp_path,
+        )
+        assert result is not None  # Blocked — wrong operation type
+
+    def test_flagged_merge_blocked_by_wrong_pr_token(self, tmp_path):
+        """Flagged merge for PR 42 blocked when token is for PR 99."""
+        from merge_guard_pre import check_merge_authorization, TOKEN_PREFIX
+        import time, json, os
+
+        token_data = {
+            "expires_at": time.time() + 300,
+            "context": {"operation_type": "merge", "pr_number": 99},
+        }
+        token_path = tmp_path / f"{TOKEN_PREFIX}test"
+        token_path.write_text(json.dumps(token_data))
+        os.chmod(token_path, 0o600)
+
+        result = check_merge_authorization(
+            "gh --repo owner/repo pr merge 42", token_dir=tmp_path
+        )
+        assert result is not None  # Blocked — wrong PR
+
+    def test_api_merge_with_flags_blocked_without_token(self, tmp_path):
+        """API merge with global flags blocked without token."""
+        from merge_guard_pre import check_merge_authorization
+
+        result = check_merge_authorization(
+            "gh --repo owner/repo api repos/o/r/pulls/1/merge -X PUT",
+            token_dir=tmp_path,
+        )
+        assert result is not None
+        assert "approval" in result.lower()
