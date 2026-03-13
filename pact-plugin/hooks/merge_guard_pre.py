@@ -33,32 +33,48 @@ from shared.merge_guard_common import (
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
 )
 
+# Optional global flags between CLI tool and subcommand.
+# (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
+_GH_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+_GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
+
+# Composed prefixes for DRY usage across all patterns.
+_GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
+_GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
+
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
     # PR merge via gh CLI
-    re.compile(r"\bgh\s+pr\s+merge\b"),
+    re.compile(_GH_PREFIX + r"pr\s+merge\b"),
     # PR close with --delete-branch via gh CLI (bare close is reversible)
-    re.compile(r"\bgh\s+pr\s+close\b(?=.*--delete-branch)"),
-    re.compile(r"--delete-branch.*\bgh\s+pr\s+close\b"),
+    re.compile(_GH_PREFIX + r"pr\s+close\b(?=.*--delete-branch)"),
+    re.compile(r"--delete-branch.*" + _GH_PREFIX + r"pr\s+close\b"),
     # Force push (excludes --force-with-lease which is a safer alternative)
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*--force(?!-with-lease)\b"),
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+.*-f\b"),
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+-[a-zA-Z]*f"),
+    re.compile(_GIT_PREFIX + r"push\s+.*--force(?!-with-lease)\b"),
+    re.compile(_GIT_PREFIX + r"push\s+.*-f\b"),
+    re.compile(_GIT_PREFIX + r"push\s+-[a-zA-Z]*f"),
     # Force branch deletion
-    re.compile(r"\bgit\s+branch\s+.*-D\b"),
-    re.compile(r"\bgit\s+branch\s+.*--delete\s+--force\b"),
-    re.compile(r"\bgit\s+branch\s+--force\s+--delete\b"),
+    re.compile(_GIT_PREFIX + r"branch\s+.*-D\b"),
+    re.compile(_GIT_PREFIX + r"branch\s+.*--delete\s+--force\b"),
+    re.compile(_GIT_PREFIX + r"branch\s+--force\s+--delete\b"),
     # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
-    re.compile(r"\bgh\s+api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    re.compile(_GH_PREFIX + r"api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
     re.compile(r"\bcurl\b(?=.*-X\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
     # Direct push to default branch (bypasses PR merge)
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:main\b"),
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+\S+\s+HEAD:master\b"),
+    re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
+    re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
     # Regular push to main/master (e.g., local merge then push)
     # Negative lookahead (?!:) prevents matching refspecs like main:feature-branch
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+(?:-\S+\s+)*\S+\s+main(?!:)\b"),
-    re.compile(r"\bgit\s+(?:-c\s+\S+\s+)*push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
+    re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+main(?!:)\b"),
+    re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
 ]
+
+# Pre-compiled patterns for helper functions (consistent with DANGEROUS_PATTERNS style).
+_GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
+_GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
+# PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
+# between merge/close and the PR number.
+_GH_PR_NUMBER_RE = re.compile(_GH_PREFIX + r"pr\s+(?:merge|close)\s+" + _GH_GLOBAL_FLAGS + r"(\d+)")
 
 
 def _has_pipe_to_shell(command: str) -> bool:
@@ -429,9 +445,9 @@ def _detect_command_operation_type(command: str) -> str | None:
         "merge" for gh pr merge, "close" for gh pr close (any variant),
         or None for other operation types (force push, branch delete, etc.)
     """
-    if re.search(r"\bgh\s+pr\s+merge\b", command):
+    if _GH_PR_MERGE_RE.search(command):
         return "merge"
-    if re.search(r"\bgh\s+pr\s+close\b", command):
+    if _GH_PR_CLOSE_RE.search(command):
         return "close"
     return None
 
@@ -468,17 +484,17 @@ def _token_matches_command(token: dict, command: str) -> bool:
 
     # If token has a PR number, check gh pr merge/close commands match
     if pr_number:
-        pr_match = re.search(r"\bgh\s+pr\s+(?:merge|close)\s+(\d+)", command)
+        pr_match = _GH_PR_NUMBER_RE.search(command)
         if pr_match:
             return pr_match.group(1) == str(pr_number)
 
     # If token has a branch, check branch deletion commands match
     if branch:
-        branch_d_match = re.search(r"\bgit\s+branch\s+.*-D\s+(\S+)", command)
+        branch_d_match = re.search(_GIT_PREFIX + r"branch\s+.*-D\s+(\S+)", command)
         if branch_d_match:
             return branch_d_match.group(1) == branch
         branch_delete_match = re.search(
-            r"\bgit\s+branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
+            _GIT_PREFIX + r"branch\s+.*--delete\s+(?:--force\s+)?(\S+)", command
         )
         if branch_delete_match:
             return branch_delete_match.group(1) == branch
