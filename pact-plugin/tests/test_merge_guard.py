@@ -6403,3 +6403,274 @@ class TestGhGlobalFlagBypassEdgeCases:
         )
         assert result is not None
         assert "approval" in result.lower()
+
+
+# =============================================================================
+# Review remediation: reversed --delete-branch pattern with flag variants (#269)
+# =============================================================================
+
+
+class TestReversedDeleteBranchWithFlags:
+    """Tests for reversed --delete-branch pattern (--delete-branch before
+    'gh ... pr close') with -R and --hostname flag variants.
+
+    Supplements the single --repo test in TestGhGlobalFlagBypass.
+    """
+
+    def test_reversed_with_short_repo_flag(self):
+        """'--delete-branch ... gh -R owner/repo pr close 42' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "--delete-branch gh -R owner/repo pr close 42"
+        )
+
+    def test_reversed_with_hostname_flag(self):
+        """'--delete-branch ... gh --hostname host pr close 42' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "--delete-branch gh --hostname github.example.com pr close 42"
+        )
+
+    def test_reversed_with_multiple_flags(self):
+        """'--delete-branch ... gh -R X --hostname Y pr close 42' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "--delete-branch gh -R owner/repo --hostname host.com pr close 42"
+        )
+
+
+# =============================================================================
+# Review remediation: --hostname=host.com equals syntax (#269)
+# =============================================================================
+
+
+class TestHostnameEqualsSyntax:
+    """Test for --hostname=value equals syntax (extends --repo= coverage)."""
+
+    def test_hostname_equals_merge(self):
+        """'gh --hostname=github.example.com pr merge 42' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "gh --hostname=github.example.com pr merge 42"
+        )
+
+
+# =============================================================================
+# Pre-existing bypass: subcommand flags before PR number (#269 item 6)
+# =============================================================================
+
+
+class TestSubcommandFlagsBeforePrNumber:
+    """Tests that subcommand flags between merge/close and the PR number
+    don't break PR number extraction in _token_matches_command.
+
+    e.g., 'gh pr merge --admin 42' should still extract PR number 42.
+    """
+
+    def test_merge_admin_flag_before_pr_number(self):
+        """'gh pr merge --admin 42' — PR number extracted correctly."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(token, "gh pr merge --admin 42")
+
+    def test_merge_squash_flag_before_pr_number(self):
+        """'gh pr merge --squash 42' — PR number extracted correctly."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(token, "gh pr merge --squash 42")
+
+    def test_merge_multiple_flags_before_pr_number(self):
+        """'gh pr merge --squash --delete-branch 42' — PR number extracted."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(
+            token, "gh pr merge --squash --delete-branch 42"
+        )
+
+    def test_close_comment_flag_before_pr_number(self):
+        """'gh pr close --comment "done" 42' — PR number extracted."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(token, "gh pr close --comment done 42")
+
+    def test_merge_admin_flag_pr_number_mismatch(self):
+        """'gh pr merge --admin 99' — mismatch with token for PR 42."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert not _token_matches_command(token, "gh pr merge --admin 99")
+
+    def test_merge_admin_flag_with_global_flags(self):
+        """'gh --repo X pr merge --admin 42' — global + subcommand flags."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert _token_matches_command(
+            token, "gh --repo owner/repo pr merge --admin 42"
+        )
+
+    def test_merge_admin_flag_with_global_flags_mismatch(self):
+        """'gh --repo X pr merge --admin 99' — mismatch with combined flags."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"pr_number": 42}}
+        assert not _token_matches_command(
+            token, "gh --repo owner/repo pr merge --admin 99"
+        )
+
+
+# =============================================================================
+# Pre-existing bypass: git -C /path flag bypass (#269 item 7)
+# =============================================================================
+
+
+class TestGitGlobalFlagBypass:
+    """Tests that git global flags (e.g., -C /path, -c key=val) between 'git'
+    and the subcommand don't bypass dangerous pattern detection.
+
+    git allows global options before the subcommand:
+    - git -C /path push --force origin main
+    - git -c user.name=x push --force origin main
+    - git --git-dir=/path/.git branch -D feature
+    """
+
+    # --- Force push with git global flags ---
+
+    def test_force_push_with_C_flag(self):
+        """'git -C /path push --force origin main' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git -C /tmp/repo push --force origin main")
+
+    def test_force_push_with_git_dir_flag(self):
+        """'git --git-dir=/path/.git push --force origin main' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git --git-dir=/tmp/repo/.git push --force origin main"
+        )
+
+    def test_force_push_with_work_tree_flag(self):
+        """'git --work-tree=/path push -f origin main' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git --work-tree=/tmp/repo push -f origin main"
+        )
+
+    def test_force_push_with_multiple_git_flags(self):
+        """'git -C /path -c key=val push --force origin main' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git -C /tmp/repo -c user.name=test push --force origin main"
+        )
+
+    # --- Branch delete with git global flags ---
+
+    def test_branch_delete_with_C_flag(self):
+        """'git -C /path branch -D feature' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git -C /tmp/repo branch -D feature")
+
+    def test_branch_delete_force_with_git_dir(self):
+        """'git --git-dir=/path/.git branch --delete --force feature' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git --git-dir=/tmp/repo/.git branch --delete --force feature"
+        )
+
+    # --- Push to main/master with git global flags ---
+
+    def test_push_main_with_C_flag(self):
+        """'git -C /path push origin main' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git -C /tmp/repo push origin main")
+
+    def test_push_master_with_C_flag(self):
+        """'git -C /path push origin master' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git -C /tmp/repo push origin master")
+
+    def test_push_head_main_with_C_flag(self):
+        """'git -C /path push origin HEAD:main' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command("git -C /tmp/repo push origin HEAD:main")
+
+    def test_push_head_master_with_git_dir(self):
+        """'git --git-dir=/path push origin HEAD:master' is detected."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            "git --git-dir=/tmp/repo/.git push origin HEAD:master"
+        )
+
+    # --- Safe commands with git global flags ---
+
+    def test_git_C_status_is_safe(self):
+        """'git -C /path status' is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git -C /tmp/repo status")
+
+    def test_git_C_log_is_safe(self):
+        """'git -C /path log --oneline' is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git -C /tmp/repo log --oneline")
+
+    def test_git_C_push_feature_branch_is_safe(self):
+        """'git -C /path push origin feature-branch' is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command(
+            "git -C /tmp/repo push origin feature-branch"
+        )
+
+    def test_git_C_branch_lowercase_d_is_safe(self):
+        """'git -C /path branch -d feature' (lowercase d) is safe."""
+        from merge_guard_pre import is_dangerous_command
+
+        assert not is_dangerous_command("git -C /tmp/repo branch -d feature")
+
+    # --- Token matching: branch delete with git global flags ---
+
+    def test_token_branch_match_with_C_flag(self):
+        """Token branch matching works with git -C flag."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "feature"}}
+        assert _token_matches_command(
+            token, "git -C /tmp/repo branch -D feature"
+        )
+
+    def test_token_branch_mismatch_with_C_flag(self):
+        """Token branch mismatch detected with git -C flag."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "feature"}}
+        assert not _token_matches_command(
+            token, "git -C /tmp/repo branch -D other-branch"
+        )
+
+    def test_token_branch_delete_force_with_git_dir(self):
+        """Token branch matching for --delete --force with --git-dir."""
+        from merge_guard_pre import _token_matches_command
+
+        token = {"context": {"branch": "feature"}}
+        assert _token_matches_command(
+            token, "git --git-dir=/tmp/.git branch --delete --force feature"
+        )
