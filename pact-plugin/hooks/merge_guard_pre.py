@@ -41,6 +41,7 @@ _GIT_GLOBAL_FLAGS = r"(?:\S+\s+)*"
 # Composed prefixes for DRY usage across all patterns.
 _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
 _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
+_GH_API_PREFIX = _GH_PREFIX + r"api\b"
 
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
@@ -60,6 +61,21 @@ DANGEROUS_PATTERNS = [
     # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
     re.compile(_GH_PREFIX + r"api\b(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
     re.compile(r"\bcurl\b(?=.*-X\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
+    # API-based branch deletion via DELETE to git/refs endpoint
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+DELETE\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+DELETE\b).*api.*git/refs", re.IGNORECASE),
+    # API-based ref mutation / force push via mutating method to git/refs endpoint
+    # (any mutating operation on git refs via API is inherently dangerous)
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*api.*git/refs", re.IGNORECASE),
+    # API-based push to main/master via mutating method to git/refs/heads/main|master
+    # (separate from generic ref mutation for distinct error context)
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PATCH|POST|PUT)\b).*git/refs/heads/(?:main|master)\b", re.IGNORECASE),
+    re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PATCH|POST|PUT)\b).*api.*git/refs/heads/(?:main|master)\b", re.IGNORECASE),
+    # Known API detection gaps (defense-in-depth, not a security boundary):
+    # - --input flag: request body from file is not visible in command string
+    # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
+    # - gh alias: aliases can hide API calls (tracked in #270)
     # Direct push to default branch (bypasses PR merge)
     re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:main\b"),
     re.compile(_GIT_PREFIX + r"push\s+\S+\s+HEAD:master\b"),
