@@ -5,6 +5,7 @@ Used by: Various PACT hooks that need common Task system integration,
          symlink management, CLAUDE.md manipulation, and session resume.
 
 This package provides shared utilities for hooks:
+- constants: Shared constants (PACT_WORK_AGENTS) used across multiple hooks
 - task_utils: Task system integration (used by multiple hooks)
 - symlinks: Plugin symlink management for @reference resolution
 - claude_md_manager: CLAUDE.md file creation and update
@@ -12,6 +13,7 @@ This package provides shared utilities for hooks:
 - merge_guard_common: Shared constants and cleanup for merge guard hooks
 """
 
+from .constants import PACT_WORK_AGENTS
 from .task_utils import (
     get_task_list,
     find_feature_task,
@@ -34,6 +36,7 @@ from .merge_guard_common import (
 )
 
 __all__ = [
+    "PACT_WORK_AGENTS",
     "get_task_list",
     "find_feature_task",
     "find_current_phase",

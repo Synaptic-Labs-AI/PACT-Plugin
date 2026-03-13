@@ -506,6 +506,13 @@ For each coder needed:
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
+**Memory save tasks**: For each coder dispatched, also create a corresponding save task:
+```
+TaskCreate(subject="{coder-name}: save memory", description="Load Skill('pact-memory') and save learnings from task #{work_task_id}. After saving, TaskUpdate(taskId, metadata={'memory_saved': true, 'memory_id': '{id}'}).")
+TaskUpdate(save_task_id, status="pending")  // deferred until work stabilizes
+```
+Save tasks are unblocked after work stabilizes (tests pass, reviews clean). They do not block feature completion.
+
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
 **Before next phase**:
@@ -630,4 +637,4 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **High-variety audit trail** (variety 10+ only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned
+7. **Save orchestration context**: Create memory save tasks for agents that completed work. Unblock save tasks so idle agents can load `Skill("pact-memory")` and save their learnings. This applies to ALL completed orchestrations, not just high-variety tasks.

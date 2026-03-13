@@ -24,7 +24,6 @@ EXPECTED_AGENTS = {
     "pact-database-engineer",
     "pact-devops-engineer",
     "pact-frontend-coder",
-    "pact-memory-agent",
     "pact-n8n",
     "pact-preparer",
     "pact-qa-engineer",

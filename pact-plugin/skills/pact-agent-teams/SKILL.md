@@ -199,16 +199,11 @@ If task complexity differs significantly from what was delegated:
 
 ## Before Completing
 
-Before returning your final output:
+Before returning your final output, include `memory_saved: false` in your HANDOFF metadata. The orchestrator manages memory saves separately via structural save tasks — you do not need to save memory as part of your work task.
 
-1. **Save Project Memory**: Invoke the `pact-memory` skill to save **project-wide institutional knowledge**:
-   - Context: What you were working on and why
-   - Goal: What you were trying to achieve
-   - Lessons learned: What worked, what didn't, gotchas discovered
-   - Decisions: Key choices made with rationale
-   - Entities: Components, files, services involved
+For **agent-level domain learnings** (patterns you personally encounter, debugging tricks, domain expertise), use your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) — this is managed automatically by the SDK `memory: user` frontmatter in your agent definition.
 
-This saves cross-agent, cross-session knowledge searchable by future agents. For **agent-level domain learnings** (patterns you personally encounter, debugging tricks, domain expertise), use your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) — this is managed automatically by the SDK `memory: user` frontmatter in your agent definition.
+> **Memory save tasks**: After your work stabilizes (tests pass, reviews clean), the orchestrator will unblock your save task and message you. At that point, load `Skill("pact-memory")` and save project-wide institutional knowledge (context, goals, decisions, lessons learned, entities). Update `memory_saved: true` in task metadata after saving.
 
 ## Shutdown
 
@@ -219,7 +214,7 @@ When you receive a `shutdown_request`:
 | Idle, consultant with no active questions, or domain no longer relevant | Approve |
 | Mid-task, awaiting response, or remediation may need your input | Reject with reason |
 
-> **Save memory before approving**: If you haven't already saved project-wide knowledge via `pact-memory`, do so before approving — your process terminates on approval. Agent-level learnings in your persistent memory directory are saved automatically.
+> **Memory on shutdown**: If you have an unblocked save task pending, save project memory before approving shutdown — your process terminates on approval and unsaved knowledge is lost permanently. If no save task exists or it's still blocked, approve shutdown; the orchestrator will handle memory saves. Agent-level learnings in your persistent memory directory are saved automatically.
 
 ## Completion Integrity (SACROSANCT)
 

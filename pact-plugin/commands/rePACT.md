@@ -363,6 +363,7 @@ When nested cycle completes:
 2. **Summarize** what was done in the nested cycle
 3. **Report** any decisions that affect the parent task
 4. **Continue** with parent orchestration (parent task now unblocked)
+5. **Save sub-cycle context**: Create memory save tasks for agents that completed nested work. Unblock when work stabilizes so agents can load `Skill("pact-memory")` and save.
 
 **Handoff format**: Use the standard handoff structure (Produced, Key decisions, Reasoning chain [recommended], Areas of uncertainty, Integration points, Open questions — 5 required fields, 1 recommended).
 

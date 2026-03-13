@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from memory_prompt import PACT_AGENTS
-from memory_enforce import PACT_WORK_AGENTS
+from handoff_gate import PACT_WORK_AGENTS
 from phase_completion import CODE_PHASE_INDICATORS
 from shared.task_utils import find_active_agents  # agent_prefixes is local; we parse source
 
@@ -515,7 +515,7 @@ class TestConstants:
 class TestAgentListConsistency:
     """Cross-list consistency tests for hardcoded agent lists across hook modules.
 
-    Validates that PACT_AGENTS (memory_prompt), PACT_WORK_AGENTS (memory_enforce),
+    Validates that PACT_AGENTS (memory_prompt), PACT_WORK_AGENTS (handoff_gate),
     agent_prefixes (task_utils), and PACT_AGENT_PATTERN (patterns) stay in sync.
     """
 
@@ -525,15 +525,6 @@ class TestAgentListConsistency:
             assert agent in PACT_AGENTS, (
                 f"{agent} is in PACT_WORK_AGENTS but missing from PACT_AGENTS"
             )
-
-    def test_pact_agents_minus_memory_equals_work_agents(self):
-        """PACT_AGENTS minus pact-memory-agent should equal PACT_WORK_AGENTS."""
-        expected = [a for a in PACT_AGENTS if a != "pact-memory-agent"]
-        assert expected == PACT_WORK_AGENTS, (
-            f"PACT_WORK_AGENTS should be PACT_AGENTS minus pact-memory-agent.\n"
-            f"Expected: {expected}\n"
-            f"Got: {PACT_WORK_AGENTS}"
-        )
 
     def test_pact_agent_pattern_matches_all_agents(self):
         """PACT_AGENT_PATTERN regex should match every agent in PACT_AGENTS."""
