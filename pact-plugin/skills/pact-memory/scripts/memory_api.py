@@ -11,7 +11,6 @@ with the memory system.
 
 Used by:
 - SKILL.md: Documents API usage for skill invocation
-- Hooks: memory_prompt.py for file tracking
 - Agents: Direct memory operations during PACT phases
 
 Note: Memory initialization is lazy-loaded on first use via memory_init.py,

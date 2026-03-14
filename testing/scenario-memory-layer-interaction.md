@@ -10,7 +10,7 @@ Verify that the three memory layers (auto-memory, pact-memory, agent persistent 
 
 ## Prerequisites
 
-1. PACT plugin installed with memory hooks active (`pact-plugin/hooks/memory_prompt.py`, `staleness.py`, `session_init.py`)
+1. PACT plugin installed with memory hooks active (`staleness.py`, `session_init.py`)
 2. pact-memory database exists at `~/.claude/pact-memory/memory.db`
 3. Project `CLAUDE.md` contains a Working Memory section (with up to 3 entries)
 4. Auto-memory file exists at `~/.claude/projects/{hash}/memory/MEMORY.md` (created by platform after at least one prior session)

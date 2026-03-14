@@ -330,10 +330,12 @@ echo ""
 # Note: memory_enforce.py was removed in the memory architecture redesign
 # (PR #275). Memory saves now happen via HANDOFF curation through the
 # memory agent, not via a SubagentStop enforcement hook.
+# Note: memory_prompt.py was also removed in PR #275. Its PACT_AGENTS
+# constant moved to hooks/shared/constants.py.
 echo "15. Memory hooks baseline:"
-check_pattern "$HOOKS_DIR/memory_prompt.py" \
-    "memory_prompt.py has main entry point" \
-    "def main()"
+check_pattern "$HOOKS_DIR/shared/constants.py" \
+    "constants.py has PACT_AGENTS list" \
+    "PACT_AGENTS"
 check_pattern "$HOOKS_DIR/staleness.py" \
     "staleness.py has detect_stale_entries function" \
     "def detect_stale_entries"

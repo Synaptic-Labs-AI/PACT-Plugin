@@ -13,7 +13,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-from memory_prompt import PACT_AGENTS
+from shared.constants import PACT_AGENTS
 from phase_completion import CODE_PHASE_INDICATORS
 from shared.task_utils import find_active_agents  # agent_prefixes is local; we parse source
 
@@ -514,7 +514,7 @@ class TestConstants:
 class TestAgentListConsistency:
     """Cross-list consistency tests for hardcoded agent lists across hook modules.
 
-    Validates that PACT_AGENTS (memory_prompt),
+    Validates that PACT_AGENTS (shared.constants),
     agent_prefixes (task_utils), and PACT_AGENT_PATTERN (patterns) stay in sync.
     """
 

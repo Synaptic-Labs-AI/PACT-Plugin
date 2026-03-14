@@ -32,6 +32,7 @@ from .merge_guard_common import (
     TOKEN_PREFIX,
     cleanup_consumed_tokens,
 )
+from .constants import PACT_AGENTS
 
 __all__ = [
     "get_task_list",
@@ -49,4 +50,5 @@ __all__ = [
     "TOKEN_DIR",
     "TOKEN_PREFIX",
     "cleanup_consumed_tokens",
+    "PACT_AGENTS",
 ]
