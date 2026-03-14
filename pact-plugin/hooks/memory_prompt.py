@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/memory_prompt.py
-Summary: Stop hook that prompts agent to save memories after significant work.
-Used by: Claude Code settings.json Stop hook
+Summary: Stop hook that reminds the orchestrator to curate HANDOFF-based
+         memories before ending the session.
+Used by: Claude Code hooks.json Stop hook
 
 Analyzes session transcript for save-worthy content:
 - PACT phase completions (agent invocations)
@@ -10,8 +11,12 @@ Analyzes session transcript for save-worthy content:
 - Lessons learned mentions
 - Blockers encountered
 
+If significant work is detected, prompts the orchestrator to ensure HANDOFF
+curation has been completed via the memory agent before wrapping up.
+
 Input: JSON from stdin with session transcript/context
-Output: JSON with `systemMessage` prompting to save memory if relevant content found
+Output: JSON with `systemMessage` prompting HANDOFF curation check if relevant
+        content found
 """
 
 import json
@@ -96,24 +101,27 @@ def should_prompt_memory(analysis: Dict) -> bool:
 
 
 def format_prompt(analysis: Dict) -> str:
-    """Format the memory save prompt message."""
-    lines = ["⚠️ MANDATORY: You MUST delegate to pact-memory-agent NOW to save session context:"]
+    """Format the memory curation reminder message."""
+    lines = ["⚠️ MANDATORY: Verify HANDOFF curation is complete before ending session:"]
 
     if analysis["agents"]:
         agent_list = ", ".join(analysis["agents"])
         lines.append(f"- PACT work completed with: {agent_list}")
 
     if analysis["has_decisions"]:
-        lines.append("- Decisions made (MUST capture rationale + alternatives)")
+        lines.append("- Decisions made — ensure they are captured in HANDOFFs for curation")
 
     if analysis["has_lessons"]:
-        lines.append("- Lessons learned (MUST preserve for future sessions)")
+        lines.append("- Lessons learned — ensure they are preserved in HANDOFFs or agent memory")
 
     if analysis["has_blockers"]:
-        lines.append("- Blockers resolved (MUST document for next time)")
+        lines.append("- Blockers resolved — ensure resolution is documented in HANDOFFs")
 
     lines.append("")
-    lines.append("This is NOT optional. Failure to save = lost context = repeated work.")
+    lines.append(
+        "This is NOT optional. If HANDOFF curation has not been sent to pact-memory-agent, "
+        "do so now via TaskCreate before wrapping up."
+    )
 
     return "\n".join(lines)
 

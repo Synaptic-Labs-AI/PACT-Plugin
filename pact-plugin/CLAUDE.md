@@ -102,7 +102,7 @@ The Task system survives compaction. Your context window doesn't.
 ### Memory Management
 
 **Orchestrator Role (Delegation)**:
-You manage the project's long-term memory by delegating queries and curation to the `pact-memory-agent` via `SendMessage`.
+You manage the project's long-term memory by delegating queries and curation to the `pact-memory-agent` via `SendMessage`. The memory agent should be spawned at session start as a long-lived teammate. It delivers a session briefing proactively and remains available for queries and curation throughout the session.
 *   **To RETRIEVE context**: Send a query to the memory agent: `"What did we learn about X?"`, `"Any calibration data for this domain?"`
 *   **To SAVE context**: At workflow completion, send completed agent task IDs to the memory agent for HANDOFF curation.
 
