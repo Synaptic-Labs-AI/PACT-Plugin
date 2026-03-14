@@ -228,14 +228,14 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
 
-5. **Calibration save + HANDOFF curation**: Create two independently trackable tasks for the memory agent:
+5. **Calibration save + HANDOFF review**: Create two independently trackable tasks for the memory agent:
    ```
    TaskCreate(subject="memory-agent: save review calibration",
      description="Save review calibration: context='PR review for {feature}: {key findings}', goal='Build review pattern data for Learning II', decisions=['{severity}: {finding}' per finding], entities=['review_calibration', '{domain}'].")
    TaskUpdate(taskId, owner="memory-agent")
 
-   TaskCreate(subject="memory-agent: curate HANDOFFs",
-     description="Curate institutional knowledge from implementation HANDOFFs. Task IDs: #X, #Y, #Z. Read each via TaskGet for HANDOFF metadata. Save to pact-memory. Report summary when done.")
+   TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge",
+     description="Review HANDOFFs and save institutional knowledge from implementation. Task IDs: #X, #Y, #Z. Read each via TaskGet for HANDOFF metadata. Save to pact-memory. Report summary when done.")
    TaskUpdate(taskId, owner="memory-agent")
    ```
    Calibration runs unconditionally — even clean reviews provide signal. Skip only for trivial single-file PRs.

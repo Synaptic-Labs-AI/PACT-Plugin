@@ -101,9 +101,9 @@ The Task system survives compaction. Your context window doesn't.
 
 ### Memory Management
 
-**Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries and HANDOFF curation via `SendMessage`. Workflow commands specify the exact curation steps.
+**Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries and HANDOFF review via `SendMessage`. Workflow commands specify the exact steps.
 
-**Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent curates it into pact-memory.
+**Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent reviews and saves it to pact-memory. For ad-hoc work outside formal workflows, query the memory agent when prior context would help, and send a save request when significant decisions or discoveries are made.
 
 #### Three-Layer Memory Architecture
 
@@ -112,7 +112,7 @@ PACT uses three complementary memory layers:
 | Layer | Storage | Purpose | Who Writes | Auto-loaded |
 |-------|---------|---------|------------|-------------|
 | **Auto-memory** (`MEMORY.md`) | Per-project file | General session learnings, user preferences | Platform (automatic) | Yes (first 200 lines) |
-| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Memory agent (curator) | Via Working Memory in CLAUDE.md |
+| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Memory agent | Via Working Memory in CLAUDE.md |
 | **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents (built-in) | Yes (first 200 lines) |
 
 **Coexistence model**: Auto-memory captures broad session context automatically. pact-memory provides structured, searchable knowledge with semantic retrieval and graph-enhanced lookup. Agent persistent memory builds domain expertise per specialist. These layers complement each other — do not treat them as redundant.

@@ -214,7 +214,7 @@ Before returning your final output:
 
    Examples: file locations, framework conventions → agent memory. Architectural decisions, cross-cutting concerns → HANDOFF.
 
-   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the memory agent will curate it into pact-memory.
+   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the memory agent will review and save it to pact-memory.
 
 ## Shutdown
 

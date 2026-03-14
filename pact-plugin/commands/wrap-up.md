@@ -93,7 +93,7 @@ SendMessage(to="memory-agent",
   summary="Session memory consolidation")
 ```
 
-This is the deep-clean pass. Pass 1 (workflow-level curation) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
+This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
 
 ## 6. Team Cleanup
 
