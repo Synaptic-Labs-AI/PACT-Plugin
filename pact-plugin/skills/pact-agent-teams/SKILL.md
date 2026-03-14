@@ -18,8 +18,9 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES)
-4. **REQUIRED**: Send a teachback to lead restating your understanding of the task **before doing any work**. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
-5. Begin work — not before step 4
+4. **CHECK AGENT MEMORY**: Search your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) for patterns, knowledge, or learnings relevant to this task. Incorporate findings into your teachback.
+5. **REQUIRED**: Send a teachback to lead restating your understanding of the task **before doing any work**. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
+6. Begin work — not before step 5
 
 > **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
 
@@ -201,14 +202,29 @@ If task complexity differs significantly from what was delegated:
 
 Before returning your final output:
 
-1. **Save Project Memory**: Invoke the `pact-memory` skill to save **project-wide institutional knowledge**:
-   - Context: What you were working on and why
-   - Goal: What you were trying to achieve
-   - Lessons learned: What worked, what didn't, gotchas discovered
-   - Decisions: Key choices made with rationale
-   - Entities: Components, files, services involved
+1. **Save Domain Learnings to Agent Memory**: Save knowledge that future instances of your specialist type would benefit from:
+   - File locations and codepaths discovered
+   - Framework conventions and patterns observed
+   - Debugging tricks and workarounds found
+   - Library quirks or version-specific behaviors
 
-This saves cross-agent, cross-session knowledge searchable by future agents. For **agent-level domain learnings** (patterns you personally encounter, debugging tricks, domain expertise), use your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) — this is managed automatically by the SDK `memory: user` frontmatter in your agent definition.
+   **What goes where** (heuristics):
+   - "Would a different agent type need this?" → Yes: include in HANDOFF. No: agent memory.
+   - "Is this about the project or about the craft?" → Project decisions/rationale: HANDOFF. Craft patterns/techniques: agent memory.
+
+   | Learning | Where | Why |
+   |----------|-------|-----|
+   | "Auth logic lives in `src/middleware/auth.ts`" | Agent memory | File location — helps future backend-coders |
+   | "Chose JWT over session tokens for microservices" | HANDOFF | Architectural decision — the project needs this |
+   | "This project uses Zod for validation, not Joi" | Agent memory | Framework convention — domain knowledge |
+   | "Rate limiting set to 100 req/min, per user discussion" | HANDOFF | Project decision with stakeholder input |
+   | "Integration tests require DB seed script" | Agent memory | Testing technique — domain knowledge |
+   | "Webhook handler and API share validation — changes affect both" | HANDOFF | Cross-cutting concern — other agents need this |
+   | "Approach X fails because ORM has cursor bug" | Both | Agent memory (avoid in future) + HANDOFF (others should know) |
+
+   Update your agent memory as you discover codepaths, patterns, library locations, and key architectural decisions. This builds up institutional knowledge across conversations. Write concise notes about what you found and where.
+
+This saves domain expertise to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`), managed automatically by the SDK `memory: user` frontmatter. For **project-wide institutional knowledge** (architectural decisions, cross-agent concerns), include it in your HANDOFF — the memory agent will curate it into pact-memory.
 
 ## Shutdown
 
@@ -219,7 +235,7 @@ When you receive a `shutdown_request`:
 | Idle, consultant with no active questions, or domain no longer relevant | Approve |
 | Mid-task, awaiting response, or remediation may need your input | Reject with reason |
 
-> **Save memory before approving**: If you haven't already saved project-wide knowledge via `pact-memory`, do so before approving — your process terminates on approval. Agent-level learnings in your persistent memory directory are saved automatically.
+> **Save memory before approving**: If you haven't saved domain learnings to your agent memory yet, do so before approving — your process terminates on approval.
 
 ## Completion Integrity (SACROSANCT)
 
