@@ -630,4 +630,10 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **High-variety audit trail** (variety 10+ only): Delegate to `pact-memory-agent` to save key orchestration decisions, S3/S4 tensions resolved, and lessons learned
+7. **HANDOFF curation**: Create a curation task for the memory agent:
+   ```
+   TaskCreate(subject="memory-agent: curate HANDOFFs", description="Curate institutional knowledge from workflow HANDOFFs. Task IDs: #X, #Y, #Z. Read each via TaskGet for HANDOFF metadata. Save to pact-memory. Report summary when done.")
+   TaskUpdate(taskId, owner="memory-agent")
+   ```
+   Do not block on curation completion before proceeding.
+8. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`

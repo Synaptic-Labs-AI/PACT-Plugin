@@ -208,6 +208,11 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
+- [ ] **HANDOFF curation**: Create a curation task for the memory agent:
+  ```
+  TaskCreate(subject="memory-agent: curate HANDOFFs", description="Curate institutional knowledge from comPACT HANDOFFs. Task IDs: #X. Read via TaskGet for HANDOFF metadata. Save to pact-memory. Report summary when done.")
+  TaskUpdate(taskId, owner="memory-agent")
+  ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 
 > ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.

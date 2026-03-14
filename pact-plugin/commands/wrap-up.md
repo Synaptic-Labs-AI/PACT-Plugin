@@ -84,7 +84,18 @@ entities: ["orchestration_calibration", "{domain}"]
 
 **Skip when**: Session was trivial (single comPACT, no variety assessment performed).
 
-## 5. Team Cleanup
+## 5. Memory Consolidation (Pass 2)
+
+Send to `pact-memory-agent` via `SendMessage`:
+```
+SendMessage(to="memory-agent",
+  message="[lead→memory-agent] Session consolidation (Pass 2): Review all memories saved during this session. Consolidate related entries. Prune superseded memories. Sync Working Memory to CLAUDE.md. Save orchestration retrospective as calibration data. Report summary when done.",
+  summary="Session memory consolidation")
+```
+
+This is the deep-clean pass. Pass 1 (workflow-level curation) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
+
+## 6. Team Cleanup
 
 Clean up the session team to free resources:
 

@@ -102,26 +102,26 @@ The Task system survives compaction. Your context window doesn't.
 ### Memory Management
 
 **Orchestrator Role (Delegation)**:
-You manage the project's long-term memory by delegating to the `pact-memory-agent`.
-*   **To SAVE context**: Delegate to `pact-memory-agent` when work is done, decisions are made, or lessons are learned.
-*   **To RETRIEVE context**: Delegate to `pact-memory-agent` to search for past decisions, patterns, or dropped context.
+You manage the project's long-term memory by delegating queries and curation to the `pact-memory-agent` via `SendMessage`. The memory agent should be spawned at session start as a long-lived teammate. It delivers a session briefing proactively and remains available for queries and curation throughout the session.
+*   **To RETRIEVE context**: Send a query to the memory agent: `"What did we learn about X?"`, `"Any calibration data for this domain?"`
+*   **To SAVE context**: At workflow completion, send completed agent task IDs to the memory agent for HANDOFF curation.
 
-**Specialist Role (Skill Usage)**:
-Specialist agents (Coders, Architects) **cannot delegate** to other agents.
-*   **Instruction**: When dispatching a specialist, ensure they know to load the `pact-memory` skill *first* to retrieve relevant context before they start working.
+**Specialist Role (Built-in Memory)**:
+Specialist agents use built-in persistent memory (Layer 3) for domain knowledge — file locations, framework conventions, debugging techniques. This is managed automatically via the `memory: user` frontmatter and prompted through the `pact-agent-teams` skill. For project-wide institutional knowledge (architectural decisions, cross-agent concerns), specialists include it in their HANDOFF — the memory agent curates it into pact-memory.
 
 #### When to Delegate (Save/Retrieve)
 
 **Delegate to `pact-memory-agent` when:**
-- **Saving**: You completed a task, made a key decision, or solved a tricky bug.
 - **Retrieving**: You are starting a new session, recovering from compaction, or facing a blocker.
+- **Saving (HANDOFF curation)**: A workflow completes — send completed task IDs to the memory agent for curation.
+- **Saving (Calibration)**: After peer review — send review calibration data and task IDs in a single invocation.
 
 #### How to Delegate
 
-Delegate to `pact-memory-agent` using the standard Agent Teams dispatch pattern (`TaskCreate` + `TaskUpdate` + Task with name/team_name). The memory agent uses the same dispatch model as all other specialists.
+The memory agent stays alive as a consultant once spawned. All communication uses `SendMessage`:
 
-- **Save**: Include in task description: `"Save memory: [context of what was done, decisions, lessons]"`
-- **Search**: Include in task description: `"Retrieve memories about: [topic/query]"`
+- **Query**: `SendMessage(to="memory-agent", message="[lead→memory-agent] What did we learn about {topic}? Report findings when done.")`
+- **Curation**: `SendMessage(to="memory-agent", message="[lead→memory-agent] Curate HANDOFFs for workflow completion. Task IDs: #X, #Y, #Z. Read each via TaskGet for HANDOFF metadata. Save institutional knowledge to pact-memory. Report summary when done.")`
 
 **Reuse pattern**: Once spawned, the memory agent stays alive as a consultant. Subsequent memory requests go via `SendMessage` to the existing memory agent — no need to spawn a new one.
 
@@ -132,8 +132,8 @@ PACT uses three complementary memory layers:
 | Layer | Storage | Purpose | Who Writes | Auto-loaded |
 |-------|---------|---------|------------|-------------|
 | **Auto-memory** (`MEMORY.md`) | Per-project file | General session learnings, user preferences | Platform (automatic) | Yes (first 200 lines) |
-| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Agents via pact-memory skill | Via Working Memory in CLAUDE.md |
-| **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents | Yes (first 200 lines) |
+| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Memory agent (curator) | Via Working Memory in CLAUDE.md |
+| **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents (built-in) | Yes (first 200 lines) |
 
 **Coexistence model**: Auto-memory captures broad session context automatically. pact-memory provides structured, searchable knowledge with semantic retrieval and graph-enhanced lookup. Agent persistent memory builds domain expertise per specialist. These layers complement each other — do not treat them as redundant.
 
