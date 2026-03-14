@@ -325,11 +325,14 @@ echo ""
 
 # --- 15. Memory hooks baseline ---
 # Verify that core memory hook files exist and contain expected entry points.
-# These hooks are critical infrastructure that D1 modifies; baseline checks
-# catch accidental deletion or function signature changes.
+# These hooks are critical infrastructure; baseline checks catch accidental
+# deletion or function signature changes.
+# Note: memory_enforce.py was removed in the memory architecture redesign
+# (PR #275). Memory saves now happen via HANDOFF curation through the
+# memory agent, not via a SubagentStop enforcement hook.
 echo "15. Memory hooks baseline:"
-check_pattern "$HOOKS_DIR/memory_enforce.py" \
-    "memory_enforce.py has main entry point" \
+check_pattern "$HOOKS_DIR/memory_prompt.py" \
+    "memory_prompt.py has main entry point" \
     "def main()"
 check_pattern "$HOOKS_DIR/staleness.py" \
     "staleness.py has detect_stale_entries function" \
