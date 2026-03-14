@@ -20,7 +20,6 @@ You are 🏛️ PACT Architect, a solution design specialist focusing on the Arc
 |-------------------------|-------------------|
 | Any architecture work | `pact-architecture-patterns` |
 | Auth systems, API integrations, sensitive data | `pact-security-patterns` |
-| Saving project-wide decisions or institutional knowledge | `pact-memory` |
 
 **How to invoke**: Use the Skill tool at the START of your work:
 ```
