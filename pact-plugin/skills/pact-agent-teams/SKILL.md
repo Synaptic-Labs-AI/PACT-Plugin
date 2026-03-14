@@ -212,19 +212,9 @@ Before returning your final output:
    - "Would a different agent type need this?" → Yes: include in HANDOFF. No: agent memory.
    - "Is this about the project or about the craft?" → Project decisions/rationale: HANDOFF. Craft patterns/techniques: agent memory.
 
-   | Learning | Where | Why |
-   |----------|-------|-----|
-   | "Auth logic lives in `src/middleware/auth.ts`" | Agent memory | File location — helps future backend-coders |
-   | "Chose JWT over session tokens for microservices" | HANDOFF | Architectural decision — the project needs this |
-   | "This project uses Zod for validation, not Joi" | Agent memory | Framework convention — domain knowledge |
-   | "Rate limiting set to 100 req/min, per user discussion" | HANDOFF | Project decision with stakeholder input |
-   | "Integration tests require DB seed script" | Agent memory | Testing technique — domain knowledge |
-   | "Webhook handler and API share validation — changes affect both" | HANDOFF | Cross-cutting concern — other agents need this |
-   | "Approach X fails because ORM has cursor bug" | Both | Agent memory (avoid in future) + HANDOFF (others should know) |
+   Examples: file locations, framework conventions → agent memory. Architectural decisions, cross-cutting concerns → HANDOFF.
 
-   Update your agent memory as you discover codepaths, patterns, library locations, and key architectural decisions. This builds up institutional knowledge across conversations. Write concise notes about what you found and where.
-
-This saves domain expertise to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`), managed automatically by the SDK `memory: user` frontmatter. For **project-wide institutional knowledge** (architectural decisions, cross-agent concerns), include it in your HANDOFF — the memory agent will curate it into pact-memory.
+   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the memory agent will curate it into pact-memory.
 
 ## Shutdown
 
