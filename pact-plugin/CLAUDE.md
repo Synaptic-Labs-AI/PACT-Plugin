@@ -101,29 +101,9 @@ The Task system survives compaction. Your context window doesn't.
 
 ### Memory Management
 
-**Orchestrator Role (Delegation)**:
-You manage the project's long-term memory by delegating queries and curation to the `pact-memory-agent` via `SendMessage`. The memory agent should be spawned at session start as a long-lived teammate. It delivers a session briefing proactively and remains available for queries and curation throughout the session.
-*   **To RETRIEVE context**: Send a query to the memory agent: `"What did we learn about X?"`, `"Any calibration data for this domain?"`
-*   **To SAVE context**: At workflow completion, send completed agent task IDs to the memory agent for HANDOFF curation.
+**Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries and HANDOFF curation via `SendMessage`. Workflow commands specify the exact curation steps.
 
-**Specialist Role (Built-in Memory)**:
-Specialist agents use built-in persistent memory (Layer 3) for domain knowledge — file locations, framework conventions, debugging techniques. This is managed automatically via the `memory: user` frontmatter and prompted through the `pact-agent-teams` skill. For project-wide institutional knowledge (architectural decisions, cross-agent concerns), specialists include it in their HANDOFF — the memory agent curates it into pact-memory.
-
-#### When to Delegate (Save/Retrieve)
-
-**Delegate to `pact-memory-agent` when:**
-- **Retrieving**: You are starting a new session, recovering from compaction, or facing a blocker.
-- **Saving (HANDOFF curation)**: A workflow completes — send completed task IDs to the memory agent for curation.
-- **Saving (Calibration)**: After peer review — send review calibration data and task IDs in a single invocation.
-
-#### How to Delegate
-
-The memory agent stays alive as a consultant once spawned. All communication uses `SendMessage`:
-
-- **Query**: `SendMessage(to="memory-agent", message="[lead→memory-agent] What did we learn about {topic}? Report findings when done.")`
-- **Curation**: `SendMessage(to="memory-agent", message="[lead→memory-agent] Curate HANDOFFs for workflow completion. Task IDs: #X, #Y, #Z. Read each via TaskGet for HANDOFF metadata. Save institutional knowledge to pact-memory. Report summary when done.")`
-
-**Reuse pattern**: Once spawned, the memory agent stays alive as a consultant. Subsequent memory requests go via `SendMessage` to the existing memory agent — no need to spawn a new one.
+**Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent curates it into pact-memory.
 
 #### Three-Layer Memory Architecture
 
