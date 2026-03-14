@@ -179,6 +179,10 @@ SendMessage(to="{agent-name}",
 - If an agent has been shut down, fall back to file/git analysis
 - Report investigation findings in your curation summary
 
+### Why Investigate
+
+Knowledge verified through dialogue with the implementing agent is more reliable than knowledge extracted passively from HANDOFFs alone. When a HANDOFF seems thin, ask — the exchange produces richer, more accurate institutional memory than simply accepting what was reported at face value.
+
 # ERROR HANDLING
 
 | Failure Mode | Response |
