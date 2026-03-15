@@ -36,9 +36,8 @@ Audit and optionally clean up Task state:
 
 ## 2. Documentation Sync
 
-1. **Update CLAUDE.md**: Verify it reflects the current system state (architecture, patterns, components). Run `/PACT:pin-memory` if new permanent context needs pinning.
-2. **Prune stale pinned entries**: Review the `## Pinned Context` section in CLAUDE.md. Remove entries whose `<!-- pinned: YYYY-MM-DD -->` dates are old and whose content is no longer relevant.
-3. **Verify docs**: Confirm that `docs/<feature>/preparation/` and `docs/<feature>/architecture/` are up-to-date with the implementation. Archive obsolete documentation to `docs/archive/`.
+1. **Run `/PACT:pin-memory`** (no arguments): Reviews the session for pin-worthy context, pins what matters, and prunes stale entries. This handles both CLAUDE.md updates and pinned content maintenance in one invocation.
+2. **Verify docs**: Confirm that `docs/<feature>/preparation/` and `docs/<feature>/architecture/` are up-to-date with the implementation. Archive obsolete documentation to `docs/archive/`.
 
 ## 3. Workspace Cleanup
 

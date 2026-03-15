@@ -1,8 +1,12 @@
 ---
-description: Pin important context permanently to CLAUDE.md
-argument-hint: [e.g., critical gotcha, key architectural decision]
+description: Pin important context permanently to CLAUDE.md, or review the session for pin-worthy context
+argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 ---
-Pin this to CLAUDE.md permanently: $ARGUMENTS
+
+## Mode
+
+- **With arguments** (`/PACT:pin-memory <content>`): Pin the specified content directly.
+- **Without arguments** (`/PACT:pin-memory`): Review the session for pin-worthy context, pin what matters, and prune stale entries.
 
 ## When to Pin
 
@@ -13,23 +17,30 @@ Pin this to CLAUDE.md permanently: $ARGUMENTS
 
 ## When NOT to Pin
 
-- Routine session context (pact-memory handles this automatically)
+- Routine session context (auto-memory and pact-memory handle this)
 - Things easily found in code or docs
 - Temporary information that will become stale
 
 ## Process
 
+### With Arguments (targeted pin)
+
 1. Read existing CLAUDE.md
 2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`)
-3. Add the new entry with a date tag for machine identification:
+3. Add the new entry with a date tag:
    ```markdown
-   ## Pinned Context
-
-   <!-- pinned: 2026-03-15 -->
+   <!-- pinned: YYYY-MM-DD -->
    ### Entry Title
    Content here (~5-10 lines max)
    ```
-4. Review ALL existing pinned entries — prune any that are stale or outdated
-5. Keep entries concise (~5-10 lines max each)
+4. Prune any stale pinned entries while you're there
+5. Commit changes
 
-**Remember**: Pinned context is for permanent CLAUDE.md context that should survive across all sessions. Working Memory syncs automatically — only pin what's truly permanent and critical.
+### Without Arguments (session review)
+
+1. Read existing CLAUDE.md
+2. Review the session for pin-worthy context — scan for significant decisions, architectural changes, gotchas discovered, or patterns established. Apply the "When to Pin" criteria above.
+3. If pin-worthy content is found, add each entry to the `## Pinned Context` section with date tags
+4. If nothing is pin-worthy, report "No new context to pin."
+5. Prune any stale pinned entries — check each `<!-- pinned: YYYY-MM-DD -->` date and assess whether the content is still relevant
+6. Commit changes if any were made
