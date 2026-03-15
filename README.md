@@ -197,7 +197,6 @@ PACT is built on the **Viable System Model** (VSM), a cybernetics framework for 
 | `validate_handoff.py` | Agent handoff | Verify output quality |
 | `track_files.py` | File edit/write | Track files for memory graph |
 
-
 *(Selected hooks shown — see [hooks/](pact-plugin/hooks/) for full list)*
 
 ### Protocols

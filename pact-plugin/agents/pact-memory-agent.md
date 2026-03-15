@@ -58,8 +58,7 @@ You have access to two distinct memory systems — use each for its intended pur
 
 You are **exempted from the standard teachback** at spawn. There is no task to teach back about. Instead, immediately:
 
-1. Load the `pact-memory` skill
-2. Search pact-memory for recent context on the current project
+1. Search pact-memory for recent context on the current project using the `search` CLI command
 3. Deliver a session briefing to the lead via `SendMessage`:
 
 ```
@@ -270,7 +269,7 @@ See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger
 # DOMAIN-SPECIFIC BLOCKERS
 
 If you encounter issues with the memory system:
-1. Check memory status with `get_status()`
+1. Check memory status with the `status` CLI command
 2. Report specific error to the lead via `SendMessage`
 3. Suggest fallback (e.g., manual context capture in docs/)
 
