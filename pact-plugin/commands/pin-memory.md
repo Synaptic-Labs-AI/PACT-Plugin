@@ -33,7 +33,7 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
    ### Entry Title
    Content here (~5-10 lines max)
    ```
-4. Prune any stale pinned entries while you're there
+4. Run the pruning process (see [Pruning Pinned Entries](#pruning-pinned-entries) below)
 5. Commit changes
 
 ### Without Arguments (session review)
@@ -42,7 +42,7 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 2. Review the session for pin-worthy context — scan for significant decisions, architectural changes, gotchas discovered, or patterns established. Apply the "When to Pin" criteria above.
 3. If pin-worthy content is found, add each entry to the `## Pinned Context` section with date tags
 4. If nothing is pin-worthy, report "No new context to pin."
-5. Run the pruning process (see below)
+5. Run the pruning process (see [Pruning Pinned Entries](#pruning-pinned-entries) below)
 6. Commit changes if any were made
 
 ## Pruning Pinned Entries
