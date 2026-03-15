@@ -68,9 +68,9 @@ Run a task that completes successfully, triggering the memory enforcement hook.
 /PACT:comPACT backend Fix a typo in the README introduction
 ```
 
-**What happens**: After the agent completes, the orchestrator sends completed task IDs to `pact-memory-agent` for HANDOFF curation. The memory agent reads HANDOFF metadata, extracts institutional knowledge, and saves structured memories to pact-memory.
+**What happens**: After the agent completes, the orchestrator sends completed task IDs to `pact-memory-agent` for HANDOFF review. The memory agent reads HANDOFF metadata, extracts institutional knowledge, and saves structured memories to pact-memory.
 
-**Expected outcome**: The memory agent curates the HANDOFF into a structured memory object in SQLite. The memory includes context, goal, lessons_learned, decisions, and entities fields.
+**Expected outcome**: The memory agent reviews the HANDOFF and saves a structured memory object to SQLite. The memory includes context, goal, lessons_learned, decisions, and entities fields.
 
 **Verification**:
 ```bash
@@ -158,7 +158,7 @@ Search pact-memory for lessons about "verification scripts"
 | Failure | Symptom | Diagnosis |
 |---------|---------|-----------|
 | Working Memory exceeds 3 entries | More than 3 `### {date}` entries in Working Memory section | `MAX_WORKING_MEMORIES` not set to 3 in `working_memory.py` |
-| pact-memory save fails silently | No new entries in SQLite after task | Check memory agent HANDOFF curation completed; verify SQLite extensions installed |
+| pact-memory save fails silently | No new entries in SQLite after task | Check memory agent HANDOFF review completed; verify SQLite extensions installed |
 | Token budget exceeded | CLAUDE.md loads slowly or context appears truncated | Combined auto-memory + Working Memory + Pinned Context too large; check token budget in `working_memory.py` |
 | Agent memory not loading | Specialist lacks domain context from prior sessions | `memory: user` missing from agent frontmatter; check with `grep` |
 | project_id is None | Memories saved without project tag | Project ID fallback chain broken in pact-memory scripts (env var, git rev-parse, cwd basename) |

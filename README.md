@@ -196,7 +196,7 @@ PACT is built on the **Viable System Model** (VSM), a cybernetics framework for 
 | `phase_completion.py` | Session stop | Remind about decision logs |
 | `validate_handoff.py` | Agent handoff | Verify output quality |
 | `track_files.py` | File edit/write | Track files for memory graph |
-| `memory_prompt.py` | Session stop | Prompt to save learnings |
+
 
 *(Selected hooks shown — see [hooks/](pact-plugin/hooks/) for full list)*
 
