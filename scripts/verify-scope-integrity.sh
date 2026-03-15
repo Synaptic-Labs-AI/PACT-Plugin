@@ -313,8 +313,8 @@ check_pattern "$COMMANDS_DIR/comPACT.md" \
     "comPACT.md references worktree-setup" \
     "worktree-setup"
 check_pattern "$COMMANDS_DIR/peer-review.md" \
-    "peer-review.md references worktree-cleanup" \
-    "worktree-cleanup"
+    "peer-review.md delegates post-merge to wrap-up" \
+    "wrap-up"
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
     "orchestrate.md propagates worktree path to agents" \
     "worktree_path"

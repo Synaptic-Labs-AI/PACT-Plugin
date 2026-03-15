@@ -259,6 +259,4 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 **After user-authorized merge**:
 1. Merge the PR (`gh pr merge`)
-2. Run `/PACT:pin-memory` to update the project `CLAUDE.md` with the latest changes
-3. Invoke `/PACT:worktree-cleanup` for the feature worktree
-4. Report: "PR merged, memory updated, worktree cleaned up"
+2. Invoke `/PACT:wrap-up` for post-merge cleanup

@@ -1,10 +1,8 @@
 ---
-description: Pin important context permanently to CLAUDE.md (bypasses rolling memory window)
+description: Pin important context permanently to CLAUDE.md
 argument-hint: [e.g., critical gotcha, key architectural decision]
 ---
 Pin this to CLAUDE.md permanently: $ARGUMENTS
-
-This bypasses the pact-memory rolling window. Use sparingly for truly critical context.
 
 ## When to Pin
 
@@ -21,10 +19,17 @@ This bypasses the pact-memory rolling window. Use sparingly for truly critical c
 
 ## Process
 
-1. Read existing CLAUDE.md structure
-2. Add to appropriate section (prefer existing sections)
-3. Keep entries concise (~5-10 lines max)
-4. Remove any outdated pinned content
-5. Commit changes
+1. Read existing CLAUDE.md
+2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`)
+3. Add the new entry with a date tag for machine identification:
+   ```markdown
+   ## Pinned Context
 
-**Remember**: Working memory syncs automatically. Only pin what's truly permanent and critical.
+   <!-- pinned: 2026-03-15 -->
+   ### Entry Title
+   Content here (~5-10 lines max)
+   ```
+4. Review ALL existing pinned entries — prune any that are stale or outdated
+5. Keep entries concise (~5-10 lines max each)
+
+**Remember**: Pinned context is for permanent CLAUDE.md context that should survive across all sessions. Working Memory syncs automatically — only pin what's truly permanent and critical.

@@ -3,11 +3,11 @@ description: Perform end-of-session cleanup and documentation synchronization
 ---
 # PACT Wrap-Up Protocol
 
-You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace is clean and documentation is synchronized before the session ends or code is committed.
+You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace is clean, documentation is synchronized, and the session is properly closed.
 
-## 0. Task Audit
+## 1. Task Audit
 
-Before other cleanup, audit and optionally clean up Task state:
+Audit and optionally clean up Task state:
 
 ```
 1. `TaskList`: Review all session tasks
@@ -34,37 +34,20 @@ Before other cleanup, audit and optionally clean up Task state:
 
 > Note: `hooks/stop_audit.sh` performs automatic audit checks at session end. This table provides wrap-up command guidance for manual orchestrator-driven cleanup.
 
----
+## 2. Documentation Sync
 
-## 1. Documentation Synchronization
-- **Scan** the workspace for recent code changes.
-- **Update** `docs/CHANGELOG.md` with a new entry for this session:
-    - **Date/Time**: Current timestamp.
-    - **Focus**: The main task or feature worked on.
-    - **Changes**: List modified files and brief descriptions.
-    - **Result**: The outcome (e.g., "Completed auth flow", "Fixed login bug").
-- **Verify** that `CLAUDE.md` reflects the current system state (architecture, patterns, components).
-- **Verify** that `docs/<feature>/preparation/` and `docs/<feature>/architecture/` are up-to-date with the implementation.
-- **Update** any outdated documentation.
-- **Archive** any obsolete documentation to `docs/archive/`.
+1. **Update CLAUDE.md**: Verify it reflects the current system state (architecture, patterns, components). Run `/PACT:pin-memory` if new permanent context needs pinning.
+2. **Prune stale pinned entries**: Review the `## Pinned Context` section in CLAUDE.md. Remove entries whose `<!-- pinned: YYYY-MM-DD -->` dates are old and whose content is no longer relevant.
+3. **Verify docs**: Confirm that `docs/<feature>/preparation/` and `docs/<feature>/architecture/` are up-to-date with the implementation. Archive obsolete documentation to `docs/archive/`.
 
-## 2. Workspace Cleanup
+## 3. Workspace Cleanup
+
 - **Identify** any temporary files created during the session (e.g., `temp_test.py`, `debug.log`, `foo.txt`, `test_output.json`).
 - **Delete** these files to leave the workspace clean.
 
-## 3. Final Status Report
-- **Report** a summary of actions taken:
-    - **Tasks**: N total (X completed, Y pending, Z cleaned up)
-    - Docs updated: [List files]
-    - Files archived: [List files]
-    - Temp files deleted: [List files]
-    - Status: READY FOR COMMIT / REVIEW
-
-If no actions were needed, state "Workspace is clean and docs are in sync."
-
 ## 4. Orchestration Retrospective (Second-Order Cybernetics)
 
-Before closing the session, perform a brief self-assessment. Compare your initial variety assessment and orchestration decisions against actual outcomes. This calibrates future judgment.
+Perform a brief self-assessment. Compare your initial variety assessment and orchestration decisions against actual outcomes. This calibrates future judgment.
 
 **Answer these four questions:**
 
@@ -86,19 +69,22 @@ entities: ["orchestration_calibration", "{domain}"]
 
 ## 5. Memory Consolidation (Pass 2)
 
-Send to `pact-memory-agent` via `SendMessage`:
+Create a task for the memory agent:
 ```
-SendMessage(to="memory-agent",
-  message="[lead→memory-agent] Session consolidation (Pass 2): Review all memories saved during this session. Consolidate related entries. Prune superseded memories. Sync Working Memory to CLAUDE.md. Save orchestration retrospective as calibration data. Report summary when done.",
-  summary="Session memory consolidation")
+TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
+  description="Review all memories saved during this session. Consolidate related entries. Prune superseded memories. Sync Working Memory to CLAUDE.md. Save orchestration retrospective as calibration data. Report summary when done.")
+TaskUpdate(taskId, owner="memory-agent")
 ```
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
 
-## 6. Team Cleanup
+## 6. Worktree Cleanup
 
-Clean up the session team to free resources:
+If a feature worktree exists for the completed work, invoke `/PACT:worktree-cleanup` to remove it cleanly.
 
-1. **Shut down remaining teammates**: Send `shutdown_request` to each active teammate and wait for responses.
-2. **Delete the team**: Call `TeamDelete` to remove the team directory (`~/.claude/teams/{team_name}/`).
-3. **Handle failures**: If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them.
+## 7. Session Decision
+
+Use `AskUserQuestion`: "Continue working in this session?"
+
+- **Yes**: Keep team alive. Report "Ready for next task."
+- **No**: Shut down remaining teammates (send `shutdown_request` to each active teammate and wait for responses). Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
