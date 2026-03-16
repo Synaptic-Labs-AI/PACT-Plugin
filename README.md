@@ -196,7 +196,6 @@ PACT is built on the **Viable System Model** (VSM), a cybernetics framework for 
 | `phase_completion.py` | Session stop | Remind about decision logs |
 | `validate_handoff.py` | Agent handoff | Verify output quality |
 | `track_files.py` | File edit/write | Track files for memory graph |
-| `memory_prompt.py` | Session stop | Prompt to save learnings |
 
 *(Selected hooks shown — see [hooks/](pact-plugin/hooks/) for full list)*
 
@@ -424,7 +423,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-marketplace/
 │           └── PACT/
-│               └── 3.9.18/     # Plugin version
+│               └── 3.10.0/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

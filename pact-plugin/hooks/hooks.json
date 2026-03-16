@@ -63,10 +63,6 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/validate_handoff.py\""
-          },
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_enforce.py\""
           }
         ]
       }
@@ -95,7 +91,7 @@
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_prompt.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/memory_adhoc_reminder.py\""
           }
         ]
       }
