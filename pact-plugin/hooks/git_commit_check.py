@@ -19,6 +19,8 @@ import subprocess
 import re
 from pathlib import Path
 
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def get_staged_files():
     """Returns a list of staged files."""
@@ -306,12 +308,14 @@ def main():
 
         # Check if the command is a git commit
         if not re.search(r'\bgit\s+commit\b', command):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)  # Not a commit command, allow it
 
         staged_files = get_staged_files()
 
         # If no files are staged, let git handle the error
         if not staged_files:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Collect all errors and warnings
@@ -361,6 +365,7 @@ def main():
             print("See SACROSANCT rules in CLAUDE.md for guidance.", file=sys.stderr)
             sys.exit(2)  # Block the tool execution
 
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)  # Allow the commit
 
     except Exception as e:
