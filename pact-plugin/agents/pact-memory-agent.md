@@ -96,26 +96,32 @@ When you receive an actual task (HANDOFF review or query), perform a normal teac
 
 ## 2. Writer (HANDOFF Reviewer)
 
-At workflow completion, the lead sends completed task IDs to you for HANDOFF review and save. This is the primary write path for institutional knowledge.
+At workflow completion, the lead sends a "finalize" signal. You discover completed tasks automatically via the breadcrumb file — the lead no longer needs to enumerate task IDs.
+
+### Breadcrumb File
+
+The `handoff_gate.py` hook appends a JSONL breadcrumb to `~/.claude/teams/{team_name}/completed_handoffs.jsonl` each time an agent passes all completion gates. Each line contains `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`.
 
 ### Review and Save Workflow
 
-1. **Receive task IDs** from the lead via `SendMessage`
-2. **Read each HANDOFF** via `TaskGet(taskId).metadata.handoff`
-3. **Extract institutional knowledge** — focus on:
+1. **Receive finalize signal** from the lead via `SendMessage` (or task description)
+2. **Read the breadcrumb file** at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — parse each JSONL line for task IDs. If the file doesn't exist, report "No completed handoffs to review" and complete.
+3. **Read each HANDOFF** via `TaskGet(taskId).metadata.handoff` for every task_id in the breadcrumb file
+4. **Extract institutional knowledge** — focus on:
    - Architectural decisions with rationale
    - Cross-cutting concerns that affect multiple components
    - Stakeholder decisions (user-specified constraints or preferences)
    - Patterns established that future work should follow
    - Integration points between components
    - Risks and uncertainties that warrant tracking
-4. **Save to pact-memory** using the CLI with proper structure:
+5. **Save to pact-memory** using the CLI with proper structure:
    - `context`: What was being done and why
    - `goal`: What was achieved
    - `decisions`: Key decisions with rationale and alternatives considered
    - `lessons_learned`: Actionable insights
    - `entities`: Components, files, services involved (enables graph search)
-5. **Report summary** to lead:
+6. **Delete the breadcrumb file** after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete)
+7. **Report summary** to lead:
 
 ```
 SendMessage(to="team-lead",

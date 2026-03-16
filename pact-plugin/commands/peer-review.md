@@ -235,7 +235,7 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
    TaskUpdate(taskId, owner="memory-agent")
 
    TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge",
-     description="Review HANDOFFs and save institutional knowledge from implementation. Task IDs: #X, #Y, #Z. Read each via TaskGet for HANDOFF metadata. Save to pact-memory. Report summary when done.")
+     description="Review pending HANDOFFs from the breadcrumb file (~/.claude/teams/{team_name}/completed_handoffs.jsonl). Read each task via TaskGet, extract institutional knowledge, save to pact-memory. Delete the file when done. Report summary when done.")
    TaskUpdate(taskId, owner="memory-agent")
    ```
    Calibration runs unconditionally — even clean reviews provide signal. Skip only for trivial single-file PRs.

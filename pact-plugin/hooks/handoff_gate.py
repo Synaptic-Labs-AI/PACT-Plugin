@@ -15,9 +15,10 @@ Output: stderr message on block (exit 2), nothing on allow (exit 0)
 """
 
 import json
+import os
 import re
 import sys
-import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
@@ -171,6 +172,38 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
     return {}
 
 
+def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> None:
+    """
+    Append a breadcrumb to the pending handoffs file for memory agent consumption.
+
+    Writes a single JSONL line to ~/.claude/teams/{team_name}/completed_handoffs.jsonl
+    so the memory agent can discover completed tasks without the orchestrator needing
+    to enumerate task IDs. Uses POSIX atomic append (O_WRONLY|O_APPEND|O_CREAT) with
+    0o600 permissions for concurrent safety and security.
+
+    Fails silently — breadcrumb loss is acceptable; blocking task completion is not.
+    """
+    if not teammate_name or not team_name:
+        return
+    teams_dir = Path.home() / ".claude" / "teams" / team_name
+    if not teams_dir.exists():
+        return
+    filepath = teams_dir / "completed_handoffs.jsonl"
+    try:
+        entry = json.dumps({
+            "task_id": task_id,
+            "teammate_name": teammate_name,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }) + "\n"
+        fd = os.open(str(filepath), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, entry.encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def main():
     try:
         input_data = json.load(sys.stdin)
@@ -206,6 +239,10 @@ def main():
     if memory_feedback:
         print(memory_feedback, file=sys.stderr)
         sys.exit(2)  # Block completion — feedback goes to agent
+
+    # Both gates passed — append breadcrumb for memory agent consumption.
+    # This is the LAST action before exit: every breadcrumb = fully complete task.
+    append_pending_handoff(task_id, teammate_name, team_name)
 
     sys.exit(0)
 

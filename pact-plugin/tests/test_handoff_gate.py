@@ -13,6 +13,13 @@ Tests cover:
 8. Subject starts with "BLOCKER:" -> allow (bypass)
 9. No teammate_name in input -> allow (non-agent completion)
 10. memory_saved enforcement nudge (non-blocking)
+11. Breadcrumb: appended on successful completion
+12. Breadcrumb: not written on handoff validation failure
+13. Breadcrumb: not written on memory_saved failure
+14. Breadcrumb: not written for non-agent tasks
+15. Breadcrumb: missing team directory -> no error
+16. Breadcrumb: file created lazily on first append
+17. Breadcrumb: file permissions are 0o600
 """
 import json
 import io
@@ -535,3 +542,224 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 0
         # Verify read_task_metadata was called with lowercased env var team name
         mock_read.assert_called_once_with("1", "pact-from-env")
+
+
+class TestAppendPendingHandoff:
+    """Tests for handoff_gate.append_pending_handoff() — breadcrumb mechanism."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        """Create a mock teams directory structure under tmp_path."""
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_appends_breadcrumb_on_call(self, tmp_path):
+        """P0: Valid call produces a JSONL file with one correct entry."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("42", "backend-coder", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        assert filepath.exists()
+
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 1
+
+        entry = json.loads(lines[0])
+        assert entry["task_id"] == "42"
+        assert entry["teammate_name"] == "backend-coder"
+        assert "timestamp" in entry
+        # Verify ISO 8601 UTC format
+        assert entry["timestamp"].endswith("Z")
+
+    def test_no_breadcrumb_when_no_team_name(self, tmp_path):
+        """P1: Empty team_name -> no file created, no error."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("42", "backend-coder", "")
+
+        assert not self._breadcrumb_path(teams_dir).exists()
+
+    def test_no_breadcrumb_when_team_dir_missing(self, tmp_path):
+        """P1: Team directory doesn't exist -> no error, no file."""
+        from handoff_gate import append_pending_handoff
+
+        # Don't create the teams dir
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            # Should not raise
+            append_pending_handoff("42", "backend-coder", "nonexistent-team")
+
+        # No file anywhere
+        teams_path = tmp_path / ".claude" / "teams" / "nonexistent-team"
+        assert not teams_path.exists()
+
+    def test_file_created_lazily(self, tmp_path):
+        """P2: File doesn't exist before first call, exists after."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        assert not filepath.exists()
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("1", "backend-coder", "pact-test")
+
+        assert filepath.exists()
+
+    def test_file_permissions_0o600(self, tmp_path):
+        """P2: Created file has 0o600 permissions (owner read/write only)."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("1", "backend-coder", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        mode = os.stat(filepath).st_mode & 0o777
+        assert mode == 0o600
+
+    def test_multiple_appends_produce_valid_jsonl(self, tmp_path):
+        """P1: Multiple appends produce multiple valid JSONL lines."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("1", "backend-coder", "pact-test")
+            append_pending_handoff("2", "frontend-coder", "pact-test")
+            append_pending_handoff("3", "test-engineer", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 3
+
+        # Each line is valid JSON
+        entries = [json.loads(line) for line in lines]
+        assert entries[0]["task_id"] == "1"
+        assert entries[1]["task_id"] == "2"
+        assert entries[2]["task_id"] == "3"
+
+    def test_silent_failure_on_os_error(self, tmp_path):
+        """Breadcrumb write failure should not raise."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch("os.open", side_effect=OSError("disk full")):
+            # Should not raise
+            append_pending_handoff("42", "backend-coder", "pact-test")
+
+
+class TestMainBreadcrumbIntegration:
+    """Integration tests: main() produces/skips breadcrumbs based on gate outcomes."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_breadcrumb_written_on_successful_completion(self, tmp_path):
+        """P0: Valid handoff + memory_saved=true -> exit 0 + breadcrumb file exists."""
+        from handoff_gate import main
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        filepath = self._breadcrumb_path(teams_dir)
+        assert filepath.exists()
+        entry = json.loads(filepath.read_text().strip())
+        assert entry["task_id"] == "5"
+        assert entry["teammate_name"] == "backend-coder"
+
+    def test_no_breadcrumb_on_handoff_validation_failure(self, tmp_path):
+        """P0: Missing handoff -> exit 2, no breadcrumb file."""
+        from handoff_gate import main
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value={}), \
+             patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        assert not self._breadcrumb_path(teams_dir).exists()
+
+    def test_no_breadcrumb_on_memory_saved_failure(self, tmp_path):
+        """P0: Valid handoff but memory_saved absent -> exit 2, no breadcrumb file."""
+        from handoff_gate import main
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        metadata = {"handoff": VALID_HANDOFF}  # no memory_saved
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        assert not self._breadcrumb_path(teams_dir).exists()
+
+    def test_no_breadcrumb_for_non_agent_tasks(self, tmp_path):
+        """P1: No teammate_name -> exit 0, no breadcrumb file."""
+        from handoff_gate import main
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        input_data = json.dumps({
+            "task_id": "5",
+            "task_subject": "Feature: auth",
+            "team_name": "pact-test"
+            # No teammate_name
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value={}), \
+             patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert not self._breadcrumb_path(teams_dir).exists()

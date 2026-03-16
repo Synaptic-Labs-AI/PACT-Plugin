@@ -210,7 +210,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
 - [ ] **Save memories from HANDOFFs**: Create a task for the memory agent:
   ```
-  TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge", description="Review HANDOFFs and save institutional knowledge from comPACT completion. Task IDs: #X. Read via TaskGet for HANDOFF metadata. Save to pact-memory. Report summary when done.")
+  TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge", description="Review pending HANDOFFs from the breadcrumb file (~/.claude/teams/{team_name}/completed_handoffs.jsonl). Read each task via TaskGet, extract institutional knowledge, save to pact-memory. Delete the file when done. Report summary when done.")
   TaskUpdate(taskId, owner="memory-agent")
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
