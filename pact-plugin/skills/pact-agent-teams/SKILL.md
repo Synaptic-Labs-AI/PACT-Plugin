@@ -216,6 +216,11 @@ Before returning your final output:
 
    Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the memory agent will review and save it to pact-memory.
 
+2. **Confirm Memory Saved**: After saving domain learnings, set `memory_saved: true` in your task metadata:
+   ```
+   TaskUpdate(taskId, metadata={"memory_saved": true})
+   ```
+
 ## Shutdown
 
 When you receive a `shutdown_request`:

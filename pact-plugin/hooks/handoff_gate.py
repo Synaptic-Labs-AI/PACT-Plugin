@@ -86,6 +86,45 @@ def validate_task_handoff(
     return None
 
 
+def check_memory_saved(
+    task_metadata: dict,
+    teammate_name: str | None,
+) -> str | None:
+    """
+    Check if agent saved domain learnings to persistent memory.
+
+    Returns a non-blocking nudge message if memory_saved is absent or false,
+    or None if no nudge is needed.
+
+    Args:
+        task_metadata: Task metadata dict (from task file)
+        teammate_name: Name of completing teammate (None for non-agent)
+
+    Returns:
+        Nudge message string if memory_saved is missing/false, None otherwise
+    """
+    # Skip: non-agent tasks
+    if not teammate_name:
+        return None
+
+    # Skip: no handoff means validate_task_handoff already blocked or bypassed
+    handoff = task_metadata.get("handoff")
+    if not handoff:
+        return None
+
+    # Skip: already saved
+    if task_metadata.get("memory_saved"):
+        return None
+
+    return (
+        f"Reminder: {teammate_name} completed without saving domain learnings "
+        f"to persistent memory (~/.claude/agent-memory/{teammate_name}/). "
+        f"Save codepaths, patterns, and conventions discovered during this task, "
+        f"then set memory_saved: true in task metadata via "
+        f"TaskUpdate(taskId, metadata={{\"memory_saved\": true}})."
+    )
+
+
 def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
     """
     Read task metadata from the task file.
@@ -152,6 +191,14 @@ def main():
     if error:
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
+
+    # Non-blocking nudge: remind agent to save domain learnings
+    nudge = check_memory_saved(
+        task_metadata=task_metadata,
+        teammate_name=teammate_name,
+    )
+    if nudge:
+        print(json.dumps({"systemMessage": nudge}))
 
     sys.exit(0)
 
