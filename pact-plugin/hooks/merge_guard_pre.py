@@ -596,12 +596,14 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(json.dumps({"suppressOutput": True}))
             sys.exit(0)
 
         tool_input = input_data.get("tool_input", {})
         command = tool_input.get("command", "")
 
         if not command:
+            print(json.dumps({"suppressOutput": True}))
             sys.exit(0)
 
         error = check_merge_authorization(command)
@@ -616,6 +618,7 @@ def main():
             print(json.dumps(output))
             sys.exit(2)
 
+        print(json.dumps({"suppressOutput": True}))
         sys.exit(0)
 
     except Exception as e:
