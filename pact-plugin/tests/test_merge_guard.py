@@ -539,7 +539,7 @@ class TestCheckMergeAuthorization:
 class TestPreMainEntryPoint:
     """Tests for merge_guard_pre.main() stdin/exit behavior."""
 
-    def test_main_exits_0_on_safe_command(self):
+    def test_main_exits_0_on_safe_command(self, capsys):
         from merge_guard_pre import main
 
         input_data = json.dumps({
@@ -551,6 +551,8 @@ class TestPreMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
     def test_main_exits_2_on_dangerous_without_token(self, tmp_path, capsys):
         from merge_guard_pre import main
@@ -570,7 +572,7 @@ class TestPreMainEntryPoint:
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "AskUserQuestion" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def test_main_exits_0_on_dangerous_with_valid_token(self, tmp_path):
+    def test_main_exits_0_on_dangerous_with_valid_token(self, tmp_path, capsys):
         from merge_guard_pre import main
 
         now = time.time()
@@ -592,8 +594,10 @@ class TestPreMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
-    def test_main_exits_0_on_invalid_json(self):
+    def test_main_exits_0_on_invalid_json(self, capsys):
         from merge_guard_pre import main
 
         with patch("sys.stdin", io.StringIO("not json")):
@@ -601,8 +605,10 @@ class TestPreMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
-    def test_main_exits_0_on_empty_command(self):
+    def test_main_exits_0_on_empty_command(self, capsys):
         from merge_guard_pre import main
 
         input_data = json.dumps({
@@ -614,6 +620,8 @@ class TestPreMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
     def test_main_exits_0_on_missing_command(self):
         from merge_guard_pre import main
@@ -7018,6 +7026,9 @@ class TestGhPrClosePreHookE2E:
                 main()
             assert exc_info.value.code == 0
 
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
+
     def test_pre_hook_allows_gh_pr_close_delete_branch_with_token(self, tmp_path, capsys):
         """Pre-hook main() allows gh pr close --delete-branch with valid token."""
         from merge_guard_pre import main
@@ -7042,6 +7053,9 @@ class TestGhPrClosePreHookE2E:
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
 
 # =============================================================================
