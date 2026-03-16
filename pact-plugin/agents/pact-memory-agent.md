@@ -193,12 +193,12 @@ Knowledge verified through dialogue with the implementing agent is more reliable
 
 # WORKING MEMORY SYNC
 
-**AUTOMATIC**: When you save a memory using the Python API, it automatically:
+**AUTOMATIC**: When you save a memory using the CLI `save` command, it automatically:
 - Syncs to the Working Memory section in CLAUDE.md
 - Maintains a rolling window of the last 3 entries
 - Includes the Memory ID for reference back to the database
 
-You do NOT need to manually edit CLAUDE.md. Just call `memory.save({...})` and the sync happens automatically.
+You do NOT need to manually edit CLAUDE.md. The sync happens automatically on every save.
 
 **Relationship to auto-memory**: The platform's auto-memory (MEMORY.md) captures free-form session learnings automatically. Working Memory provides a complementary structured view -- PACT-specific context (goals, decisions, lessons) sourced from the SQLite database. Both are loaded into the system prompt independently. The reduced entry count (3 instead of 5) limits token overlap while retaining the structured format that auto-memory does not provide.
 
