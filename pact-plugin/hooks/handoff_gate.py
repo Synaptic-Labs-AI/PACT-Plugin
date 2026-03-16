@@ -86,6 +86,9 @@ def validate_task_handoff(
     return None
 
 
+# Note: The memory agent processes HANDOFFs sequentially ("read all before saving")
+# for deduplication. This serializes writes but produces cleaner entries.
+# Acceptable at current scale (2-5 HANDOFFs per workflow).
 def check_memory_saved(
     task_metadata: dict,
     teammate_name: str | None,
@@ -192,7 +195,10 @@ def main():
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
 
-    # Blocking enforcement: agent must acknowledge memory save before completing
+    # Blocking enforcement: agent must acknowledge memory save before completing.
+    # Exit 2 blocks task completion and feeds stderr back to the agent as
+    # actionable feedback. The agent must set memory_saved: true before it
+    # can complete.
     memory_feedback = check_memory_saved(
         task_metadata=task_metadata,
         teammate_name=teammate_name,

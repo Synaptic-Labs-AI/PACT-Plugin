@@ -16,6 +16,7 @@ Tests cover:
 """
 import json
 import io
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -347,6 +348,26 @@ class TestReadTaskMetadata:
 
         assert result == {}
 
+    def test_sanitizes_path_traversal_in_task_id(self, tmp_path):
+        """Adversarial task_id with path traversal should be sanitized to empty -> {}."""
+        from handoff_gate import read_task_metadata
+
+        result = read_task_metadata("../../etc/passwd", "pact-test", tasks_base_dir=str(tmp_path))
+
+        assert result == {}
+
+    def test_reads_with_team_name_none(self, tmp_path):
+        """team_name=None should skip team dir and fall back to base."""
+        from handoff_gate import read_task_metadata
+
+        task_data = {"metadata": {"handoff": VALID_HANDOFF}}
+        (tmp_path / "42.json").write_text(json.dumps(task_data))
+
+        result = read_task_metadata("42", None, tasks_base_dir=str(tmp_path))
+
+        assert "handoff" in result
+        assert result["handoff"]["produced"] == ["src/auth.ts"]
+
     def test_falls_back_to_base_dir(self, tmp_path):
         """When team subdirectory doesn't have the task, falls back to base."""
         from handoff_gate import read_task_metadata
@@ -491,3 +512,26 @@ class TestMainEntryPoint:
         # Error on stderr, nothing on stdout (nudge doesn't fire when handoff blocked)
         assert captured.out == ""
         assert "handoff" in captured.err.lower()
+
+    def test_main_uses_env_var_for_team_name(self):
+        """team_name falls back to CLAUDE_CODE_TEAM_NAME env var when absent from input."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            # No team_name in input
+        })
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        env = {**os.environ, "CLAUDE_CODE_TEAM_NAME": "PACT-FROM-ENV"}
+        with patch("handoff_gate.read_task_metadata", return_value=metadata) as mock_read, \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # Verify read_task_metadata was called with lowercased env var team name
+        mock_read.assert_called_once_with("1", "pact-from-env")
