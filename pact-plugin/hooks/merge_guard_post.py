@@ -31,6 +31,10 @@ from shared.merge_guard_common import (
     cleanup_consumed_tokens as _cleanup_consumed_tokens,
 )
 
+# When the hook allows a command (exits 0), output this JSON so the Claude Code
+# UI suppresses the hook display instead of showing "hook error (No output)".
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 # Keywords that indicate a merge-related question
 MERGE_KEYWORDS = re.compile(
     r"merge|close\s+(?:pr|pull\s*request)|(?:pr|pull\s*request)\s+close|"
@@ -182,6 +186,7 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         tool_input = input_data.get("tool_input", {})
@@ -190,6 +195,7 @@ def main():
         # Extract question from AskUserQuestion schema:
         # tool_input: {"questions": [{"question": "...", ...}]}
         if not isinstance(tool_input, dict):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
         questions = tool_input.get("questions", [])
         if isinstance(questions, list) and len(questions) > 0:
@@ -201,6 +207,7 @@ def main():
         # Extract answer from AskUserQuestion schema:
         # tool_output: {"answers": {"question_text": "answer_text"}, ...}
         if not isinstance(tool_output, dict):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
         answers = tool_output.get("answers", {})
         if isinstance(answers, dict) and answers:
@@ -219,6 +226,7 @@ def main():
                     file=sys.stderr,
                 )
 
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:
