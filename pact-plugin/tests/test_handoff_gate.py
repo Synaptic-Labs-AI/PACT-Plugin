@@ -12,7 +12,7 @@ Tests cover:
 7. Algedonic task (metadata.type: "algedonic") -> allow (bypass)
 8. Subject starts with "BLOCKER:" -> allow (bypass)
 9. No teammate_name in input -> allow (non-agent completion)
-10. memory_saved enforcement nudge (non-blocking)
+10. memory_saved blocking enforcement (exit 2)
 11. Breadcrumb: appended on successful completion
 12. Breadcrumb: not written on handoff validation failure
 13. Breadcrumb: not written on memory_saved failure
@@ -194,10 +194,10 @@ class TestHandoffGate:
 
 
 class TestCheckMemorySaved:
-    """Tests for handoff_gate.check_memory_saved() — non-blocking nudge."""
+    """Tests for handoff_gate.check_memory_saved() — blocking enforcement."""
 
-    def test_no_nudge_when_memory_saved_true(self):
-        """P0: HANDOFF present + memory_saved true -> no nudge."""
+    def test_no_block_when_memory_saved_true(self):
+        """P0: HANDOFF present + memory_saved true -> no block."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -206,8 +206,8 @@ class TestCheckMemorySaved:
         )
         assert result is None
 
-    def test_nudge_when_memory_saved_false(self):
-        """P0: HANDOFF present + memory_saved false -> nudge fires."""
+    def test_blocks_when_memory_saved_false(self):
+        """P0: HANDOFF present + memory_saved false -> blocks completion."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -217,8 +217,8 @@ class TestCheckMemorySaved:
         assert result is not None
         assert "Save domain learnings" in result
 
-    def test_nudge_when_memory_saved_absent(self):
-        """P0: HANDOFF present + memory_saved absent -> nudge fires."""
+    def test_blocks_when_memory_saved_absent(self):
+        """P0: HANDOFF present + memory_saved absent -> blocks completion."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -228,8 +228,8 @@ class TestCheckMemorySaved:
         assert result is not None
         assert "Save domain learnings" in result
 
-    def test_no_nudge_when_no_teammate(self):
-        """P1: Non-agent task -> no nudge."""
+    def test_no_block_when_no_teammate(self):
+        """P1: Non-agent task -> no block."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -238,8 +238,8 @@ class TestCheckMemorySaved:
         )
         assert result is None
 
-    def test_no_nudge_when_no_handoff(self):
-        """P1: No HANDOFF in metadata -> no nudge (validate_task_handoff handles this)."""
+    def test_no_block_when_no_handoff(self):
+        """P1: No HANDOFF in metadata -> no block (validate_task_handoff handles this)."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -248,8 +248,8 @@ class TestCheckMemorySaved:
         )
         assert result is None
 
-    def test_no_nudge_when_handoff_is_none(self):
-        """P1: handoff key present but None -> no nudge."""
+    def test_no_block_when_handoff_is_none(self):
+        """P1: handoff key present but None -> no block."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -258,8 +258,8 @@ class TestCheckMemorySaved:
         )
         assert result is None
 
-    def test_nudge_contains_agent_name(self):
-        """P2: Nudge message includes the teammate name."""
+    def test_feedback_contains_agent_name(self):
+        """P2: Feedback message includes the teammate name."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -268,8 +268,8 @@ class TestCheckMemorySaved:
         )
         assert "test-engineer" in result
 
-    def test_nudge_contains_memory_path(self):
-        """P2: Nudge message includes the agent-memory path."""
+    def test_feedback_contains_memory_path(self):
+        """P2: Feedback message includes the agent-memory path."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -278,8 +278,8 @@ class TestCheckMemorySaved:
         )
         assert "~/.claude/agent-memory/frontend-coder/" in result
 
-    def test_nudge_contains_taskupdate_instruction(self):
-        """P2: Nudge message tells agent how to set memory_saved."""
+    def test_feedback_contains_taskupdate_instruction(self):
+        """P2: Feedback message tells agent how to set memory_saved."""
         from handoff_gate import check_memory_saved
 
         result = check_memory_saved(
@@ -289,8 +289,8 @@ class TestCheckMemorySaved:
         assert "memory_saved" in result
         assert "TaskUpdate" in result
 
-    def test_memory_saved_truthy_values_suppress_nudge(self):
-        """Any truthy value for memory_saved should suppress the nudge."""
+    def test_memory_saved_truthy_values_suppress_block(self):
+        """Any truthy value for memory_saved should suppress blocking."""
         from handoff_gate import check_memory_saved
 
         for truthy in [True, 1, "yes", {"saved": True}]:
@@ -298,10 +298,10 @@ class TestCheckMemorySaved:
                 task_metadata={"handoff": VALID_HANDOFF, "memory_saved": truthy},
                 teammate_name="backend-coder",
             )
-            assert result is None, f"memory_saved={truthy!r} should suppress nudge"
+            assert result is None, f"memory_saved={truthy!r} should suppress block"
 
-    def test_memory_saved_falsy_values_trigger_nudge(self):
-        """Falsy values for memory_saved should trigger the nudge."""
+    def test_memory_saved_falsy_values_trigger_block(self):
+        """Falsy values for memory_saved should trigger blocking."""
         from handoff_gate import check_memory_saved
 
         for falsy in [False, 0, "", None]:
@@ -309,7 +309,7 @@ class TestCheckMemorySaved:
                 task_metadata={"handoff": VALID_HANDOFF, "memory_saved": falsy},
                 teammate_name="backend-coder",
             )
-            assert result is not None, f"memory_saved={falsy!r} should trigger nudge"
+            assert result is not None, f"memory_saved={falsy!r} should trigger block"
 
 
 class TestReadTaskMetadata:
@@ -476,7 +476,7 @@ class TestMainEntryPoint:
         # No JSON on stdout
         assert captured.out == ""
 
-    def test_main_no_nudge_when_memory_saved(self, capsys):
+    def test_main_no_block_when_memory_saved(self, capsys):
         """Integration: valid handoff + memory_saved=true -> exit 0, no stdout output."""
         from handoff_gate import main
 
@@ -498,8 +498,8 @@ class TestMainEntryPoint:
         assert captured.out == ""
         assert captured.err == ""
 
-    def test_main_no_nudge_when_handoff_blocked(self, capsys):
-        """Integration: missing handoff -> exit 2 (blocked), no nudge on stdout."""
+    def test_main_no_memory_block_when_handoff_blocked(self, capsys):
+        """Integration: missing handoff -> exit 2 (blocked), no memory feedback on stdout."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -516,7 +516,7 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 2
         captured = capsys.readouterr()
-        # Error on stderr, nothing on stdout (nudge doesn't fire when handoff blocked)
+        # Error on stderr, nothing on stdout (memory check doesn't fire when handoff blocked)
         assert captured.out == ""
         assert "handoff" in captured.err.lower()
 
