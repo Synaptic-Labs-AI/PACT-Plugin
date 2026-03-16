@@ -196,7 +196,7 @@ Knowledge verified through dialogue with the implementing agent is more reliable
 |-------------|----------|
 | Single missing HANDOFF | Normal message to lead: "No HANDOFF metadata for task #N. Skipping." Continue with remaining. |
 | Partial/malformed HANDOFF | Save what's available, note gaps in summary. |
-| Multiple missing (>50% of workflow) | ALERT to lead: "Most HANDOFFs missing. Possible systemic issue." |
+| Multiple missing (>50% of workflow) | ALERT QUALITY to lead: "Most HANDOFFs missing. Possible systemic issue." |
 | TaskGet fails | Normal message to lead with task ID and error. Continue with remaining. |
 
 # WORKING MEMORY SYNC

@@ -14,7 +14,7 @@ TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
 TaskUpdate(taskId, owner="memory-agent")
 ```
 
-This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
+This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
 
 > **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 3) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
 

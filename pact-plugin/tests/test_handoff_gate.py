@@ -207,7 +207,7 @@ class TestCheckMemorySaved:
             teammate_name="backend-coder",
         )
         assert result is not None
-        assert "Reminder" in result
+        assert "Save domain learnings" in result
 
     def test_nudge_when_memory_saved_absent(self):
         """P0: HANDOFF present + memory_saved absent -> nudge fires."""
@@ -218,7 +218,7 @@ class TestCheckMemorySaved:
             teammate_name="backend-coder",
         )
         assert result is not None
-        assert "Reminder" in result
+        assert "Save domain learnings" in result
 
     def test_no_nudge_when_no_teammate(self):
         """P1: Non-agent task -> no nudge."""
@@ -363,7 +363,7 @@ class TestReadTaskMetadata:
 class TestMainEntryPoint:
     """Tests for handoff_gate.main() stdin/stdout/exit behavior."""
 
-    def test_main_exits_0_on_valid_handoff(self):
+    def test_main_exits_0_on_valid_handoff_with_memory_saved(self):
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -373,7 +373,8 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={"handoff": VALID_HANDOFF}), \
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -423,8 +424,8 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_emits_nudge_when_memory_not_saved(self, capsys):
-        """Integration: valid handoff but no memory_saved -> exit 0 + systemMessage on stdout."""
+    def test_main_blocks_when_memory_not_saved(self, capsys):
+        """Integration: valid handoff but no memory_saved -> exit 2 + feedback on stderr."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -439,14 +440,13 @@ class TestMainEntryPoint:
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
-        assert exc_info.value.code == 0
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
-        output = json.loads(captured.out)
-        assert "systemMessage" in output
-        assert "backend-coder" in output["systemMessage"]
-        assert "Reminder" in output["systemMessage"]
-        # No error on stderr
-        assert captured.err == ""
+        assert "backend-coder" in captured.err
+        assert "agent-memory" in captured.err
+        assert "memory_saved" in captured.err
+        # No JSON on stdout
+        assert captured.out == ""
 
     def test_main_no_nudge_when_memory_saved(self, capsys):
         """Integration: valid handoff + memory_saved=true -> exit 0, no stdout output."""

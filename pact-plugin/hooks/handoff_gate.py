@@ -93,15 +93,16 @@ def check_memory_saved(
     """
     Check if agent saved domain learnings to persistent memory.
 
-    Returns a non-blocking nudge message if memory_saved is absent or false,
-    or None if no nudge is needed.
+    Returns a blocking feedback message if memory_saved is absent or false,
+    or None if no action is needed. When returned, the caller should
+    exit 2 to block task completion — the message feeds back to the agent.
 
     Args:
         task_metadata: Task metadata dict (from task file)
         teammate_name: Name of completing teammate (None for non-agent)
 
     Returns:
-        Nudge message string if memory_saved is missing/false, None otherwise
+        Feedback message string if memory_saved is missing/false, None otherwise
     """
     # Skip: non-agent tasks
     if not teammate_name:
@@ -117,11 +118,10 @@ def check_memory_saved(
         return None
 
     return (
-        f"Reminder: {teammate_name} completed without saving domain learnings "
-        f"to persistent memory (~/.claude/agent-memory/{teammate_name}/). "
-        f"Save codepaths, patterns, and conventions discovered during this task, "
-        f"then set memory_saved: true in task metadata via "
-        f"TaskUpdate(taskId, metadata={{\"memory_saved\": true}})."
+        f"Save domain learnings to persistent memory (~/.claude/agent-memory/{teammate_name}/). "
+        f"Save codepaths, patterns, and conventions discovered during this task. "
+        f"If you have nothing new to save, that's OK — just set the flag. "
+        f"Then set memory_saved: true via TaskUpdate(taskId, metadata={{\"memory_saved\": true}})."
     )
 
 
@@ -192,13 +192,14 @@ def main():
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
 
-    # Non-blocking nudge: remind agent to save domain learnings
-    nudge = check_memory_saved(
+    # Blocking enforcement: agent must acknowledge memory save before completing
+    memory_feedback = check_memory_saved(
         task_metadata=task_metadata,
         teammate_name=teammate_name,
     )
-    if nudge:
-        print(json.dumps({"systemMessage": nudge}))
+    if memory_feedback:
+        print(memory_feedback, file=sys.stderr)
+        sys.exit(2)  # Block completion — feedback goes to agent
 
     sys.exit(0)
 
