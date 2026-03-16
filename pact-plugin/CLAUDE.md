@@ -99,11 +99,15 @@ The Task system survives compaction. Your context window doesn't.
 ### Git Workflow
 - Create a feature branch before any new workstream begins
 
+### Default to comPACT
+
+When a user requests work without specifying a workflow (e.g., "fix this bug", "add this feature", "update this file"), default to at least `/PACT:comPACT` rather than doing the work passively. This ensures memory enforcement, HANDOFF collection, and quality gates are active. Only skip comPACT for truly passive interactions (questions, exploration, code review without changes).
+
 ### Memory Management
 
 **Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries and HANDOFF review via `SendMessage`. Workflow commands specify the exact steps.
 
-**Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent reviews and saves it to pact-memory. For ad-hoc work outside formal workflows, query the memory agent when prior context would help, and send a save request when significant decisions or discoveries are made.
+**Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent reviews and saves it to pact-memory. For ad-hoc work outside formal workflows: query the memory agent when prior context would help. After making a significant decision, fixing a tricky bug, or discovering a non-obvious pattern, send the memory agent a save request. Specific triggers: architectural choices, gotchas that would waste hours if forgotten, cross-component impacts discovered, and stakeholder decisions.
 
 #### Three-Layer Memory Architecture
 
