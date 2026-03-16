@@ -92,7 +92,7 @@ For each query:
 3. Identify gaps where coverage is thin
 4. Report findings with source memory IDs to the lead
 
-When you receive an actual task (HANDOFF review or query), perform a normal teachback at that point per the agent-teams protocol.
+When you receive an actual task (HANDOFF review or query), perform a normal teachback at that point per the `pact-agent-teams` skill.
 
 ## 2. Writer (HANDOFF Reviewer)
 
@@ -219,7 +219,7 @@ This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the prima
 
 ## Task Completion Signal (Required)
 
-When your work is done, follow the Agent Teams HANDOFF protocol:
+When your work is done, follow the `pact-agent-teams` HANDOFF protocol:
 
 1. **Store HANDOFF in task metadata** via `TaskUpdate`, adapting the standard fields for memory operations:
    ```
