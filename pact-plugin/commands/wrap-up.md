@@ -5,34 +5,18 @@ description: Perform end-of-session cleanup and documentation synchronization
 
 You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace is clean, documentation is synchronized, and the session is properly closed.
 
-## 1. Task Audit
+## 1. Memory Consolidation (Pass 2)
 
-Audit and optionally clean up Task state:
-
+Create a task for the memory agent:
 ```
-1. `TaskList`: Review all session tasks
-2. For abandoned in_progress tasks: complete or document reason
-3. Verify Feature task reflects final state
-4. Archive key context to memory (via pact-memory-agent)
-5. Report task summary: "Session has N tasks (X completed, Y pending)"
-6. IF multi-session mode (CLAUDE_CODE_TASK_LIST_ID set):
-   - Offer: "Clean up completed workflows? (Context archived to memory)"
-   - User confirms → delete completed feature hierarchies
-   - User declines → leave as-is
+TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
+  description="Review all memories saved during this session. Consolidate related entries. Prune superseded memories. Sync Working Memory to CLAUDE.md. Save orchestration retrospective as calibration data. Report summary when done.")
+TaskUpdate(taskId, owner="memory-agent")
 ```
 
-**Cleanup rules** (self-contained for command context):
+This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
 
-| Task State | Cleanup Action |
-|------------|----------------|
-| `completed` Feature task | Archive summary, then delete with children |
-| `in_progress` Feature task | Do NOT delete (workflow still active) |
-| Orphaned `in_progress` | Document abandonment reason, then delete |
-| `pending` blocked forever | Delete with note |
-
-**Why conservative:** Tasks are session-scoped by default (fresh on new session). Cleanup only matters for multi-session work, where user explicitly chose persistence via `CLAUDE_CODE_TASK_LIST_ID`.
-
-> Note: `hooks/stop_audit.sh` performs automatic audit checks at session end. This table provides wrap-up command guidance for manual orchestrator-driven cleanup.
+> **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 3) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
 
 ## 2. Documentation Sync
 
@@ -66,20 +50,35 @@ entities: ["orchestration_calibration", "{domain}"]
 
 **Skip when**: Session was trivial (single comPACT, no variety assessment performed).
 
-## 5. Memory Consolidation (Pass 2)
-
-Create a task for the memory agent:
-```
-TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
-  description="Review all memories saved during this session. Consolidate related entries. Prune superseded memories. Sync Working Memory to CLAUDE.md. Save orchestration retrospective as calibration data. Report summary when done.")
-TaskUpdate(taskId, owner="memory-agent")
-```
-
-This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is optional but recommended for sessions with significant work.
-
-## 6. Worktree Cleanup
+## 5. Worktree Cleanup
 
 If a feature worktree exists for the completed work, invoke `/PACT:worktree-cleanup` to remove it cleanly.
+
+## 6. Task Audit
+
+Audit and optionally clean up Task state:
+
+```
+1. `TaskList`: Review all session tasks
+2. For abandoned in_progress tasks: complete or document reason
+3. Verify Feature task reflects final state
+4. Report task summary: "Session has N tasks (X completed, Y pending)"
+5. IF multi-session mode (CLAUDE_CODE_TASK_LIST_ID set):
+   - Offer: "Clean up completed workflows? (Context archived to memory)"
+   - User confirms → delete completed feature hierarchies
+   - User declines → leave as-is
+```
+
+**Cleanup rules**:
+
+| Task State | Cleanup Action |
+|------------|----------------|
+| `completed` Feature task | Archive summary, then delete with children |
+| `in_progress` Feature task | Do NOT delete (workflow still active) |
+| Orphaned `in_progress` | Document abandonment reason, then delete |
+| `pending` blocked forever | Delete with note |
+
+**Why conservative:** Tasks are session-scoped by default. Cleanup only matters for multi-session work via `CLAUDE_CODE_TASK_LIST_ID`.
 
 ## 7. Session Decision
 

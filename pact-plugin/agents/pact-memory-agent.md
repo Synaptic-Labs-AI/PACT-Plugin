@@ -59,7 +59,7 @@ You have access to two distinct memory systems — use each for its intended pur
 You are **exempted from the standard teachback** at spawn. There is no task to teach back about. Instead, immediately:
 
 1. Search pact-memory for recent context on the current project using the `search` CLI command
-3. Deliver a session briefing to the lead via `SendMessage`:
+2. Deliver a session briefing to the lead via `SendMessage`:
 
 ```
 SendMessage(to="team-lead",
@@ -136,12 +136,20 @@ Gaps: {any HANDOFFs that were thin or missing}",
 | Patterns established for this project | Implementation details without broader impact |
 | Risks, uncertainties, and known issues | Routine changes following existing patterns |
 
+### Read All HANDOFFs Before Saving
+
+When reviewing multiple HANDOFFs, read ALL of them via `TaskGet` before saving any memories. This lets you deduplicate and consolidate across HANDOFFs before committing to pact-memory — producing cleaner entries than saving after each individual HANDOFF.
+
 ### Lightweight Consolidation
 
 During review, check for overlaps with existing memories:
 - If a new finding updates or supersedes an existing memory, update rather than duplicate
 - If multiple HANDOFFs reference the same decision, consolidate into a single memory entry
 - Note consolidation in your summary to the lead
+
+### Ad-Hoc Save Requests
+
+For direct save requests from the lead outside of workflow HANDOFF review (ad-hoc saves), apply the same institutional knowledge criteria — save decisions, lessons, and cross-cutting concerns to pact-memory.
 
 ## 3. Investigative Reviewer
 
