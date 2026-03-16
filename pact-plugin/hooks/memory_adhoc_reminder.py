@@ -23,6 +23,8 @@ import os
 import sys
 from pathlib import Path
 
+MIN_TRANSCRIPT_LENGTH = 500
+
 
 def should_remind(team_name: str, transcript: str) -> bool:
     """
@@ -32,8 +34,8 @@ def should_remind(team_name: str, transcript: str) -> bool:
     - team_name is present (session had a team)
     - No breadcrumb file exists (no formal workflow ran)
     - No .adhoc_reminded guard file exists (not already reminded)
-    - Transcript is substantive (>= 500 chars)
-    - Transcript contains evidence of file modifications (Edit or Write tool use)
+    - Transcript is substantive (>= MIN_TRANSCRIPT_LENGTH chars)
+    - Transcript contains evidence of file modifications ("Edit" or "Write" tool names in JSON)
 
     Args:
         team_name: Session team name from env
@@ -56,11 +58,13 @@ def should_remind(team_name: str, transcript: str) -> bool:
         return False
 
     # Trivial sessions don't need reminders
-    if len(transcript) < 500:
+    if len(transcript) < MIN_TRANSCRIPT_LENGTH:
         return False
 
-    # Only remind for work sessions (file modifications), not pure chat
-    if "Edit" not in transcript and "Write" not in transcript:
+    # Only remind for work sessions (file modifications), not pure chat.
+    # Match quoted tool names ('"Edit"', '"Write"') to avoid false-positives
+    # on words like "Editorial" or "Rewrite" in discussion text.
+    if '"Edit"' not in transcript and '"Write"' not in transcript:
         return False
 
     return True

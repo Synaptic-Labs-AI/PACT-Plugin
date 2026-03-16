@@ -28,9 +28,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
-# Transcript that meets both conditions: >= 500 chars AND contains Edit/Write evidence
-WORK_TRANSCRIPT = "Some discussion about the feature... " + "x" * 450 + " Edit the file..."
-CHAT_TRANSCRIPT = "x" * 600  # Long but no Edit/Write evidence
+# Transcript that meets both conditions: >= 500 chars AND contains quoted "Edit"/"Write" tool names
+WORK_TRANSCRIPT = "Some discussion about the feature... " + "x" * 450 + ' "Edit" the file...'
+CHAT_TRANSCRIPT = "x" * 600  # Long but no "Edit"/"Write" evidence
 
 
 class TestShouldRemind:
@@ -70,7 +70,7 @@ class TestShouldRemind:
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", "short session with Edit")
+            result = should_remind("pact-test", 'short session with "Edit"')
 
         assert result is False
 
@@ -103,19 +103,19 @@ class TestShouldRemind:
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", "Edit " + "x" * 494)
+            result = should_remind("pact-test", '"Edit" ' + "x" * 492)
 
         assert result is False
 
     def test_true_at_boundary_500_chars_with_edit(self, tmp_path):
-        """Exactly 500 chars with Edit evidence -> at threshold -> True."""
+        """Exactly 500 chars with quoted "Edit" evidence -> at threshold -> True."""
         from memory_adhoc_reminder import should_remind
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", "Edit " + "x" * 495)
+            result = should_remind("pact-test", '"Edit" ' + "x" * 493)
 
         assert result is True
 
@@ -128,7 +128,7 @@ class TestShouldRemind:
             result = should_remind("pact-test", WORK_TRANSCRIPT)
 
         # breadcrumb.exists() returns False, .adhoc_reminded.exists() returns False,
-        # transcript is long enough and has Edit evidence -> True
+        # transcript is long enough and has quoted "Edit" evidence -> True
         assert result is True
 
     def test_false_for_chat_only_session(self, tmp_path):
@@ -144,13 +144,13 @@ class TestShouldRemind:
         assert result is False
 
     def test_true_with_write_evidence(self, tmp_path):
-        """Transcript with Write (not Edit) evidence -> True."""
+        """Transcript with quoted "Write" (not "Edit") evidence -> True."""
         from memory_adhoc_reminder import should_remind
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
-        transcript = "Discussing the feature... " + "x" * 470 + " Write the config..."
+        transcript = "Discussing the feature... " + "x" * 470 + ' "Write" the config...'
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = should_remind("pact-test", transcript)
 
