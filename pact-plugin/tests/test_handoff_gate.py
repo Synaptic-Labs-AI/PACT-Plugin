@@ -12,6 +12,7 @@ Tests cover:
 7. Algedonic task (metadata.type: "algedonic") -> allow (bypass)
 8. Subject starts with "BLOCKER:" -> allow (bypass)
 9. No teammate_name in input -> allow (non-agent completion)
+10. memory_saved enforcement nudge (non-blocking)
 """
 import json
 import io
@@ -184,6 +185,125 @@ class TestHandoffGate:
         assert "decisions" in result
 
 
+class TestCheckMemorySaved:
+    """Tests for handoff_gate.check_memory_saved() — non-blocking nudge."""
+
+    def test_no_nudge_when_memory_saved_true(self):
+        """P0: HANDOFF present + memory_saved true -> no nudge."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF, "memory_saved": True},
+            teammate_name="backend-coder",
+        )
+        assert result is None
+
+    def test_nudge_when_memory_saved_false(self):
+        """P0: HANDOFF present + memory_saved false -> nudge fires."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF, "memory_saved": False},
+            teammate_name="backend-coder",
+        )
+        assert result is not None
+        assert "Reminder" in result
+
+    def test_nudge_when_memory_saved_absent(self):
+        """P0: HANDOFF present + memory_saved absent -> nudge fires."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF},
+            teammate_name="backend-coder",
+        )
+        assert result is not None
+        assert "Reminder" in result
+
+    def test_no_nudge_when_no_teammate(self):
+        """P1: Non-agent task -> no nudge."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF},
+            teammate_name=None,
+        )
+        assert result is None
+
+    def test_no_nudge_when_no_handoff(self):
+        """P1: No HANDOFF in metadata -> no nudge (validate_task_handoff handles this)."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={},
+            teammate_name="backend-coder",
+        )
+        assert result is None
+
+    def test_no_nudge_when_handoff_is_none(self):
+        """P1: handoff key present but None -> no nudge."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": None},
+            teammate_name="backend-coder",
+        )
+        assert result is None
+
+    def test_nudge_contains_agent_name(self):
+        """P2: Nudge message includes the teammate name."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF},
+            teammate_name="test-engineer",
+        )
+        assert "test-engineer" in result
+
+    def test_nudge_contains_memory_path(self):
+        """P2: Nudge message includes the agent-memory path."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF},
+            teammate_name="frontend-coder",
+        )
+        assert "~/.claude/agent-memory/frontend-coder/" in result
+
+    def test_nudge_contains_taskupdate_instruction(self):
+        """P2: Nudge message tells agent how to set memory_saved."""
+        from handoff_gate import check_memory_saved
+
+        result = check_memory_saved(
+            task_metadata={"handoff": VALID_HANDOFF},
+            teammate_name="backend-coder",
+        )
+        assert "memory_saved" in result
+        assert "TaskUpdate" in result
+
+    def test_memory_saved_truthy_values_suppress_nudge(self):
+        """Any truthy value for memory_saved should suppress the nudge."""
+        from handoff_gate import check_memory_saved
+
+        for truthy in [True, 1, "yes", {"saved": True}]:
+            result = check_memory_saved(
+                task_metadata={"handoff": VALID_HANDOFF, "memory_saved": truthy},
+                teammate_name="backend-coder",
+            )
+            assert result is None, f"memory_saved={truthy!r} should suppress nudge"
+
+    def test_memory_saved_falsy_values_trigger_nudge(self):
+        """Falsy values for memory_saved should trigger the nudge."""
+        from handoff_gate import check_memory_saved
+
+        for falsy in [False, 0, "", None]:
+            result = check_memory_saved(
+                task_metadata={"handoff": VALID_HANDOFF, "memory_saved": falsy},
+                teammate_name="backend-coder",
+            )
+            assert result is not None, f"memory_saved={falsy!r} should trigger nudge"
+
+
 class TestReadTaskMetadata:
     """Tests for handoff_gate.read_task_metadata()."""
 
@@ -302,3 +422,72 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+
+    def test_main_emits_nudge_when_memory_not_saved(self, capsys):
+        """Integration: valid handoff but no memory_saved -> exit 0 + systemMessage on stdout."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value={"handoff": VALID_HANDOFF}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "systemMessage" in output
+        assert "backend-coder" in output["systemMessage"]
+        assert "Reminder" in output["systemMessage"]
+        # No error on stderr
+        assert captured.err == ""
+
+    def test_main_no_nudge_when_memory_saved(self, capsys):
+        """Integration: valid handoff + memory_saved=true -> exit 0, no stdout output."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_main_no_nudge_when_handoff_blocked(self, capsys):
+        """Integration: missing handoff -> exit 2 (blocked), no nudge on stdout."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value={}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        # Error on stderr, nothing on stdout (nudge doesn't fire when handoff blocked)
+        assert captured.out == ""
+        assert "handoff" in captured.err.lower()
