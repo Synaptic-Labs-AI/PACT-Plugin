@@ -211,7 +211,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 - [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
   TaskCreate(subject="memory-agent: process pending HANDOFFs",
-    description="Read breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review HANDOFFs via TaskGet, extract institutional knowledge, save to pact-memory, delete file when done. Report summary when done. If file doesn't exist, report 'no pending HANDOFFs' and complete.")
+    description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
   TaskUpdate(taskId, owner="memory-agent")
   ```
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
