@@ -151,6 +151,29 @@ Keep messages actionable — state what you did/found, what they need to know, a
 any action needed from them.
 Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the lead.
 
+## Secretary Queries
+
+The PACT Secretary (`pact-secretary`) is available for the entire session to answer questions
+about past decisions, architectural patterns, and project history.
+
+**When to query**:
+- Before making a decision that might have been made before
+- When you encounter an unfamiliar part of the codebase
+- When your task description references prior work you don't have context on
+
+**How to query**:
+```
+SendMessage(to="pact-secretary",
+  message="[{sender}→pact-secretary] Query: {your question}",
+  summary="Memory query: {topic}")
+```
+
+**What you'll get back**: Summaries of relevant memories with IDs. If you need more
+detail on a specific memory, ask a follow-up query with the memory ID.
+
+**What NOT to ask**: Implementation advice, code review, or testing strategy — those
+are other specialists' domains. The secretary provides historical context only.
+
 ## Consultant Mode
 
 When your active task is done and no follow-up tasks are available:
@@ -212,7 +235,7 @@ Before returning your final output:
 
    Examples: file locations, framework conventions → agent memory. Architectural decisions, cross-cutting concerns → HANDOFF.
 
-   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the memory agent will review and save it to pact-memory.
+   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the secretary will review and save it to pact-memory.
 
 2. **Confirm Memory Saved**: After saving domain learnings, set `memory_saved: true` in your task metadata:
    ```

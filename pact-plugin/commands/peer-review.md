@@ -87,6 +87,18 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 
+### Post-Remediation Incremental Update
+
+After remediation fixes are verified, create an incremental update task for the secretary to process any new findings:
+
+```
+TaskCreate(subject="secretary: update synthesis with remediation findings",
+  description="Remediation completed. Check for new completed tasks since your last review. Read TaskList for any completed tasks not yet processed. Update existing memories if remediation superseded prior decisions. Report summary.")
+TaskUpdate(taskId, owner="secretary")
+```
+
+This trigger fires only when remediation occurred and changed things. Skip if no remediation was needed.
+
 ### Reviewer-to-Fixer Reuse
 
 > ⚠️ **MANDATORY**: When a reviewer's findings need fixing in their domain, send the fix task directly to the reviewer via `SendMessage`. Do NOT shut down reviewers and spawn a fresh coder — the reviewer has the most relevant context (files loaded, issues understood, line numbers identified).
@@ -132,6 +144,15 @@ For each reviewer:
 3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
+
+**HANDOFF review** (dispatched parallel with reviewers — PRIMARY memory trigger):
+```
+TaskCreate(subject="secretary: process pending HANDOFFs (primary trigger, pre-merge)",
+  description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
+TaskUpdate(taskId, owner="secretary")
+```
+
+This is the **primary memory trigger** — fires unconditionally at reviewer dispatch (runs parallel with reviewers).
 
 ### Reviewer Teachback
 
@@ -228,23 +249,15 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
 
-5. **Calibration save + HANDOFF review**:
+5. **Calibration save**:
 
-   Calibration save (via task — structured tracking):
    ```
-   TaskCreate(subject="memory-agent: save review calibration",
+   TaskCreate(subject="secretary: save review calibration",
      description="Save review calibration: context='PR review for {feature}: {key findings}', goal='Build review pattern data for Learning II', decisions=['{severity}: {finding}' per finding], entities=['review_calibration', '{domain}'].")
-   TaskUpdate(taskId, owner="memory-agent")
+   TaskUpdate(taskId, owner="secretary")
    ```
 
-   HANDOFF review (via task — visible in TaskList):
-   ```
-   TaskCreate(subject="memory-agent: process pending HANDOFFs (primary trigger, pre-merge)",
-     description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
-   TaskUpdate(taskId, owner="memory-agent")
-   ```
-
-   This is the **primary memory trigger** — fires unconditionally after all reviewers complete, before the merge question. Calibration runs unconditionally. Skip only for trivial single-file PRs.
+   Calibration runs unconditionally after all reviewers complete. Skip only for trivial single-file PRs.
 
    **Verify agent task completion**: After each reviewer completes, check their task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 
