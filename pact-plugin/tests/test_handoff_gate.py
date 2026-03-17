@@ -1170,7 +1170,7 @@ class TestBreadcrumbLifecycle:
     """E2E test: breadcrumb creation → consumption → deletion.
 
     Simulates the full breadcrumb lifecycle: handoff_gate creates breadcrumbs,
-    the memory agent reads and processes them, then deletes the file.
+    the secretary reads and processes them, then deletes the file.
     After deletion, the reminder hook should no longer report unprocessed
     handoffs.
     """
@@ -1184,7 +1184,7 @@ class TestBreadcrumbLifecycle:
         return teams_dir / "completed_handoffs.jsonl"
 
     def test_breadcrumb_created_consumed_deleted(self, tmp_path):
-        """Full lifecycle: create breadcrumbs, simulate memory agent consumption,
+        """Full lifecycle: create breadcrumbs, simulate secretary consumption,
         verify file deletion makes reminder hook transition from
         unprocessed_handoffs to adhoc_save (or None)."""
         from handoff_gate import append_pending_handoff
@@ -1207,7 +1207,7 @@ class TestBreadcrumbLifecycle:
             reminder = get_reminder_type("pact-test", "short transcript")
         assert reminder == REMINDER_UNPROCESSED_HANDOFFS
 
-        # Phase 3: Simulate memory agent consuming and deleting breadcrumbs
+        # Phase 3: Simulate secretary consuming and deleting breadcrumbs
         consumed_entries = []
         for line in filepath.read_text().strip().split("\n"):
             if line.strip():
@@ -1222,7 +1222,7 @@ class TestBreadcrumbLifecycle:
         assert reminder_after is None  # Short transcript, no Edit/Write → None
 
     def test_breadcrumb_deleted_then_new_append_works(self, tmp_path):
-        """After memory agent deletes breadcrumbs, new completions can create
+        """After secretary deletes breadcrumbs, new completions can create
         a fresh file without issues."""
         from handoff_gate import append_pending_handoff
 
@@ -1235,7 +1235,7 @@ class TestBreadcrumbLifecycle:
 
         assert filepath.exists()
 
-        # Simulate memory agent deletion
+        # Simulate secretary deletion
         filepath.unlink()
         assert not filepath.exists()
 

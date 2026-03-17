@@ -295,7 +295,7 @@ class TestFindActiveAgents:
             "pact-preparer", "pact-architect", "pact-backend-coder",
             "pact-frontend-coder", "pact-database-engineer",
             "pact-devops-engineer", "pact-n8n", "pact-test-engineer",
-            "pact-security-engineer", "pact-qa-engineer", "pact-memory-agent",
+            "pact-security-engineer", "pact-qa-engineer", "pact-secretary",
         ]
         tasks = [
             {"id": str(i), "subject": f"{agent}: task {i}",

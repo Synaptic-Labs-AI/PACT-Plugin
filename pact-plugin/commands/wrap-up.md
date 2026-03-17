@@ -7,11 +7,11 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 
 ## 1. Memory Consolidation (Pass 2)
 
-Create a consolidation task for the memory agent:
+Create a consolidation task for the secretary:
 ```
-TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
+TaskCreate(subject="secretary: session consolidation (Pass 2)",
   description="First: read TaskList for any completed tasks with unprocessed HANDOFFs, and check breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for remaining entries. Process any found. Then: review all memories saved during this session, consolidate related entries, prune superseded memories, sync Working Memory to CLAUDE.md, save orchestration retrospective as calibration data. Delete breadcrumb file when done. Report summary when done.")
-TaskUpdate(taskId, owner="memory-agent")
+TaskUpdate(taskId, owner="secretary")
 ```
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
@@ -39,7 +39,7 @@ Perform a brief self-assessment. Compare your initial variety assessment and orc
 3. **Specialist fit**: Were specialists well-matched to tasks? Any that should have been different?
 4. **Estimation pattern**: Does this match a recurring pattern from prior sessions? (Search pact-memory for `orchestration_calibration` entries)
 
-**Save as pact-memory** (delegate to pact-memory-agent):
+**Save as pact-memory** (delegate to pact-secretary):
 ```
 context: "Orchestration retrospective for {feature}"
 goal: "Calibrate orchestration judgment via second-order observation"

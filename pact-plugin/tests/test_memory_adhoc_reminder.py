@@ -667,7 +667,7 @@ class TestEdgeCaseBreadcrumbContent:
 
         This is intentional behavior: an empty breadcrumb file means the hook
         created it (O_CREAT) but the write failed or was interrupted. The file's
-        presence is the signal, not its content. The memory agent handles empty
+        presence is the signal, not its content. The secretary handles empty
         files gracefully.
         """
         from memory_adhoc_reminder import get_reminder_type
@@ -685,7 +685,7 @@ class TestEdgeCaseBreadcrumbContent:
         """File with only malformed JSON — .exists() True → 'unprocessed_handoffs'.
 
         The reminder hook doesn't parse the file — it only checks existence.
-        Malformed content is the memory agent's problem to handle.
+        Malformed content is the secretary's problem to handle.
         """
         from memory_adhoc_reminder import get_reminder_type
 

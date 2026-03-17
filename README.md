@@ -126,7 +126,7 @@ The orchestrator manages the cycle, delegating each phase to the appropriate spe
 | **Test Engineer** | Write and run comprehensive tests |
 | **Security Engineer** | Adversarial security code review |
 | **QA Engineer** | Runtime verification, exploratory testing |
-| **Memory Agent** | Persist context, recover from compaction |
+| **Secretary** | Research assistant, knowledge distiller, context preservation |
 
 ---
 

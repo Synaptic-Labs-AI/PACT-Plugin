@@ -46,7 +46,7 @@
     "./agents/pact-test-engineer.md",
     "./agents/pact-security-engineer.md",
     "./agents/pact-qa-engineer.md",
-    "./agents/pact-memory-agent.md"
+    "./agents/pact-secretary.md"
   ],
   "skills": "./skills/"
 }

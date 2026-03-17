@@ -447,7 +447,7 @@ class TestFindActiveAgents:
             "pact-test-engineer:",
             "pact-security-engineer:",
             "pact-qa-engineer:",
-            "pact-memory-agent:",
+            "pact-secretary:",
         ]
 
         for prefix in agent_prefixes:

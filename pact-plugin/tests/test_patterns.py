@@ -435,7 +435,7 @@ class TestRegexPatternEdgeCases:
         assert PACT_AGENT_PATTERN.search("pact-security-engineer") is not None
         assert PACT_AGENT_PATTERN.search("pact-qa-engineer") is not None
         assert PACT_AGENT_PATTERN.search("pact-test-engineer") is not None
-        assert PACT_AGENT_PATTERN.search("pact-memory-agent") is not None
+        assert PACT_AGENT_PATTERN.search("pact-secretary") is not None
 
         # Should not match non-agent strings
         assert PACT_AGENT_PATTERN.search("other-agent") is None
@@ -539,7 +539,7 @@ class TestAgentListConsistency:
             "pact-test-engineer",
             "pact-security-engineer",
             "pact-qa-engineer",
-            "pact-memory-agent",
+            "pact-secretary",
         ]
         assert PACT_AGENTS == lifecycle_order, (
             f"PACT_AGENTS not in lifecycle order.\n"

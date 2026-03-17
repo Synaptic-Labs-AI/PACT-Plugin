@@ -18,7 +18,7 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Prof
 
 ## What You Get
 
-- **11 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Memory Agent
+- **11 Specialist Agents** — Preparer, Architect, Backend/Frontend/Database/DevOps Coders, n8n, Test/Security/QA Engineers, Secretary
 - **9 Commands** — From full orchestration to quick single-specialist fixes
 - **16 Skills** — On-demand domain knowledge for architecture, coding, testing, security, n8n, plus operational skills
 - **Persistent Memory** — SQLite + vector embeddings for cross-session learning
