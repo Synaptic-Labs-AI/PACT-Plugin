@@ -97,6 +97,12 @@ class TestKeyContentSections:
             "SKILL.md must include '## Peer Communication' section"
         )
 
+    def test_has_secretary_queries_section(self, skill_content):
+        """Skill must include 'Secretary Queries' section."""
+        assert "## Secretary Queries" in skill_content, (
+            "SKILL.md must include '## Secretary Queries' section"
+        )
+
     def test_has_consultant_mode_section(self, skill_content):
         """Skill must include 'Consultant Mode' section."""
         assert "## Consultant Mode" in skill_content, (
