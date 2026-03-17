@@ -242,7 +242,7 @@ class TestWriteToken:
 class TestPostMainEntryPoint:
     """Tests for merge_guard_post.main() stdin/exit behavior."""
 
-    def test_main_exits_0_on_merge_approval(self, tmp_path):
+    def test_main_exits_0_on_merge_approval(self, tmp_path, capsys):
         from merge_guard_post import main
 
         input_data = json.dumps({
@@ -256,6 +256,8 @@ class TestPostMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
         # Verify token was created
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) == 1

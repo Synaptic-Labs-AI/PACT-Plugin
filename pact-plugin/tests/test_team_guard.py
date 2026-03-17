@@ -91,7 +91,7 @@ class TestTeamGuard:
 class TestMainEntryPoint:
     """Tests for team_guard.main() stdin/stdout/exit behavior."""
 
-    def test_main_exits_0_when_team_exists(self, tmp_path):
+    def test_main_exits_0_when_team_exists(self, tmp_path, capsys):
         from team_guard import main
 
         # Create team directory with config
@@ -109,6 +109,8 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
     def test_main_exits_2_when_team_missing(self, capsys):
         from team_guard import main

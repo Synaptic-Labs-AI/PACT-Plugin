@@ -180,7 +180,7 @@ class TestSuggestWorktreePath:
 class TestMainEntryPoint:
     """Tests for worktree_guard.main() stdin/stdout/exit behavior."""
 
-    def test_main_exits_0_when_no_worktree_path(self):
+    def test_main_exits_0_when_no_worktree_path(self, capsys):
         from worktree_guard import main
 
         with patch.dict("os.environ", {}, clear=True):
@@ -188,6 +188,8 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
     def test_main_exits_0_when_edit_inside_worktree(self):
         from worktree_guard import main
