@@ -17,6 +17,8 @@ import sys
 import os
 from pathlib import Path
 
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 # Paths always allowed regardless of worktree
 ALLOW_PATTERNS = [
     "/.claude/",
@@ -190,15 +192,18 @@ def check_worktree_boundary(file_path: str, worktree_path: str) -> str | None:
 def main():
     worktree_path = os.environ.get("PACT_WORKTREE_PATH", "")
     if not worktree_path:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)  # No worktree active, complete no-op
 
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     file_path = input_data.get("tool_input", {}).get("file_path", "")
     if not file_path:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     error = check_worktree_boundary(file_path, worktree_path)
@@ -213,6 +218,7 @@ def main():
         print(json.dumps(output))
         sys.exit(2)
 
+    print(_SUPPRESS_OUTPUT)
     sys.exit(0)
 
 

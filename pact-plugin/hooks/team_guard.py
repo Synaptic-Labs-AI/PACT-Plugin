@@ -16,6 +16,8 @@ import json
 import sys
 from pathlib import Path
 
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def check_team_exists(tool_input: dict, teams_dir: str | None = None) -> str | None:
     """
@@ -50,6 +52,7 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     tool_input = input_data.get("tool_input", {})
@@ -65,6 +68,7 @@ def main():
         print(json.dumps(output))
         sys.exit(2)
 
+    print(_SUPPRESS_OUTPUT)
     sys.exit(0)
 
 

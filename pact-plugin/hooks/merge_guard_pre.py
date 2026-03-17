@@ -48,6 +48,10 @@ _GH_PREFIX = r"\bgh\s+" + _GH_GLOBAL_FLAGS
 _GIT_PREFIX = r"\bgit\s+" + _GIT_GLOBAL_FLAGS
 _GH_API_PREFIX = _GH_PREFIX + r"api\b"
 
+# Pre-serialized JSON for allow-path output: tells Claude Code UI to suppress
+# the hook display instead of showing "hook error (No output)".
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 # Patterns for dangerous commands
 DANGEROUS_PATTERNS = [
     # PR merge via gh CLI
@@ -596,12 +600,14 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         tool_input = input_data.get("tool_input", {})
         command = tool_input.get("command", "")
 
         if not command:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         error = check_merge_authorization(command)
@@ -616,6 +622,7 @@ def main():
             print(json.dumps(output))
             sys.exit(2)
 
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:

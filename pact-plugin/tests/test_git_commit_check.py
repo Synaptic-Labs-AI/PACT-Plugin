@@ -535,13 +535,15 @@ class TestGitHelpers:
 class TestMain:
     """Tests for main() entry point — stdin parsing, exit codes, integration."""
 
-    def test_allows_non_commit_command(self):
+    def test_allows_non_commit_command(self, capsys):
         from git_commit_check import main
         input_data = {"tool_input": {"command": "git status"}}
         with patch("sys.stdin", io.StringIO(json.dumps(input_data))):
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"suppressOutput": True}
 
     def test_allows_commit_with_no_staged_files(self):
         from git_commit_check import main
