@@ -106,7 +106,7 @@ When a user requests work without specifying a workflow (e.g., "fix this bug", "
 
 ### Memory Management
 
-Delegate memory queries to the secretary (`pact-secretary`) via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
+Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
 
 #### Memory Processing Triggers
 
@@ -129,7 +129,7 @@ Four layers ensure agents mark tasks completed so HANDOFFs are captured:
 
 #### Specialist Memory Guidance
 
-When dispatching specialists, include guidance about memory: specialists use built-in persistent memory for domain knowledge (accumulated across sessions). Institutional knowledge — architectural decisions, cross-component impacts, stakeholder constraints — goes in HANDOFFs, which the secretary reviews and saves to pact-memory. For ad-hoc work outside formal workflows, instruct specialists to send the secretary a save request after significant decisions, tricky bug fixes, or non-obvious pattern discoveries. Specialists can also query the secretary directly for past decisions and context — include "The secretary (pact-secretary) is available for questions about past decisions via SendMessage" in specialist dispatch prompts.
+When dispatching specialists, include guidance about memory: specialists use built-in persistent memory for domain knowledge (accumulated across sessions). Institutional knowledge — architectural decisions, cross-component impacts, stakeholder constraints — goes in HANDOFFs, which the secretary reviews and saves to pact-memory. For ad-hoc work outside formal workflows, instruct specialists to send the secretary a save request after significant decisions, tricky bug fixes, or non-obvious pattern discoveries. Specialists can also query the secretary directly for past decisions and context — include "The secretary (secretary) is available for questions about past decisions via SendMessage" in specialist dispatch prompts.
 
 #### Three-Layer Memory Architecture
 

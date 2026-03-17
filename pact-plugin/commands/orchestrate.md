@@ -651,4 +651,4 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
    TaskUpdate(taskId, owner="secretary")
    ```
    Skip for the first feature in a session — full consolidation happens during `/PACT:wrap-up`.
-9. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-secretary`
+9. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via the secretary

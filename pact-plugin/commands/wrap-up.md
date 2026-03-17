@@ -39,7 +39,7 @@ Perform a brief self-assessment. Compare your initial variety assessment and orc
 3. **Specialist fit**: Were specialists well-matched to tasks? Any that should have been different?
 4. **Estimation pattern**: Does this match a recurring pattern from prior sessions? (Search pact-memory for `orchestration_calibration` entries)
 
-**Save as pact-memory** (delegate to pact-secretary):
+**Save as pact-memory** (delegate to secretary):
 ```
 context: "Orchestration retrospective for {feature}"
 goal: "Calibrate orchestration judgment via second-order observation"

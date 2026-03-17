@@ -153,7 +153,7 @@ Message each peer at most once per task — share your output when complete, not
 
 ## Secretary Queries
 
-The PACT Secretary (`pact-secretary`) is available for the entire session to answer questions
+The PACT Secretary (`secretary`) is available for the entire session to answer questions
 about past decisions, architectural patterns, and project history.
 
 **When to query**:
@@ -163,8 +163,8 @@ about past decisions, architectural patterns, and project history.
 
 **How to query**:
 ```
-SendMessage(to="pact-secretary",
-  message="[{sender}→pact-secretary] Query: {your question}",
+SendMessage(to="secretary",
+  message="[{sender}→secretary] Query: {your question}",
   summary="Memory query: {topic}")
 ```
 
