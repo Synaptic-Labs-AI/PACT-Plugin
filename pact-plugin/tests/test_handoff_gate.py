@@ -698,16 +698,16 @@ class TestAppendPendingHandoff:
         with patch("handoff_gate.Path.home", return_value=tmp_path):
             append_pending_handoff("5", "backend-coder", "pact-test")
 
-        # Make read_text fail but os.open still works
-        original_read_text = Path.read_text
+        # Make POSIX read fail (O_RDONLY) but write still works (O_WRONLY)
+        original_os_open = os.open
 
-        def fail_read(self_path, *args, **kwargs):
-            if "completed_handoffs" in str(self_path):
+        def fail_read_open(path, flags, *args, **kwargs):
+            if "completed_handoffs" in str(path) and (flags & os.O_RDONLY == os.O_RDONLY) and not (flags & os.O_WRONLY):
                 raise OSError("permission denied")
-            return original_read_text(self_path, *args, **kwargs)
+            return original_os_open(path, flags, *args, **kwargs)
 
         with patch("handoff_gate.Path.home", return_value=tmp_path), \
-             patch.object(Path, "read_text", fail_read):
+             patch("handoff_gate.os.open", side_effect=fail_read_open):
             append_pending_handoff("5", "backend-coder", "pact-test")
 
         # Should have 2 entries (dedup couldn't read, so appended anyway)
@@ -902,7 +902,8 @@ class TestDedupCascadeScenario:
         assert json.loads(lines[0])["task_id"] == "10"
 
     def test_cascade_sequential_completions_unique_breadcrumbs(self, tmp_path):
-        """Two tasks complete sequentially. Each gets exactly one breadcrumb."""
+        """Two tasks complete sequentially. Each gets exactly one breadcrumb.
+        Timestamps must be monotonically non-decreasing."""
         from handoff_gate import append_pending_handoff
 
         teams_dir = self._make_teams_dir(tmp_path)
@@ -921,8 +922,13 @@ class TestDedupCascadeScenario:
         lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
         assert len(lines) == 2
 
-        task_ids = [json.loads(l)["task_id"] for l in lines]
+        entries = [json.loads(l) for l in lines]
+        task_ids = [e["task_id"] for e in entries]
         assert task_ids == ["10", "11"]
+
+        # Timestamps must be monotonically non-decreasing
+        timestamps = [e["timestamp"] for e in entries]
+        assert timestamps == sorted(timestamps)
 
     def test_cascade_integration_via_main(self, tmp_path):
         """Integration: main() called twice with same task_id -> single breadcrumb."""
@@ -1158,3 +1164,86 @@ class TestDedupTruncatedEntries:
         valid = [l for l in lines if l.strip()]
         assert len(valid) == 1
         assert json.loads(valid[0])["task_id"] == "1"
+
+
+class TestBreadcrumbLifecycle:
+    """E2E test: breadcrumb creation → consumption → deletion.
+
+    Simulates the full breadcrumb lifecycle: handoff_gate creates breadcrumbs,
+    the memory agent reads and processes them, then deletes the file.
+    After deletion, the reminder hook should no longer report unprocessed
+    handoffs.
+    """
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_breadcrumb_created_consumed_deleted(self, tmp_path):
+        """Full lifecycle: create breadcrumbs, simulate memory agent consumption,
+        verify file deletion makes reminder hook transition from
+        unprocessed_handoffs to adhoc_save (or None)."""
+        from handoff_gate import append_pending_handoff
+        from memory_adhoc_reminder import get_reminder_type, REMINDER_UNPROCESSED_HANDOFFS
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        # Phase 1: Create breadcrumbs via handoff_gate
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("10", "backend-coder", "pact-test")
+            append_pending_handoff("11", "frontend-coder", "pact-test")
+
+        assert filepath.exists()
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 2
+
+        # Phase 2: Reminder hook sees unprocessed handoffs
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            reminder = get_reminder_type("pact-test", "short transcript")
+        assert reminder == REMINDER_UNPROCESSED_HANDOFFS
+
+        # Phase 3: Simulate memory agent consuming and deleting breadcrumbs
+        consumed_entries = []
+        for line in filepath.read_text().strip().split("\n"):
+            if line.strip():
+                consumed_entries.append(json.loads(line))
+        assert len(consumed_entries) == 2
+        filepath.unlink()
+
+        # Phase 4: After deletion, breadcrumb file gone — no unprocessed warning
+        assert not filepath.exists()
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            reminder_after = get_reminder_type("pact-test", "short transcript")
+        assert reminder_after is None  # Short transcript, no Edit/Write → None
+
+    def test_breadcrumb_deleted_then_new_append_works(self, tmp_path):
+        """After memory agent deletes breadcrumbs, new completions can create
+        a fresh file without issues."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        # Create initial breadcrumbs
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("10", "backend-coder", "pact-test")
+
+        assert filepath.exists()
+
+        # Simulate memory agent deletion
+        filepath.unlink()
+        assert not filepath.exists()
+
+        # New task completion creates fresh file
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("20", "test-engineer", "pact-test")
+
+        assert filepath.exists()
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 1
+        assert json.loads(lines[0])["task_id"] == "20"

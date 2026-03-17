@@ -78,7 +78,7 @@ If no memories are found, report that:
 ### Orphaned Breadcrumb Recovery (Layer 4 Fallback)
 
 After delivering the session briefing, check for orphaned breadcrumb files from prior sessions:
-1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories (excluding the current session's team)
+1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available via the `CLAUDE_CODE_TEAM_NAME` environment variable or the team name provided in your dispatch prompt) — that team's breadcrumbs are active, not orphaned.
 2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
 3. Attempt to process them (TaskGet may fail for old tasks — extract what's available from breadcrumb metadata)
 4. Delete the breadcrumb file after processing

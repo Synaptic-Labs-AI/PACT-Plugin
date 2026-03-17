@@ -25,14 +25,17 @@ from pathlib import Path
 
 MIN_TRANSCRIPT_LENGTH = 500
 
+REMINDER_UNPROCESSED_HANDOFFS = "unprocessed_handoffs"
+REMINDER_ADHOC_SAVE = "adhoc_save"
+
 
 def get_reminder_type(team_name: str, transcript: str) -> str | None:
     """
     Determine which reminder to emit, if any.
 
     Returns:
-        "unprocessed_handoffs" — breadcrumbs exist (workflow ran but memory not processed)
-        "adhoc_save" — no breadcrumbs but substantive ad-hoc work detected
+        REMINDER_UNPROCESSED_HANDOFFS — breadcrumbs exist (workflow ran but memory not processed)
+        REMINDER_ADHOC_SAVE — no breadcrumbs but substantive ad-hoc work detected
         None — no reminder needed
 
     Args:
@@ -50,7 +53,7 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
 
     # Path 1: Breadcrumbs exist → unprocessed HANDOFFs
     if (teams_dir / "completed_handoffs.jsonl").exists():
-        return "unprocessed_handoffs"
+        return REMINDER_UNPROCESSED_HANDOFFS
 
     # Path 2: No breadcrumbs but substantive ad-hoc work
     if len(transcript) < MIN_TRANSCRIPT_LENGTH:
@@ -62,7 +65,7 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
     if '"Edit"' not in transcript and '"Write"' not in transcript:
         return None
 
-    return "adhoc_save"
+    return REMINDER_ADHOC_SAVE
 
 
 def _write_guard_file(team_name: str) -> None:
@@ -79,12 +82,12 @@ def _write_guard_file(team_name: str) -> None:
 
 
 _MESSAGES = {
-    "unprocessed_handoffs": (
+    REMINDER_UNPROCESSED_HANDOFFS: (
         "Unprocessed HANDOFFs detected from this session's workflow. "
         "Consider running /PACT:wrap-up or ensuring the memory agent "
         "processes them in the next session."
     ),
-    "adhoc_save": (
+    REMINDER_ADHOC_SAVE: (
         "This session had work outside formal PACT workflows. "
         "If significant decisions or discoveries were made, consider "
         "sending the memory agent a save request via SendMessage."

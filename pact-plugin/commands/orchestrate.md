@@ -521,7 +521,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
     summary="Process pending HANDOFFs")
   ```
   Do not block on completion — TEST phase proceeds in parallel.
-  > On receiving a HANDOFF summary via SendMessage, verify the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
+- [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`. This is the belt-and-suspenders check for the SKILL.md step merge (ADR-003).
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE
@@ -644,4 +644,11 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
      message="[lead→memory-agent] Process pending HANDOFFs (post-review). Read breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl if it exists. Review each HANDOFF, save institutional knowledge, delete file when done.",
      summary="Process pending HANDOFFs (post-review)")
    ```
-8. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`
+8. **Mid-session consolidation** (multi-feature sessions only): If this is the second or subsequent feature completed in this session, send a consolidation trigger to merge cross-feature knowledge:
+   ```
+   SendMessage(to="memory-agent",
+     message="[lead→memory-agent] Mid-session consolidation. Multiple features completed this session. Review memories saved so far, consolidate related entries across features, prune superseded memories. Report summary when done.",
+     summary="Mid-session consolidation")
+   ```
+   Skip for the first feature in a session — full consolidation happens during `/PACT:wrap-up`.
+9. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`

@@ -194,18 +194,24 @@ def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> 
         return
     filepath = teams_dir / "completed_handoffs.jsonl"
 
-    # Dedup guard: check if task_id already recorded (fail-open on read error)
-    if filepath.exists():
+    # Dedup guard: check if task_id already recorded (fail-open on read error).
+    # Uses POSIX fd read for consistency with the append path below.
+    try:
+        rfd = os.open(str(filepath), os.O_RDONLY)
         try:
-            for line in filepath.read_text(encoding="utf-8").strip().split("\n"):
-                if line.strip():
-                    try:
-                        if json.loads(line).get("task_id") == task_id:
-                            return  # Already captured — skip
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            pass  # Can't read? Proceed with append (fail-open)
+            size = os.fstat(rfd).st_size
+            content = os.read(rfd, size).decode("utf-8") if size > 0 else ""
+        finally:
+            os.close(rfd)
+        for line in content.strip().splitlines():
+            if line.strip():
+                try:
+                    if json.loads(line).get("task_id") == task_id:
+                        return  # Already captured — skip
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass  # Can't read or file missing? Proceed with append (fail-open)
 
     try:
         entry = json.dumps({

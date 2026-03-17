@@ -214,7 +214,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
     message="[lead→memory-agent] Process pending HANDOFFs. Read the breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review HANDOFFs via TaskGet, save institutional knowledge, delete file when done.",
     summary="Process pending HANDOFFs")
   ```
-  > On receiving a HANDOFF summary via SendMessage, verify the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
+- [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 
 > ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.
