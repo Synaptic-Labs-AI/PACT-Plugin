@@ -208,11 +208,13 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
-- [ ] **Save memories from HANDOFFs**: Create a task for the memory agent:
+- [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
-  TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge", description="Review pending HANDOFFs from the breadcrumb file (~/.claude/teams/{team_name}/completed_handoffs.jsonl). Read each task via TaskGet, extract institutional knowledge, save to pact-memory. Delete the file when done. Report summary when done.")
+  TaskCreate(subject="memory-agent: process pending HANDOFFs",
+    description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
   TaskUpdate(taskId, owner="memory-agent")
   ```
+- [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 
 > ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.

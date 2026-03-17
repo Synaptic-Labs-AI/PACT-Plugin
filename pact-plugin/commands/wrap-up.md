@@ -7,10 +7,10 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 
 ## 1. Memory Consolidation (Pass 2)
 
-Create a task for the memory agent:
+Create a consolidation task for the memory agent:
 ```
 TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
-  description="Review all memories saved during this session. Consolidate related entries. Prune superseded memories. Sync Working Memory to CLAUDE.md. Save orchestration retrospective as calibration data. Report summary when done.")
+  description="First: read TaskList for any completed tasks with unprocessed HANDOFFs, and check breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for remaining entries. Process any found. Then: review all memories saved during this session, consolidate related entries, prune superseded memories, sync Working Memory to CLAUDE.md, save orchestration retrospective as calibration data. Delete breadcrumb file when done. Report summary when done.")
 TaskUpdate(taskId, owner="memory-agent")
 ```
 

@@ -514,6 +514,14 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
+- [ ] **Process coder HANDOFFs** (non-blocking):
+  ```
+  TaskCreate(subject="memory-agent: process pending HANDOFFs",
+    description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
+  TaskUpdate(taskId, owner="memory-agent")
+  ```
+  Do not block on completion — TEST phase proceeds in parallel.
+- [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`. This is the belt-and-suspenders check for the SKILL.md step merge (ADR-003).
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE
@@ -630,10 +638,17 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **Save memories from HANDOFFs**: Create a task for the memory agent:
+7. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
    ```
-   TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge", description="Review pending HANDOFFs from the breadcrumb file (~/.claude/teams/{team_name}/completed_handoffs.jsonl). Read each task via TaskGet, extract institutional knowledge, save to pact-memory. Delete the file when done. Report summary when done.")
+   TaskCreate(subject="memory-agent: process pending HANDOFFs (post-review)",
+     description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
    TaskUpdate(taskId, owner="memory-agent")
    ```
-   Do not block on memory save completion before proceeding.
-8. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`
+8. **Mid-session consolidation** (multi-feature sessions only): If this is the second or subsequent feature completed in this session, create a consolidation task to merge cross-feature knowledge:
+   ```
+   TaskCreate(subject="memory-agent: mid-session consolidation",
+     description="Multiple features completed this session. Review memories saved so far, consolidate related entries across features, prune superseded memories. Report summary when done.")
+   TaskUpdate(taskId, owner="memory-agent")
+   ```
+   Skip for the first feature in a session — full consolidation happens during `/PACT:wrap-up`.
+9. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`

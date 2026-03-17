@@ -1,20 +1,41 @@
 """
-Tests for memory_adhoc_reminder.py — Stop hook that reminds about memory
-saves for ad-hoc sessions (no formal PACT workflow ran).
+Tests for memory_adhoc_reminder.py — Stop hook that emits memory-related
+reminders at session end.
 
 Tests cover:
-1. should_remind returns True for substantive ad-hoc work sessions
-2. should_remind returns False when breadcrumb file exists (workflow ran)
-3. should_remind returns False for trivial sessions (< 500 chars)
-4. should_remind returns False when no team_name
-5. should_remind returns False when no Edit/Write evidence in transcript
-6. should_remind returns False when .adhoc_reminded guard file exists
+1. get_reminder_type returns "adhoc_save" for substantive ad-hoc work sessions
+2. get_reminder_type returns "unprocessed_handoffs" when breadcrumb file exists
+3. get_reminder_type returns None for trivial sessions (< 500 chars)
+4. get_reminder_type returns None when no team_name
+5. get_reminder_type returns None when no Edit/Write evidence in transcript
+6. get_reminder_type returns None when .adhoc_reminded guard file exists
 7. main() emits systemMessage JSON for ad-hoc work sessions
-8. main() emits nothing for workflow sessions
+8. main() emits unprocessed_handoffs message for workflow sessions with breadcrumbs
 9. main() exits 0 on invalid JSON input
 10. main() exits 0 on unexpected errors (fail-silent)
 11. main() writes .adhoc_reminded guard file on reminder
 12. main() guard file has 0o600 permissions
+13. Edge: empty breadcrumb file (0 bytes) triggers unprocessed_handoffs
+14. Edge: breadcrumb file with only malformed JSON triggers unprocessed_handoffs
+15. Edge: guard file blocks both unprocessed_handoffs and adhoc_save via main()
+16. Integration: main() guard file written for unprocessed_handoffs path too
+
+Uncompleted tasks path (Path 0 — highest priority):
+17. find_uncompleted_tasks returns owned in_progress tasks
+18. find_uncompleted_tasks ignores completed tasks
+19. find_uncompleted_tasks ignores unowned tasks
+20. find_uncompleted_tasks returns empty for missing dir
+21. find_uncompleted_tasks returns empty for empty team_name
+22. find_uncompleted_tasks skips malformed JSON
+23. find_uncompleted_tasks fails open on OSError
+24. format_uncompleted_message single task
+25. format_uncompleted_message multiple tasks
+26. get_reminder_type returns uncompleted_tasks over unprocessed_handoffs
+27. get_reminder_type returns uncompleted_tasks over adhoc_save
+28. guard file blocks uncompleted_tasks path
+29. main() emits dynamic uncompleted_tasks message
+30. main() uncompleted_tasks writes guard file
+31. main() uncompleted_tasks message includes task subjects
 """
 import json
 import io
@@ -33,148 +54,396 @@ WORK_TRANSCRIPT = "Some discussion about the feature... " + "x" * 450 + ' "Edit"
 CHAT_TRANSCRIPT = "x" * 600  # Long but no "Edit"/"Write" evidence
 
 
-class TestShouldRemind:
-    """Tests for memory_adhoc_reminder.should_remind()."""
+def _write_task(task_dir, task_id, status, owner=None, subject=None):
+    """Helper to write a task JSON file for testing."""
+    data = {"status": status}
+    if owner:
+        data["owner"] = owner
+    if subject:
+        data["subject"] = subject
+    (task_dir / f"{task_id}.json").write_text(json.dumps(data))
 
-    def test_true_for_adhoc_work_session(self, tmp_path):
-        """Substantive work session with no breadcrumb -> True."""
-        from memory_adhoc_reminder import should_remind
 
-        # Create team dir but no breadcrumb file
+class TestFindUncompletedTasks:
+    """Tests for memory_adhoc_reminder.find_uncompleted_tasks()."""
+
+    def test_returns_owned_in_progress_tasks(self, tmp_path):
+        """In_progress task with owner -> returned."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        _write_task(task_dir, "1", "in_progress", owner="backend-coder", subject="Fix API")
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert len(result) == 1
+        assert result[0] == {"id": "1", "subject": "Fix API"}
+
+    def test_ignores_completed_tasks(self, tmp_path):
+        """Completed task -> not returned."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        _write_task(task_dir, "1", "completed", owner="backend-coder", subject="Fix API")
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert result == []
+
+    def test_ignores_unowned_tasks(self, tmp_path):
+        """In_progress task without owner -> not returned (orchestrator tasks)."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        _write_task(task_dir, "1", "in_progress", subject="Feature task")
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert result == []
+
+    def test_returns_empty_for_missing_dir(self, tmp_path):
+        """Team dir doesn't exist -> empty list."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        result = find_uncompleted_tasks("no-such-team", tasks_base_dir=str(tmp_path))
+        assert result == []
+
+    def test_returns_empty_for_empty_team_name(self, tmp_path):
+        """Empty team_name -> early return empty."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        result = find_uncompleted_tasks("", tasks_base_dir=str(tmp_path))
+        assert result == []
+
+    def test_skips_malformed_json(self, tmp_path):
+        """Malformed JSON file -> skipped, other tasks still returned."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        (task_dir / "bad.json").write_text("not json")
+        _write_task(task_dir, "2", "in_progress", owner="coder", subject="Good task")
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert len(result) == 1
+        assert result[0]["id"] == "2"
+
+    def test_skips_non_json_files(self, tmp_path):
+        """Non-.json files -> ignored."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        (task_dir / "readme.txt").write_text("not a task")
+        _write_task(task_dir, "1", "in_progress", owner="coder", subject="Task")
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert len(result) == 1
+
+    def test_multiple_uncompleted_tasks(self, tmp_path):
+        """Multiple in_progress owned tasks -> all returned."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        _write_task(task_dir, "1", "in_progress", owner="backend", subject="Task A")
+        _write_task(task_dir, "2", "in_progress", owner="frontend", subject="Task B")
+        _write_task(task_dir, "3", "completed", owner="test", subject="Task C")
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert len(result) == 2
+        ids = {t["id"] for t in result}
+        assert ids == {"1", "2"}
+
+    def test_default_subject_when_missing(self, tmp_path):
+        """Task without subject field -> defaults to 'unknown'."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+        data = {"status": "in_progress", "owner": "coder"}
+        (task_dir / "1.json").write_text(json.dumps(data))
+
+        result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert result[0]["subject"] == "unknown"
+
+    def test_fails_open_on_iterdir_error(self, tmp_path):
+        """OSError during directory scan -> empty list (fail-open)."""
+        from memory_adhoc_reminder import find_uncompleted_tasks
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir(parents=True)
+
+        with patch("memory_adhoc_reminder.Path.iterdir", side_effect=OSError("denied")):
+            result = find_uncompleted_tasks("pact-test", tasks_base_dir=str(tmp_path))
+        assert result == []
+
+
+class TestFormatUncompletedMessage:
+    """Tests for memory_adhoc_reminder.format_uncompleted_message()."""
+
+    def test_single_task(self):
+        """Single task -> '1 task(s)' with subject."""
+        from memory_adhoc_reminder import format_uncompleted_message
+
+        msg = format_uncompleted_message([{"id": "1", "subject": "Fix API"}])
+        assert "1 task(s)" in msg
+        assert "Fix API" in msg
+        assert "incomplete HANDOFFs" in msg
+
+    def test_multiple_tasks(self):
+        """Multiple tasks -> count and comma-separated subjects."""
+        from memory_adhoc_reminder import format_uncompleted_message
+
+        tasks = [
+            {"id": "1", "subject": "Fix API"},
+            {"id": "2", "subject": "Update DB"},
+        ]
+        msg = format_uncompleted_message(tasks)
+        assert "2 task(s)" in msg
+        assert "Fix API" in msg
+        assert "Update DB" in msg
+        assert "Fix API, Update DB" in msg
+
+
+class TestGetReminderType:
+    """Tests for memory_adhoc_reminder.get_reminder_type()."""
+
+    def test_adhoc_save_for_work_session(self, tmp_path):
+        """Substantive work session with no breadcrumb -> 'adhoc_save'."""
+        from memory_adhoc_reminder import get_reminder_type
+
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", WORK_TRANSCRIPT)
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        assert result is True
+        assert result == "adhoc_save"
 
-    def test_false_when_breadcrumb_exists(self, tmp_path):
-        """Breadcrumb file exists -> workflow handled memory -> False."""
-        from memory_adhoc_reminder import should_remind
+    def test_unprocessed_handoffs_when_breadcrumb_exists(self, tmp_path):
+        """Breadcrumb file exists -> unprocessed HANDOFFs warning."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
         (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", WORK_TRANSCRIPT)
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        assert result is False
+        assert result == "unprocessed_handoffs"
 
-    def test_false_for_trivial_session(self, tmp_path):
-        """Short transcript (< 500 chars) -> trivial session -> False."""
-        from memory_adhoc_reminder import should_remind
-
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", 'short session with "Edit"')
-
-        assert result is False
-
-    def test_false_when_no_team_name(self, tmp_path):
-        """No team_name -> no session context -> False."""
-        from memory_adhoc_reminder import should_remind
-
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("", WORK_TRANSCRIPT)
-
-        assert result is False
-
-    def test_false_for_empty_transcript(self, tmp_path):
-        """Empty transcript -> trivial -> False."""
-        from memory_adhoc_reminder import should_remind
+    def test_none_for_trivial_session(self, tmp_path):
+        """Short transcript (< 500 chars) -> no reminder."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", "")
+            result = get_reminder_type("pact-test", 'short session with "Edit"')
 
-        assert result is False
+        assert result is None
 
-    def test_false_at_boundary_499_chars(self, tmp_path):
-        """Exactly 499 chars -> below threshold -> False."""
-        from memory_adhoc_reminder import should_remind
+    def test_none_when_no_team_name(self, tmp_path):
+        """No team_name -> no session context -> None."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("", WORK_TRANSCRIPT)
+
+        assert result is None
+
+    def test_none_for_empty_transcript(self, tmp_path):
+        """Empty transcript -> trivial -> None."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", '"Edit" ' + "x" * 492)
+            result = get_reminder_type("pact-test", "")
 
-        assert result is False
+        assert result is None
 
-    def test_true_at_boundary_500_chars_with_edit(self, tmp_path):
-        """Exactly 500 chars with quoted "Edit" evidence -> at threshold -> True."""
-        from memory_adhoc_reminder import should_remind
+    def test_none_at_boundary_499_chars(self, tmp_path):
+        """Exactly 499 chars -> below threshold -> None."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", '"Edit" ' + "x" * 493)
+            result = get_reminder_type("pact-test", '"Edit" ' + "x" * 492)
 
-        assert result is True
+        assert result is None
 
-    def test_false_when_team_dir_missing(self, tmp_path):
+    def test_adhoc_save_at_boundary_500_chars_with_edit(self, tmp_path):
+        """Exactly 500 chars with quoted "Edit" evidence -> at threshold -> 'adhoc_save'."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", '"Edit" ' + "x" * 493)
+
+        assert result == "adhoc_save"
+
+    def test_adhoc_save_when_team_dir_missing(self, tmp_path):
         """Team dir doesn't exist -> breadcrumb check still works (no crash)."""
-        from memory_adhoc_reminder import should_remind
+        from memory_adhoc_reminder import get_reminder_type
 
         # Don't create team dir at all
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", WORK_TRANSCRIPT)
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         # breadcrumb.exists() returns False, .adhoc_reminded.exists() returns False,
-        # transcript is long enough and has quoted "Edit" evidence -> True
-        assert result is True
+        # transcript is long enough and has quoted "Edit" evidence -> "adhoc_save"
+        assert result == "adhoc_save"
 
-    def test_false_for_chat_only_session(self, tmp_path):
-        """Long transcript but no Edit/Write -> chat session -> False."""
-        from memory_adhoc_reminder import should_remind
+    def test_none_for_chat_only_session(self, tmp_path):
+        """Long transcript but no Edit/Write -> chat session -> None."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", CHAT_TRANSCRIPT)
+            result = get_reminder_type("pact-test", CHAT_TRANSCRIPT)
 
-        assert result is False
+        assert result is None
 
-    def test_true_with_write_evidence(self, tmp_path):
-        """Transcript with quoted "Write" (not "Edit") evidence -> True."""
-        from memory_adhoc_reminder import should_remind
+    def test_adhoc_save_with_write_evidence(self, tmp_path):
+        """Transcript with quoted "Write" (not "Edit") evidence -> 'adhoc_save'."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
 
         transcript = "Discussing the feature... " + "x" * 470 + ' "Write" the config...'
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", transcript)
+            result = get_reminder_type("pact-test", transcript)
 
-        assert result is True
+        assert result == "adhoc_save"
 
-    def test_false_when_guard_file_exists(self, tmp_path):
-        """Guard file .adhoc_reminded exists -> already reminded -> False."""
-        from memory_adhoc_reminder import should_remind
+    def test_none_when_guard_file_exists(self, tmp_path):
+        """Guard file .adhoc_reminded exists -> already reminded -> None."""
+        from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
         (teams_dir / ".adhoc_reminded").write_text("")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
-            result = should_remind("pact-test", WORK_TRANSCRIPT)
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        assert result is False
+        assert result is None
+
+    def test_guard_file_blocks_unprocessed_handoffs_too(self, tmp_path):
+        """Guard file blocks even unprocessed_handoffs path."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        (teams_dir / ".adhoc_reminded").write_text("")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result is None
+
+    def test_unprocessed_handoffs_ignores_transcript_length(self, tmp_path):
+        """Breadcrumbs trigger unprocessed_handoffs regardless of transcript length."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", "short")
+
+        assert result == "unprocessed_handoffs"
+
+    def test_uncompleted_tasks_highest_priority(self, tmp_path):
+        """Uncompleted tasks take priority over breadcrumbs AND adhoc_save."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        # Both breadcrumb AND work transcript exist
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        # Also have uncompleted tasks
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "uncompleted_tasks"
+
+    def test_uncompleted_tasks_over_adhoc_save(self, tmp_path):
+        """Uncompleted tasks take priority over adhoc_save (no breadcrumbs)."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Active task")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "uncompleted_tasks"
+
+    def test_guard_file_blocks_uncompleted_tasks(self, tmp_path):
+        """Guard file blocks all paths including uncompleted_tasks."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / ".adhoc_reminded").write_text("")
+
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result is None
+
+    def test_falls_through_when_no_uncompleted_tasks(self, tmp_path):
+        """No uncompleted tasks + breadcrumbs → falls through to unprocessed_handoffs."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        # All tasks completed
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "completed", owner="coder", subject="Done task")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
 
 
 class TestMain:
     """Tests for memory_adhoc_reminder.main() entry point."""
 
-    def test_emits_system_message_for_adhoc(self, tmp_path, capsys):
-        """Ad-hoc work session -> JSON systemMessage on stdout, exit 0."""
+    def test_emits_adhoc_save_message(self, tmp_path, capsys):
+        """Ad-hoc work session -> JSON systemMessage with adhoc_save content, exit 0."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -193,11 +462,11 @@ class TestMain:
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert "systemMessage" in output
-        assert "memory agent" in output["systemMessage"]
+        assert "outside formal PACT workflows" in output["systemMessage"]
         assert "SendMessage" in output["systemMessage"]
 
-    def test_silent_for_workflow_session(self, tmp_path, capsys):
-        """Workflow session (breadcrumb exists) -> no output, exit 0."""
+    def test_emits_unprocessed_handoffs_message(self, tmp_path, capsys):
+        """Workflow session (breadcrumb exists) -> unprocessed HANDOFFs warning, exit 0."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -215,7 +484,10 @@ class TestMain:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        output = json.loads(captured.out)
+        assert "systemMessage" in output
+        assert "Unprocessed HANDOFFs" in output["systemMessage"]
+        assert "wrap-up" in output["systemMessage"]
 
     def test_exits_0_on_invalid_json(self):
         """Invalid JSON input -> exit 0, no crash."""
@@ -380,3 +652,335 @@ class TestMain:
         assert exc_info.value.code == 0
         guard = teams_dir / ".adhoc_reminded"
         assert not guard.exists()
+
+
+class TestEdgeCaseBreadcrumbContent:
+    """Edge case tests for breadcrumb file content vs existence checks.
+
+    The get_reminder_type() function checks .exists() on the breadcrumb file,
+    not its content. These tests verify behavior when the file exists but has
+    unusual content (empty, malformed, etc.).
+    """
+
+    def test_empty_breadcrumb_file_triggers_unprocessed(self, tmp_path):
+        """Empty file (0 bytes) — .exists() returns True → 'unprocessed_handoffs'.
+
+        This is intentional behavior: an empty breadcrumb file means the hook
+        created it (O_CREAT) but the write failed or was interrupted. The file's
+        presence is the signal, not its content. The memory agent handles empty
+        files gracefully.
+        """
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text("")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
+
+    def test_breadcrumb_with_only_malformed_json_triggers_unprocessed(self, tmp_path):
+        """File with only malformed JSON — .exists() True → 'unprocessed_handoffs'.
+
+        The reminder hook doesn't parse the file — it only checks existence.
+        Malformed content is the memory agent's problem to handle.
+        """
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text(
+            'not valid json\n{"truncated\n'
+        )
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
+
+    def test_breadcrumb_with_only_whitespace_triggers_unprocessed(self, tmp_path):
+        """File with only whitespace/newlines — .exists() True → 'unprocessed_handoffs'."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text("\n\n  \n")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
+
+
+class TestMainIntegrationBothPaths:
+    """Integration tests verifying main() produces correct systemMessage JSON
+    for both reminder paths and that guard file behavior is consistent."""
+
+    def test_unprocessed_handoffs_writes_guard_file(self, tmp_path, capsys):
+        """Guard file is written when unprocessed_handoffs reminder fires."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert (teams_dir / ".adhoc_reminded").exists()
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "Unprocessed HANDOFFs" in output["systemMessage"]
+
+    def test_guard_blocks_unprocessed_handoffs_via_main(self, tmp_path, capsys):
+        """Guard file prevents unprocessed_handoffs reminder in main()."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        (teams_dir / ".adhoc_reminded").write_text("")
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_adhoc_save_message_content(self, tmp_path, capsys):
+        """Verify adhoc_save message contains actionable content."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        msg = output["systemMessage"]
+        # Must mention outside workflows (differentiates from unprocessed path)
+        assert "outside formal PACT workflows" in msg
+        # Must provide actionable guidance
+        assert "SendMessage" in msg
+
+    def test_unprocessed_handoffs_message_content(self, tmp_path, capsys):
+        """Verify unprocessed_handoffs message contains actionable content."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        msg = output["systemMessage"]
+        # Must mention unprocessed HANDOFFs
+        assert "Unprocessed HANDOFFs" in msg
+        # Must suggest wrap-up as remediation
+        assert "wrap-up" in msg
+
+    def test_empty_breadcrumb_triggers_warning_via_main(self, tmp_path, capsys):
+        """Empty breadcrumb file → unprocessed_handoffs warning via main()."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text("")
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "Unprocessed HANDOFFs" in output["systemMessage"]
+
+    def test_no_team_name_env_var_no_crash(self, tmp_path, capsys):
+        """Missing CLAUDE_CODE_TEAM_NAME env var → no reminder, no crash."""
+        from memory_adhoc_reminder import main
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {}  # No CLAUDE_CODE_TEAM_NAME
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+
+class TestMainUncompletedTasks:
+    """Integration tests for main() with uncompleted_tasks reminder path."""
+
+    def test_emits_uncompleted_tasks_message(self, tmp_path, capsys):
+        """Uncompleted tasks → dynamic systemMessage with task subjects, exit 0."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Fix API")
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "systemMessage" in output
+        assert "1 task(s)" in output["systemMessage"]
+        assert "Fix API" in output["systemMessage"]
+        assert "incomplete HANDOFFs" in output["systemMessage"]
+
+    def test_uncompleted_tasks_writes_guard_file(self, tmp_path, capsys):
+        """Guard file is written when uncompleted_tasks reminder fires."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Fix API")
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert (teams_dir / ".adhoc_reminded").exists()
+
+    def test_uncompleted_tasks_multiple_subjects(self, tmp_path, capsys):
+        """Multiple uncompleted tasks → message includes all subjects."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="backend", subject="Fix API")
+        _write_task(tasks_dir, "6", "in_progress", owner="frontend", subject="Update UI")
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "2 task(s)" in output["systemMessage"]
+        assert "Fix API" in output["systemMessage"]
+        assert "Update UI" in output["systemMessage"]
+
+    def test_uncompleted_tasks_takes_priority_via_main(self, tmp_path, capsys):
+        """Uncompleted tasks + breadcrumbs → uncompleted_tasks message wins."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        # Must be uncompleted_tasks message, NOT unprocessed_handoffs
+        assert "task(s) still in_progress" in output["systemMessage"]
+        assert "Unprocessed HANDOFFs" not in output["systemMessage"]
+
+    def test_guard_blocks_uncompleted_tasks_via_main(self, tmp_path, capsys):
+        """Guard file prevents uncompleted_tasks reminder in main()."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / ".adhoc_reminded").write_text("")
+        tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
+        tasks_dir.mkdir(parents=True)
+        _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""

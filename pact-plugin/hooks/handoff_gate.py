@@ -181,6 +181,10 @@ def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> 
     to enumerate task IDs. Uses POSIX atomic append (O_WRONLY|O_APPEND|O_CREAT) with
     0o600 permissions for concurrent safety and security.
 
+    Dedup guard: reads the file before appending and skips if task_id is already
+    present. This prevents cascade duplicates when TaskCompleted fires for multiple
+    tasks owned by the same agent. Fails open — if the read fails, appends anyway.
+
     Fails silently — breadcrumb loss is acceptable; blocking task completion is not.
     """
     if not teammate_name or not team_name:
@@ -189,6 +193,26 @@ def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> 
     if not teams_dir.exists():
         return
     filepath = teams_dir / "completed_handoffs.jsonl"
+
+    # Dedup guard: check if task_id already recorded (fail-open on read error).
+    # Uses POSIX fd read for consistency with the append path below.
+    try:
+        rfd = os.open(str(filepath), os.O_RDONLY)
+        try:
+            size = os.fstat(rfd).st_size
+            content = os.read(rfd, size).decode("utf-8") if size > 0 else ""
+        finally:
+            os.close(rfd)
+        for line in content.strip().splitlines():
+            if line.strip():
+                try:
+                    if json.loads(line).get("task_id") == task_id:
+                        return  # Already captured — skip
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass  # Can't read or file missing? Proceed with append (fail-open)
+
     try:
         entry = json.dumps({
             "task_id": task_id,

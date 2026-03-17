@@ -101,17 +101,15 @@ When your work is done:
    }})
    ```
    If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
-2. **Notify lead with summary only**:
-   ```
-   SendMessage(type="message", recipient="lead",
-     content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
-     summary="Task complete: [brief]")
-   ```
-3. **Mark task completed**:
-   `TaskUpdate(taskId, status="completed")`
-4. **Self-claim follow-up work**: Check `TaskList` for unassigned, unblocked tasks matching your domain
-5. If found: `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin
-6. If none: idle (you may be consulted or shut down)
+2. **Complete task — BOTH actions required, in this order**:
+   a. `SendMessage(type="message", recipient="lead", content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
+   b. `TaskUpdate(taskId, status="completed")`
+
+   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the TaskCompleted hook only fires after TaskUpdate, which triggers HANDOFF capture for institutional memory. Skipping (b) means your work is invisible to the memory system.
+
+3. **Self-claim follow-up work**: Check `TaskList` for unassigned, unblocked tasks matching your domain
+4. If found: `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin
+5. If none: idle (you may be consulted or shut down)
 
 ### HANDOFF Format
 

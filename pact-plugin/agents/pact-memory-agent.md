@@ -75,6 +75,17 @@ If no memories are found, report that:
 "Session briefing: No prior memories found for this project. This appears to be a fresh start."
 ```
 
+### Orphaned Breadcrumb Recovery (Layer 4 Fallback)
+
+After delivering the session briefing, check for orphaned breadcrumb files from prior sessions:
+1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available via the `CLAUDE_CODE_TEAM_NAME` environment variable or the team name provided in your dispatch prompt) — that team's breadcrumbs are active, not orphaned.
+2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
+3. Attempt to process them (TaskGet may fail for old tasks — extract what's available from breadcrumb metadata)
+4. Delete the breadcrumb file after processing
+5. Report summary of recovered knowledge (or gaps where TaskGet failed)
+
+This catches sessions that ended without wrap-up or where Layer 2 triggers were missed.
+
 ### Ongoing Queries
 
 The lead delegates memory queries via `SendMessage`. Common use cases:
@@ -95,32 +106,36 @@ When you receive an actual task (HANDOFF review or query), perform a normal teac
 
 ## 2. Writer (HANDOFF Reviewer)
 
-At workflow completion, the lead sends a "finalize" signal. You discover completed tasks automatically via the breadcrumb file — the lead no longer needs to enumerate task IDs.
+At workflow completion, the lead sends a "finalize" signal. You discover completed tasks via TaskList (primary) — the breadcrumb file provides supplementary timeline data.
 
-### Breadcrumb File
+### Task Discovery
 
-The `handoff_gate.py` hook appends a JSONL breadcrumb to `~/.claude/teams/{team_name}/completed_handoffs.jsonl` each time an agent passes all completion gates. Each line contains `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`.
+You have two complementary sources for finding completed agent tasks:
+
+1. **TaskList** (primary): Read TaskList for all completed tasks owned by agents. This is authoritative — it reflects the current state of every task regardless of hook behavior.
+2. **Breadcrumb file** (supplementary): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. Each line contains `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Provides temporal ordering and serves as a cross-reference. May not exist (already processed or hooks didn't fire). **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
 
 ### Review and Save Workflow
 
 1. **Receive finalize signal** from the lead via `SendMessage` (or task description)
-2. **Read the breadcrumb file** at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — parse each JSONL line for task IDs. If the file doesn't exist, report "No completed handoffs to review" and complete.
-3. **Read each HANDOFF** via `TaskGet(taskId).metadata.handoff` for every task_id in the breadcrumb file
-4. **Extract institutional knowledge** — focus on:
+2. **Read TaskList** for all completed tasks owned by agents — this is the primary source. Collect all task IDs with completed status and an owner.
+3. **Read the breadcrumb file** at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` for timeline context (supplementary — may not exist). Cross-reference with TaskList results. If neither TaskList has completed agent tasks nor the breadcrumb file exists, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
+4. **Read each HANDOFF** via `TaskGet(taskId).metadata.handoff` for every discovered task
+5. **Extract institutional knowledge** — focus on:
    - Architectural decisions with rationale
    - Cross-cutting concerns that affect multiple components
    - Stakeholder decisions (user-specified constraints or preferences)
    - Patterns established that future work should follow
    - Integration points between components
    - Risks and uncertainties that warrant tracking
-5. **Save to pact-memory** using the CLI with proper structure:
+6. **Save to pact-memory** using the CLI with proper structure:
    - `context`: What was being done and why
    - `goal`: What was achieved
    - `decisions`: Key decisions with rationale and alternatives considered
    - `lessons_learned`: Actionable insights
    - `entities`: Components, files, services involved (enables graph search)
-6. **Delete the breadcrumb file** after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete)
-7. **Report summary** to lead:
+7. **Delete the breadcrumb file** after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete)
+8. **Report summary** to lead:
 
 ```
 SendMessage(to="team-lead",
@@ -219,6 +234,7 @@ You do NOT need to manually edit CLAUDE.md. The sync happens automatically on ev
 
 When the lead sends a consolidation request (typically during `/PACT:wrap-up`):
 
+0. **Safety net**: If the breadcrumb file at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` still exists, process remaining HANDOFFs first (Layer 2 may have been missed)
 1. Review all memories saved during this session
 2. Consolidate related entries (merge overlapping memories)
 3. Prune superseded memories (update or delete entries that have been replaced by newer information)
