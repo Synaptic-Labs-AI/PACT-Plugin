@@ -66,10 +66,11 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 ## INSTRUCTIONS
 1. Read `CLAUDE.md` at session start to understand project structure and current state
 2. Create the session team immediately — the `session_init` hook provides a session-unique team name (format: `pact-{session_hash}`). This must exist before starting any work or spawning any agents. Use this name wherever `{team_name}` appears in commands.
-3. Apply the PACT framework methodology with specific principles at each phase, and delegate tasks to specific specialist agents for each phase
-4. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
-5. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
-6. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
+3. Spawn `pact-memory-agent` as a teammate on the session team. It delivers a session briefing at spawn and remains available for memory queries and HANDOFF review throughout the session.
+4. Apply the PACT framework methodology with specific principles at each phase, and delegate tasks to specific specialist agents for each phase
+5. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
+6. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
+7. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
 
 ## GUIDELINES
 
@@ -105,23 +106,29 @@ When a user requests work without specifying a workflow (e.g., "fix this bug", "
 
 ### Memory Management
 
-**Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact steps.
+Delegate memory queries to the memory agent via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
 
-**Memory processing triggers** (orchestrator responsibility):
-- After CODE phase completes → TaskCreate for memory agent: "Process pending HANDOFFs"
+#### Memory Processing Triggers
+
+At these workflow boundaries, create a task for the memory agent to process accumulated HANDOFFs:
+- After CODE phase completes → `TaskCreate` for memory agent: "Process pending HANDOFFs"
 - After peer-review synthesis (step 5) → **PRIMARY trigger**, fires unconditionally
-- After comPACT specialist completes → TaskCreate for memory agent
+- After comPACT specialist completes → `TaskCreate` for memory agent
 - During wrap-up → Consolidation (Pass 2) with safety net for unprocessed HANDOFFs
-- These triggers are idempotent — safe to fire even if HANDOFFs were already processed
-- **Primary source**: TaskList (all completed tasks). Breadcrumb file is supplementary (timestamps/ordering).
 
-**Task completion safety nets**:
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The memory agent discovers completed tasks via TaskList (primary source) and cross-references with the breadcrumb file for temporal ordering (supplementary).
+
+#### Task Completion Safety Nets
+
+Four layers ensure agents mark tasks completed so HANDOFFs are captured:
 - SKILL.md step merge (instruction — agent self-completes)
 - TeammateIdle completion gate hook (mechanical — blocks idle until tasks completed)
-- Orchestrator verification checklist (instruction — lead catches on HANDOFF receipt)
+- Orchestrator verification checklist (instruction — catch on HANDOFF receipt via TaskList)
 - Stop hook uncompleted-tasks warning (mechanical — last-resort alert at session end)
 
-**Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent reviews and saves it to pact-memory. For ad-hoc work outside formal workflows: query the memory agent when prior context would help. After making a significant decision, fixing a tricky bug, or discovering a non-obvious pattern, send the memory agent a save request. Specific triggers: architectural choices, gotchas that would waste hours if forgotten, cross-component impacts discovered, and stakeholder decisions.
+#### Specialist Memory Guidance
+
+When dispatching specialists, include guidance about memory: specialists use built-in persistent memory for domain knowledge (accumulated across sessions). Institutional knowledge — architectural decisions, cross-component impacts, stakeholder constraints — goes in HANDOFFs, which the memory agent reviews and saves to pact-memory. For ad-hoc work outside formal workflows, instruct specialists to send the memory agent a save request after significant decisions, tricky bug fixes, or non-obvious pattern discoveries.
 
 #### Three-Layer Memory Architecture
 
