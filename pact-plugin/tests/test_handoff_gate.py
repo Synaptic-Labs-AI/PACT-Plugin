@@ -650,6 +650,98 @@ class TestAppendPendingHandoff:
         assert entries[1]["task_id"] == "2"
         assert entries[2]["task_id"] == "3"
 
+    def test_dedup_skips_existing_task_id(self, tmp_path):
+        """P0: Second append with same task_id is skipped — file has 1 entry."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("5", "backend-coder", "pact-test")
+            append_pending_handoff("5", "backend-coder", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 1
+        assert json.loads(lines[0])["task_id"] == "5"
+
+    def test_dedup_allows_different_task_ids(self, tmp_path):
+        """P0: Different task_ids both get appended."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("5", "backend-coder", "pact-test")
+            append_pending_handoff("6", "frontend-coder", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert json.loads(lines[0])["task_id"] == "5"
+        assert json.loads(lines[1])["task_id"] == "6"
+
+    def test_dedup_fails_open_on_read_error(self, tmp_path):
+        """P1: If reading the file fails, append proceeds anyway (fail-open)."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        # Write an initial entry
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("5", "backend-coder", "pact-test")
+
+        # Make read_text fail but os.open still works
+        original_read_text = Path.read_text
+
+        def fail_read(self_path, *args, **kwargs):
+            if "completed_handoffs" in str(self_path):
+                raise OSError("permission denied")
+            return original_read_text(self_path, *args, **kwargs)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch.object(Path, "read_text", fail_read):
+            append_pending_handoff("5", "backend-coder", "pact-test")
+
+        # Should have 2 entries (dedup couldn't read, so appended anyway)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 2
+
+    def test_dedup_handles_malformed_lines(self, tmp_path):
+        """P1: Malformed JSON lines are skipped during dedup, valid lines still checked."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        # Pre-populate with malformed + valid entry
+        filepath.write_text('not json\n{"task_id": "5", "teammate_name": "x", "timestamp": "T"}\n')
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            # task_id "5" already exists — should be skipped
+            append_pending_handoff("5", "backend-coder", "pact-test")
+            # task_id "6" is new — should be appended
+            append_pending_handoff("6", "frontend-coder", "pact-test")
+
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 3  # malformed + "5" + "6"
+
+    def test_dedup_handles_empty_file(self, tmp_path):
+        """P1: Empty breadcrumb file — append succeeds."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+        filepath.write_text("")
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("1", "backend-coder", "pact-test")
+
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 1
+        assert json.loads(lines[0])["task_id"] == "1"
+
     def test_silent_failure_on_os_error(self, tmp_path):
         """Breadcrumb write failure should not raise."""
         from handoff_gate import append_pending_handoff

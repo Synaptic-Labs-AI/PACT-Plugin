@@ -75,6 +75,17 @@ If no memories are found, report that:
 "Session briefing: No prior memories found for this project. This appears to be a fresh start."
 ```
 
+### Orphaned Breadcrumb Recovery (Layer 4 Fallback)
+
+After delivering the session briefing, check for orphaned breadcrumb files from prior sessions:
+1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories (excluding the current session's team)
+2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
+3. Attempt to process them (TaskGet may fail for old tasks — extract what's available from breadcrumb metadata)
+4. Delete the breadcrumb file after processing
+5. Report summary of recovered knowledge (or gaps where TaskGet failed)
+
+This catches sessions that ended without wrap-up or where Layer 2 triggers were missed.
+
 ### Ongoing Queries
 
 The lead delegates memory queries via `SendMessage`. Common use cases:
@@ -104,7 +115,7 @@ The `handoff_gate.py` hook appends a JSONL breadcrumb to `~/.claude/teams/{team_
 ### Review and Save Workflow
 
 1. **Receive finalize signal** from the lead via `SendMessage` (or task description)
-2. **Read the breadcrumb file** at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — parse each JSONL line for task IDs. If the file doesn't exist, report "No completed handoffs to review" and complete.
+2. **Read the breadcrumb file** at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — parse each JSONL line for task IDs. **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior). If the file doesn't exist, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
 3. **Read each HANDOFF** via `TaskGet(taskId).metadata.handoff` for every task_id in the breadcrumb file
 4. **Extract institutional knowledge** — focus on:
    - Architectural decisions with rationale
@@ -219,6 +230,7 @@ You do NOT need to manually edit CLAUDE.md. The sync happens automatically on ev
 
 When the lead sends a consolidation request (typically during `/PACT:wrap-up`):
 
+0. **Safety net**: If the breadcrumb file at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` still exists, process remaining HANDOFFs first (Layer 2 may have been missed)
 1. Review all memories saved during this session
 2. Consolidate related entries (merge overlapping memories)
 3. Prune superseded memories (update or delete entries that have been replaced by newer information)

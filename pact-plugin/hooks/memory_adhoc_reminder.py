@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/memory_adhoc_reminder.py
-Summary: Stop hook that reminds about memory saves for ad-hoc sessions where
-         no formal PACT workflow ran.
+Summary: Stop hook that emits memory-related reminders at session end.
 Used by: hooks.json Stop hook
 
-Non-blocking (always exit 0). Only fires when no breadcrumb file exists
-(workflows create breadcrumbs via handoff_gate.py, so this skips workflow
-sessions). Emits a systemMessage reminder if the session had substantive
-work outside formal PACT workflows.
+Non-blocking (always exit 0). Two reminder paths:
+1. "unprocessed_handoffs" — breadcrumb file exists at session end, meaning
+   workflow HANDOFFs were captured but never processed by the memory agent.
+2. "adhoc_save" — no breadcrumb file but session had substantive ad-hoc work
+   outside formal PACT workflows.
 
 Uses a file-based reentrancy guard (~/.claude/teams/{team_name}/.adhoc_reminded)
 to prevent duplicate reminders across process invocations. The guard file is
@@ -26,48 +26,43 @@ from pathlib import Path
 MIN_TRANSCRIPT_LENGTH = 500
 
 
-def should_remind(team_name: str, transcript: str) -> bool:
+def get_reminder_type(team_name: str, transcript: str) -> str | None:
     """
-    Determine if the ad-hoc memory reminder should fire.
+    Determine which reminder to emit, if any.
 
-    Returns True only when:
-    - team_name is present (session had a team)
-    - No breadcrumb file exists (no formal workflow ran)
-    - No .adhoc_reminded guard file exists (not already reminded)
-    - Transcript is substantive (>= MIN_TRANSCRIPT_LENGTH chars)
-    - Transcript contains evidence of file modifications ("Edit" or "Write" tool names in JSON)
+    Returns:
+        "unprocessed_handoffs" — breadcrumbs exist (workflow ran but memory not processed)
+        "adhoc_save" — no breadcrumbs but substantive ad-hoc work detected
+        None — no reminder needed
 
     Args:
         team_name: Session team name from env
         transcript: Session transcript text
-
-    Returns:
-        True if reminder should fire
     """
     if not team_name:
-        return False
+        return None
 
     teams_dir = Path.home() / ".claude" / "teams" / team_name
 
-    # If breadcrumb file exists, a workflow handled memory — skip
-    if (teams_dir / "completed_handoffs.jsonl").exists():
-        return False
-
     # If already reminded this session, skip
     if (teams_dir / ".adhoc_reminded").exists():
-        return False
+        return None
 
-    # Trivial sessions don't need reminders
+    # Path 1: Breadcrumbs exist → unprocessed HANDOFFs
+    if (teams_dir / "completed_handoffs.jsonl").exists():
+        return "unprocessed_handoffs"
+
+    # Path 2: No breadcrumbs but substantive ad-hoc work
     if len(transcript) < MIN_TRANSCRIPT_LENGTH:
-        return False
+        return None
 
     # Only remind for work sessions (file modifications), not pure chat.
     # Match quoted tool names ('"Edit"', '"Write"') to avoid false-positives
     # on words like "Editorial" or "Rewrite" in discussion text.
     if '"Edit"' not in transcript and '"Write"' not in transcript:
-        return False
+        return None
 
-    return True
+    return "adhoc_save"
 
 
 def _write_guard_file(team_name: str) -> None:
@@ -83,6 +78,20 @@ def _write_guard_file(team_name: str) -> None:
         pass  # Already exists or write failure — either way, safe to continue
 
 
+_MESSAGES = {
+    "unprocessed_handoffs": (
+        "Unprocessed HANDOFFs detected from this session's workflow. "
+        "Consider running /PACT:wrap-up or ensuring the memory agent "
+        "processes them in the next session."
+    ),
+    "adhoc_save": (
+        "This session had work outside formal PACT workflows. "
+        "If significant decisions or discoveries were made, consider "
+        "sending the memory agent a save request via SendMessage."
+    ),
+}
+
+
 def main():
     try:
         try:
@@ -93,16 +102,10 @@ def main():
         team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
         transcript = input_data.get("transcript", "")
 
-        if should_remind(team_name, transcript):
+        reminder_type = get_reminder_type(team_name, transcript)
+        if reminder_type and reminder_type in _MESSAGES:
             _write_guard_file(team_name)
-            output = {
-                "systemMessage": (
-                    "This session had work outside formal PACT workflows. "
-                    "If significant decisions or discoveries were made, consider "
-                    "sending the memory agent a save request via SendMessage."
-                )
-            }
-            print(json.dumps(output))
+            print(json.dumps({"systemMessage": _MESSAGES[reminder_type]}))
 
         sys.exit(0)
 

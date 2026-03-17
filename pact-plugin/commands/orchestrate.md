@@ -514,6 +514,14 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
+- [ ] **Process coder HANDOFFs** (non-blocking): Send the memory agent a "process pending HANDOFFs" message:
+  ```
+  SendMessage(to="memory-agent",
+    message="[lead→memory-agent] Process pending HANDOFFs. Read the breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review each HANDOFF via TaskGet, extract and save institutional knowledge to pact-memory, then delete the breadcrumb file. Report summary when done.",
+    summary="Process pending HANDOFFs")
+  ```
+  Do not block on completion — TEST phase proceeds in parallel.
+  > On receiving a HANDOFF summary via SendMessage, verify the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE
@@ -630,10 +638,10 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
-7. **Save memories from HANDOFFs**: Create a task for the memory agent:
+7. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
    ```
-   TaskCreate(subject="memory-agent: review HANDOFFs and save institutional knowledge", description="Review pending HANDOFFs from the breadcrumb file (~/.claude/teams/{team_name}/completed_handoffs.jsonl). Read each task via TaskGet, extract institutional knowledge, save to pact-memory. Delete the file when done. Report summary when done.")
-   TaskUpdate(taskId, owner="memory-agent")
+   SendMessage(to="memory-agent",
+     message="[lead→memory-agent] Process pending HANDOFFs (post-review). Read breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl if it exists. Review each HANDOFF, save institutional knowledge, delete file when done.",
+     summary="Process pending HANDOFFs (post-review)")
    ```
-   Do not block on memory save completion before proceeding.
 8. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`
