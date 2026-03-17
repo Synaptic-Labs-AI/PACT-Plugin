@@ -105,7 +105,21 @@ When a user requests work without specifying a workflow (e.g., "fix this bug", "
 
 ### Memory Management
 
-**Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries and HANDOFF review via `SendMessage`. Workflow commands specify the exact steps.
+**Orchestrator**: Spawn `pact-memory-agent` at session start. Delegate all memory queries via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact steps.
+
+**Memory processing triggers** (orchestrator responsibility):
+- After CODE phase completes → TaskCreate for memory agent: "Process pending HANDOFFs"
+- After peer-review synthesis (step 5) → **PRIMARY trigger**, fires unconditionally
+- After comPACT specialist completes → TaskCreate for memory agent
+- During wrap-up → Consolidation (Pass 2) with safety net for unprocessed HANDOFFs
+- These triggers are idempotent — safe to fire even if HANDOFFs were already processed
+- **Primary source**: TaskList (all completed tasks). Breadcrumb file is supplementary (timestamps/ordering).
+
+**Task completion safety nets**:
+- SKILL.md step merge (instruction — agent self-completes)
+- TeammateIdle completion gate hook (mechanical — blocks idle until tasks completed)
+- Orchestrator verification checklist (instruction — lead catches on HANDOFF receipt)
+- Stop hook uncompleted-tasks warning (mechanical — last-resort alert at session end)
 
 **Specialists**: Use built-in persistent memory for domain knowledge. Institutional knowledge goes in HANDOFFs — the memory agent reviews and saves it to pact-memory. For ad-hoc work outside formal workflows: query the memory agent when prior context would help. After making a significant decision, fixing a tricky bug, or discovering a non-obvious pattern, send the memory agent a save request. Specific triggers: architectural choices, gotchas that would waste hours if forgotten, cross-component impacts discovered, and stakeholder decisions.
 
