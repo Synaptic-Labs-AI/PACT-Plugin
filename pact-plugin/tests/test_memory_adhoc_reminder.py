@@ -15,6 +15,10 @@ Tests cover:
 10. main() exits 0 on unexpected errors (fail-silent)
 11. main() writes .adhoc_reminded guard file on reminder
 12. main() guard file has 0o600 permissions
+13. Edge: empty breadcrumb file (0 bytes) triggers unprocessed_handoffs
+14. Edge: breadcrumb file with only malformed JSON triggers unprocessed_handoffs
+15. Edge: guard file blocks both unprocessed_handoffs and adhoc_save via main()
+16. Integration: main() guard file written for unprocessed_handoffs path too
 """
 import json
 import io
@@ -409,3 +413,204 @@ class TestMain:
         assert exc_info.value.code == 0
         guard = teams_dir / ".adhoc_reminded"
         assert not guard.exists()
+
+
+class TestEdgeCaseBreadcrumbContent:
+    """Edge case tests for breadcrumb file content vs existence checks.
+
+    The get_reminder_type() function checks .exists() on the breadcrumb file,
+    not its content. These tests verify behavior when the file exists but has
+    unusual content (empty, malformed, etc.).
+    """
+
+    def test_empty_breadcrumb_file_triggers_unprocessed(self, tmp_path):
+        """Empty file (0 bytes) — .exists() returns True → 'unprocessed_handoffs'.
+
+        This is intentional behavior: an empty breadcrumb file means the hook
+        created it (O_CREAT) but the write failed or was interrupted. The file's
+        presence is the signal, not its content. The memory agent handles empty
+        files gracefully.
+        """
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text("")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
+
+    def test_breadcrumb_with_only_malformed_json_triggers_unprocessed(self, tmp_path):
+        """File with only malformed JSON — .exists() True → 'unprocessed_handoffs'.
+
+        The reminder hook doesn't parse the file — it only checks existence.
+        Malformed content is the memory agent's problem to handle.
+        """
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text(
+            'not valid json\n{"truncated\n'
+        )
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
+
+    def test_breadcrumb_with_only_whitespace_triggers_unprocessed(self, tmp_path):
+        """File with only whitespace/newlines — .exists() True → 'unprocessed_handoffs'."""
+        from memory_adhoc_reminder import get_reminder_type
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text("\n\n  \n")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        assert result == "unprocessed_handoffs"
+
+
+class TestMainIntegrationBothPaths:
+    """Integration tests verifying main() produces correct systemMessage JSON
+    for both reminder paths and that guard file behavior is consistent."""
+
+    def test_unprocessed_handoffs_writes_guard_file(self, tmp_path, capsys):
+        """Guard file is written when unprocessed_handoffs reminder fires."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert (teams_dir / ".adhoc_reminded").exists()
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "Unprocessed HANDOFFs" in output["systemMessage"]
+
+    def test_guard_blocks_unprocessed_handoffs_via_main(self, tmp_path, capsys):
+        """Guard file prevents unprocessed_handoffs reminder in main()."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        (teams_dir / ".adhoc_reminded").write_text("")
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_adhoc_save_message_content(self, tmp_path, capsys):
+        """Verify adhoc_save message contains actionable content."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        msg = output["systemMessage"]
+        # Must mention outside workflows (differentiates from unprocessed path)
+        assert "outside formal PACT workflows" in msg
+        # Must provide actionable guidance
+        assert "SendMessage" in msg
+
+    def test_unprocessed_handoffs_message_content(self, tmp_path, capsys):
+        """Verify unprocessed_handoffs message contains actionable content."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        msg = output["systemMessage"]
+        # Must mention unprocessed HANDOFFs
+        assert "Unprocessed HANDOFFs" in msg
+        # Must suggest wrap-up as remediation
+        assert "wrap-up" in msg
+
+    def test_empty_breadcrumb_triggers_warning_via_main(self, tmp_path, capsys):
+        """Empty breadcrumb file → unprocessed_handoffs warning via main()."""
+        from memory_adhoc_reminder import main
+
+        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+        (teams_dir / "completed_handoffs.jsonl").write_text("")
+
+        input_data = json.dumps({"transcript": "short"})
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "Unprocessed HANDOFFs" in output["systemMessage"]
+
+    def test_no_team_name_env_var_no_crash(self, tmp_path, capsys):
+        """Missing CLAUDE_CODE_TEAM_NAME env var → no reminder, no crash."""
+        from memory_adhoc_reminder import main
+
+        input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
+        env = {}  # No CLAUDE_CODE_TEAM_NAME
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=True):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
