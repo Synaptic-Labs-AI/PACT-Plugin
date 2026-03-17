@@ -482,6 +482,35 @@ class TestMain:
 
         assert exc_info.value.code == 2
 
+    def test_allows_when_tasks_owned_by_different_teammate(self, tmp_path, capsys):
+        """P0: Teammate A goes idle but all completable tasks belong to
+        teammate B → exit 0 (A has nothing to complete)."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        # Task owned by frontend-coder, NOT backend-coder
+        _make_task_file(task_dir, "5", "frontend-coder", "in_progress",
+                        {"handoff": VALID_HANDOFF})
+        _make_task_file(task_dir, "8", "frontend-coder", "in_progress",
+                        {"handoff": VALID_HANDOFF})
+
+        # backend-coder goes idle
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
     def test_fail_open_on_unexpected_exception(self, tmp_path):
         """P1: Unexpected exception → exit 0 (fail-open, not trapped)."""
         from teammate_completion_gate import main
