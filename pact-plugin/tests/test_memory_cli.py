@@ -529,26 +529,6 @@ class TestApiSaveVerification:
         assert call_order == ["get", "sync"]
 
 
-# ---------------------------------------------------------------------------
-# Agent Model Configuration
-# ---------------------------------------------------------------------------
-
-class TestAgentModelConfig:
-    """Verify agent frontmatter configuration (#245)."""
-
-    def test_memory_agent_uses_sonnet_model(self):
-        """pact-memory-agent.md should specify model: sonnet."""
-        agent_path = (
-            Path(__file__).resolve().parent.parent
-            / "agents" / "pact-memory-agent.md"
-        )
-        content = agent_path.read_text()
-        # Extract frontmatter (between --- markers)
-        parts = content.split("---", 2)
-        assert len(parts) >= 3, "Agent file should have YAML frontmatter"
-        frontmatter = parts[1]
-        assert "model: sonnet" in frontmatter
-
 
 # ---------------------------------------------------------------------------
 # Search Command

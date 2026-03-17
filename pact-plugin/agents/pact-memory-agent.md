@@ -28,7 +28,6 @@ description: |
   </example>
 color: "#708090"
 permissionMode: acceptEdits
-model: sonnet
 memory: user
 skills:
   - pact-agent-teams
