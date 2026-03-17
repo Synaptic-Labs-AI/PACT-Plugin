@@ -110,7 +110,7 @@ def sample_task_list(make_task) -> list[dict[str, Any]]:
         # Active agent task
         make_task(
             task_id="task-005",
-            subject="pact-backend-coder: Implement auth endpoint",
+            subject="backend-coder: Implement auth endpoint",
             status="in_progress",
             blocked_by=["task-004"],
         ),
@@ -400,17 +400,17 @@ class TestFindActiveAgents:
 
         assert len(result) == 1
         assert result[0]["id"] == "task-005"
-        assert "pact-backend-coder" in result[0]["subject"].lower()
+        assert "backend-coder" in result[0]["subject"].lower()
 
     def test_finds_multiple_active_agents(self, make_task):
         """Test finds all active agent tasks when multiple exist."""
         from shared.task_utils import find_active_agents
 
         tasks = [
-            make_task("task-1", "pact-backend-coder: API endpoint", "in_progress"),
-            make_task("task-2", "pact-frontend-coder: UI component", "in_progress"),
-            make_task("task-3", "pact-test-engineer: Integration tests", "in_progress"),
-            make_task("task-4", "pact-architect: Design review", "completed"),  # Not active
+            make_task("task-1", "backend-coder: API endpoint", "in_progress"),
+            make_task("task-2", "frontend-coder: UI component", "in_progress"),
+            make_task("task-3", "test-engineer: Integration tests", "in_progress"),
+            make_task("task-4", "architect: Design review", "completed"),  # Not active
         ]
 
         result = find_active_agents(tasks)
@@ -424,7 +424,7 @@ class TestFindActiveAgents:
         from shared.task_utils import find_active_agents
 
         tasks = [
-            make_task("task-1", "pact-backend-coder: Work", "completed"),
+            make_task("task-1", "backend-coder: Work", "completed"),
             make_task("task-2", "Feature task", "in_progress"),  # Not an agent
         ]
 
@@ -437,17 +437,17 @@ class TestFindActiveAgents:
         from shared.task_utils import find_active_agents
 
         agent_prefixes = [
-            "pact-preparer:",
-            "pact-architect:",
-            "pact-backend-coder:",
-            "pact-frontend-coder:",
-            "pact-database-engineer:",
-            "pact-devops-engineer:",
-            "pact-n8n:",
-            "pact-test-engineer:",
-            "pact-security-engineer:",
-            "pact-qa-engineer:",
-            "pact-secretary:",
+            "preparer:",
+            "architect:",
+            "backend-coder:",
+            "frontend-coder:",
+            "database-engineer:",
+            "devops-engineer:",
+            "n8n:",
+            "test-engineer:",
+            "security-engineer:",
+            "qa-engineer:",
+            "secretary:",
         ]
 
         for prefix in agent_prefixes:
@@ -468,8 +468,8 @@ class TestFindActiveAgents:
         from shared.task_utils import find_active_agents
 
         tasks = [
-            make_task("task-1", "PACT-BACKEND-CODER: Uppercase", "in_progress"),
-            make_task("task-2", "Pact-Frontend-Coder: Mixed case", "in_progress"),
+            make_task("task-1", "BACKEND-CODER: Uppercase", "in_progress"),
+            make_task("task-2", "Frontend-Coder: Mixed case", "in_progress"),
         ]
 
         result = find_active_agents(tasks)
@@ -617,7 +617,7 @@ class TestBuildRefreshFromTasks:
 
         feature = make_task("feat-1", "Implement auth", "in_progress")
         phase = make_task("phase-1", "CODE: auth", "in_progress")
-        agents = [make_task("agent-1", "pact-backend-coder: work", "in_progress")]
+        agents = [make_task("agent-1", "backend-coder: work", "in_progress")]
         blockers = []
 
         result = build_refresh_from_tasks(feature, phase, agents, blockers)
@@ -625,7 +625,7 @@ class TestBuildRefreshFromTasks:
         assert "[POST-COMPACTION CHECKPOINT]" in result
         assert "Implement auth" in result
         assert "CODE: auth" in result
-        assert "pact-backend-coder" in result
+        assert "backend-coder" in result
         assert "Monitor active agents" in result
 
     def test_handles_missing_feature(self, make_task):
@@ -676,15 +676,15 @@ class TestBuildRefreshFromTasks:
 
         feature = make_task("feat-1", "Feature", "in_progress")
         agents = [
-            make_task("agent-1", "pact-backend-coder: API", "in_progress"),
-            make_task("agent-2", "pact-frontend-coder: UI", "in_progress"),
+            make_task("agent-1", "backend-coder: API", "in_progress"),
+            make_task("agent-2", "frontend-coder: UI", "in_progress"),
         ]
 
         result = build_refresh_from_tasks(feature, None, agents, [])
 
         assert "Active Agents (2)" in result
-        assert "pact-backend-coder: API" in result
-        assert "pact-frontend-coder: UI" in result
+        assert "backend-coder: API" in result
+        assert "frontend-coder: UI" in result
 
     def test_includes_feature_id_when_present(self, make_task):
         """Test includes feature task ID in output."""
@@ -702,7 +702,7 @@ class TestBuildRefreshFromTasks:
 
         feature = make_task("feat-1", "Feature", "in_progress")
         phase = make_task("phase-1", "CODE: work", "in_progress")
-        agents = [make_task("agent-1", "pact-backend-coder: work", "in_progress")]
+        agents = [make_task("agent-1", "backend-coder: work", "in_progress")]
         blockers = [make_task("block-1", "Blocker", "pending", metadata={"type": "blocker"})]
 
         # With blockers - should mention addressing blockers

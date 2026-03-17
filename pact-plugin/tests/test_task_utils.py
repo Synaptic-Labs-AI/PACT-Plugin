@@ -258,9 +258,9 @@ class TestFindActiveAgents:
     def test_finds_active_agents(self):
         from task_utils import find_active_agents
         tasks = [
-            {"id": "1", "subject": "pact-backend-coder: implement auth",
+            {"id": "1", "subject": "backend-coder: implement auth",
              "status": "in_progress"},
-            {"id": "2", "subject": "pact-test-engineer: write tests",
+            {"id": "2", "subject": "test-engineer: write tests",
              "status": "in_progress"},
         ]
         result = find_active_agents(tasks)
@@ -269,7 +269,7 @@ class TestFindActiveAgents:
     def test_excludes_completed_agents(self):
         from task_utils import find_active_agents
         tasks = [
-            {"id": "1", "subject": "pact-backend-coder: implement auth",
+            {"id": "1", "subject": "backend-coder: implement auth",
              "status": "completed"},
         ]
         result = find_active_agents(tasks)
@@ -292,10 +292,10 @@ class TestFindActiveAgents:
     def test_detects_all_agent_types(self):
         from task_utils import find_active_agents
         agent_types = [
-            "pact-preparer", "pact-architect", "pact-backend-coder",
-            "pact-frontend-coder", "pact-database-engineer",
-            "pact-devops-engineer", "pact-n8n", "pact-test-engineer",
-            "pact-security-engineer", "pact-qa-engineer", "pact-secretary",
+            "preparer", "architect", "backend-coder",
+            "frontend-coder", "database-engineer",
+            "devops-engineer", "n8n", "test-engineer",
+            "security-engineer", "qa-engineer", "secretary",
         ]
         tasks = [
             {"id": str(i), "subject": f"{agent}: task {i}",
@@ -308,7 +308,7 @@ class TestFindActiveAgents:
     def test_case_insensitive_matching(self):
         from task_utils import find_active_agents
         tasks = [
-            {"id": "1", "subject": "Pact-Backend-Coder: task",
+            {"id": "1", "subject": "Backend-Coder: task",
              "status": "in_progress"},
         ]
         result = find_active_agents(tasks)
