@@ -232,6 +232,7 @@ def main():
     except Exception as e:
         # Never block on errors — this is an observer hook
         print(f"Hook warning (merge_guard_post): {e}", file=sys.stderr)
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
 

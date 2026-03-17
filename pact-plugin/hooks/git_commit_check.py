@@ -371,6 +371,7 @@ def main():
     except Exception as e:
         # If something goes wrong in the hook, log it but don't block
         print(f"Hook Error (git_commit_check): {e}", file=sys.stderr)
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
 
