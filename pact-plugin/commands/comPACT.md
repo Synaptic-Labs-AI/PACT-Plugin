@@ -210,9 +210,9 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
 - [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
-  SendMessage(to="memory-agent",
-    message="[lead→memory-agent] Process pending HANDOFFs. Read the breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review HANDOFFs via TaskGet, save institutional knowledge, delete file when done.",
-    summary="Process pending HANDOFFs")
+  TaskCreate(subject="memory-agent: process pending HANDOFFs",
+    description="Read breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review HANDOFFs via TaskGet, extract institutional knowledge, save to pact-memory, delete file when done. Report summary when done. If file doesn't exist, report 'no pending HANDOFFs' and complete.")
+  TaskUpdate(taskId, owner="memory-agent")
   ```
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 - [ ] **`TaskUpdate`**: Feature task status = "completed"

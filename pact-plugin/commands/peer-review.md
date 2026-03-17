@@ -237,11 +237,11 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
    TaskUpdate(taskId, owner="memory-agent")
    ```
 
-   HANDOFF review (via message — lightweight trigger):
+   HANDOFF review (via task — visible in TaskList):
    ```
-   SendMessage(to="memory-agent",
-     message="[lead→memory-agent] Process pending HANDOFFs (primary trigger, pre-merge). Read breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review all HANDOFFs, save institutional knowledge, delete file when done.",
-     summary="Process pending HANDOFFs (primary trigger)")
+   TaskCreate(subject="memory-agent: process pending HANDOFFs (primary trigger, pre-merge)",
+     description="Read breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, review all HANDOFFs via TaskGet, extract institutional knowledge, save to pact-memory, delete file when done. Report summary when done. If file doesn't exist, report 'no pending HANDOFFs' and complete.")
+   TaskUpdate(taskId, owner="memory-agent")
    ```
 
    This is the **primary memory trigger** — fires unconditionally after all reviewers complete, before the merge question. Calibration runs unconditionally. Skip only for trivial single-file PRs.

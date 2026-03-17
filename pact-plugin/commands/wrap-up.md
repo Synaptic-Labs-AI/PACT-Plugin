@@ -7,11 +7,11 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 
 ## 1. Memory Consolidation (Pass 2)
 
-Send the memory agent a consolidation request:
+Create a consolidation task for the memory agent:
 ```
-SendMessage(to="memory-agent",
-  message="[lead→memory-agent] Session consolidation (Pass 2). First: if breadcrumb file exists at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, process any remaining HANDOFFs. Then: review all memories saved during this session, consolidate related entries, prune superseded memories, sync Working Memory to CLAUDE.md, save orchestration retrospective as calibration data. Report summary when done.",
-  summary="Session consolidation (Pass 2)")
+TaskCreate(subject="memory-agent: session consolidation (Pass 2)",
+  description="First: if breadcrumb file exists at ~/.claude/teams/{team_name}/completed_handoffs.jsonl, process any remaining HANDOFFs. Then: review all memories saved during this session, consolidate related entries, prune superseded memories, sync Working Memory to CLAUDE.md, save orchestration retrospective as calibration data. Report summary when done.")
+TaskUpdate(taskId, owner="memory-agent")
 ```
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
