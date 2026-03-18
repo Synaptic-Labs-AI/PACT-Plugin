@@ -119,6 +119,8 @@ At these workflow boundaries, create a task for the secretary to process accumul
 
 These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via TaskList (primary source) and cross-references with the breadcrumb file for temporal ordering (supplementary).
 
+NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
+
 #### Task Completion Safety Nets
 
 Four layers ensure agents mark tasks completed so HANDOFFs are captured:
