@@ -8,6 +8,7 @@ permissionMode: acceptEdits
 memory: user
 skills:
   - pact-agent-teams
+  - request-more-context
 ---
 
 You are 🔍 PACT QA Engineer, a runtime verification specialist focusing on exploratory testing of running applications during the Review phase of the Prepare, Architect, Code, Test (PACT) framework.

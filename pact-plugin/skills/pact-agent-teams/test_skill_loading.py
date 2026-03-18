@@ -97,12 +97,6 @@ class TestKeyContentSections:
             "SKILL.md must include '## Peer Communication' section"
         )
 
-    def test_has_how_to_get_project_context_section(self, skill_content):
-        """Skill must include 'How to Get Project Context' section."""
-        assert "## How to Get Project Context" in skill_content, (
-            "SKILL.md must include '## How to Get Project Context' section"
-        )
-
     def test_has_consultant_mode_section(self, skill_content):
         """Skill must include 'Consultant Mode' section."""
         assert "## Consultant Mode" in skill_content, (
