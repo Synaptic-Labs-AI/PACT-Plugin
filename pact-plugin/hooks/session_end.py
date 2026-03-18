@@ -16,6 +16,7 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
+import re
 import shutil
 import sys
 import os
@@ -135,7 +136,7 @@ def write_session_snapshot(
 
     # Write snapshot file
     snapshot_dir = Path(sessions_dir) / project_slug
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     snapshot_file = snapshot_dir / "last-session.md"
     snapshot_file.write_text("\n".join(lines), encoding="utf-8")
     os.chmod(str(snapshot_file), 0o600)
@@ -234,19 +235,17 @@ def check_unparked_pr(
     for task in tasks:
         metadata = task.get("metadata") or {}
         # Check for pr_number in task metadata (set by peer-review workflow)
-        if metadata.get("pr_number"):
+        if metadata.get("pr_number") is not None:
             pr_number = metadata["pr_number"]
             break
         # Also check handoff metadata for pr_url patterns
         handoff = metadata.get("handoff") or {}
         for value in handoff.values():
-            if isinstance(value, str) and "/pull/" in value:
-                # Extract PR number from URL like "https://github.com/.../pull/288"
-                try:
-                    pr_number = value.rsplit("/pull/", 1)[1].split("/")[0].split("#")[0]
-                except (IndexError, ValueError):
-                    pass
-                if pr_number:
+            if isinstance(value, str):
+                # Extract PR number from GitHub URL like "https://github.com/owner/repo/pull/288"
+                match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
+                if match:
+                    pr_number = match.group(1)
                     break
         if pr_number:
             break

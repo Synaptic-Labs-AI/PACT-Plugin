@@ -179,7 +179,7 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
 
     for task in in_progress:
         subject = task.get("subject", "")
-        metadata = task.get("metadata", {})
+        metadata = task.get("metadata") or {}
 
         if metadata.get("type") in ("blocker", "algedonic"):
             blocker_tasks.append(task)
@@ -239,13 +239,15 @@ def check_parked_state(
     Detect parked work from a previous session's /PACT:park invocation.
 
     Checks if ~/.claude/pact-sessions/{project_slug}/parked-state.json exists.
-    If found, returns a formatted context string for the orchestrator describing
-    the parked PR, branch, and worktree so it can offer to resume.
+    If found, validates the parked state and returns a formatted context string
+    for the orchestrator describing the parked PR, branch, and worktree so it
+    can offer to resume.
 
-    Uses lazy validation: checks file existence and reads JSON locally, but does
-    NOT validate PR state via `gh pr view` to avoid ~1s startup latency. Stale
-    state (PR already merged/closed) is detected on first orchestrator action
-    when it runs /PACT:peer-review or /PACT:wrap-up.
+    Validation pipeline (ordered cheapest-first):
+    1. TTL check: parked_at older than 14 days → clean up stale file, return info
+    2. Active PR validation via `gh pr view`: if PR is MERGED/CLOSED → clean up,
+       return info. Fail-open: if gh is unavailable or network fails, skip this
+       check and fall through to existing behavior.
 
     Args:
         project_slug: Project identifier for the session directory
@@ -278,6 +280,26 @@ def check_parked_state(
     if pr_number is None:
         return None
 
+    # TTL check: clean up parked state older than 14 days (cheaper than gh call)
+    # Fail-open: if parked_at is missing or unparseable, skip TTL check
+    parked_at_str = state.get("parked_at")
+    if parked_at_str:
+        try:
+            parked_at = datetime.fromisoformat(parked_at_str.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - parked_at).days
+            if age_days > 14:
+                try:
+                    state_file.unlink()
+                except OSError:
+                    pass
+                parked_date = parked_at.strftime("%Y-%m-%d")
+                return (
+                    f"Stale parked state from {parked_date} cleaned up "
+                    f"(older than 14 days). PR #{pr_number} on {branch}."
+                )
+        except (ValueError, TypeError, OverflowError):
+            pass  # Fail-open: unparseable timestamp — skip TTL check
+
     # Active PR validation: check if the PR is still open.
     # Only runs when parked-state.json exists (rare), so ~1s latency is acceptable.
     # Fail-open: if gh is unavailable or network fails, fall through to existing behavior.
@@ -286,7 +308,7 @@ def check_parked_state(
             ["gh", "pr", "view", str(pr_number), "--json", "state", "--jq", ".state"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=5,
         )
         if result.returncode == 0:
             pr_state = result.stdout.strip().upper()
