@@ -342,7 +342,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable?
+- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See CLAUDE.md Memory Management.
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -516,9 +516,9 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **Process coder HANDOFFs** (non-blocking):
   ```
-  TaskCreate(subject="memory-agent: process pending HANDOFFs",
+  TaskCreate(subject="secretary: process pending HANDOFFs",
     description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
-  TaskUpdate(taskId, owner="memory-agent")
+  TaskUpdate(taskId, owner="secretary")
   ```
   Do not block on completion — TEST phase proceeds in parallel.
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`. This is the belt-and-suspenders check for the SKILL.md step merge (ADR-003).
@@ -640,15 +640,15 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
 7. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
    ```
-   TaskCreate(subject="memory-agent: process pending HANDOFFs (post-review)",
+   TaskCreate(subject="secretary: process pending HANDOFFs (post-review)",
      description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done. Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
-   TaskUpdate(taskId, owner="memory-agent")
+   TaskUpdate(taskId, owner="secretary")
    ```
 8. **Mid-session consolidation** (multi-feature sessions only): If this is the second or subsequent feature completed in this session, create a consolidation task to merge cross-feature knowledge:
    ```
-   TaskCreate(subject="memory-agent: mid-session consolidation",
+   TaskCreate(subject="secretary: mid-session consolidation",
      description="Multiple features completed this session. Review memories saved so far, consolidate related entries across features, prune superseded memories. Report summary when done.")
-   TaskUpdate(taskId, owner="memory-agent")
+   TaskUpdate(taskId, owner="secretary")
    ```
    Skip for the first feature in a session — full consolidation happens during `/PACT:wrap-up`.
-9. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via `pact-memory-agent`
+9. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via the secretary

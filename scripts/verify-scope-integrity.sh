@@ -329,7 +329,7 @@ echo ""
 # deletion or function signature changes.
 # Note: memory_enforce.py was removed in the memory architecture redesign
 # (PR #275). Memory saves now happen via HANDOFF curation through the
-# memory agent, not via a SubagentStop enforcement hook.
+# secretary, not via a SubagentStop enforcement hook.
 # Note: memory_prompt.py was also removed in PR #275. Its PACT_AGENTS
 # constant moved to hooks/shared/constants.py.
 echo "15. Memory hooks baseline:"

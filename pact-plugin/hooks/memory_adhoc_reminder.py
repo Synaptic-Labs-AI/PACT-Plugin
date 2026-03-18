@@ -8,7 +8,7 @@ Non-blocking (always exit 0). Three reminder paths (checked in priority order):
 1. "uncompleted_tasks" — agent-owned tasks still in_progress at session end.
    Last-resort safety net for agents that crashed or missed the TeammateIdle gate.
 2. "unprocessed_handoffs" — breadcrumb file exists at session end, meaning
-   workflow HANDOFFs were captured but never processed by the memory agent.
+   workflow HANDOFFs were captured but never processed by the secretary.
 3. "adhoc_save" — no breadcrumb file but session had substantive ad-hoc work
    outside formal PACT workflows.
 
@@ -165,13 +165,13 @@ def format_uncompleted_message(uncompleted: list[dict]) -> str:
 _MESSAGES = {
     REMINDER_UNPROCESSED_HANDOFFS: (
         "Unprocessed HANDOFFs detected from this session's workflow. "
-        "Consider running /PACT:wrap-up or ensuring the memory agent "
+        "Consider running /PACT:wrap-up or ensuring the secretary "
         "processes them in the next session."
     ),
     REMINDER_ADHOC_SAVE: (
         "This session had work outside formal PACT workflows. "
         "If significant decisions or discoveries were made, consider "
-        "sending the memory agent a save request via SendMessage."
+        "sending the secretary a save request via SendMessage."
     ),
 }
 

@@ -87,7 +87,7 @@ def validate_task_handoff(
     return None
 
 
-# Note: The memory agent processes HANDOFFs sequentially ("read all before saving")
+# Note: The secretary processes HANDOFFs sequentially ("read all before saving")
 # for deduplication. This serializes writes but produces cleaner entries.
 # Acceptable at current scale (2-5 HANDOFFs per workflow).
 def check_memory_saved(
@@ -174,10 +174,10 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
 
 def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> None:
     """
-    Append a breadcrumb to the pending handoffs file for memory agent consumption.
+    Append a breadcrumb to the pending handoffs file for secretary consumption.
 
     Writes a single JSONL line to ~/.claude/teams/{team_name}/completed_handoffs.jsonl
-    so the memory agent can discover completed tasks without the orchestrator needing
+    so the secretary can discover completed tasks without the orchestrator needing
     to enumerate task IDs. Uses POSIX atomic append (O_WRONLY|O_APPEND|O_CREAT) with
     0o600 permissions for concurrent safety and security.
 
@@ -264,7 +264,7 @@ def main():
         print(memory_feedback, file=sys.stderr)
         sys.exit(2)  # Block completion — feedback goes to agent
 
-    # Both gates passed — append breadcrumb for memory agent consumption.
+    # Both gates passed — append breadcrumb for secretary consumption.
     # This is the LAST action before exit: every breadcrumb = fully complete task.
     append_pending_handoff(task_id, teammate_name, team_name)
 

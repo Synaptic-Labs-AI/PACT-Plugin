@@ -66,7 +66,7 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 ## INSTRUCTIONS
 1. Read `CLAUDE.md` at session start to understand project structure and current state
 2. Create the session team immediately — the `session_init` hook provides a session-unique team name (format: `pact-{session_hash}`). This must exist before starting any work or spawning any agents. Use this name wherever `{team_name}` appears in commands.
-3. Spawn `pact-memory-agent` as a teammate on the session team. It delivers a session briefing at spawn and remains available for memory queries and HANDOFF review throughout the session.
+3. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn and remains available for memory queries, specialist questions, and HANDOFF review throughout the session.
 4. Apply the PACT framework methodology with specific principles at each phase, and delegate tasks to specific specialist agents for each phase
 5. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
 6. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
@@ -106,17 +106,20 @@ When a user requests work without specifying a workflow (e.g., "fix this bug", "
 
 ### Memory Management
 
-Delegate memory queries to the memory agent via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
+Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
 
 #### Memory Processing Triggers
 
-At these workflow boundaries, create a task for the memory agent to process accumulated HANDOFFs:
-- After CODE phase completes → `TaskCreate` for memory agent: "Process pending HANDOFFs"
-- After peer-review synthesis (step 5) → **PRIMARY trigger**, fires unconditionally
-- After comPACT specialist completes → `TaskCreate` for memory agent
+At these workflow boundaries, create a task for the secretary to process accumulated HANDOFFs:
+- After CODE phase completes → `TaskCreate` for secretary: "Process pending HANDOFFs"
+- At peer-review dispatch (parallel with reviewers) → **PRIMARY trigger**, fires unconditionally
+- After remediation completes → `TaskCreate` for secretary: "Update synthesis with remediation findings" (incremental delta, only if remediation occurred)
+- After comPACT specialist completes → `TaskCreate` for secretary
 - During wrap-up → Consolidation (Pass 2) with safety net for unprocessed HANDOFFs
 
-These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The memory agent discovers completed tasks via TaskList (primary source) and cross-references with the breadcrumb file for temporal ordering (supplementary).
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via TaskList (primary source) and cross-references with the breadcrumb file for temporal ordering (supplementary).
+
+NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
 #### Task Completion Safety Nets
 
@@ -126,10 +129,6 @@ Four layers ensure agents mark tasks completed so HANDOFFs are captured:
 - Orchestrator verification checklist (instruction — catch on HANDOFF receipt via TaskList)
 - Stop hook uncompleted-tasks warning (mechanical — last-resort alert at session end)
 
-#### Specialist Memory Guidance
-
-When dispatching specialists, include guidance about memory: specialists use built-in persistent memory for domain knowledge (accumulated across sessions). Institutional knowledge — architectural decisions, cross-component impacts, stakeholder constraints — goes in HANDOFFs, which the memory agent reviews and saves to pact-memory. For ad-hoc work outside formal workflows, instruct specialists to send the memory agent a save request after significant decisions, tricky bug fixes, or non-obvious pattern discoveries.
-
 #### Three-Layer Memory Architecture
 
 PACT uses three complementary memory layers:
@@ -137,10 +136,34 @@ PACT uses three complementary memory layers:
 | Layer | Storage | Purpose | Who Writes | Auto-loaded |
 |-------|---------|---------|------------|-------------|
 | **Auto-memory** (`MEMORY.md`) | Per-project file | General session learnings, user preferences | Platform (automatic) | Yes (first 200 lines) |
-| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Memory agent | Via Working Memory in CLAUDE.md |
+| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Secretary | Via Working Memory in CLAUDE.md |
 | **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents (built-in) | Yes (first 200 lines) |
 
 **Coexistence model**: Auto-memory captures broad session context automatically. pact-memory provides structured, searchable knowledge with semantic retrieval and graph-enhanced lookup. Agent persistent memory builds domain expertise per specialist. These layers complement each other — do not treat them as redundant.
+
+**Decision tree** — which layer should store this knowledge?
+
+```
+Is this knowledge specific to ONE agent's craft/domain?
+  -> YES -> Agent persistent memory (the agent saves it themselves)
+  -> NO |
+
+Is this knowledge about the project that other agents/sessions need?
+  -> YES -> pact-memory (secretary saves via Knowledge Distiller)
+  -> NO |
+
+Is this a broad session observation or user preference?
+  -> YES -> Auto-memory (platform handles automatically)
+  -> NO -> Probably doesn't need saving
+```
+
+| Content | Layer | Example |
+|---------|-------|---------|
+| File locations, codepaths, framework quirks | Agent persistent memory | "React components are in src/ui/" |
+| Architectural decisions, cross-cutting patterns | pact-memory | "Auth uses JWT with 15-min expiry" |
+| Scope expansion patterns, variety calibration | pact-memory | "Auth tasks consistently underestimated" |
+| User communication preferences | Auto-memory | "User prefers concise responses" |
+| Stakeholder constraints, compliance requirements | pact-memory | "Legal requires session token encryption" |
 
 ### S3/S4 Operational Modes
 
@@ -415,7 +438,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🛡️ pact-security-engineer** (Review): Adversarial security code review
 - **🔍 pact-qa-engineer** (Review): Runtime verification, exploratory testing
-- **🧠 pact-memory-agent** (Memory): Memory management, context preservation, post-compaction recovery
+- **🧠 pact-secretary** (Secretary): Research assistant, knowledge distiller, context preservation
 
 ### Agent Teams Dispatch
 

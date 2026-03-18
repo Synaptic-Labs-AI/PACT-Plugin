@@ -146,17 +146,17 @@ def find_active_agents(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         List of agent task dicts
     """
     agent_prefixes = (
-        "pact-preparer:",
-        "pact-architect:",
-        "pact-backend-coder:",
-        "pact-frontend-coder:",
-        "pact-database-engineer:",
-        "pact-devops-engineer:",
-        "pact-n8n:",
-        "pact-test-engineer:",
-        "pact-security-engineer:",
-        "pact-qa-engineer:",
-        "pact-memory-agent:",
+        "preparer:",
+        "architect:",
+        "backend-coder:",
+        "frontend-coder:",
+        "database-engineer:",
+        "devops-engineer:",
+        "n8n:",
+        "test-engineer:",
+        "security-engineer:",
+        "qa-engineer:",
+        "secretary:",
     )
 
     active = []

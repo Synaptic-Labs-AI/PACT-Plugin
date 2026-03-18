@@ -8,7 +8,7 @@ Creates two types of symlinks:
 1. ~/.claude/protocols/pact-plugin/ -> plugin/protocols/
    (enables @~/.claude/protocols/pact-plugin/... references)
 2. ~/.claude/agents/pact-*.md -> plugin/agents/pact-*.md
-   (enables non-prefixed agent names like "pact-memory-agent")
+   (enables non-prefixed agent names like "pact-secretary")
 """
 
 import os
@@ -23,7 +23,7 @@ def setup_plugin_symlinks() -> str | None:
     1. ~/.claude/protocols/pact-plugin/ -> plugin/protocols/
        (enables @~/.claude/protocols/pact-plugin/... references in CLAUDE.md)
     2. ~/.claude/agents/pact-*.md -> plugin/agents/pact-*.md
-       (enables non-prefixed agent names like "pact-memory-agent")
+       (enables non-prefixed agent names like "pact-secretary")
 
     Returns:
         Status message or None if successful

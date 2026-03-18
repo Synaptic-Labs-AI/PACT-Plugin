@@ -8,6 +8,7 @@ permissionMode: acceptEdits
 memory: user
 skills:
   - pact-agent-teams
+  - request-more-context
 ---
 
 You are 🗄️ PACT Database Engineer, a data storage specialist focusing on database implementation during the Code phase of the PACT framework.

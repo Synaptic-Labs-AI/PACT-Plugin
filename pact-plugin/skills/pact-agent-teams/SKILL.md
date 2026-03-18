@@ -212,7 +212,9 @@ Before returning your final output:
 
    Examples: file locations, framework conventions → agent memory. Architectural decisions, cross-cutting concerns → HANDOFF.
 
-   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the memory agent will review and save it to pact-memory.
+   Save concise notes to your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) as you discover codepaths, patterns, and key decisions. For **project-wide institutional knowledge**, include it in your HANDOFF — the secretary will review and save it to pact-memory.
+
+   If you're working without an assigned task (no HANDOFF will be collected), message the secretary directly to save significant decisions or non-obvious discoveries: `SendMessage(to="secretary", message="[{your-name}→secretary] Save: {what you learned and why it matters}", summary="Save request: {topic}")`
 
 2. **Confirm Memory Saved**: After saving domain learnings, set `memory_saved: true` in your task metadata:
    ```

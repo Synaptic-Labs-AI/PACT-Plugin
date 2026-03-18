@@ -435,7 +435,7 @@ class TestRegexPatternEdgeCases:
         assert PACT_AGENT_PATTERN.search("pact-security-engineer") is not None
         assert PACT_AGENT_PATTERN.search("pact-qa-engineer") is not None
         assert PACT_AGENT_PATTERN.search("pact-test-engineer") is not None
-        assert PACT_AGENT_PATTERN.search("pact-memory-agent") is not None
+        assert PACT_AGENT_PATTERN.search("pact-secretary") is not None
 
         # Should not match non-agent strings
         assert PACT_AGENT_PATTERN.search("other-agent") is None
@@ -539,7 +539,7 @@ class TestAgentListConsistency:
             "pact-test-engineer",
             "pact-security-engineer",
             "pact-qa-engineer",
-            "pact-memory-agent",
+            "pact-secretary",
         ]
         assert PACT_AGENTS == lifecycle_order, (
             f"PACT_AGENTS not in lifecycle order.\n"
@@ -558,17 +558,23 @@ class TestAgentListConsistency:
         idx = source.index(marker)
         # Grab a generous window after the marker to capture the full literal
         block = source[idx:idx + 600]
-        return re.findall(r'"(pact-[^"]+:)"', block)
+        return re.findall(r'"([^"]+:)"', block)
 
     def test_task_utils_prefixes_match_pact_agents(self):
-        """task_utils.py agent_prefixes should match PACT_AGENTS (with colon suffix)."""
+        """task_utils.py agent_prefixes should match PACT_AGENTS (short names with colon suffix).
+
+        Task subjects use short names (e.g., 'backend-coder:') while PACT_AGENTS
+        uses full subagent_type names (e.g., 'pact-backend-coder'). This test
+        verifies the mapping stays in sync.
+        """
         task_utils_path = str(
             Path(__file__).parent.parent / "hooks" / "shared" / "task_utils.py"
         )
         prefixes = self._parse_prefixes_from_source(
             task_utils_path, "agent_prefixes = ("
         )
-        expected = [a + ":" for a in PACT_AGENTS]
+        # Task subjects use short names (strip 'pact-' prefix)
+        expected = [a.removeprefix("pact-") + ":" for a in PACT_AGENTS]
         assert prefixes == expected, (
             f"task_utils.py agent_prefixes out of sync with PACT_AGENTS.\n"
             f"Expected: {expected}\n"

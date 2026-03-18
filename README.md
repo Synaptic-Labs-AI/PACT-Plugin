@@ -126,7 +126,7 @@ The orchestrator manages the cycle, delegating each phase to the appropriate spe
 | **Test Engineer** | Write and run comprehensive tests |
 | **Security Engineer** | Adversarial security code review |
 | **QA Engineer** | Runtime verification, exploratory testing |
-| **Memory Agent** | Persist context, recover from compaction |
+| **Secretary** | Research assistant, knowledge distiller, context preservation |
 
 ---
 
@@ -423,7 +423,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-marketplace/
 │           └── PACT/
-│               └── 3.10.3/     # Plugin version
+│               └── 3.11.0/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
