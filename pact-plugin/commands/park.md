@@ -88,7 +88,7 @@ Write `~/.claude/pact-sessions/{slug}/parked-state.json`:
 | `consolidation_completed` | boolean | Whether memory consolidation finished successfully |
 | `team_name` | string | Session team name (format: `pact-{session_hash}`) |
 
-**Slug derivation**: Use the branch name, replacing `/` with `-` (e.g., `feat/park-mode-consolidation-289` → `feat-park-mode-consolidation-289`).
+**Slug derivation**: Use the project directory basename — the same derivation as `session_init.py` (`Path(project_dir).name`). For example, if the project directory is `/Users/me/Sites/my-app`, the slug is `my-app`.
 
 ### 6. Shut Down Teammates
 

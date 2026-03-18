@@ -74,11 +74,11 @@ def write_session_snapshot(
             task_id = task.get("id", "?")
             subject = task.get("subject", "unknown")
             status = task.get("status", "unknown")
-            metadata = task.get("metadata", {})
+            metadata = task.get("metadata") or {}
 
             if status == "completed":
                 # Extract 1-line summary from handoff decisions if present
-                handoff = metadata.get("handoff", {})
+                handoff = metadata.get("handoff") or {}
                 decisions = handoff.get("decisions", [])
                 if decisions and isinstance(decisions, list):
                     summary = decisions[0] if isinstance(decisions[0], str) else str(decisions[0])
@@ -94,7 +94,7 @@ def write_session_snapshot(
 
             # Collect decisions from all completed tasks with handoff metadata
             if status == "completed":
-                handoff = metadata.get("handoff", {})
+                handoff = metadata.get("handoff") or {}
                 for decision in handoff.get("decisions", []):
                     if isinstance(decision, str) and decision not in decision_lines:
                         decision_lines.append(decision)
@@ -138,6 +138,7 @@ def write_session_snapshot(
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshot_file = snapshot_dir / "last-session.md"
     snapshot_file.write_text("\n".join(lines), encoding="utf-8")
+    os.chmod(str(snapshot_file), 0o600)
 
 
 def cleanup_stale_teams(
@@ -231,13 +232,13 @@ def check_unparked_pr(
     # Scan task metadata for open PR indicators
     pr_number = None
     for task in tasks:
-        metadata = task.get("metadata", {})
+        metadata = task.get("metadata") or {}
         # Check for pr_number in task metadata (set by peer-review workflow)
         if metadata.get("pr_number"):
             pr_number = metadata["pr_number"]
             break
         # Also check handoff metadata for pr_url patterns
-        handoff = metadata.get("handoff", {})
+        handoff = metadata.get("handoff") or {}
         for value in handoff.values():
             if isinstance(value, str) and "/pull/" in value:
                 # Extract PR number from URL like "https://github.com/.../pull/288"
@@ -267,6 +268,7 @@ def check_unparked_pr(
         )
         existing = snapshot_file.read_text(encoding="utf-8")
         snapshot_file.write_text(existing + warning, encoding="utf-8")
+        os.chmod(str(snapshot_file), 0o600)
     except (IOError, OSError):
         pass  # Best-effort — never block session end
 

@@ -15,6 +15,7 @@ Manages:
 import json
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -276,6 +277,31 @@ def check_parked_state(
 
     if pr_number is None:
         return None
+
+    # Active PR validation: check if the PR is still open.
+    # Only runs when parked-state.json exists (rare), so ~1s latency is acceptable.
+    # Fail-open: if gh is unavailable or network fails, fall through to existing behavior.
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "state", "--jq", ".state"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            pr_state = result.stdout.strip().upper()
+            if pr_state in ("MERGED", "CLOSED"):
+                # PR is no longer open — clean up stale parked state
+                try:
+                    state_file.unlink()
+                except OSError:
+                    pass
+                return (
+                    f"Previously parked PR #{pr_number} has been "
+                    f"{pr_state.lower()}. Cleaned up parked state."
+                )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass  # Fail-open: gh not available or network error — use lazy validation
 
     consolidation = state.get("consolidation_completed", False)
     consolidation_note = ""
