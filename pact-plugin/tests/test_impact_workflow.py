@@ -93,21 +93,6 @@ class TestImPACTTerminationSignals:
         """Test that imPACT termination signals are defined."""
         assert "imPACT" in TERMINATION_SIGNALS
 
-    def test_redo_solo_signal(self):
-        """Test detecting redo solo outcome."""
-        assert is_termination_signal("Outcome: redo solo", "imPACT") is True
-        assert is_termination_signal("Decision: redo solo the PREPARE phase", "imPACT") is True
-
-    def test_redo_with_help_signal(self):
-        """Test detecting redo with help outcome."""
-        assert is_termination_signal("Outcome: redo with help", "imPACT") is True
-        assert is_termination_signal("Decision: redo with help from pact-architect", "imPACT") is True
-
-    def test_proceed_with_help_signal(self):
-        """Test detecting proceed with help outcome."""
-        assert is_termination_signal("Outcome: proceed with help", "imPACT") is True
-        assert is_termination_signal("Decision: proceed with help from specialists", "imPACT") is True
-
     def test_impact_resolved_signal(self):
         """Test detecting imPACT resolved signal."""
         assert is_termination_signal("imPACT resolved. Continuing workflow.", "imPACT") is True
@@ -121,7 +106,7 @@ class TestImPACTTerminationSignals:
         """Test detecting blocker resolved signal."""
         assert is_termination_signal("Blocker resolved. Moving forward.", "imPACT") is True
 
-    # --- v3.5.0 outcome signals (anchored patterns) ---
+    # --- outcome signals (anchored patterns) ---
 
     def test_redo_prior_phase_signal(self):
         """Test detecting v3.5.0 'redo prior phase' outcome."""
@@ -170,8 +155,61 @@ class TestImPACTTerminationSignals:
 
     def test_case_insensitive_termination(self):
         """Test termination signals are case insensitive."""
-        assert is_termination_signal("REDO SOLO", "imPACT") is True
         assert is_termination_signal("Blocker Resolved", "imPACT") is True
+        assert is_termination_signal("IMPACT RESOLVED", "imPACT") is True
+
+    # --- anchor edge cases ---
+
+    def test_dot_anchor_matches_outcome(self):
+        """Test that dot anchor (sentence boundary) matches outcome text."""
+        assert is_termination_signal("Decision made. redo prior phase", "imPACT") is True
+        assert is_termination_signal("Resolved. terminate agent", "imPACT") is True
+        assert is_termination_signal("Analysis complete. escalate to user", "imPACT") is True
+
+    def test_line_start_matches_outcome(self):
+        """Test that outcomes at start of line match (multiline content)."""
+        content = "Triage complete.\nredo prior phase — going back to PREPARE"
+        assert is_termination_signal(content, "imPACT") is True
+        content2 = "Analysis:\nnot truly blocked, continue with guidance"
+        assert is_termination_signal(content2, "imPACT") is True
+
+    def test_colon_anchor_all_outcomes(self):
+        """Test colon anchor matches for all 6 v3.5.0 outcomes."""
+        outcomes = [
+            "redo prior phase",
+            "augment present phase",
+            "invoke rePACT",
+            "terminate agent",
+            "not truly blocked",
+            "escalate to user",
+        ]
+        for outcome in outcomes:
+            content = f"Outcome: {outcome}"
+            assert is_termination_signal(content, "imPACT") is True, (
+                f"Failed for colon-anchored '{outcome}'"
+            )
+
+    def test_empty_and_whitespace_not_termination(self):
+        """Test that empty/whitespace-only content is not a termination signal."""
+        assert is_termination_signal("", "imPACT") is False
+        assert is_termination_signal("   ", "imPACT") is False
+
+    def test_non_impact_workflow_returns_false(self):
+        """Test that imPACT outcome text does not trigger for other workflows."""
+        assert is_termination_signal("Outcome: redo prior phase", "orchestrate") is False
+        assert is_termination_signal("Outcome: terminate agent", "peer-review") is False
+
+    def test_unknown_workflow_returns_false(self):
+        """Test that an unknown workflow name returns False."""
+        assert is_termination_signal("anything", "nonexistent") is False
+
+    # --- old v3.4 patterns must NOT match ---
+
+    @pytest.mark.parametrize("old_pattern", ["redo solo", "redo with help", "proceed with help"])
+    def test_old_v34_patterns_no_longer_match(self, old_pattern):
+        """Old v3.4 outcome patterns must not be detected as termination signals."""
+        assert is_termination_signal(f"Outcome: {old_pattern}", "imPACT") is False
+        assert is_termination_signal(old_pattern, "imPACT") is False
 
 
 class TestImPACTWorkflowPattern:
@@ -199,9 +237,9 @@ class TestImPACTWorkflowPattern:
         assert "triage" in pattern.step_markers
 
     def test_compiled_pattern_has_termination_signals(self):
-        """Test compiled pattern has termination signals (6 v3.5.0 + 6 v3.4 compat)."""
+        """Test compiled pattern has termination signals (6 outcome + 3 generic)."""
         pattern = WORKFLOW_PATTERNS["imPACT"]
-        assert len(pattern.termination_signals) == 12
+        assert len(pattern.termination_signals) == 9
 
     def test_compile_workflow_patterns_includes_impact(self):
         """Test compile_workflow_patterns function includes imPACT."""
@@ -296,7 +334,7 @@ class TestImPACTProseTemplates:
         result = template_fn({})
         assert "resolution" in result.lower()
 
-    # --- v3.5.0 outcome prose templates ---
+    # --- outcome prose templates ---
 
     def test_resolution_path_template_redo_prior_phase(self):
         """Test resolution-path template with v3.5.0 redo_prior_phase outcome."""
@@ -334,25 +372,6 @@ class TestImPACTProseTemplates:
         result = template_fn({"outcome": "escalate_to_user"})
         assert "escalate" in result.lower()
 
-    # --- v3.4 outcome prose templates (backwards compat) ---
-
-    def test_resolution_path_template_redo_solo(self):
-        """Test resolution-path template with redo_solo outcome."""
-        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
-        result = template_fn({"outcome": "redo_solo"})
-        assert "redo prior phase solo" in result.lower()
-
-    def test_resolution_path_template_redo_with_help(self):
-        """Test resolution-path template with redo_with_help outcome."""
-        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
-        result = template_fn({"outcome": "redo_with_help"})
-        assert "redo prior phase with agent assistance" in result.lower()
-
-    def test_resolution_path_template_proceed_with_help(self):
-        """Test resolution-path template with proceed_with_help outcome."""
-        template_fn = PROSE_CONTEXT_TEMPLATES["resolution-path"]
-        result = template_fn({"outcome": "proceed_with_help"})
-        assert "proceed with agent assistance" in result.lower()
 
 
 class TestImPACTConsistency:

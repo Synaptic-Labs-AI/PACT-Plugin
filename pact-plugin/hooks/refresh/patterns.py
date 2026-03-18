@@ -149,7 +149,7 @@ TERMINATION_SIGNALS = {
         r"rePACT\s+complete",
     ],
     "imPACT": [
-        # v3.5.0 outcome names (authoritative, from imPACT.md)
+        # imPACT outcome names (from pact-workflows.md)
         # Anchored with (?:^|[:.>\-]\s*) to avoid matching mid-sentence
         # triage discussion (e.g., "Assessing whether to redo prior phase")
         r"(?:^|[:.>\-]\s*)redo\s+prior\s+phase",
@@ -158,10 +158,6 @@ TERMINATION_SIGNALS = {
         r"(?:^|[:.>\-]\s*)terminate\s+agent",
         r"(?:^|[:.>\-]\s*)not\s+truly\s+blocked",
         r"(?:^|[:.>\-]\s*)escalate\s+to\s+user",
-        # v3.4 outcome names (kept for backwards compatibility with old transcripts)
-        r"redo\s+solo",
-        r"redo\s+with\s+help",
-        r"proceed\s+with\s+help",
         r"imPACT\s+resolved",
         r"returning\s+to\s+(?:main\s+)?workflow",
         r"blocker\s+resolved",
