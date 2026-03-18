@@ -151,7 +151,7 @@ Keep messages actionable — state what you did/found, what they need to know, a
 any action needed from them.
 Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the lead.
 
-## Secretary Queries
+## How to Get Project Context
 
 The PACT Secretary (`secretary`) is available for the entire session to answer questions
 about past decisions, architectural patterns, and project history.
