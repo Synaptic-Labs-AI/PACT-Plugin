@@ -39,7 +39,14 @@ check_parked_state():
 28. Returns None on empty file
 29. Returns None on IOError during read (fail-open)
 30. Handles missing optional fields with defaults
-31. Returns None on UnicodeDecodeError (fail-open)
+31. Returns None on UnicodeDecodeError via non-UTF-8 bytes (fail-open)
+
+check_parked_state() -- active PR validation:
+32. Returns merged message and cleans up state file when gh reports MERGED
+33. Returns closed message and cleans up state file when gh reports CLOSED
+34. Falls through to lazy validation when PR is still OPEN
+35. Falls through to lazy validation when gh times out
+36. Falls through to lazy validation when gh returns non-zero exit code
 """
 
 import sys
@@ -439,15 +446,18 @@ class TestCheckParkedState:
         return state_file
 
     def test_returns_context_string_when_parked_state_exists(self, tmp_path):
-        """Should return formatted context when parked-state.json exists."""
+        """Should return formatted context when parked-state.json exists and PR is open."""
         from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
 
         self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
 
-        result = check_parked_state(
-            project_slug="my-project",
-            sessions_dir=str(tmp_path),
-        )
+        # Mock gh as unavailable so we test the fail-open (lazy validation) path
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
 
         assert result is not None
         assert "Parked work detected" in result
@@ -495,14 +505,17 @@ class TestCheckParkedState:
     def test_includes_pr_number_branch_worktree(self, tmp_path):
         """Output should include all key parked state fields."""
         from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
 
         state = {**VALID_PARKED_STATE, "pr_number": 42, "branch": "fix/login-bug"}
         self._write_parked_state(tmp_path, "proj", state)
 
-        result = check_parked_state(
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        # Mock gh as unavailable so we test the lazy validation path
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
+            result = check_parked_state(
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
 
         assert "PR #42" in result
         assert "fix/login-bug" in result
@@ -510,29 +523,36 @@ class TestCheckParkedState:
     def test_no_consolidation_note_when_completed_true(self, tmp_path):
         """Should NOT include consolidation guidance when consolidation_completed is true."""
         from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
 
         state = {**VALID_PARKED_STATE, "consolidation_completed": True}
         self._write_parked_state(tmp_path, "proj", state)
 
-        result = check_parked_state(
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        # Mock gh as unavailable so we test the lazy validation path
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
+            result = check_parked_state(
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
 
         assert result is not None
+        assert "Parked work detected" in result
         assert "did NOT complete" not in result
 
     def test_consolidation_note_when_completed_false(self, tmp_path):
         """Should include consolidation guidance when consolidation_completed is false."""
         from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
 
         state = {**VALID_PARKED_STATE, "consolidation_completed": False}
         self._write_parked_state(tmp_path, "proj", state)
 
-        result = check_parked_state(
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        # Mock gh as unavailable so we test the lazy validation path
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
+            result = check_parked_state(
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
 
         assert result is not None
         assert "did NOT complete" in result
@@ -541,6 +561,7 @@ class TestCheckParkedState:
     def test_consolidation_note_when_field_missing(self, tmp_path):
         """Should default to consolidation_completed=False when field missing."""
         from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
 
         state = {
             "pr_number": 100,
@@ -549,10 +570,12 @@ class TestCheckParkedState:
         }
         self._write_parked_state(tmp_path, "proj", state)
 
-        result = check_parked_state(
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        # Mock gh as unavailable so we test the lazy validation path
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
+            result = check_parked_state(
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
 
         assert result is not None
         assert "did NOT complete" in result
@@ -628,17 +651,133 @@ class TestCheckParkedState:
     def test_handles_missing_optional_fields_with_defaults(self, tmp_path):
         """Should use 'unknown' defaults for missing branch and worktree_path."""
         from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
         import json
 
         # Only pr_number required; branch and worktree_path should default
         state = {"pr_number": 55}
         self._write_parked_state(tmp_path, "proj", state)
 
+        # Mock gh as unavailable so we test the lazy validation path
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
+            result = check_parked_state(
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "PR #55" in result
+        assert "unknown" in result  # Default for missing branch/worktree
+
+    def test_returns_none_on_unicode_decode_error(self, tmp_path):
+        """Should return None when file contains non-UTF-8 bytes (fail-open)."""
+        from shared.session_resume import check_parked_state
+
+        # Write a valid parked-state.json first (so the file exists for .exists() check)
+        self._write_parked_state(tmp_path, "proj", VALID_PARKED_STATE)
+
+        # Overwrite with raw bytes that trigger UnicodeDecodeError
+        state_file = tmp_path / "proj" / "parked-state.json"
+        state_file.write_bytes(b"\x80\x81\x82\xff\xfe")
+
         result = check_parked_state(
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
 
+        assert result is None
+
+    def test_returns_merged_message_when_pr_merged(self, tmp_path):
+        """Should return merged message and clean up state file when gh reports MERGED."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        state_file = tmp_path / "my-project" / "parked-state.json"
+        assert state_file.exists()
+
+        mock_result = MagicMock(returncode=0, stdout="MERGED\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
         assert result is not None
-        assert "PR #55" in result
-        assert "unknown" in result  # Default for missing branch/worktree
+        assert "merged" in result
+        assert "PR #288" in result
+        assert "Cleaned up parked state" in result
+        # State file should be removed after detecting merged PR
+        assert not state_file.exists()
+
+    def test_returns_closed_message_when_pr_closed(self, tmp_path):
+        """Should return closed message and clean up state file when gh reports CLOSED."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        state_file = tmp_path / "my-project" / "parked-state.json"
+
+        mock_result = MagicMock(returncode=0, stdout="CLOSED\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "closed" in result
+        assert "PR #288" in result
+        assert not state_file.exists()
+
+    def test_falls_through_when_pr_still_open(self, tmp_path):
+        """Should return normal parked-work message when gh reports OPEN."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+
+        mock_result = MagicMock(returncode=0, stdout="OPEN\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "Parked work detected" in result
+        assert "PR #288" in result
+
+    def test_falls_through_on_gh_timeout(self, tmp_path):
+        """Should fall through to lazy validation when gh times out."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
+        import subprocess
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+
+        with mock_patch("shared.session_resume.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=10)):
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "Parked work detected" in result
+
+    def test_falls_through_on_gh_nonzero_exit(self, tmp_path):
+        """Should fall through to lazy validation when gh returns non-zero exit code."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+
+        mock_result = MagicMock(returncode=1, stdout="", stderr="not found")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "Parked work detected" in result

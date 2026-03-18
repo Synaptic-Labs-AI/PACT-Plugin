@@ -23,6 +23,7 @@ check_unparked_pr() — safety-net for unparked PRs:
 16. Handles malformed handoff PR URL gracefully
 17. Best-effort: no crash on IOError during append
 18. main() calls check_unparked_pr after write_session_snapshot
+19. main() call ordering: write_session_snapshot -> check_unparked_pr -> cleanup_stale_teams
 """
 import json
 import sys
@@ -345,6 +346,35 @@ class TestMainEntryPoint:
                 main()
 
         mock_cleanup.assert_called_once()
+
+    def test_main_call_ordering(self):
+        """main() must call write_session_snapshot -> check_unparked_pr -> cleanup_stale_teams in order.
+
+        Ordering is critical: snapshot creates the file, check_unparked_pr
+        appends to it, cleanup removes task dirs that check_unparked_pr reads.
+        """
+        from session_end import main
+
+        call_order = []
+
+        env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
+
+        with patch.dict("os.environ", env, clear=True), \
+             patch("session_end.get_task_list", return_value=[]), \
+             patch("session_end.write_session_snapshot",
+                   side_effect=lambda **kw: call_order.append("write_session_snapshot")), \
+             patch("session_end.check_unparked_pr",
+                   side_effect=lambda **kw: call_order.append("check_unparked_pr")), \
+             patch("session_end.cleanup_stale_teams",
+                   side_effect=lambda **kw: call_order.append("cleanup_stale_teams")):
+            with pytest.raises(SystemExit):
+                main()
+
+        assert call_order == [
+            "write_session_snapshot",
+            "check_unparked_pr",
+            "cleanup_stale_teams",
+        ]
 
 
 # =============================================================================
