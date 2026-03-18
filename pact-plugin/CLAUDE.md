@@ -127,10 +127,6 @@ Four layers ensure agents mark tasks completed so HANDOFFs are captured:
 - Orchestrator verification checklist (instruction — catch on HANDOFF receipt via TaskList)
 - Stop hook uncompleted-tasks warning (mechanical — last-resort alert at session end)
 
-#### Specialist Memory Guidance
-
-When dispatching specialists, include guidance about memory: specialists use built-in persistent memory for domain knowledge (accumulated across sessions). Institutional knowledge — architectural decisions, cross-component impacts, stakeholder constraints — goes in HANDOFFs, which the secretary reviews and saves to pact-memory. For ad-hoc work outside formal workflows, instruct specialists to send the secretary a save request after significant decisions, tricky bug fixes, or non-obvious pattern discoveries.
-
 #### Three-Layer Memory Architecture
 
 PACT uses three complementary memory layers:
