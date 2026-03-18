@@ -278,6 +278,9 @@ On signal detected: Follow Signal Task Handling in CLAUDE.md.
 
 ---
 
-**After user-authorized merge**:
-1. Merge the PR (`gh pr merge`)
-2. Invoke `/PACT:wrap-up` for post-merge cleanup
+**After user merge decision**:
+
+| User's decision | Action |
+|----------------|--------|
+| **Merge** | Merge the PR (`gh pr merge`), then invoke `/PACT:wrap-up` for post-merge cleanup |
+| **Not yet** / park | Invoke `/PACT:park` — consolidates memory, persists state, shuts down teammates. PR stays open; resume later with `/PACT:peer-review`. |

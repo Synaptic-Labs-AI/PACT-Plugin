@@ -32,6 +32,7 @@
     "./commands/peer-review.md",
     "./commands/plan-mode.md",
     "./commands/wrap-up.md",
+    "./commands/park.md",
     "./commands/pin-memory.md",
     "./commands/telegram-setup.md"
   ],
