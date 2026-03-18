@@ -24,6 +24,9 @@ check_unparked_pr() — safety-net for unparked PRs:
 17. Best-effort: no crash on IOError during append
 18. main() calls check_unparked_pr after write_session_snapshot
 19. main() call ordering: write_session_snapshot -> check_unparked_pr -> cleanup_stale_teams
+20. Non-string handoff values (dict/list) are skipped without error
+21. Full github.com PR URL is detected by regex
+22. Non-URL "/pull/" text is NOT detected by regex
 """
 import json
 import sys
@@ -786,3 +789,92 @@ class TestCheckUnparkedPr:
 
         content = snapshot.read_text()
         assert "PR #100" in content
+
+    def test_non_string_handoff_values_skipped(self, tmp_path):
+        """Non-string handoff values (dict/list) should be skipped without error."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {
+                "id": "1",
+                "subject": "CODE: feature",
+                "status": "completed",
+                "metadata": {
+                    "pr_number": 42,
+                    "handoff": {
+                        "produced": ["src/auth.py"],  # list value
+                        "decisions": {"key": "value"},  # dict value
+                        "integration": 12345,  # int value
+                        "notes": None,  # None value
+                    },
+                },
+            }
+        ]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        # Should detect PR via pr_number (primary path) despite non-string handoff values
+        assert "## Park-Mode Warning" in content
+        assert "PR #42" in content
+
+    def test_detects_full_github_pr_url(self, tmp_path):
+        """Should detect PR from full github.com/org/repo/pull/N URL."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {
+                "id": "1",
+                "subject": "backend-coder: implement auth",
+                "status": "completed",
+                "metadata": {
+                    "handoff": {
+                        "artifact": "https://github.com/owner/repo/pull/123",
+                    }
+                },
+            }
+        ]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        assert "## Park-Mode Warning" in content
+        assert "PR #123" in content
+
+    def test_non_url_pull_text_not_detected(self, tmp_path):
+        """Non-URL text containing '/pull/' should NOT be detected after regex change."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {
+                "id": "1",
+                "subject": "CODE: feature",
+                "status": "completed",
+                "metadata": {
+                    "handoff": {
+                        "notes": "See the /pull/ request for details",
+                    }
+                },
+            }
+        ]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        # After regex change (#11), bare "/pull/" without github.com URL should NOT match
+        assert "## Park-Mode Warning" not in content

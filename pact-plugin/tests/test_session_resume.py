@@ -41,12 +41,17 @@ check_parked_state():
 30. Handles missing optional fields with defaults
 31. Returns None on UnicodeDecodeError via non-UTF-8 bytes (fail-open)
 
-check_parked_state() -- active PR validation:
-32. Returns merged message and cleans up state file when gh reports MERGED
-33. Returns closed message and cleans up state file when gh reports CLOSED
-34. Falls through to lazy validation when PR is still OPEN
-35. Falls through to lazy validation when gh times out
-36. Falls through to lazy validation when gh returns non-zero exit code
+check_parked_state() -- active PR validation (parameterized):
+32-36. Parameterized: MERGED (cleanup), CLOSED (cleanup), OPEN (fall-through),
+       timeout (fall-through), non-zero exit (fall-through)
+37. Asserts exact subprocess arguments including timeout=5
+38. Returns merged message even when state_file.unlink() raises OSError
+
+check_parked_state() -- TTL cleanup:
+39. Cleans up parked state older than 14 days
+40. Does NOT clean up recent parked state
+41. Skips TTL check when parked_at is missing
+42. Skips TTL check when parked_at is unparseable
 """
 
 import sys
@@ -687,17 +692,106 @@ class TestCheckParkedState:
 
         assert result is None
 
-    def test_returns_merged_message_when_pr_merged(self, tmp_path):
-        """Should return merged message and clean up state file when gh reports MERGED."""
+    @pytest.mark.parametrize(
+        "subprocess_return, expected_behavior",
+        [
+            pytest.param(
+                {"returncode": 0, "stdout": "MERGED\n"},
+                {"contains": ["merged", "PR #288", "Cleaned up parked state"], "state_file_removed": True},
+                id="MERGED-cleanup",
+            ),
+            pytest.param(
+                {"returncode": 0, "stdout": "CLOSED\n"},
+                {"contains": ["closed", "PR #288", "Cleaned up parked state"], "state_file_removed": True},
+                id="CLOSED-cleanup",
+            ),
+            pytest.param(
+                {"returncode": 0, "stdout": "OPEN\n"},
+                {"contains": ["Parked work detected", "PR #288"], "state_file_removed": False},
+                id="OPEN-fall-through",
+            ),
+            pytest.param(
+                "timeout",
+                {"contains": ["Parked work detected"], "state_file_removed": False},
+                id="timeout-fall-through",
+            ),
+            pytest.param(
+                {"returncode": 1, "stdout": "", "stderr": "not found"},
+                {"contains": ["Parked work detected"], "state_file_removed": False},
+                id="nonzero-exit-fall-through",
+            ),
+        ],
+    )
+    def test_active_pr_validation(self, tmp_path, subprocess_return, expected_behavior):
+        """Parameterized: active PR validation with MERGED/CLOSED/OPEN/timeout/error."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+        import subprocess as sp
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        state_file = tmp_path / "my-project" / "parked-state.json"
+
+        if subprocess_return == "timeout":
+            side_effect = sp.TimeoutExpired(cmd="gh", timeout=5)
+            mock_ctx = mock_patch("shared.session_resume.subprocess.run", side_effect=side_effect)
+        else:
+            mock_result = MagicMock(**subprocess_return)
+            mock_ctx = mock_patch("shared.session_resume.subprocess.run", return_value=mock_result)
+
+        with mock_ctx:
+            result = check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        for text in expected_behavior["contains"]:
+            assert text in result, f"Expected '{text}' in result"
+
+        if expected_behavior["state_file_removed"]:
+            assert not state_file.exists(), "State file should be removed"
+        else:
+            assert state_file.exists(), "State file should persist"
+
+    def test_subprocess_called_with_exact_args(self, tmp_path):
+        """Should call gh pr view with exact arguments and timeout=5."""
         from shared.session_resume import check_parked_state
         from unittest.mock import patch as mock_patch, MagicMock
 
         self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
-        state_file = tmp_path / "my-project" / "parked-state.json"
-        assert state_file.exists()
+
+        mock_result = MagicMock(returncode=0, stdout="OPEN\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result) as mock_subprocess:
+            check_parked_state(
+                project_slug="my-project",
+                sessions_dir=str(tmp_path),
+            )
+
+        mock_subprocess.assert_called_once_with(
+            ["gh", "pr", "view", str(VALID_PARKED_STATE["pr_number"]), "--json", "state", "--jq", ".state"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    def test_returns_merged_message_when_unlink_fails(self, tmp_path):
+        """Should still return merged message when state_file.unlink() raises OSError."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
 
         mock_result = MagicMock(returncode=0, stdout="MERGED\n")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+
+        original_unlink = Path.unlink
+
+        def failing_unlink(self_path, *args, **kwargs):
+            if "parked-state.json" in str(self_path):
+                raise OSError("Permission denied")
+            return original_unlink(self_path, *args, **kwargs)
+
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result), \
+             mock_patch.object(Path, "unlink", failing_unlink):
             result = check_parked_state(
                 project_slug="my-project",
                 sessions_dir=str(tmp_path),
@@ -707,75 +801,104 @@ class TestCheckParkedState:
         assert "merged" in result
         assert "PR #288" in result
         assert "Cleaned up parked state" in result
-        # State file should be removed after detecting merged PR
-        assert not state_file.exists()
 
-    def test_returns_closed_message_when_pr_closed(self, tmp_path):
-        """Should return closed message and clean up state file when gh reports CLOSED."""
+
+class TestCheckParkedStateTTL:
+    """Tests for check_parked_state() -- TTL cleanup of stale parked state."""
+
+    def _write_parked_state(self, sessions_dir, project_slug, state):
+        """Helper: write a parked-state.json file."""
+        import json
+
+        proj_dir = Path(sessions_dir) / project_slug
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        state_file = proj_dir / "parked-state.json"
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        return state_file
+
+    def test_cleans_up_stale_parked_state_older_than_14_days(self, tmp_path):
+        """Should clean up parked state when parked_at is older than 14 days."""
         from shared.session_resume import check_parked_state
-        from unittest.mock import patch as mock_patch, MagicMock
+        from unittest.mock import patch as mock_patch
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
-        state_file = tmp_path / "my-project" / "parked-state.json"
+        stale_state = {
+            **VALID_PARKED_STATE,
+            "parked_at": "2026-02-01T09:30:00Z",  # well over 14 days ago from 2026-03-18
+        }
+        state_file = self._write_parked_state(tmp_path, "proj", stale_state)
 
-        mock_result = MagicMock(returncode=0, stdout="CLOSED\n")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
-            result = check_parked_state(
-                project_slug="my-project",
-                sessions_dir=str(tmp_path),
-            )
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
 
         assert result is not None
-        assert "closed" in result
-        assert "PR #288" in result
+        assert "Stale" in result or "stale" in result or "older than 14 days" in result.lower() or "cleaned up" in result.lower()
         assert not state_file.exists()
 
-    def test_falls_through_when_pr_still_open(self, tmp_path):
-        """Should return normal parked-work message when gh reports OPEN."""
+    def test_does_not_clean_up_recent_parked_state(self, tmp_path):
+        """Should NOT clean up parked state when parked_at is within 14 days."""
         from shared.session_resume import check_parked_state
         from unittest.mock import patch as mock_patch, MagicMock
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        # Use a date that's recent (within 14 days)
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_state = {**VALID_PARKED_STATE, "parked_at": recent}
+        state_file = self._write_parked_state(tmp_path, "proj", recent_state)
 
+        # gh reports OPEN so we fall through to normal parked-work message
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
             result = check_parked_state(
-                project_slug="my-project",
+                project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
         assert "Parked work detected" in result
-        assert "PR #288" in result
+        assert state_file.exists()
 
-    def test_falls_through_on_gh_timeout(self, tmp_path):
-        """Should fall through to lazy validation when gh times out."""
-        from shared.session_resume import check_parked_state
-        from unittest.mock import patch as mock_patch
-        import subprocess
-
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
-
-        with mock_patch("shared.session_resume.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=10)):
-            result = check_parked_state(
-                project_slug="my-project",
-                sessions_dir=str(tmp_path),
-            )
-
-        assert result is not None
-        assert "Parked work detected" in result
-
-    def test_falls_through_on_gh_nonzero_exit(self, tmp_path):
-        """Should fall through to lazy validation when gh returns non-zero exit code."""
+    def test_skips_ttl_check_when_parked_at_missing(self, tmp_path):
+        """Should skip TTL check when parked_at field is missing."""
         from shared.session_resume import check_parked_state
         from unittest.mock import patch as mock_patch, MagicMock
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        state = {
+            "pr_number": 100,
+            "branch": "feat/test",
+            "worktree_path": "/tmp/wt",
+            # No parked_at field
+        }
+        self._write_parked_state(tmp_path, "proj", state)
 
-        mock_result = MagicMock(returncode=1, stdout="", stderr="not found")
+        # gh reports OPEN so we fall through to normal parked-work message
+        mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
             result = check_parked_state(
-                project_slug="my-project",
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is not None
+        assert "Parked work detected" in result
+
+    def test_skips_ttl_check_when_parked_at_unparseable(self, tmp_path):
+        """Should skip TTL check when parked_at is not a valid ISO timestamp."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        state = {
+            **VALID_PARKED_STATE,
+            "parked_at": "not-a-date",
+        }
+        self._write_parked_state(tmp_path, "proj", state)
+
+        # gh reports OPEN so we fall through to normal parked-work message
+        mock_result = MagicMock(returncode=0, stdout="OPEN\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = check_parked_state(
+                project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
