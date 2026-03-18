@@ -26,6 +26,20 @@ check_resumption_context():
 17. Returns agent count
 18. Returns blocker count with bold formatting
 19. Mixed task types
+
+check_parked_state():
+20. Returns formatted context string when parked-state.json exists
+21. Returns None when no parked-state.json
+22. Returns None when project_slug is empty
+23. Includes PR number, branch, and worktree path in output
+24. Adds consolidation guidance when consolidation_completed is false
+25. No guidance note when consolidation_completed is true
+26. Returns None on corrupt/invalid JSON (fail-open)
+27. Returns None when pr_number field is missing
+28. Returns None on empty file
+29. Returns None on IOError during read (fail-open)
+30. Handles missing optional fields with defaults
+31. Returns None on UnicodeDecodeError (fail-open)
 """
 
 import sys
@@ -394,3 +408,237 @@ class TestRestoreLastSessionErrorPaths:
         assert result is not None
         assert "Previous session summary" in result
         assert "# Last Session" in result
+
+
+# =============================================================================
+# check_parked_state() Tests
+# =============================================================================
+
+VALID_PARKED_STATE = {
+    "pr_number": 288,
+    "pr_url": "https://github.com/owner/repo/pull/288",
+    "branch": "feat/park-mode-289",
+    "worktree_path": "/path/to/.worktrees/feat-park-mode-289",
+    "parked_at": "2026-03-18T09:30:00Z",
+    "consolidation_completed": True,
+    "team_name": "pact-d7ab1edb",
+}
+
+
+class TestCheckParkedState:
+    """Tests for check_parked_state() -- parked work detection."""
+
+    def _write_parked_state(self, sessions_dir, project_slug, state):
+        """Helper: write a parked-state.json file."""
+        import json
+
+        proj_dir = Path(sessions_dir) / project_slug
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        state_file = proj_dir / "parked-state.json"
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        return state_file
+
+    def test_returns_context_string_when_parked_state_exists(self, tmp_path):
+        """Should return formatted context when parked-state.json exists."""
+        from shared.session_resume import check_parked_state
+
+        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+
+        result = check_parked_state(
+            project_slug="my-project",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is not None
+        assert "Parked work detected" in result
+        assert "PR #288" in result
+        assert "feat/park-mode-289" in result
+        assert "/path/to/.worktrees/feat-park-mode-289" in result
+        assert "/PACT:peer-review" in result
+
+    def test_returns_none_when_no_parked_state(self, tmp_path):
+        """Should return None when parked-state.json does not exist."""
+        from shared.session_resume import check_parked_state
+
+        # Create the project dir but no parked-state.json
+        (tmp_path / "my-project").mkdir()
+
+        result = check_parked_state(
+            project_slug="my-project",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is None
+
+    def test_returns_none_when_empty_project_slug(self, tmp_path):
+        """Should return None when project_slug is empty."""
+        from shared.session_resume import check_parked_state
+
+        result = check_parked_state(
+            project_slug="",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is None
+
+    def test_returns_none_when_sessions_dir_missing(self, tmp_path):
+        """Should return None when sessions directory doesn't exist."""
+        from shared.session_resume import check_parked_state
+
+        result = check_parked_state(
+            project_slug="my-project",
+            sessions_dir=str(tmp_path / "nonexistent"),
+        )
+
+        assert result is None
+
+    def test_includes_pr_number_branch_worktree(self, tmp_path):
+        """Output should include all key parked state fields."""
+        from shared.session_resume import check_parked_state
+
+        state = {**VALID_PARKED_STATE, "pr_number": 42, "branch": "fix/login-bug"}
+        self._write_parked_state(tmp_path, "proj", state)
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert "PR #42" in result
+        assert "fix/login-bug" in result
+
+    def test_no_consolidation_note_when_completed_true(self, tmp_path):
+        """Should NOT include consolidation guidance when consolidation_completed is true."""
+        from shared.session_resume import check_parked_state
+
+        state = {**VALID_PARKED_STATE, "consolidation_completed": True}
+        self._write_parked_state(tmp_path, "proj", state)
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is not None
+        assert "did NOT complete" not in result
+
+    def test_consolidation_note_when_completed_false(self, tmp_path):
+        """Should include consolidation guidance when consolidation_completed is false."""
+        from shared.session_resume import check_parked_state
+
+        state = {**VALID_PARKED_STATE, "consolidation_completed": False}
+        self._write_parked_state(tmp_path, "proj", state)
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is not None
+        assert "did NOT complete" in result
+        assert "/PACT:park" in result or "/PACT:wrap-up" in result
+
+    def test_consolidation_note_when_field_missing(self, tmp_path):
+        """Should default to consolidation_completed=False when field missing."""
+        from shared.session_resume import check_parked_state
+
+        state = {
+            "pr_number": 100,
+            "branch": "main",
+            "worktree_path": "/tmp/wt",
+        }
+        self._write_parked_state(tmp_path, "proj", state)
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is not None
+        assert "did NOT complete" in result
+
+    def test_returns_none_on_corrupt_json(self, tmp_path):
+        """Should return None when parked-state.json contains invalid JSON (fail-open)."""
+        from shared.session_resume import check_parked_state
+
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        (proj_dir / "parked-state.json").write_text("not valid json{{{")
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is None
+
+    def test_returns_none_when_pr_number_missing(self, tmp_path):
+        """Should return None when pr_number field is absent."""
+        from shared.session_resume import check_parked_state
+        import json
+
+        state = {"branch": "main", "worktree_path": "/tmp/wt", "consolidation_completed": True}
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        (proj_dir / "parked-state.json").write_text(json.dumps(state))
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is None
+
+    def test_returns_none_on_empty_file(self, tmp_path):
+        """Should return None when parked-state.json is empty (fail-open)."""
+        from shared.session_resume import check_parked_state
+
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        (proj_dir / "parked-state.json").write_text("")
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is None
+
+    def test_returns_none_on_ioerror(self, tmp_path):
+        """Should return None when file read raises IOError (fail-open)."""
+        from shared.session_resume import check_parked_state
+        from unittest.mock import patch as mock_patch
+
+        self._write_parked_state(tmp_path, "proj", VALID_PARKED_STATE)
+
+        original_read = Path.read_text
+        def failing_read(self_path, *args, **kwargs):
+            if "parked-state.json" in str(self_path):
+                raise IOError("disk error")
+            return original_read(self_path, *args, **kwargs)
+
+        with mock_patch.object(Path, "read_text", failing_read):
+            result = check_parked_state(
+                project_slug="proj",
+                sessions_dir=str(tmp_path),
+            )
+
+        assert result is None
+
+    def test_handles_missing_optional_fields_with_defaults(self, tmp_path):
+        """Should use 'unknown' defaults for missing branch and worktree_path."""
+        from shared.session_resume import check_parked_state
+        import json
+
+        # Only pr_number required; branch and worktree_path should default
+        state = {"pr_number": 55}
+        self._write_parked_state(tmp_path, "proj", state)
+
+        result = check_parked_state(
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        assert result is not None
+        assert "PR #55" in result
+        assert "unknown" in result  # Default for missing branch/worktree

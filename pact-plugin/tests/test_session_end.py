@@ -10,6 +10,19 @@ Tests cover:
 5. Handles empty task list gracefully
 6. Handles None task list gracefully
 7. main() entry point: exit codes and error handling
+
+check_unparked_pr() — safety-net for unparked PRs:
+8. Detects PR number in task metadata → appends warning to snapshot
+9. Detects PR URL in handoff values → appends warning
+10. No warning when parked-state.json exists (consolidation already done)
+11. No warning when no PR detected in tasks
+12. No warning when tasks is None
+13. No warning when project_slug is empty
+14. No warning when snapshot file missing
+15. Skips warning when tasks is empty list
+16. Handles malformed handoff PR URL gracefully
+17. Best-effort: no crash on IOError during append
+18. main() calls check_unparked_pr after write_session_snapshot
 """
 import json
 import sys
@@ -478,3 +491,268 @@ class TestCleanupStaleTeams:
         result = cleanup_stale_teams(team_name="pact-nonexistent-test")
         assert isinstance(result, list)
         assert result == []
+
+
+# =============================================================================
+# check_unparked_pr() Tests
+# =============================================================================
+
+class TestCheckUnparkedPr:
+    """Tests for session_end.check_unparked_pr() — safety-net for unparked PRs.
+
+    Detects open PRs that were NOT parked (no memory consolidation), appending
+    a warning to the last-session.md snapshot for next-session pickup.
+    """
+
+    def _setup_snapshot(self, sessions_dir, project_slug, content="# Last Session\n"):
+        """Helper: create a last-session.md file."""
+        proj_dir = sessions_dir / project_slug
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = proj_dir / "last-session.md"
+        snapshot.write_text(content, encoding="utf-8")
+        return snapshot
+
+    def _make_task_with_pr_number(self, pr_number):
+        """Helper: task with pr_number in metadata."""
+        return {
+            "id": "1",
+            "subject": "Review: auth feature",
+            "status": "completed",
+            "metadata": {"pr_number": pr_number},
+        }
+
+    def _make_task_with_pr_url(self, pr_url):
+        """Helper: task with PR URL in handoff metadata."""
+        return {
+            "id": "2",
+            "subject": "backend-coder: implement auth",
+            "status": "completed",
+            "metadata": {
+                "handoff": {
+                    "produced": ["src/auth.py"],
+                    "decisions": ["Used JWT"],
+                    "artifact": pr_url,
+                }
+            },
+        }
+
+    def test_detects_pr_number_in_task_metadata(self, tmp_path):
+        """Should append warning when pr_number found in task metadata."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [self._make_task_with_pr_number(288)]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        assert "## Park-Mode Warning" in content
+        assert "PR #288" in content
+        assert "park-mode was not run" in content
+
+    def test_detects_pr_url_in_handoff_values(self, tmp_path):
+        """Should extract PR number from /pull/ URL in handoff metadata."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [self._make_task_with_pr_url("https://github.com/owner/repo/pull/42")]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        assert "## Park-Mode Warning" in content
+        assert "PR #42" in content
+
+    def test_no_warning_when_parked_state_exists(self, tmp_path):
+        """Should skip warning when parked-state.json exists (already consolidated)."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        # Write a parked-state.json
+        import json
+        parked = tmp_path / "proj" / "parked-state.json"
+        parked.write_text(json.dumps({"pr_number": 288}), encoding="utf-8")
+
+        tasks = [self._make_task_with_pr_number(288)]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        assert "## Park-Mode Warning" not in content
+
+    def test_no_warning_when_no_pr_detected(self, tmp_path):
+        """Should not append warning when no PR found in task metadata."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {"id": "1", "subject": "CODE: auth", "status": "completed", "metadata": {}},
+        ]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        assert "## Park-Mode Warning" not in content
+
+    def test_no_warning_when_tasks_is_none(self, tmp_path):
+        """Should return early when tasks is None."""
+        from session_end import check_unparked_pr
+
+        self._setup_snapshot(tmp_path, "proj")
+
+        # Should not raise
+        check_unparked_pr(
+            tasks=None,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_no_warning_when_project_slug_empty(self, tmp_path):
+        """Should return early when project_slug is empty."""
+        from session_end import check_unparked_pr
+
+        tasks = [self._make_task_with_pr_number(100)]
+
+        # Should not raise
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="",
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_no_warning_when_snapshot_file_missing(self, tmp_path):
+        """Should not crash when last-session.md doesn't exist."""
+        from session_end import check_unparked_pr
+
+        # Create project dir but NOT the snapshot file
+        (tmp_path / "proj").mkdir()
+        tasks = [self._make_task_with_pr_number(99)]
+
+        # Should not raise
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_no_warning_when_tasks_empty(self, tmp_path):
+        """Should return early for empty task list."""
+        from session_end import check_unparked_pr
+
+        self._setup_snapshot(tmp_path, "proj")
+
+        check_unparked_pr(
+            tasks=[],
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_handles_malformed_pr_url(self, tmp_path):
+        """Should handle handoff values with /pull/ but no valid number."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {
+                "id": "1",
+                "subject": "CODE: feature",
+                "status": "completed",
+                "metadata": {
+                    "handoff": {
+                        "produced": ["file.py"],
+                        "notes": "See /pull/",
+                    }
+                },
+            }
+        ]
+
+        # Should not crash; may or may not detect depending on parsing
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_best_effort_no_crash_on_ioerror(self, tmp_path):
+        """Should not crash when appending to snapshot raises IOError."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [self._make_task_with_pr_number(288)]
+
+        # Make the snapshot read-only to trigger IOError on write
+        import os
+        os.chmod(str(snapshot), 0o444)
+
+        # Should not raise
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        # Restore permissions for cleanup
+        os.chmod(str(snapshot), 0o644)
+
+    def test_main_calls_check_unparked_pr(self):
+        """main() should call check_unparked_pr after write_session_snapshot."""
+        from session_end import main
+
+        env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
+
+        with patch.dict("os.environ", env, clear=True), \
+             patch("session_end.get_task_list", return_value=[]), \
+             patch("session_end.write_session_snapshot"), \
+             patch("session_end.check_unparked_pr") as mock_check, \
+             patch("session_end.cleanup_stale_teams"):
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_check.assert_called_once()
+        call_args = mock_check.call_args
+        assert call_args.kwargs["tasks"] == []
+        assert call_args.kwargs["project_slug"] == "my-project"
+
+    def test_pr_number_metadata_takes_priority_over_url(self, tmp_path):
+        """When both pr_number and URL exist, pr_number in metadata should be used."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {
+                "id": "1",
+                "subject": "Review: feature",
+                "status": "completed",
+                "metadata": {
+                    "pr_number": 100,
+                    "handoff": {
+                        "artifact": "https://github.com/org/repo/pull/999",
+                    },
+                },
+            }
+        ]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        assert "PR #100" in content

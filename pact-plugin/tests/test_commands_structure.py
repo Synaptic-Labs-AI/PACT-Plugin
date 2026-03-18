@@ -20,6 +20,7 @@ EXPECTED_COMMANDS = {
     "comPACT",
     "imPACT",
     "orchestrate",
+    "park",
     "peer-review",
     "pin-memory",
     "plan-mode",
