@@ -158,6 +158,51 @@ class TestImPACTTerminationSignals:
         assert is_termination_signal("Blocker Resolved", "imPACT") is True
         assert is_termination_signal("IMPACT RESOLVED", "imPACT") is True
 
+    # --- anchor edge cases ---
+
+    def test_dot_anchor_matches_outcome(self):
+        """Test that dot anchor (sentence boundary) matches outcome text."""
+        assert is_termination_signal("Decision made. redo prior phase", "imPACT") is True
+        assert is_termination_signal("Resolved. terminate agent", "imPACT") is True
+        assert is_termination_signal("Analysis complete. escalate to user", "imPACT") is True
+
+    def test_line_start_matches_outcome(self):
+        """Test that outcomes at start of line match (multiline content)."""
+        content = "Triage complete.\nredo prior phase — going back to PREPARE"
+        assert is_termination_signal(content, "imPACT") is True
+        content2 = "Analysis:\nnot truly blocked, continue with guidance"
+        assert is_termination_signal(content2, "imPACT") is True
+
+    def test_colon_anchor_all_outcomes(self):
+        """Test colon anchor matches for all 6 v3.5.0 outcomes."""
+        outcomes = [
+            "redo prior phase",
+            "augment present phase",
+            "invoke rePACT",
+            "terminate agent",
+            "not truly blocked",
+            "escalate to user",
+        ]
+        for outcome in outcomes:
+            content = f"Outcome: {outcome}"
+            assert is_termination_signal(content, "imPACT") is True, (
+                f"Failed for colon-anchored '{outcome}'"
+            )
+
+    def test_empty_and_whitespace_not_termination(self):
+        """Test that empty/whitespace-only content is not a termination signal."""
+        assert is_termination_signal("", "imPACT") is False
+        assert is_termination_signal("   ", "imPACT") is False
+
+    def test_non_impact_workflow_returns_false(self):
+        """Test that imPACT outcome text does not trigger for other workflows."""
+        assert is_termination_signal("Outcome: redo prior phase", "orchestrate") is False
+        assert is_termination_signal("Outcome: terminate agent", "peer-review") is False
+
+    def test_unknown_workflow_returns_false(self):
+        """Test that an unknown workflow name returns False."""
+        assert is_termination_signal("anything", "nonexistent") is False
+
 
 class TestImPACTWorkflowPattern:
     """Tests for imPACT workflow pattern compilation."""

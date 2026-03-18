@@ -334,3 +334,33 @@ class TestImPACTProseTemplates:
         """Test resolution-path step prose with no specific outcome."""
         result = _prose_resolution_path({})
         assert "resolution" in result.lower() or "blocker" in result.lower()
+
+    # --- old v3.4 names must NOT match new outcomes ---
+
+    @pytest.mark.parametrize("old_name", ["redo_solo", "redo_with_help", "proceed_with_help"])
+    def test_prose_resolution_path_old_v34_names_fall_to_default(self, old_name):
+        """Old v3.4 outcome names must fall through to default, not match any branch."""
+        result = _prose_resolution_path({"outcome": old_name})
+        # Default message contains "resolution path" or "blocker" — never specific outcome text
+        assert result == "Was executing resolution path for blocker."
+
+    # --- edge cases ---
+
+    def test_prose_resolution_path_empty_string_outcome(self):
+        """Empty string outcome should fall to default."""
+        result = _prose_resolution_path({"outcome": ""})
+        assert result == "Was executing resolution path for blocker."
+
+    def test_prose_resolution_path_none_outcome(self):
+        """None outcome should fall to default."""
+        result = _prose_resolution_path({"outcome": None})
+        assert result == "Was executing resolution path for blocker."
+
+    def test_prose_resolution_path_each_outcome_unique(self):
+        """Each v3.5.0 outcome should produce a distinct prose string."""
+        outcomes = [
+            "redo_prior_phase", "augment_present_phase", "invoke_repact",
+            "terminate_agent", "not_truly_blocked", "escalate_to_user",
+        ]
+        results = [_prose_resolution_path({"outcome": o}) for o in outcomes]
+        assert len(set(results)) == len(outcomes), "All outcomes must produce unique prose"
