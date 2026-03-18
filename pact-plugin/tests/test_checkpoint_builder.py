@@ -827,3 +827,48 @@ class TestCheckpointSchemaRoundTrip:
         assert exported["pending_action"]["data"]["nested"]["key"] == 123
         assert exported["context"]["tags"] == ["review", "test"]
         assert exported["context"]["pr_number"] == 99
+
+
+class TestImPACTResolutionPathIntegration:
+    """Integration test: checkpoint_to_refresh_message → _prose_resolution_path flow."""
+
+    @pytest.mark.parametrize("outcome,expected_fragment", [
+        ("redo_prior_phase", "redo prior phase"),
+        ("augment_present_phase", "augment"),
+        ("invoke_repact", "repact"),
+        ("terminate_agent", "terminate"),
+        ("not_truly_blocked", "not truly blocked"),
+        ("escalate_to_user", "escalate"),
+    ])
+    def test_checkpoint_resolution_path_produces_correct_prose(self, outcome, expected_fragment):
+        """Full integration: imPACT checkpoint with resolution-path step produces correct prose."""
+        checkpoint = {
+            "workflow": {"name": "imPACT", "id": "impact-001"},
+            "step": {"name": "resolution-path"},
+            "extraction": {"confidence": 0.85},
+            "context": {"outcome": outcome},
+            "pending_action": {
+                "instruction": "Continue with resolution",
+            },
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "Workflow: imPACT (impact-001)" in message
+        assert expected_fragment in message.lower()
+        assert "Next Step: Continue with resolution" in message
+
+    def test_checkpoint_resolution_path_default_for_unknown_outcome(self):
+        """Integration: unknown outcome falls through to default prose."""
+        checkpoint = {
+            "workflow": {"name": "imPACT", "id": ""},
+            "step": {"name": "resolution-path"},
+            "extraction": {"confidence": 0.7},
+            "context": {"outcome": "some_future_outcome"},
+            "pending_action": None,
+        }
+
+        message = checkpoint_to_refresh_message(checkpoint)
+
+        assert "resolution path" in message.lower() or "blocker" in message.lower()
+        assert "Ask user how to proceed" in message

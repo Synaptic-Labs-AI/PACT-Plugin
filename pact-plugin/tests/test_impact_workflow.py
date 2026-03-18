@@ -203,6 +203,14 @@ class TestImPACTTerminationSignals:
         """Test that an unknown workflow name returns False."""
         assert is_termination_signal("anything", "nonexistent") is False
 
+    # --- old v3.4 patterns must NOT match ---
+
+    @pytest.mark.parametrize("old_pattern", ["redo solo", "redo with help", "proceed with help"])
+    def test_old_v34_patterns_no_longer_match(self, old_pattern):
+        """Old v3.4 outcome patterns must not be detected as termination signals."""
+        assert is_termination_signal(f"Outcome: {old_pattern}", "imPACT") is False
+        assert is_termination_signal(old_pattern, "imPACT") is False
+
 
 class TestImPACTWorkflowPattern:
     """Tests for imPACT workflow pattern compilation."""
