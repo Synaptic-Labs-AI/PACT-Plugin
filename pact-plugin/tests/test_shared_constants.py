@@ -293,7 +293,7 @@ class TestImPACTProseTemplates:
         result = _prose_selecting_agents({})
         assert "agent" in result.lower()
 
-    # --- v3.5.0 outcome names ---
+    # --- outcome names ---
 
     def test_prose_resolution_path_redo_prior_phase(self):
         """Test resolution-path with v3.5.0 redo_prior_phase outcome."""
@@ -325,25 +325,10 @@ class TestImPACTProseTemplates:
         result = _prose_resolution_path({"outcome": "escalate_to_user"})
         assert "escalate" in result.lower()
 
-    # --- v3.4 outcome names (backwards compat) ---
-
-    def test_prose_resolution_path_redo_solo(self):
-        """Test resolution-path step prose with redo_solo outcome."""
-        result = _prose_resolution_path({"outcome": "redo_solo"})
-        assert "redo" in result.lower()
-        assert "solo" in result.lower()
-
-    def test_prose_resolution_path_redo_with_help(self):
-        """Test resolution-path step prose with redo_with_help outcome."""
-        result = _prose_resolution_path({"outcome": "redo_with_help"})
-        assert "redo" in result.lower()
-        assert "help" in result.lower() or "assist" in result.lower()
-
-    def test_prose_resolution_path_proceed_with_help(self):
-        """Test resolution-path step prose with proceed_with_help outcome."""
-        result = _prose_resolution_path({"outcome": "proceed_with_help"})
-        assert "proceed" in result.lower()
-        assert "help" in result.lower() or "assist" in result.lower()
+    def test_prose_resolution_path_unknown_falls_to_default(self):
+        """Test resolution-path step prose with unknown outcome falls to default."""
+        result = _prose_resolution_path({"outcome": "some_unknown_outcome"})
+        assert "resolution" in result.lower() or "blocker" in result.lower()
 
     def test_prose_resolution_path_default(self):
         """Test resolution-path step prose with no specific outcome."""
