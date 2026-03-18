@@ -2,14 +2,17 @@
 Location: pact-plugin/hooks/shared/session_resume.py
 Summary: Session resume and snapshot management for cross-session continuity.
 Used by: session_init.py during SessionStart hook to write session info,
-         restore previous session snapshots, and check for resumable tasks.
+         restore previous session snapshots, check for resumable tasks,
+         and detect parked work from previous sessions.
 
 Manages:
 1. Writing session resume info (team name, resume command) to project CLAUDE.md
 2. Restoring last session snapshots for cross-session continuity
 3. Checking for in-progress tasks that indicate resumable work
+4. Detecting parked state from /PACT:park for multi-session resume
 """
 
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -213,3 +216,77 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
         return summary
 
     return None
+
+
+# parked-state.json schema (written by /PACT:park command, read here):
+# {
+#   "pr_number": int,           -- GitHub PR number
+#   "pr_url": str,              -- Full GitHub PR URL
+#   "branch": str,              -- Git branch name
+#   "worktree_path": str,       -- Absolute path to .worktrees/ directory
+#   "parked_at": str,           -- ISO 8601 UTC timestamp
+#   "consolidation_completed": bool,  -- Whether memory consolidation ran
+#   "team_name": str            -- Session team name (e.g. "pact-d7ab1edb")
+# }
+
+
+def check_parked_state(
+    project_slug: str,
+    sessions_dir: str | None = None,
+) -> str | None:
+    """
+    Detect parked work from a previous session's /PACT:park invocation.
+
+    Checks if ~/.claude/pact-sessions/{project_slug}/parked-state.json exists.
+    If found, returns a formatted context string for the orchestrator describing
+    the parked PR, branch, and worktree so it can offer to resume.
+
+    Uses lazy validation: checks file existence and reads JSON locally, but does
+    NOT validate PR state via `gh pr view` to avoid ~1s startup latency. Stale
+    state (PR already merged/closed) is detected on first orchestrator action
+    when it runs /PACT:peer-review or /PACT:wrap-up.
+
+    Args:
+        project_slug: Project identifier for the session directory
+        sessions_dir: Override for sessions base directory (for testing)
+
+    Returns:
+        Formatted context string if parked state exists, None otherwise
+    """
+    if not project_slug:
+        return None
+
+    if sessions_dir is None:
+        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+
+    state_file = Path(sessions_dir) / project_slug / "parked-state.json"
+    if not state_file.exists():
+        return None
+
+    try:
+        content = state_file.read_text(encoding="utf-8")
+        state = json.loads(content)
+    except (IOError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    # Validate required fields
+    pr_number = state.get("pr_number")
+    branch = state.get("branch", "unknown")
+    worktree_path = state.get("worktree_path", "unknown")
+
+    if pr_number is None:
+        return None
+
+    consolidation = state.get("consolidation_completed", False)
+    consolidation_note = ""
+    if not consolidation:
+        consolidation_note = (
+            " Memory consolidation did NOT complete — "
+            "run /PACT:park or /PACT:wrap-up to capture session knowledge."
+        )
+
+    return (
+        f"Parked work detected: PR #{pr_number} ({branch}) — awaiting merge. "
+        f"Worktree at {worktree_path}. "
+        f"Run /PACT:peer-review to resume review/merge.{consolidation_note}"
+    )
