@@ -27,6 +27,15 @@ check_unparked_pr() — safety-net for unparked PRs:
 20. Non-string handoff values (dict/list) are skipped without error
 21. Full github.com PR URL is detected by regex
 22. Non-URL "/pull/" text is NOT detected by regex
+23. metadata: None in task dict does not crash check_unparked_pr (or {} guard)
+
+write_session_snapshot() — metadata None guard:
+24. metadata: None in task dict does not crash write_session_snapshot
+
+File permission hardening:
+25. write_session_snapshot creates directory with 0o700
+26. write_session_snapshot creates file with 0o600
+27. check_unparked_pr re-applies 0o600 after appending warning
 """
 import json
 import sys
@@ -269,6 +278,37 @@ class TestWriteSessionSnapshot:
         assert long_decision not in content.split("## Key Decisions")[0]
         # But the full decision DOES appear in Key Decisions section (not truncated there)
         assert long_decision in content
+
+    def test_handles_metadata_none(self, tmp_path):
+        """Task with 'metadata': None should not crash (or {} guard handles it)."""
+        from session_end import write_session_snapshot
+
+        tasks = [
+            {
+                "id": "20",
+                "subject": "CODE: implement feature",
+                "status": "completed",
+                "metadata": None,
+            },
+            {
+                "id": "21",
+                "subject": "TEST: write tests",
+                "status": "in_progress",
+                "metadata": None,
+            },
+        ]
+
+        write_session_snapshot(
+            tasks=tasks,
+            project_slug="none-meta-proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = (tmp_path / "none-meta-proj" / "last-session.md").read_text()
+        assert "## Completed Tasks" in content
+        assert "#20 CODE: implement feature" in content
+        assert "## Incomplete Tasks" in content
+        assert "#21 TEST: write tests -- in_progress" in content
 
 
 class TestMainEntryPoint:
@@ -878,3 +918,115 @@ class TestCheckUnparkedPr:
         content = snapshot.read_text()
         # After regex change (#11), bare "/pull/" without github.com URL should NOT match
         assert "## Park-Mode Warning" not in content
+
+    def test_handles_metadata_none_in_task(self, tmp_path):
+        """Task with 'metadata': None should not crash (or {} guard handles it)."""
+        from session_end import check_unparked_pr
+
+        snapshot = self._setup_snapshot(tmp_path, "proj")
+        tasks = [
+            {
+                "id": "1",
+                "subject": "CODE: feature",
+                "status": "completed",
+                "metadata": None,
+            },
+        ]
+
+        # Should not raise
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        content = snapshot.read_text()
+        # No PR detected, so no warning
+        assert "## Park-Mode Warning" not in content
+
+
+# =============================================================================
+# File Permission Tests for session_end.py
+# =============================================================================
+
+class TestSessionEndFilePermissions:
+    """Tests for file permission hardening in session_end.py.
+
+    Verifies that:
+    - write_session_snapshot creates directory with 0o700
+    - write_session_snapshot creates file with 0o600
+    - check_unparked_pr re-applies 0o600 after appending to snapshot
+    """
+
+    def test_write_snapshot_creates_directory_with_700(self, tmp_path):
+        """write_session_snapshot() should create project dir with mode 0o700."""
+        import os
+        import stat
+        from session_end import write_session_snapshot
+
+        write_session_snapshot(
+            tasks=[],
+            project_slug="perm-proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        proj_dir = tmp_path / "perm-proj"
+        dir_mode = stat.S_IMODE(proj_dir.stat().st_mode)
+        assert dir_mode == 0o700, (
+            f"Directory should have mode 0o700, got {oct(dir_mode)}"
+        )
+
+    def test_write_snapshot_creates_file_with_600(self, tmp_path):
+        """write_session_snapshot() should set snapshot file to mode 0o600."""
+        import os
+        import stat
+        from session_end import write_session_snapshot
+
+        write_session_snapshot(
+            tasks=[],
+            project_slug="perm-proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        snapshot_file = tmp_path / "perm-proj" / "last-session.md"
+        file_mode = stat.S_IMODE(snapshot_file.stat().st_mode)
+        assert file_mode == 0o600, (
+            f"Snapshot file should have mode 0o600, got {oct(file_mode)}"
+        )
+
+    def test_check_unparked_pr_reapplies_600_after_append(self, tmp_path):
+        """check_unparked_pr() should re-apply 0o600 after appending warning."""
+        import os
+        import stat
+        from session_end import check_unparked_pr
+
+        # Set up snapshot with known permissions
+        proj_dir = tmp_path / "perm-proj"
+        proj_dir.mkdir(parents=True)
+        snapshot = proj_dir / "last-session.md"
+        snapshot.write_text("# Last Session\n", encoding="utf-8")
+
+        tasks = [
+            {
+                "id": "1",
+                "subject": "Review: feature",
+                "status": "completed",
+                "metadata": {"pr_number": 288},
+            },
+        ]
+
+        check_unparked_pr(
+            tasks=tasks,
+            project_slug="perm-proj",
+            sessions_dir=str(tmp_path),
+        )
+
+        # Verify warning was appended
+        content = snapshot.read_text()
+        assert "## Park-Mode Warning" in content
+
+        # Verify permissions re-applied
+        file_mode = stat.S_IMODE(snapshot.stat().st_mode)
+        assert file_mode == 0o600, (
+            f"Snapshot file should have mode 0o600 after append, got {oct(file_mode)}"
+        )

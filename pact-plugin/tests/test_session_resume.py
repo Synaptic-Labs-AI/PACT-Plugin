@@ -26,6 +26,7 @@ check_resumption_context():
 17. Returns agent count
 18. Returns blocker count with bold formatting
 19. Mixed task types
+20a. metadata: None in task dict does not crash (or {} guard)
 
 check_parked_state():
 20. Returns formatted context string when parked-state.json exists
@@ -330,6 +331,27 @@ class TestCheckResumptionContext:
         assert "Active agents: 1" in result
         assert "**Blockers: 1**" in result
         assert "(1 pending)" in result
+
+    def test_handles_metadata_none(self):
+        """Task with 'metadata': None should not crash (or {} guard handles it)."""
+        from shared.session_resume import check_resumption_context
+
+        tasks = [
+            {
+                "id": "1",
+                "subject": "BLOCKER: missing API key",
+                "status": "in_progress",
+                "metadata": None,
+            },
+        ]
+
+        result = check_resumption_context(tasks)
+
+        assert result is not None
+        # With metadata=None, or {} guard prevents crash.
+        # The task is in_progress but won't be classified as a blocker
+        # (metadata.get("type") requires a dict, and or {} provides one).
+        assert "Features:" in result
 
 
 class TestUpdateSessionInfoErrorPaths:
