@@ -12,13 +12,19 @@ generate_team_name():
 7. Output format validation (pact- prefix, hex suffix)
 8. None session_id: treated as falsy, falls back to random
 
+main() integration:
+9. check_parked_state non-None result appears in additionalContext output
+
 Note: restore_last_session() and check_resumption_context() are tested
 in test_session_resume.py (canonical location).
 """
 
+import io
+import json
 import re
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -157,3 +163,65 @@ class TestGenerateTeamName:
         result = generate_team_name({"session_id": "test1234"})
 
         assert isinstance(result, str)
+
+
+class TestMainParkedStateIntegration:
+    """Integration test: check_parked_state wiring in session_init.main()."""
+
+    def test_parked_state_appears_in_additional_context(self, monkeypatch):
+        """Non-None check_parked_state result should appear in additionalContext output."""
+        from session_init import main
+
+        parked_msg = "Parked work detected: PR #42 (feat/login) — awaiting merge."
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+
+        # Provide valid JSON on stdin with a session_id
+        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_parked_state", return_value=parked_msg) as mock_parked, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_parked.assert_called_once_with(project_slug="test-project")
+
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert parked_msg in additional
+
+    def test_none_parked_state_excluded_from_output(self, monkeypatch):
+        """None check_parked_state result should not appear in additionalContext."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+
+        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_parked_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit):
+                main()
+
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Parked work" not in additional

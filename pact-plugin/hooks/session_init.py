@@ -12,6 +12,8 @@ Performs:
 5. Generates session-unique PACT team name and reminds orchestrator to create it
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
 6. Checks for in_progress Tasks (resumption context via Task integration)
+7. Restores last session snapshot
+8. Checks for parked work from previous /PACT:park invocation
 
 Note: Plan detection (scanning docs/plans/) was removed from session startup
 to reduce latency. Plan detection is deferred to /PACT:orchestrate, which
@@ -62,6 +64,7 @@ from shared.session_resume import (
     update_session_info,
     restore_last_session,
     check_resumption_context,
+    check_parked_state,
 )
 
 
@@ -112,6 +115,7 @@ def main():
     5. Generates session-unique PACT team name and reminds orchestrator to create it
     6. Checks for in_progress Tasks (resumption context via Task integration)
     7. Restores last session snapshot for cross-session continuity
+    8. Checks for parked work from previous session's /PACT:park
 
     Memory initialization (dependencies, migrations, embedding catch-up) is
     now lazy-loaded on first memory operation to reduce startup cost for
@@ -189,6 +193,11 @@ def main():
         session_snapshot = restore_last_session(project_slug=project_slug)
         if session_snapshot:
             context_parts.append(session_snapshot)
+
+        # 8. Check for parked work from previous session's /PACT:park
+        parked_msg = check_parked_state(project_slug=project_slug)
+        if parked_msg:
+            context_parts.append(parked_msg)
 
         # Build output
         output = {}

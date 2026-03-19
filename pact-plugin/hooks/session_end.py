@@ -16,6 +16,7 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
+import re
 import shutil
 import sys
 import os
@@ -74,11 +75,11 @@ def write_session_snapshot(
             task_id = task.get("id", "?")
             subject = task.get("subject", "unknown")
             status = task.get("status", "unknown")
-            metadata = task.get("metadata", {})
+            metadata = task.get("metadata") or {}
 
             if status == "completed":
                 # Extract 1-line summary from handoff decisions if present
-                handoff = metadata.get("handoff", {})
+                handoff = metadata.get("handoff") or {}
                 decisions = handoff.get("decisions", [])
                 if decisions and isinstance(decisions, list):
                     summary = decisions[0] if isinstance(decisions[0], str) else str(decisions[0])
@@ -94,7 +95,7 @@ def write_session_snapshot(
 
             # Collect decisions from all completed tasks with handoff metadata
             if status == "completed":
-                handoff = metadata.get("handoff", {})
+                handoff = metadata.get("handoff") or {}
                 for decision in handoff.get("decisions", []):
                     if isinstance(decision, str) and decision not in decision_lines:
                         decision_lines.append(decision)
@@ -135,9 +136,10 @@ def write_session_snapshot(
 
     # Write snapshot file
     snapshot_dir = Path(sessions_dir) / project_slug
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     snapshot_file = snapshot_dir / "last-session.md"
     snapshot_file.write_text("\n".join(lines), encoding="utf-8")
+    os.chmod(str(snapshot_file), 0o600)
 
 
 def cleanup_stale_teams(
@@ -196,6 +198,80 @@ def cleanup_stale_teams(
     return cleaned
 
 
+def check_unparked_pr(
+    tasks: list[dict] | None,
+    project_slug: str,
+    sessions_dir: str | None = None,
+) -> None:
+    """
+    Safety-net: detect open PRs that were NOT parked (no memory consolidation).
+
+    If parked-state.json exists, consolidation already happened — no warning needed.
+    If no parked-state.json but task metadata indicates an open PR, append a warning
+    to the last-session.md snapshot so the next session can flag it.
+
+    This is detection-only. SessionEnd is async fire-and-forget and cannot run agents
+    or memory operations.
+
+    Args:
+        tasks: List of task dicts from get_task_list(), or None
+        project_slug: Project identifier for the session directory
+        sessions_dir: Override for sessions base directory (for testing)
+    """
+    if not project_slug or not tasks:
+        return
+
+    if sessions_dir is None:
+        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+
+    session_dir = Path(sessions_dir) / project_slug
+
+    # If parked-state.json exists, consolidation already happened — no warning
+    if (session_dir / "parked-state.json").exists():
+        return
+
+    # Scan task metadata for open PR indicators
+    pr_number = None
+    for task in tasks:
+        metadata = task.get("metadata") or {}
+        # Check for pr_number in task metadata (set by peer-review workflow)
+        if metadata.get("pr_number") is not None:
+            pr_number = metadata["pr_number"]
+            break
+        # Also check handoff metadata for pr_url patterns
+        handoff = metadata.get("handoff") or {}
+        for value in handoff.values():
+            if isinstance(value, str):
+                # Extract PR number from GitHub URL like "https://github.com/owner/repo/pull/288"
+                match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
+                if match:
+                    pr_number = match.group(1)
+                    break
+        if pr_number:
+            break
+
+    if not pr_number:
+        return
+
+    # Append warning to existing snapshot
+    snapshot_file = session_dir / "last-session.md"
+    if not snapshot_file.exists():
+        return
+
+    try:
+        warning = (
+            f"\n## Park-Mode Warning\n"
+            f"Session ended without memory consolidation. "
+            f"PR #{pr_number} is open but park-mode was not run. "
+            f"Run /PACT:park or /PACT:wrap-up in next session to capture session knowledge.\n"
+        )
+        existing = snapshot_file.read_text(encoding="utf-8")
+        snapshot_file.write_text(existing + warning, encoding="utf-8")
+        os.chmod(str(snapshot_file), 0o600)
+    except (IOError, OSError):
+        pass  # Best-effort — never block session end
+
+
 def main():
     try:
         project_slug = get_project_slug()
@@ -207,6 +283,12 @@ def main():
         # would return empty results and the snapshot would be blank.
         tasks = get_task_list()
         write_session_snapshot(
+            tasks=tasks,
+            project_slug=project_slug,
+        )
+
+        # Safety-net: warn if open PR detected but park-mode wasn't run
+        check_unparked_pr(
             tasks=tasks,
             project_slug=project_slug,
         )

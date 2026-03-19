@@ -64,7 +64,17 @@ Options:
 
 Do NOT force-remove automatically. The user must choose.
 
-### Step 3: Delete the Branch
+### Step 3: Clean Up Parked State
+
+Remove any parked-state.json left from a previous `/PACT:park` invocation. The slug is the project directory basename (same as `session_init.py`'s derivation).
+
+```bash
+rm -f ~/.claude/pact-sessions/{slug}/parked-state.json
+```
+
+This is best-effort — skip silently if the file or directory doesn't exist.
+
+### Step 4: Delete the Branch
 
 After the worktree is removed, delete the local branch.
 
@@ -87,7 +97,7 @@ Options:
 
 Do NOT force-delete automatically. The user must choose.
 
-### Step 4: Report
+### Step 5: Report
 
 ```
 Cleaned up worktree for {branch}

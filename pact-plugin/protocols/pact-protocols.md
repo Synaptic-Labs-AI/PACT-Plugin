@@ -861,6 +861,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 | **comPACT** | Focused, single-domain tasks | Single-domain delegation with light ceremony (parallelizable) |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
+| **park** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
 
 ---
 
@@ -1005,7 +1006,7 @@ Invoke multiple specialists of the same type when:
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`
-- Not yet → worktree persists; user resumes later. Clean up manually with `/PACT:worktree-cleanup` when done.
+- Not yet / park → invoke `/PACT:park` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later.
 - More work → continue with comPACT or orchestrate
 
 **If blocker reported**:
