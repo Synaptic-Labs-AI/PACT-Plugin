@@ -162,9 +162,18 @@ def main():
             else:
                 context_parts.append(staleness_msg)
 
-        # 5. Remind orchestrator to create session-unique PACT team
+        # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
-        context_parts.insert(0, f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). Do not read files, explore code, or respond to the user until the team is created. Use the name `{team_name}` wherever {{team_name}} appears in commands.')
+        try:
+            team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"
+            team_exists = team_config.exists()
+        except OSError:
+            # Fail-open: if filesystem check fails, assume fresh session
+            team_exists = False
+        if team_exists:
+            context_parts.insert(0, f'Your team is `{team_name}` (existing — resumed session). Do not call TeamCreate — the team already exists. Use the name `{team_name}` wherever {{team_name}} appears in commands.')
+        else:
+            context_parts.insert(0, f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). Do not read files, explore code, or respond to the user until the team is created. Use the name `{team_name}` wherever {{team_name}} appears in commands.')
 
         # 5b. Write session resume info to project CLAUDE.md
         raw_id = input_data.get("session_id")
