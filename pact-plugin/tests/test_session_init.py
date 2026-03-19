@@ -12,8 +12,14 @@ generate_team_name():
 7. Output format validation (pact- prefix, hex suffix)
 8. None session_id: treated as falsy, falls back to random
 
+Resume-aware team detection (main() integration):
+9. Fresh session (no config file) → TeamCreate instruction emitted
+10. Resume session (config file exists) → reuse instruction emitted
+11. OSError fallback → TeamCreate instruction (fail-open)
+12. Team instruction is first in context_parts (insert at position 0)
+
 main() integration:
-9. check_parked_state non-None result appears in additionalContext output
+13. check_parked_state non-None result appears in additionalContext output
 
 Note: restore_last_session() and check_resumption_context() are tested
 in test_session_resume.py (canonical location).
@@ -163,6 +169,112 @@ class TestGenerateTeamName:
         result = generate_team_name({"session_id": "test1234"})
 
         assert isinstance(result, str)
+
+
+class TestTeamResumeDetection:
+    """Tests for resume-aware team detection in session_init.main().
+
+    The hook checks whether ~/.claude/teams/{team_name}/config.json exists
+    to determine if this is a fresh session (TeamCreate instruction) or a
+    resumed session (reuse instruction).
+    """
+
+    def _run_main_with_team_detection(self, monkeypatch, tmp_path, stdin_data=None):
+        """Helper: run main() with Path.home() pointed at tmp_path.
+
+        Returns the additionalContext string from the hook output.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        if stdin_data is None:
+            stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_parked_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        return output["hookSpecificOutput"]["additionalContext"]
+
+    def test_fresh_session_emits_team_create(self, monkeypatch, tmp_path):
+        """When no team config exists on disk, should emit TeamCreate instruction."""
+        additional = self._run_main_with_team_detection(monkeypatch, tmp_path)
+
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "Do not call TeamCreate" not in additional
+
+    def test_resume_session_emits_reuse_instruction(self, monkeypatch, tmp_path):
+        """When team config exists on disk, should emit reuse instruction."""
+        # Create the team config file to simulate a resumed session
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        additional = self._run_main_with_team_detection(monkeypatch, tmp_path)
+
+        assert "existing — resumed session" in additional
+        assert "Do not call TeamCreate" in additional
+        assert "pact-aabb1122" in additional
+
+    def test_oserror_falls_back_to_team_create(self, monkeypatch, tmp_path):
+        """When filesystem check raises OSError, should fall back to TeamCreate."""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+
+        # Make Path.home() raise OSError indirectly by patching Path.exists
+        original_exists = Path.exists
+
+        def exists_that_raises(self):
+            if "config.json" in str(self) and "teams" in str(self):
+                raise OSError("Simulated filesystem error")
+            return original_exists(self)
+
+        monkeypatch.setattr(Path, "exists", exists_that_raises)
+
+        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+
+        from session_init import main
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_parked_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+
+    def test_team_instruction_is_first_in_context(self, monkeypatch, tmp_path):
+        """Team instruction should be inserted at position 0 (first in context)."""
+        additional = self._run_main_with_team_detection(monkeypatch, tmp_path)
+
+        # The team instruction uses insert(0, ...) so it should be first
+        # additionalContext is " | ".join(context_parts), so team instruction
+        # should be at the start
+        assert additional.startswith("Your FIRST action must be")
 
 
 class TestMainParkedStateIntegration:

@@ -2,6 +2,8 @@
 """
 Tests for session_end.py — SessionEnd hook that writes last-session snapshots.
 
+session_end.py is purely observational — no destructive operations.
+
 Tests cover:
 1. Writes structured markdown snapshot
 2. Creates sessions directory if missing
@@ -23,7 +25,7 @@ check_unparked_pr() — safety-net for unparked PRs:
 16. Handles malformed handoff PR URL gracefully
 17. Best-effort: no crash on IOError during append
 18. main() calls check_unparked_pr after write_session_snapshot
-19. main() call ordering: write_session_snapshot -> check_unparked_pr -> cleanup_stale_teams
+19. main() call ordering: write_session_snapshot -> check_unparked_pr
 20. Non-string handoff values (dict/list) are skipped without error
 21. Full github.com PR URL is detected by regex
 22. Non-URL "/pull/" text is NOT detected by regex
@@ -375,26 +377,11 @@ class TestMainEntryPoint:
         assert call_args.kwargs["tasks"] == mock_tasks
         assert call_args.kwargs["project_slug"] == "my-project"
 
-    def test_main_calls_cleanup_stale_teams(self):
-        """main() should call cleanup_stale_teams() after write_session_snapshot()."""
-        from session_end import main
-
-        env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
-
-        with patch.dict("os.environ", env, clear=True), \
-             patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
-             patch("session_end.cleanup_stale_teams") as mock_cleanup:
-            with pytest.raises(SystemExit):
-                main()
-
-        mock_cleanup.assert_called_once()
-
     def test_main_call_ordering(self):
-        """main() must call write_session_snapshot -> check_unparked_pr -> cleanup_stale_teams in order.
+        """main() must call write_session_snapshot -> check_unparked_pr in order.
 
         Ordering is critical: snapshot creates the file, check_unparked_pr
-        appends to it, cleanup removes task dirs that check_unparked_pr reads.
+        appends to it.
         """
         from session_end import main
 
@@ -407,163 +394,14 @@ class TestMainEntryPoint:
              patch("session_end.write_session_snapshot",
                    side_effect=lambda **kw: call_order.append("write_session_snapshot")), \
              patch("session_end.check_unparked_pr",
-                   side_effect=lambda **kw: call_order.append("check_unparked_pr")), \
-             patch("session_end.cleanup_stale_teams",
-                   side_effect=lambda **kw: call_order.append("cleanup_stale_teams")):
+                   side_effect=lambda **kw: call_order.append("check_unparked_pr")):
             with pytest.raises(SystemExit):
                 main()
 
         assert call_order == [
             "write_session_snapshot",
             "check_unparked_pr",
-            "cleanup_stale_teams",
         ]
-
-
-# =============================================================================
-# cleanup_stale_teams() Tests
-# =============================================================================
-
-class TestCleanupStaleTeams:
-    """Tests for session_end.cleanup_stale_teams() — session-scoped cleanup
-    of the current team's directory and corresponding task directory."""
-
-    def test_removes_specified_team(self, tmp_path):
-        """Team directory should be removed when team_name is specified."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        team = teams_dir / "pact-abc123"
-        team.mkdir(parents=True)
-        (team / "config.json").write_text('{"members": []}')
-
-        cleaned = cleanup_stale_teams(team_name="pact-abc123", teams_dir=str(teams_dir))
-        assert "pact-abc123" in cleaned
-        assert not team.exists()
-
-    def test_removes_team_without_config(self, tmp_path):
-        """Team directory with no config.json should still be removed."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        team = teams_dir / "pact-orphan"
-        team.mkdir(parents=True)
-
-        cleaned = cleanup_stale_teams(team_name="pact-orphan", teams_dir=str(teams_dir))
-        assert "pact-orphan" in cleaned
-        assert not team.exists()
-
-    def test_does_not_touch_other_teams(self, tmp_path):
-        """Only the specified team should be removed, not other pact-* teams."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-
-        # Target team
-        target = teams_dir / "pact-target"
-        target.mkdir(parents=True)
-
-        # Other team — must survive
-        other = teams_dir / "pact-other"
-        other.mkdir(parents=True)
-        (other / "config.json").write_text('{"members": []}')
-
-        cleaned = cleanup_stale_teams(team_name="pact-target", teams_dir=str(teams_dir))
-        assert "pact-target" in cleaned
-        assert not target.exists()
-        assert other.exists()  # Untouched
-
-    def test_also_removes_corresponding_task_dir(self, tmp_path):
-        """When removing a team, should also remove ~/.claude/tasks/{team_name}."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        tasks_dir = tmp_path / "tasks"
-
-        team = teams_dir / "pact-cleanup"
-        team.mkdir(parents=True)
-
-        task_dir = tasks_dir / "pact-cleanup"
-        task_dir.mkdir(parents=True)
-        (task_dir / "1.json").write_text('{"id": "1"}')
-
-        cleaned = cleanup_stale_teams(team_name="pact-cleanup", teams_dir=str(teams_dir))
-        assert "pact-cleanup" in cleaned
-        assert not team.exists()
-        assert not task_dir.exists()
-
-    def test_no_error_when_task_dir_missing(self, tmp_path):
-        """Should not fail if corresponding task dir doesn't exist."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        team = teams_dir / "pact-notasks"
-        team.mkdir(parents=True)
-
-        cleaned = cleanup_stale_teams(team_name="pact-notasks", teams_dir=str(teams_dir))
-        assert "pact-notasks" in cleaned
-
-    def test_returns_empty_when_team_dir_missing(self, tmp_path):
-        """Should return empty list if the team directory doesn't exist."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        teams_dir.mkdir(parents=True)
-
-        cleaned = cleanup_stale_teams(team_name="pact-nonexistent", teams_dir=str(teams_dir))
-        assert cleaned == []
-
-    def test_returns_empty_when_teams_dir_missing(self, tmp_path):
-        """Should return empty list if the base teams directory doesn't exist."""
-        from session_end import cleanup_stale_teams
-
-        cleaned = cleanup_stale_teams(
-            team_name="pact-abc",
-            teams_dir=str(tmp_path / "nonexistent"),
-        )
-        assert cleaned == []
-
-    def test_returns_empty_when_no_team_name(self, tmp_path):
-        """Should return empty list if team_name is empty string."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        teams_dir.mkdir(parents=True)
-
-        cleaned = cleanup_stale_teams(team_name="", teams_dir=str(teams_dir))
-        assert cleaned == []
-
-    def test_reads_team_name_from_env(self, tmp_path):
-        """Should read team name from CLAUDE_CODE_TEAM_NAME env var."""
-        from session_end import cleanup_stale_teams
-
-        teams_dir = tmp_path / "teams"
-        team = teams_dir / "pact-fromenv"
-        team.mkdir(parents=True)
-
-        env = {"CLAUDE_CODE_TEAM_NAME": "PACT-FROMENV"}
-        with patch.dict("os.environ", env, clear=True):
-            cleaned = cleanup_stale_teams(teams_dir=str(teams_dir))
-        assert "pact-fromenv" in cleaned
-        assert not team.exists()
-
-    def test_returns_empty_when_no_env_and_no_arg(self, tmp_path):
-        """Should return empty list when no team_name arg and no env var."""
-        from session_end import cleanup_stale_teams
-
-        with patch.dict("os.environ", {}, clear=True):
-            cleaned = cleanup_stale_teams(teams_dir=str(tmp_path))
-        assert cleaned == []
-
-    def test_defaults_to_home_claude_teams(self):
-        """Without teams_dir override, should use ~/.claude/teams/."""
-        from session_end import cleanup_stale_teams
-
-        # Just verify it doesn't crash when called with explicit team name
-        # (it will look for the team under ~/.claude/teams/ which may not exist)
-        result = cleanup_stale_teams(team_name="pact-nonexistent-test")
-        assert isinstance(result, list)
-        assert result == []
 
 
 # =============================================================================
@@ -792,8 +630,7 @@ class TestCheckUnparkedPr:
         with patch.dict("os.environ", env, clear=True), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot"), \
-             patch("session_end.check_unparked_pr") as mock_check, \
-             patch("session_end.cleanup_stale_teams"):
+             patch("session_end.check_unparked_pr") as mock_check:
             with pytest.raises(SystemExit):
                 main()
 
