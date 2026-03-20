@@ -1,11 +1,11 @@
 ---
-description: Park the session — consolidate memory, persist state, shut down teammates
+description: Pause the session — consolidate memory, persist state, shut down teammates
 ---
-# PACT Park Protocol
+# PACT Pause Protocol
 
-Park the current session for later resumption. This is a **memory-critical subset of wrap-up** — it consolidates knowledge and persists session state without cleaning up the worktree or deleting tasks.
+Pause the current session for later resumption. This is a **memory-critical subset of wrap-up** — it consolidates knowledge and persists session state without cleaning up the worktree or deleting tasks.
 
-> **Cross-reference**: For full end-of-session cleanup (worktree removal, task audit, session decision), see [wrap-up.md](wrap-up.md). Park is invoked automatically when the user chooses "Not yet" at the merge decision in `/PACT:peer-review` or `/PACT:comPACT`.
+> **Cross-reference**: For full end-of-session cleanup (worktree removal, task audit, session decision), see [wrap-up.md](wrap-up.md). Pause is invoked automatically when the user chooses "Not yet" at the merge decision in `/PACT:peer-review` or `/PACT:comPACT`.
 
 ---
 
@@ -55,7 +55,7 @@ Report task summary without deleting any tasks:
 3. Do NOT delete or complete any tasks — they must survive for session resume
 ```
 
-### 5. Write Parked State
+### 5. Write Paused State
 
 Persist session state for the `session_init` hook to detect on resume:
 
@@ -63,15 +63,15 @@ Persist session state for the `session_init` hook to detect on resume:
 mkdir -p ~/.claude/pact-sessions/{slug}/
 ```
 
-Write `~/.claude/pact-sessions/{slug}/parked-state.json`:
+Write `~/.claude/pact-sessions/{slug}/paused-state.json`:
 
 ```json
 {
   "pr_number": 288,
   "pr_url": "https://github.com/owner/repo/pull/288",
-  "branch": "feat/park-mode-consolidation-289",
-  "worktree_path": "/path/to/.worktrees/feat/park-mode-consolidation-289",
-  "parked_at": "2026-03-18T09:30:00Z",
+  "branch": "feat/pause-mode-consolidation-289",
+  "worktree_path": "/path/to/.worktrees/feat/pause-mode-consolidation-289",
+  "paused_at": "2026-03-18T09:30:00Z",
   "consolidation_completed": true,
   "team_name": "pact-d7ab1edb"
 }
@@ -84,7 +84,7 @@ Write `~/.claude/pact-sessions/{slug}/parked-state.json`:
 | `pr_url` | string | Full URL to the PR |
 | `branch` | string | Git branch name |
 | `worktree_path` | string | Absolute path to the worktree |
-| `parked_at` | string | ISO 8601 timestamp of when session was parked |
+| `paused_at` | string | ISO 8601 timestamp of when session was paused |
 | `consolidation_completed` | boolean | Whether memory consolidation finished successfully |
 | `team_name` | string | Session team name (format: `pact-{session_hash}`) |
 
@@ -96,7 +96,7 @@ Send `shutdown_request` to all active teammates and wait for responses. The secr
 
 ```
 For each active teammate:
-  SendMessage(to="{teammate_name}", message={"type": "shutdown_request", "reason": "Session parked"})
+  SendMessage(to="{teammate_name}", message={"type": "shutdown_request", "reason": "Session paused"})
 ```
 
 Do NOT delete the team — it will be garbage-collected or reused on resume.
@@ -104,10 +104,10 @@ Do NOT delete the team — it will be garbage-collected or reused on resume.
 ### 7. Report
 
 ```
-"Session parked. PR #{N} open at {url}. Resume with `/PACT:peer-review`."
+"Session paused. PR #{N} open at {url}. Resume with `/PACT:peer-review`."
 ```
 
 If Telegram bridge is active, send a notification:
 ```
-telegram_notify("Session parked. PR #{N} open at {url}.")
+telegram_notify("Session paused. PR #{N} open at {url}.")
 ```

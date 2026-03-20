@@ -5,7 +5,7 @@ description: Perform end-of-session cleanup and documentation synchronization
 
 You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace is clean, documentation is synchronized, and the session is properly closed.
 
-> **Cross-reference**: For parking a session (PR open, not ready to merge), see [park.md](park.md). Park consolidates memory and persists state without worktree cleanup or task deletion.
+> **Cross-reference**: For pausing a session (PR open, not ready to merge), see [pause.md](pause.md). Pause consolidates memory and persists state without worktree cleanup or task deletion.
 
 ## 1. Memory Consolidation (Pass 2)
 
@@ -55,8 +55,8 @@ entities: ["orchestration_calibration", "{domain}"]
 ## 5. Worktree Cleanup
 
 Check for open PRs associated with the current worktree branch:
-- **PR merged or no PR**: Clean up parked state if it exists (`rm -f ~/.claude/pact-sessions/{slug}/parked-state.json`), then invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.
-- **PR still open**: Skip worktree cleanup. Write `parked-state.json` (see [park.md step 5](park.md) for schema). Set `consolidation_completed: true` because wrap-up steps 1-4 already performed memory consolidation. Report: "Worktree preserved — PR still open. Use `/PACT:park` to consolidate and pause, or `/PACT:peer-review` to continue review."
+- **PR merged or no PR**: Clean up paused state if it exists (`rm -f ~/.claude/pact-sessions/{slug}/paused-state.json`), then invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.
+- **PR still open**: Skip worktree cleanup. Write `paused-state.json` (see [pause.md step 5](pause.md) for schema). Set `consolidation_completed: true` because wrap-up steps 1-4 already performed memory consolidation. Report: "Worktree preserved — PR still open. Use `/PACT:pause` to consolidate and pause, or `/PACT:peer-review` to continue review."
 
 ## 6. Task Audit
 

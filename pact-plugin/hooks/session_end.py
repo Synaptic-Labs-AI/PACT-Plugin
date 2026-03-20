@@ -7,7 +7,7 @@ Used by: hooks.json SessionEnd hook
 
 Actions:
 1. Write last-session snapshot to ~/.claude/pact-sessions/{slug}/last-session.md
-2. Detect open PRs that were not parked (append warning to snapshot)
+2. Detect open PRs that were not paused (append warning to snapshot)
 
 Purely observational — no destructive operations. Cannot block session termination.
 
@@ -141,16 +141,16 @@ def write_session_snapshot(
     os.chmod(str(snapshot_file), 0o600)
 
 
-def check_unparked_pr(
+def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
     sessions_dir: str | None = None,
 ) -> None:
     """
-    Safety-net: detect open PRs that were NOT parked (no memory consolidation).
+    Safety-net: detect open PRs that were NOT paused (no memory consolidation).
 
-    If parked-state.json exists, consolidation already happened — no warning needed.
-    If no parked-state.json but task metadata indicates an open PR, append a warning
+    If paused-state.json exists, consolidation already happened — no warning needed.
+    If no paused-state.json but task metadata indicates an open PR, append a warning
     to the last-session.md snapshot so the next session can flag it.
 
     This is detection-only. SessionEnd is async fire-and-forget and cannot run agents
@@ -169,8 +169,8 @@ def check_unparked_pr(
 
     session_dir = Path(sessions_dir) / project_slug
 
-    # If parked-state.json exists, consolidation already happened — no warning
-    if (session_dir / "parked-state.json").exists():
+    # If paused-state.json exists, consolidation already happened — no warning
+    if (session_dir / "paused-state.json").exists():
         return
 
     # Scan task metadata for open PR indicators
@@ -203,10 +203,10 @@ def check_unparked_pr(
 
     try:
         warning = (
-            f"\n## Park-Mode Warning\n"
+            f"\n## Pause-Mode Warning\n"
             f"Session ended without memory consolidation. "
-            f"PR #{pr_number} is open but park-mode was not run. "
-            f"Run /PACT:park or /PACT:wrap-up in next session to capture session knowledge.\n"
+            f"PR #{pr_number} is open but pause-mode was not run. "
+            f"Run /PACT:pause or /PACT:wrap-up in next session to capture session knowledge.\n"
         )
         existing = snapshot_file.read_text(encoding="utf-8")
         snapshot_file.write_text(existing + warning, encoding="utf-8")
@@ -226,8 +226,8 @@ def main():
             project_slug=project_slug,
         )
 
-        # Safety-net: warn if open PR detected but park-mode wasn't run
-        check_unparked_pr(
+        # Safety-net: warn if open PR detected but pause-mode wasn't run
+        check_unpaused_pr(
             tasks=tasks,
             project_slug=project_slug,
         )
