@@ -261,7 +261,7 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 
    **Verify agent task completion**: After each reviewer completes, check their task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 
-6. ⚠️ **Merge Authorization Checkpoint** (S5 — always use `AskUserQuestion` to request merge authorization, not bare text):
+6. ⚠️ **Merge Authorization Checkpoint** (MANDATORY — always use `AskUserQuestion` to request merge authorization, not bare text):
 
    Use `AskUserQuestion` with these exact options:
    - **"Yes, merge"** (description: "Merge the PR and run wrap-up") → On selection: merge via `gh pr merge`, then invoke `/PACT:wrap-up`
