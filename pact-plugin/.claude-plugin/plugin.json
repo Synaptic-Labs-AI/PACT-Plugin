@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "3.12.0",
+  "version": "3.12.1",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "ProfSynapse",
