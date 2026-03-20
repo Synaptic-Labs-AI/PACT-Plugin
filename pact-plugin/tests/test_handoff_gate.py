@@ -90,6 +90,10 @@ class TestHandoffGate:
         assert '"decisions": ["chose X because Y"]' in result
         # Verify two-step instruction
         assert 'status="completed"' in result
+        # F1: Verify balanced parentheses in example output
+        assert result.count("(") == result.count(")"), (
+            f"Unbalanced parens: {result.count('(')} open vs {result.count(')')} close"
+        )
 
     def test_blocks_missing_required_field(self):
         from handoff_gate import validate_task_handoff

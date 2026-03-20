@@ -381,6 +381,45 @@ class TestFindMissingHandoffTasks:
         ids = {r["id"] for r in result}
         assert ids == {"5", "8"}
 
+    def test_malformed_task_file_skipped(self, tmp_path):
+        """P1: Malformed JSON in task file → skipped, no crash."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        (task_dir / "5.json").write_text("not valid json")
+        _make_task_file(task_dir, "6", "backend-coder", "in_progress", {})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "6"
+
+    def test_os_error_during_scan_returns_empty(self, tmp_path):
+        """P1: OSError during directory scan → fail-open, empty list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        self._make_task_dir(tmp_path)
+
+        with patch("teammate_completion_gate.Path.iterdir",
+                    side_effect=OSError("permission denied")):
+            result = find_missing_handoff_tasks(
+                "backend-coder", "pact-test",
+                tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+            )
+        assert len(result) == 0
+
+    def test_none_team_name_returns_empty(self, tmp_path):
+        """P1: None team_name → empty list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", None,
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
 
 class TestFormatMissingHandoffFeedback:
     """Tests for teammate_completion_gate.format_missing_handoff_feedback()."""
@@ -421,6 +460,15 @@ class TestFormatMissingHandoffFeedback:
 
         msg = format_missing_handoff_feedback([{"id": "5", "subject": "CODE: auth"}])
         assert "missing HANDOFF metadata" in msg
+
+    def test_example_has_balanced_parens(self):
+        """F1: Example output must have matching parentheses."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([{"id": "5", "subject": "CODE: auth"}])
+        assert msg.count("(") == msg.count(")"), (
+            f"Unbalanced parens: {msg.count('(')} open vs {msg.count(')')} close"
+        )
 
 
 class TestMain:
