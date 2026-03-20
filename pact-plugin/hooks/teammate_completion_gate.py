@@ -84,6 +84,71 @@ def find_completable_tasks(
     return completable
 
 
+def find_missing_handoff_tasks(
+    teammate_name: str,
+    team_name: str,
+    tasks_base_dir: str | None = None,
+) -> list[dict]:
+    """
+    Find tasks owned by this teammate that are in_progress but have NO handoff
+    metadata at all — meaning the agent went idle without storing its HANDOFF.
+
+    This is the safety net for the "agent loops on handoff gate" bug: agents
+    that call TaskUpdate(status="completed") without handoff get blocked by
+    handoff_gate.py, then retry the same call repeatedly. When they finally
+    go idle, this function catches them and provides concrete guidance.
+
+    Scans ~/.claude/tasks/{team_name}/ for JSON task files. Fails open on
+    any I/O or parsing error (returns empty list).
+
+    Args:
+        teammate_name: Name of the idle teammate
+        team_name: Session team name
+        tasks_base_dir: Override for tasks base directory (for testing)
+
+    Returns:
+        List of dicts with 'id' and 'subject' for tasks missing handoff
+    """
+    if not teammate_name or not team_name:
+        return []
+
+    if tasks_base_dir is None:
+        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+
+    task_dir = Path(tasks_base_dir) / team_name
+    if not task_dir.exists():
+        return []
+
+    missing = []
+
+    try:
+        for task_file in task_dir.iterdir():
+            if not task_file.name.endswith(".json"):
+                continue
+
+            try:
+                data = json.loads(task_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            if data.get("owner") != teammate_name:
+                continue
+            if data.get("status") != "in_progress":
+                continue
+
+            metadata = data.get("metadata", {})
+            if metadata.get("handoff"):
+                continue  # Has HANDOFF — handled by find_completable_tasks
+
+            task_id = task_file.stem
+            subject = data.get("subject", "unknown")
+            missing.append({"id": task_id, "subject": subject})
+    except OSError:
+        return []
+
+    return missing
+
+
 def format_feedback(completable: list[dict]) -> str:
     """
     Format the feedback message telling the agent which tasks to complete.
@@ -114,6 +179,41 @@ def format_feedback(completable: list[dict]) -> str:
     )
 
 
+def format_missing_handoff_feedback(missing: list[dict]) -> str:
+    """
+    Format feedback for an idle agent whose tasks are missing HANDOFF metadata.
+
+    Provides the same concrete example as handoff_gate.py so agents can
+    self-correct from a copy-paste-ready template rather than looping on
+    the schema description.
+
+    Args:
+        missing: List of dicts with 'id' and 'subject'
+
+    Returns:
+        Feedback message string for stderr
+    """
+    if len(missing) == 1:
+        task = missing[0]
+        task_ref = f"Task #{task['id']} ({task['subject']})"
+    else:
+        task_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in missing)
+
+    task_id_example = missing[0]["id"]
+
+    return (
+        f"You went idle with in_progress tasks missing HANDOFF metadata: {task_ref}. "
+        f"You must store handoff metadata BEFORE marking the task completed.\n\n"
+        f"Example — copy, fill in, and run:\n"
+        f"TaskUpdate(taskId=\"{task_id_example}\", metadata={{\"handoff\": {{\n"
+        f"  \"produced\": [\"file1.py\"], \"decisions\": [\"chose X because Y\"],\n"
+        f"  \"uncertainty\": [{{\"LOW\": \"untested edge case\"}}],\n"
+        f"  \"integration\": [\"touches module Z\"], \"open_questions\": [\"none\"]\n"
+        f"}}}}))\n\n"
+        f"Then call: TaskUpdate(taskId=\"{task_id_example}\", status=\"completed\")"
+    )
+
+
 def main():
     try:
         try:
@@ -135,6 +235,14 @@ def main():
         if completable:
             print(format_feedback(completable), file=sys.stderr)
             sys.exit(2)  # Block idle — agent has tasks to complete
+
+        # Safety net: catch agents that went idle without storing HANDOFF.
+        # These agents were likely looping on handoff_gate rejection.
+        missing = find_missing_handoff_tasks(teammate_name, team_name)
+
+        if missing:
+            print(format_missing_handoff_feedback(missing), file=sys.stderr)
+            sys.exit(2)  # Block idle — agent needs to store HANDOFF first
 
         sys.exit(0)
 

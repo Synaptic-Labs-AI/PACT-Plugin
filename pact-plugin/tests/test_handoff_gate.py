@@ -5,6 +5,7 @@ if handoff metadata is missing or incomplete.
 Tests cover:
 1. Complete handoff metadata -> allow (exit 0)
 2. Missing metadata.handoff -> block (exit 2)
+2a. Missing handoff block message includes concrete copy-paste example
 3. Missing required field (e.g., no 'produced') -> block (exit 2)
 4. Empty produced list -> block (exit 2)
 5. Skipped task (metadata.skipped: true) -> allow (bypass)
@@ -71,6 +72,24 @@ class TestHandoffGate:
         )
         assert result is not None
         assert "handoff" in result.lower()
+
+    def test_missing_handoff_includes_concrete_example(self):
+        """Rejection message includes a copy-paste-ready TaskUpdate example."""
+        from handoff_gate import validate_task_handoff
+
+        result = validate_task_handoff(
+            task_subject="CODE: implement auth",
+            task_metadata={},
+            teammate_name="backend-coder"
+        )
+        assert result is not None
+        # Verify the concrete example is present (not just schema description)
+        assert "Example" in result
+        assert "YOUR_ID" in result
+        assert '"produced": ["file1.py"]' in result
+        assert '"decisions": ["chose X because Y"]' in result
+        # Verify two-step instruction
+        assert 'status="completed"' in result
 
     def test_blocks_missing_required_field(self):
         from handoff_gate import validate_task_handoff

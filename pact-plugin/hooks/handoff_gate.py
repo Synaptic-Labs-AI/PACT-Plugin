@@ -66,7 +66,14 @@ def validate_task_handoff(
             "Task completion blocked: missing handoff metadata. "
             "Store your HANDOFF via TaskUpdate(metadata={\"handoff\": {\"produced\": [...], "
             "\"decisions\": [...], \"uncertainty\": [...], \"integration\": [...], "
-            "\"open_questions\": [...]}}) before marking task completed."
+            "\"open_questions\": [...]}}) BEFORE marking task completed.\n\n"
+            "Example — copy, fill in, and run:\n"
+            "TaskUpdate(taskId=\"YOUR_ID\", metadata={\"handoff\": {\n"
+            "  \"produced\": [\"file1.py\"], \"decisions\": [\"chose X because Y\"],\n"
+            "  \"uncertainty\": [{\"LOW\": \"untested edge case\"}],\n"
+            "  \"integration\": [\"touches module Z\"], \"open_questions\": [\"none\"]\n"
+            "}})\n\n"
+            "Then call: TaskUpdate(taskId=\"YOUR_ID\", status=\"completed\")"
         )
 
     # Check: all required fields present
