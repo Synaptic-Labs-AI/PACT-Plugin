@@ -21,6 +21,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from shared.handoff_example import format_handoff_example
+
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
 
@@ -66,7 +68,8 @@ def validate_task_handoff(
             "Task completion blocked: missing handoff metadata. "
             "Store your HANDOFF via TaskUpdate(metadata={\"handoff\": {\"produced\": [...], "
             "\"decisions\": [...], \"uncertainty\": [...], \"integration\": [...], "
-            "\"open_questions\": [...]}}) before marking task completed."
+            "\"open_questions\": [...]}}) BEFORE marking task completed.\n\n"
+            + format_handoff_example()
         )
 
     # Check: all required fields present

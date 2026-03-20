@@ -1,11 +1,13 @@
 """
 Tests for teammate_completion_gate.py — TeammateIdle hook that blocks agents
-from going idle when they own in_progress tasks with HANDOFF metadata.
+from going idle when they own in_progress tasks with HANDOFF metadata, or
+when they have in_progress tasks with NO handoff metadata (safety net for
+agents stuck looping on handoff_gate rejection).
 
 Tests cover:
 1. Agent with in_progress task + HANDOFF → blocked (exit 2)
 2. Agent with completed tasks → allowed (exit 0)
-3. Agent with in_progress task but no HANDOFF → allowed (still working)
+3. find_completable_tasks: in_progress without HANDOFF → not in completable list
 4. Agent with no tasks → allowed (exit 0)
 5. Multiple in_progress tasks with HANDOFF → lists all in feedback
 6. Malformed task files → fail-open (allow idle)
@@ -17,6 +19,9 @@ Tests cover:
 12. Task owned by different agent → not included
 13. Integration: main() exit codes
 14. Integration: main() stderr feedback content
+15. find_missing_handoff_tasks: finds in_progress tasks without handoff
+16. format_missing_handoff_feedback: concrete example in feedback
+17. Integration: idle agent with no handoff → blocked with guidance (exit 2)
 """
 import json
 import io
@@ -278,6 +283,194 @@ class TestFormatFeedback:
         assert "2 tasks" in msg
 
 
+class TestFindMissingHandoffTasks:
+    """Tests for teammate_completion_gate.find_missing_handoff_tasks()."""
+
+    def _make_task_dir(self, tmp_path, team_name="pact-test"):
+        task_dir = tmp_path / ".claude" / "tasks" / team_name
+        task_dir.mkdir(parents=True)
+        return task_dir
+
+    def test_finds_in_progress_without_handoff(self, tmp_path):
+        """P0: in_progress + no HANDOFF → found as missing."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "5"
+
+    def test_excludes_tasks_with_handoff(self, tmp_path):
+        """P0: in_progress + HANDOFF present → not in missing list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"handoff": VALID_HANDOFF})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
+    def test_excludes_completed_tasks(self, tmp_path):
+        """P0: completed task without handoff → not flagged."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "completed", {})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
+    def test_excludes_different_owner(self, tmp_path):
+        """P0: Task owned by different agent → not included."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "frontend-coder", "in_progress", {})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
+    def test_empty_teammate_returns_empty(self, tmp_path):
+        """P1: No teammate_name → empty list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        result = find_missing_handoff_tasks(
+            "", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
+    def test_missing_team_directory_returns_empty(self, tmp_path):
+        """P1: Team directory doesn't exist → empty list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
+    def test_multiple_missing_tasks(self, tmp_path):
+        """P0: Multiple in_progress tasks without handoff → all listed."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {})
+        _make_task_file(task_dir, "8", "backend-coder", "in_progress", {})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 2
+        ids = {r["id"] for r in result}
+        assert ids == {"5", "8"}
+
+    def test_malformed_task_file_skipped(self, tmp_path):
+        """P1: Malformed JSON in task file → skipped, no crash."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        task_dir = self._make_task_dir(tmp_path)
+        (task_dir / "5.json").write_text("not valid json")
+        _make_task_file(task_dir, "6", "backend-coder", "in_progress", {})
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "6"
+
+    def test_os_error_during_scan_returns_empty(self, tmp_path):
+        """P1: OSError during directory scan → fail-open, empty list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        self._make_task_dir(tmp_path)
+
+        with patch("teammate_completion_gate.Path.iterdir",
+                    side_effect=OSError("permission denied")):
+            result = find_missing_handoff_tasks(
+                "backend-coder", "pact-test",
+                tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+            )
+        assert len(result) == 0
+
+    def test_none_team_name_returns_empty(self, tmp_path):
+        """P1: None team_name → empty list."""
+        from teammate_completion_gate import find_missing_handoff_tasks
+
+        result = find_missing_handoff_tasks(
+            "backend-coder", None,
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(result) == 0
+
+
+class TestFormatMissingHandoffFeedback:
+    """Tests for teammate_completion_gate.format_missing_handoff_feedback()."""
+
+    def test_single_task_contains_example(self):
+        """P0: Single task → feedback includes concrete TaskUpdate example."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([{"id": "5", "subject": "CODE: auth"}])
+        assert "#5" in msg
+        assert "CODE: auth" in msg
+        assert "produced" in msg
+        assert "decisions" in msg
+        assert 'TaskUpdate(taskId="5"' in msg
+
+    def test_single_task_contains_two_step_instruction(self):
+        """P0: Feedback instructs two-step process: metadata first, then complete."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([{"id": "5", "subject": "CODE: auth"}])
+        assert "metadata" in msg
+        assert 'status="completed"' in msg
+
+    def test_multiple_tasks_lists_all(self):
+        """P0: Multiple tasks → all listed in feedback."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "5", "subject": "CODE: auth"},
+            {"id": "8", "subject": "CODE: api"},
+        ])
+        assert "#5" in msg
+        assert "#8" in msg
+
+    def test_feedback_mentions_missing_handoff(self):
+        """P0: Feedback clearly states the problem is missing HANDOFF."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([{"id": "5", "subject": "CODE: auth"}])
+        assert "missing HANDOFF metadata" in msg
+
+    def test_example_has_balanced_parens(self):
+        """F1: Example output must have matching parentheses."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([{"id": "5", "subject": "CODE: auth"}])
+        assert msg.count("(") == msg.count(")"), (
+            f"Unbalanced parens: {msg.count('(')} open vs {msg.count(')')} close"
+        )
+
+
 class TestMain:
     """Integration tests for teammate_completion_gate.main()."""
 
@@ -335,8 +528,13 @@ class TestMain:
         captured = capsys.readouterr()
         assert captured.err == ""
 
-    def test_allows_when_still_working(self, tmp_path, capsys):
-        """P0: in_progress but no HANDOFF → exit 0 (agent still working)."""
+    def test_blocks_when_idle_with_missing_handoff(self, tmp_path, capsys):
+        """P0: in_progress but no HANDOFF + agent idle → exit 2 with guidance.
+
+        An idle agent with in_progress tasks but no HANDOFF metadata is stuck
+        (likely looping on handoff_gate rejection). The safety net blocks idle
+        and provides a concrete example to help the agent self-correct.
+        """
         from teammate_completion_gate import main
 
         task_dir = self._make_task_dir(tmp_path)
@@ -354,7 +552,11 @@ class TestMain:
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
-        assert exc_info.value.code == 0
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "missing HANDOFF metadata" in captured.err
+        assert "TaskUpdate" in captured.err
+        assert "produced" in captured.err
 
     def test_allows_when_no_tasks(self, tmp_path, capsys):
         """P0: Empty task directory → exit 0."""
