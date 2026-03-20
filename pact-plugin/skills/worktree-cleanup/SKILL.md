@@ -64,12 +64,12 @@ Options:
 
 Do NOT force-remove automatically. The user must choose.
 
-### Step 3: Clean Up Parked State
+### Step 3: Clean Up Paused State
 
-Remove any parked-state.json left from a previous `/PACT:park` invocation. The slug is the project directory basename (same as `session_init.py`'s derivation).
+Remove any paused-state.json left from a previous `/PACT:pause` invocation. The slug is the project directory basename (same as `session_init.py`'s derivation).
 
 ```bash
-rm -f ~/.claude/pact-sessions/{slug}/parked-state.json
+rm -f ~/.claude/pact-sessions/{slug}/paused-state.json
 ```
 
 This is best-effort — skip silently if the file or directory doesn't exist.

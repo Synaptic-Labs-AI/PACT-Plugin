@@ -3,13 +3,13 @@ Location: pact-plugin/hooks/shared/session_resume.py
 Summary: Session resume and snapshot management for cross-session continuity.
 Used by: session_init.py during SessionStart hook to write session info,
          restore previous session snapshots, check for resumable tasks,
-         and detect parked work from previous sessions.
+         and detect paused work from previous sessions.
 
 Manages:
 1. Writing session resume info (team name, resume command) to project CLAUDE.md
 2. Restoring last session snapshots for cross-session continuity
 3. Checking for in-progress tasks that indicate resumable work
-4. Detecting parked state from /PACT:park for multi-session resume
+4. Detecting paused state from /PACT:pause for multi-session resume
 """
 
 import json
@@ -219,32 +219,32 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
     return None
 
 
-# parked-state.json schema (written by /PACT:park command, read here):
+# paused-state.json schema (written by /PACT:pause command, read here):
 # {
 #   "pr_number": int,           -- GitHub PR number
 #   "pr_url": str,              -- Full GitHub PR URL
 #   "branch": str,              -- Git branch name
 #   "worktree_path": str,       -- Absolute path to .worktrees/ directory
-#   "parked_at": str,           -- ISO 8601 UTC timestamp
+#   "paused_at": str,           -- ISO 8601 UTC timestamp
 #   "consolidation_completed": bool,  -- Whether memory consolidation ran
 #   "team_name": str            -- Session team name (e.g. "pact-d7ab1edb")
 # }
 
 
-def check_parked_state(
+def check_paused_state(
     project_slug: str,
     sessions_dir: str | None = None,
 ) -> str | None:
     """
-    Detect parked work from a previous session's /PACT:park invocation.
+    Detect paused work from a previous session's /PACT:pause invocation.
 
-    Checks if ~/.claude/pact-sessions/{project_slug}/parked-state.json exists.
-    If found, validates the parked state and returns a formatted context string
-    for the orchestrator describing the parked PR, branch, and worktree so it
+    Checks if ~/.claude/pact-sessions/{project_slug}/paused-state.json exists.
+    If found, validates the paused state and returns a formatted context string
+    for the orchestrator describing the paused PR, branch, and worktree so it
     can offer to resume.
 
     Validation pipeline (ordered cheapest-first):
-    1. TTL check: parked_at older than 14 days → clean up stale file, return info
+    1. TTL check: paused_at older than 14 days → clean up stale file, return info
     2. Active PR validation via `gh pr view`: if PR is MERGED/CLOSED → clean up,
        return info. Fail-open: if gh is unavailable or network fails, skip this
        check and fall through to existing behavior.
@@ -254,7 +254,7 @@ def check_parked_state(
         sessions_dir: Override for sessions base directory (for testing)
 
     Returns:
-        Formatted context string if parked state exists, None otherwise
+        Formatted context string if paused state exists, None otherwise
     """
     if not project_slug:
         return None
@@ -262,7 +262,7 @@ def check_parked_state(
     if sessions_dir is None:
         sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
 
-    state_file = Path(sessions_dir) / project_slug / "parked-state.json"
+    state_file = Path(sessions_dir) / project_slug / "paused-state.json"
     if not state_file.exists():
         return None
 
@@ -280,28 +280,28 @@ def check_parked_state(
     if pr_number is None:
         return None
 
-    # TTL check: clean up parked state older than 14 days (cheaper than gh call)
-    # Fail-open: if parked_at is missing or unparseable, skip TTL check
-    parked_at_str = state.get("parked_at")
-    if parked_at_str:
+    # TTL check: clean up paused state older than 14 days (cheaper than gh call)
+    # Fail-open: if paused_at is missing or unparseable, skip TTL check
+    paused_at_str = state.get("paused_at")
+    if paused_at_str:
         try:
-            parked_at = datetime.fromisoformat(parked_at_str.replace("Z", "+00:00"))
-            age_days = (datetime.now(timezone.utc) - parked_at).days
+            paused_at = datetime.fromisoformat(paused_at_str.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - paused_at).days
             if age_days > 14:
                 try:
                     state_file.unlink()
                 except OSError:
                     pass
-                parked_date = parked_at.strftime("%Y-%m-%d")
+                paused_date = paused_at.strftime("%Y-%m-%d")
                 return (
-                    f"Stale parked state from {parked_date} cleaned up "
+                    f"Stale paused state from {paused_date} cleaned up "
                     f"(older than 14 days). PR #{pr_number} on {branch}."
                 )
         except (ValueError, TypeError, OverflowError):
             pass  # Fail-open: unparseable timestamp — skip TTL check
 
     # Active PR validation: check if the PR is still open.
-    # Only runs when parked-state.json exists (rare), so ~1s latency is acceptable.
+    # Only runs when paused-state.json exists (rare), so ~1s latency is acceptable.
     # Fail-open: if gh is unavailable or network fails, fall through to existing behavior.
     try:
         result = subprocess.run(
@@ -313,28 +313,28 @@ def check_parked_state(
         if result.returncode == 0:
             pr_state = result.stdout.strip().upper()
             if pr_state in ("MERGED", "CLOSED"):
-                # PR is no longer open — clean up stale parked state
+                # PR is no longer open — clean up stale paused state
                 try:
                     state_file.unlink()
                 except OSError:
                     pass
                 return (
-                    f"Previously parked PR #{pr_number} has been "
-                    f"{pr_state.lower()}. Cleaned up parked state."
+                    f"Previously paused PR #{pr_number} has been "
+                    f"{pr_state.lower()}. Cleaned up paused state."
                 )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass  # Fail-open: gh not available or network error — use lazy validation
+        pass  # Fail-open: gh not available or network error — skip validation
 
     consolidation = state.get("consolidation_completed", False)
     consolidation_note = ""
     if not consolidation:
         consolidation_note = (
             " Memory consolidation did NOT complete — "
-            "run /PACT:park or /PACT:wrap-up to capture session knowledge."
+            "run /PACT:pause or /PACT:wrap-up to capture session knowledge."
         )
 
     return (
-        f"Parked work detected: PR #{pr_number} ({branch}) — awaiting merge. "
+        f"Paused work detected: PR #{pr_number} ({branch}) — awaiting merge. "
         f"Worktree at {worktree_path}. "
         f"Run /PACT:peer-review to resume review/merge.{consolidation_note}"
     )

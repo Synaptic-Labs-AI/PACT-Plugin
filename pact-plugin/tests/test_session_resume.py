@@ -28,9 +28,9 @@ check_resumption_context():
 19. Mixed task types
 20a. metadata: None in task dict does not crash (or {} guard)
 
-check_parked_state():
-20. Returns formatted context string when parked-state.json exists
-21. Returns None when no parked-state.json
+check_paused_state():
+20. Returns formatted context string when paused-state.json exists
+21. Returns None when no paused-state.json
 22. Returns None when project_slug is empty
 23. Includes PR number, branch, and worktree path in output
 24. Adds consolidation guidance when consolidation_completed is false
@@ -42,17 +42,17 @@ check_parked_state():
 30. Handles missing optional fields with defaults
 31. Returns None on UnicodeDecodeError via non-UTF-8 bytes (fail-open)
 
-check_parked_state() -- active PR validation (parameterized):
+check_paused_state() -- active PR validation (parameterized):
 32-36. Parameterized: MERGED (cleanup), CLOSED (cleanup), OPEN (fall-through),
        timeout (fall-through), non-zero exit (fall-through)
 37. Asserts exact subprocess arguments including timeout=5
 38. Returns merged message even when state_file.unlink() raises OSError
 
-check_parked_state() -- TTL cleanup:
-39. Cleans up parked state older than 14 days
-40. Does NOT clean up recent parked state
-41. Skips TTL check when parked_at is missing
-42. Skips TTL check when parked_at is unparseable
+check_paused_state() -- TTL cleanup:
+39. Cleans up paused state older than 14 days
+40. Does NOT clean up recent paused state
+41. Skips TTL check when paused_at is missing
+42. Skips TTL check when paused_at is unparseable
 """
 
 import sys
@@ -445,62 +445,62 @@ class TestRestoreLastSessionErrorPaths:
 
 
 # =============================================================================
-# check_parked_state() Tests
+# check_paused_state() Tests
 # =============================================================================
 
-VALID_PARKED_STATE = {
+VALID_PAUSED_STATE = {
     "pr_number": 288,
     "pr_url": "https://github.com/owner/repo/pull/288",
-    "branch": "feat/park-mode-289",
-    "worktree_path": "/path/to/.worktrees/feat-park-mode-289",
-    "parked_at": "2026-03-18T09:30:00Z",
+    "branch": "feat/pause-mode-289",
+    "worktree_path": "/path/to/.worktrees/feat-pause-mode-289",
+    "paused_at": "2026-03-18T09:30:00Z",
     "consolidation_completed": True,
     "team_name": "pact-d7ab1edb",
 }
 
 
-class TestCheckParkedState:
-    """Tests for check_parked_state() -- parked work detection."""
+class TestCheckPausedState:
+    """Tests for check_paused_state() -- paused work detection."""
 
-    def _write_parked_state(self, sessions_dir, project_slug, state):
-        """Helper: write a parked-state.json file."""
+    def _write_paused_state(self, sessions_dir, project_slug, state):
+        """Helper: write a paused-state.json file."""
         import json
 
         proj_dir = Path(sessions_dir) / project_slug
         proj_dir.mkdir(parents=True, exist_ok=True)
-        state_file = proj_dir / "parked-state.json"
+        state_file = proj_dir / "paused-state.json"
         state_file.write_text(json.dumps(state), encoding="utf-8")
         return state_file
 
-    def test_returns_context_string_when_parked_state_exists(self, tmp_path):
-        """Should return formatted context when parked-state.json exists and PR is open."""
-        from shared.session_resume import check_parked_state
+    def test_returns_context_string_when_paused_state_exists(self, tmp_path):
+        """Should return formatted context when paused-state.json exists and PR is open."""
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        self._write_paused_state(tmp_path, "my-project", VALID_PAUSED_STATE)
 
         # Mock gh as unavailable so we test the fail-open (lazy validation) path
         with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="my-project",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
-        assert "Parked work detected" in result
+        assert "Paused work detected" in result
         assert "PR #288" in result
-        assert "feat/park-mode-289" in result
-        assert "/path/to/.worktrees/feat-park-mode-289" in result
+        assert "feat/pause-mode-289" in result
+        assert "/path/to/.worktrees/feat-pause-mode-289" in result
         assert "/PACT:peer-review" in result
 
-    def test_returns_none_when_no_parked_state(self, tmp_path):
-        """Should return None when parked-state.json does not exist."""
-        from shared.session_resume import check_parked_state
+    def test_returns_none_when_no_paused_state(self, tmp_path):
+        """Should return None when paused-state.json does not exist."""
+        from shared.session_resume import check_paused_state
 
-        # Create the project dir but no parked-state.json
+        # Create the project dir but no paused-state.json
         (tmp_path / "my-project").mkdir()
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="my-project",
             sessions_dir=str(tmp_path),
         )
@@ -509,9 +509,9 @@ class TestCheckParkedState:
 
     def test_returns_none_when_empty_project_slug(self, tmp_path):
         """Should return None when project_slug is empty."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="",
             sessions_dir=str(tmp_path),
         )
@@ -520,9 +520,9 @@ class TestCheckParkedState:
 
     def test_returns_none_when_sessions_dir_missing(self, tmp_path):
         """Should return None when sessions directory doesn't exist."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="my-project",
             sessions_dir=str(tmp_path / "nonexistent"),
         )
@@ -530,16 +530,16 @@ class TestCheckParkedState:
         assert result is None
 
     def test_includes_pr_number_branch_worktree(self, tmp_path):
-        """Output should include all key parked state fields."""
-        from shared.session_resume import check_parked_state
+        """Output should include all key paused state fields."""
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
-        state = {**VALID_PARKED_STATE, "pr_number": 42, "branch": "fix/login-bug"}
-        self._write_parked_state(tmp_path, "proj", state)
+        state = {**VALID_PAUSED_STATE, "pr_number": 42, "branch": "fix/login-bug"}
+        self._write_paused_state(tmp_path, "proj", state)
 
         # Mock gh as unavailable so we test the lazy validation path
         with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
@@ -549,45 +549,45 @@ class TestCheckParkedState:
 
     def test_no_consolidation_note_when_completed_true(self, tmp_path):
         """Should NOT include consolidation guidance when consolidation_completed is true."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
-        state = {**VALID_PARKED_STATE, "consolidation_completed": True}
-        self._write_parked_state(tmp_path, "proj", state)
+        state = {**VALID_PAUSED_STATE, "consolidation_completed": True}
+        self._write_paused_state(tmp_path, "proj", state)
 
         # Mock gh as unavailable so we test the lazy validation path
         with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
-        assert "Parked work detected" in result
+        assert "Paused work detected" in result
         assert "did NOT complete" not in result
 
     def test_consolidation_note_when_completed_false(self, tmp_path):
         """Should include consolidation guidance when consolidation_completed is false."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
-        state = {**VALID_PARKED_STATE, "consolidation_completed": False}
-        self._write_parked_state(tmp_path, "proj", state)
+        state = {**VALID_PAUSED_STATE, "consolidation_completed": False}
+        self._write_paused_state(tmp_path, "proj", state)
 
         # Mock gh as unavailable so we test the lazy validation path
         with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
         assert "did NOT complete" in result
-        assert "/PACT:park" in result or "/PACT:wrap-up" in result
+        assert "/PACT:pause" in result or "/PACT:wrap-up" in result
 
     def test_consolidation_note_when_field_missing(self, tmp_path):
         """Should default to consolidation_completed=False when field missing."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
         state = {
@@ -595,11 +595,11 @@ class TestCheckParkedState:
             "branch": "main",
             "worktree_path": "/tmp/wt",
         }
-        self._write_parked_state(tmp_path, "proj", state)
+        self._write_paused_state(tmp_path, "proj", state)
 
         # Mock gh as unavailable so we test the lazy validation path
         with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
@@ -608,14 +608,14 @@ class TestCheckParkedState:
         assert "did NOT complete" in result
 
     def test_returns_none_on_corrupt_json(self, tmp_path):
-        """Should return None when parked-state.json contains invalid JSON (fail-open)."""
-        from shared.session_resume import check_parked_state
+        """Should return None when paused-state.json contains invalid JSON (fail-open)."""
+        from shared.session_resume import check_paused_state
 
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir()
-        (proj_dir / "parked-state.json").write_text("not valid json{{{")
+        (proj_dir / "paused-state.json").write_text("not valid json{{{")
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
@@ -624,15 +624,15 @@ class TestCheckParkedState:
 
     def test_returns_none_when_pr_number_missing(self, tmp_path):
         """Should return None when pr_number field is absent."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         import json
 
         state = {"branch": "main", "worktree_path": "/tmp/wt", "consolidation_completed": True}
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir()
-        (proj_dir / "parked-state.json").write_text(json.dumps(state))
+        (proj_dir / "paused-state.json").write_text(json.dumps(state))
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
@@ -640,14 +640,14 @@ class TestCheckParkedState:
         assert result is None
 
     def test_returns_none_on_empty_file(self, tmp_path):
-        """Should return None when parked-state.json is empty (fail-open)."""
-        from shared.session_resume import check_parked_state
+        """Should return None when paused-state.json is empty (fail-open)."""
+        from shared.session_resume import check_paused_state
 
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir()
-        (proj_dir / "parked-state.json").write_text("")
+        (proj_dir / "paused-state.json").write_text("")
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
@@ -656,19 +656,19 @@ class TestCheckParkedState:
 
     def test_returns_none_on_ioerror(self, tmp_path):
         """Should return None when file read raises IOError (fail-open)."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
-        self._write_parked_state(tmp_path, "proj", VALID_PARKED_STATE)
+        self._write_paused_state(tmp_path, "proj", VALID_PAUSED_STATE)
 
         original_read = Path.read_text
         def failing_read(self_path, *args, **kwargs):
-            if "parked-state.json" in str(self_path):
+            if "paused-state.json" in str(self_path):
                 raise IOError("disk error")
             return original_read(self_path, *args, **kwargs)
 
         with mock_patch.object(Path, "read_text", failing_read):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
@@ -677,17 +677,17 @@ class TestCheckParkedState:
 
     def test_handles_missing_optional_fields_with_defaults(self, tmp_path):
         """Should use 'unknown' defaults for missing branch and worktree_path."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
         import json
 
         # Only pr_number required; branch and worktree_path should default
         state = {"pr_number": 55}
-        self._write_parked_state(tmp_path, "proj", state)
+        self._write_paused_state(tmp_path, "proj", state)
 
         # Mock gh as unavailable so we test the lazy validation path
         with mock_patch("shared.session_resume.subprocess.run", side_effect=FileNotFoundError):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
@@ -698,16 +698,16 @@ class TestCheckParkedState:
 
     def test_returns_none_on_unicode_decode_error(self, tmp_path):
         """Should return None when file contains non-UTF-8 bytes (fail-open)."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
 
-        # Write a valid parked-state.json first (so the file exists for .exists() check)
-        self._write_parked_state(tmp_path, "proj", VALID_PARKED_STATE)
+        # Write a valid paused-state.json first (so the file exists for .exists() check)
+        self._write_paused_state(tmp_path, "proj", VALID_PAUSED_STATE)
 
         # Overwrite with raw bytes that trigger UnicodeDecodeError
-        state_file = tmp_path / "proj" / "parked-state.json"
+        state_file = tmp_path / "proj" / "paused-state.json"
         state_file.write_bytes(b"\x80\x81\x82\xff\xfe")
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
@@ -719,39 +719,39 @@ class TestCheckParkedState:
         [
             pytest.param(
                 {"returncode": 0, "stdout": "MERGED\n"},
-                {"contains": ["merged", "PR #288", "Cleaned up parked state"], "state_file_removed": True},
+                {"contains": ["merged", "PR #288", "Cleaned up paused state"], "state_file_removed": True},
                 id="MERGED-cleanup",
             ),
             pytest.param(
                 {"returncode": 0, "stdout": "CLOSED\n"},
-                {"contains": ["closed", "PR #288", "Cleaned up parked state"], "state_file_removed": True},
+                {"contains": ["closed", "PR #288", "Cleaned up paused state"], "state_file_removed": True},
                 id="CLOSED-cleanup",
             ),
             pytest.param(
                 {"returncode": 0, "stdout": "OPEN\n"},
-                {"contains": ["Parked work detected", "PR #288"], "state_file_removed": False},
+                {"contains": ["Paused work detected", "PR #288"], "state_file_removed": False},
                 id="OPEN-fall-through",
             ),
             pytest.param(
                 "timeout",
-                {"contains": ["Parked work detected"], "state_file_removed": False},
+                {"contains": ["Paused work detected"], "state_file_removed": False},
                 id="timeout-fall-through",
             ),
             pytest.param(
                 {"returncode": 1, "stdout": "", "stderr": "not found"},
-                {"contains": ["Parked work detected"], "state_file_removed": False},
+                {"contains": ["Paused work detected"], "state_file_removed": False},
                 id="nonzero-exit-fall-through",
             ),
         ],
     )
     def test_active_pr_validation(self, tmp_path, subprocess_return, expected_behavior):
         """Parameterized: active PR validation with MERGED/CLOSED/OPEN/timeout/error."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch, MagicMock
         import subprocess as sp
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
-        state_file = tmp_path / "my-project" / "parked-state.json"
+        self._write_paused_state(tmp_path, "my-project", VALID_PAUSED_STATE)
+        state_file = tmp_path / "my-project" / "paused-state.json"
 
         if subprocess_return == "timeout":
             side_effect = sp.TimeoutExpired(cmd="gh", timeout=5)
@@ -761,7 +761,7 @@ class TestCheckParkedState:
             mock_ctx = mock_patch("shared.session_resume.subprocess.run", return_value=mock_result)
 
         with mock_ctx:
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="my-project",
                 sessions_dir=str(tmp_path),
             )
@@ -777,20 +777,20 @@ class TestCheckParkedState:
 
     def test_subprocess_called_with_exact_args(self, tmp_path):
         """Should call gh pr view with exact arguments and timeout=5."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch, MagicMock
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        self._write_paused_state(tmp_path, "my-project", VALID_PAUSED_STATE)
 
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result) as mock_subprocess:
-            check_parked_state(
+            check_paused_state(
                 project_slug="my-project",
                 sessions_dir=str(tmp_path),
             )
 
         mock_subprocess.assert_called_once_with(
-            ["gh", "pr", "view", str(VALID_PARKED_STATE["pr_number"]), "--json", "state", "--jq", ".state"],
+            ["gh", "pr", "view", str(VALID_PAUSED_STATE["pr_number"]), "--json", "state", "--jq", ".state"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -798,23 +798,23 @@ class TestCheckParkedState:
 
     def test_returns_merged_message_when_unlink_fails(self, tmp_path):
         """Should still return merged message when state_file.unlink() raises OSError."""
-        from shared.session_resume import check_parked_state
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch, MagicMock
 
-        self._write_parked_state(tmp_path, "my-project", VALID_PARKED_STATE)
+        self._write_paused_state(tmp_path, "my-project", VALID_PAUSED_STATE)
 
         mock_result = MagicMock(returncode=0, stdout="MERGED\n")
 
         original_unlink = Path.unlink
 
         def failing_unlink(self_path, *args, **kwargs):
-            if "parked-state.json" in str(self_path):
+            if "paused-state.json" in str(self_path):
                 raise OSError("Permission denied")
             return original_unlink(self_path, *args, **kwargs)
 
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result), \
              mock_patch.object(Path, "unlink", failing_unlink):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="my-project",
                 sessions_dir=str(tmp_path),
             )
@@ -822,34 +822,34 @@ class TestCheckParkedState:
         assert result is not None
         assert "merged" in result
         assert "PR #288" in result
-        assert "Cleaned up parked state" in result
+        assert "Cleaned up paused state" in result
 
 
-class TestCheckParkedStateTTL:
-    """Tests for check_parked_state() -- TTL cleanup of stale parked state."""
+class TestCheckPausedStateTTL:
+    """Tests for check_paused_state() -- TTL cleanup of stale paused state."""
 
-    def _write_parked_state(self, sessions_dir, project_slug, state):
-        """Helper: write a parked-state.json file."""
+    def _write_paused_state(self, sessions_dir, project_slug, state):
+        """Helper: write a paused-state.json file."""
         import json
 
         proj_dir = Path(sessions_dir) / project_slug
         proj_dir.mkdir(parents=True, exist_ok=True)
-        state_file = proj_dir / "parked-state.json"
+        state_file = proj_dir / "paused-state.json"
         state_file.write_text(json.dumps(state), encoding="utf-8")
         return state_file
 
-    def test_cleans_up_stale_parked_state_older_than_14_days(self, tmp_path):
-        """Should clean up parked state when parked_at is older than 14 days."""
-        from shared.session_resume import check_parked_state
+    def test_cleans_up_stale_paused_state_older_than_14_days(self, tmp_path):
+        """Should clean up paused state when paused_at is older than 14 days."""
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch
 
         stale_state = {
-            **VALID_PARKED_STATE,
-            "parked_at": "2026-02-01T09:30:00Z",  # well over 14 days ago from 2026-03-18
+            **VALID_PAUSED_STATE,
+            "paused_at": "2026-02-01T09:30:00Z",  # well over 14 days ago from 2026-03-18
         }
-        state_file = self._write_parked_state(tmp_path, "proj", stale_state)
+        state_file = self._write_paused_state(tmp_path, "proj", stale_state)
 
-        result = check_parked_state(
+        result = check_paused_state(
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
@@ -858,71 +858,71 @@ class TestCheckParkedStateTTL:
         assert "Stale" in result or "stale" in result or "older than 14 days" in result.lower() or "cleaned up" in result.lower()
         assert not state_file.exists()
 
-    def test_does_not_clean_up_recent_parked_state(self, tmp_path):
-        """Should NOT clean up parked state when parked_at is within 14 days."""
-        from shared.session_resume import check_parked_state
+    def test_does_not_clean_up_recent_paused_state(self, tmp_path):
+        """Should NOT clean up paused state when paused_at is within 14 days."""
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch, MagicMock
 
         # Use a date that's recent (within 14 days)
         from datetime import datetime, timezone, timedelta
         recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        recent_state = {**VALID_PARKED_STATE, "parked_at": recent}
-        state_file = self._write_parked_state(tmp_path, "proj", recent_state)
+        recent_state = {**VALID_PAUSED_STATE, "paused_at": recent}
+        state_file = self._write_paused_state(tmp_path, "proj", recent_state)
 
-        # gh reports OPEN so we fall through to normal parked-work message
+        # gh reports OPEN so we fall through to normal paused-work message
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
-        assert "Parked work detected" in result
+        assert "Paused work detected" in result
         assert state_file.exists()
 
-    def test_skips_ttl_check_when_parked_at_missing(self, tmp_path):
-        """Should skip TTL check when parked_at field is missing."""
-        from shared.session_resume import check_parked_state
+    def test_skips_ttl_check_when_paused_at_missing(self, tmp_path):
+        """Should skip TTL check when paused_at field is missing."""
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch, MagicMock
 
         state = {
             "pr_number": 100,
             "branch": "feat/test",
             "worktree_path": "/tmp/wt",
-            # No parked_at field
+            # No paused_at field
         }
-        self._write_parked_state(tmp_path, "proj", state)
+        self._write_paused_state(tmp_path, "proj", state)
 
-        # gh reports OPEN so we fall through to normal parked-work message
+        # gh reports OPEN so we fall through to normal paused-work message
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
-        assert "Parked work detected" in result
+        assert "Paused work detected" in result
 
-    def test_skips_ttl_check_when_parked_at_unparseable(self, tmp_path):
-        """Should skip TTL check when parked_at is not a valid ISO timestamp."""
-        from shared.session_resume import check_parked_state
+    def test_skips_ttl_check_when_paused_at_unparseable(self, tmp_path):
+        """Should skip TTL check when paused_at is not a valid ISO timestamp."""
+        from shared.session_resume import check_paused_state
         from unittest.mock import patch as mock_patch, MagicMock
 
         state = {
-            **VALID_PARKED_STATE,
-            "parked_at": "not-a-date",
+            **VALID_PAUSED_STATE,
+            "paused_at": "not-a-date",
         }
-        self._write_parked_state(tmp_path, "proj", state)
+        self._write_paused_state(tmp_path, "proj", state)
 
-        # gh reports OPEN so we fall through to normal parked-work message
+        # gh reports OPEN so we fall through to normal paused-work message
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
-            result = check_parked_state(
+            result = check_paused_state(
                 project_slug="proj",
                 sessions_dir=str(tmp_path),
             )
 
         assert result is not None
-        assert "Parked work detected" in result
+        assert "Paused work detected" in result

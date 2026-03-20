@@ -13,10 +13,10 @@ Tests cover:
 6. Handles None task list gracefully
 7. main() entry point: exit codes and error handling
 
-check_unparked_pr() — safety-net for unparked PRs:
+check_unpaused_pr() — safety-net for unpaused PRs:
 8. Detects PR number in task metadata → appends warning to snapshot
 9. Detects PR URL in handoff values → appends warning
-10. No warning when parked-state.json exists (consolidation already done)
+10. No warning when paused-state.json exists (consolidation already done)
 11. No warning when no PR detected in tasks
 12. No warning when tasks is None
 13. No warning when project_slug is empty
@@ -24,12 +24,12 @@ check_unparked_pr() — safety-net for unparked PRs:
 15. Skips warning when tasks is empty list
 16. Handles malformed handoff PR URL gracefully
 17. Best-effort: no crash on IOError during append
-18. main() calls check_unparked_pr after write_session_snapshot
-19. main() call ordering: write_session_snapshot -> check_unparked_pr
+18. main() calls check_unpaused_pr after write_session_snapshot
+19. main() call ordering: write_session_snapshot -> check_unpaused_pr
 20. Non-string handoff values (dict/list) are skipped without error
 21. Full github.com PR URL is detected by regex
 22. Non-URL "/pull/" text is NOT detected by regex
-23. metadata: None in task dict does not crash check_unparked_pr (or {} guard)
+23. metadata: None in task dict does not crash check_unpaused_pr (or {} guard)
 
 write_session_snapshot() — metadata None guard:
 24. metadata: None in task dict does not crash write_session_snapshot
@@ -37,7 +37,7 @@ write_session_snapshot() — metadata None guard:
 File permission hardening:
 25. write_session_snapshot creates directory with 0o700
 26. write_session_snapshot creates file with 0o600
-27. check_unparked_pr re-applies 0o600 after appending warning
+27. check_unpaused_pr re-applies 0o600 after appending warning
 """
 import json
 import sys
@@ -378,9 +378,9 @@ class TestMainEntryPoint:
         assert call_args.kwargs["project_slug"] == "my-project"
 
     def test_main_call_ordering(self):
-        """main() must call write_session_snapshot -> check_unparked_pr in order.
+        """main() must call write_session_snapshot -> check_unpaused_pr in order.
 
-        Ordering is critical: snapshot creates the file, check_unparked_pr
+        Ordering is critical: snapshot creates the file, check_unpaused_pr
         appends to it.
         """
         from session_end import main
@@ -393,25 +393,25 @@ class TestMainEntryPoint:
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot",
                    side_effect=lambda **kw: call_order.append("write_session_snapshot")), \
-             patch("session_end.check_unparked_pr",
-                   side_effect=lambda **kw: call_order.append("check_unparked_pr")):
+             patch("session_end.check_unpaused_pr",
+                   side_effect=lambda **kw: call_order.append("check_unpaused_pr")):
             with pytest.raises(SystemExit):
                 main()
 
         assert call_order == [
             "write_session_snapshot",
-            "check_unparked_pr",
+            "check_unpaused_pr",
         ]
 
 
 # =============================================================================
-# check_unparked_pr() Tests
+# check_unpaused_pr() Tests
 # =============================================================================
 
-class TestCheckUnparkedPr:
-    """Tests for session_end.check_unparked_pr() — safety-net for unparked PRs.
+class TestCheckUnpausedPr:
+    """Tests for session_end.check_unpaused_pr() — safety-net for unpaused PRs.
 
-    Detects open PRs that were NOT parked (no memory consolidation), appending
+    Detects open PRs that were NOT paused (no memory consolidation), appending
     a warning to the last-session.md snapshot for next-session pickup.
     """
 
@@ -449,86 +449,86 @@ class TestCheckUnparkedPr:
 
     def test_detects_pr_number_in_task_metadata(self, tmp_path):
         """Should append warning when pr_number found in task metadata."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [self._make_task_with_pr_number(288)]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
 
         content = snapshot.read_text()
-        assert "## Park-Mode Warning" in content
+        assert "## Pause-Mode Warning" in content
         assert "PR #288" in content
-        assert "park-mode was not run" in content
+        assert "pause-mode was not run" in content
 
     def test_detects_pr_url_in_handoff_values(self, tmp_path):
         """Should extract PR number from /pull/ URL in handoff metadata."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [self._make_task_with_pr_url("https://github.com/owner/repo/pull/42")]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
 
         content = snapshot.read_text()
-        assert "## Park-Mode Warning" in content
+        assert "## Pause-Mode Warning" in content
         assert "PR #42" in content
 
-    def test_no_warning_when_parked_state_exists(self, tmp_path):
-        """Should skip warning when parked-state.json exists (already consolidated)."""
-        from session_end import check_unparked_pr
+    def test_no_warning_when_paused_state_exists(self, tmp_path):
+        """Should skip warning when paused-state.json exists (already consolidated)."""
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
-        # Write a parked-state.json
+        # Write a paused-state.json
         import json
-        parked = tmp_path / "proj" / "parked-state.json"
-        parked.write_text(json.dumps({"pr_number": 288}), encoding="utf-8")
+        paused = tmp_path / "proj" / "paused-state.json"
+        paused.write_text(json.dumps({"pr_number": 288}), encoding="utf-8")
 
         tasks = [self._make_task_with_pr_number(288)]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
 
         content = snapshot.read_text()
-        assert "## Park-Mode Warning" not in content
+        assert "## Pause-Mode Warning" not in content
 
     def test_no_warning_when_no_pr_detected(self, tmp_path):
         """Should not append warning when no PR found in task metadata."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {"id": "1", "subject": "CODE: auth", "status": "completed", "metadata": {}},
         ]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
 
         content = snapshot.read_text()
-        assert "## Park-Mode Warning" not in content
+        assert "## Pause-Mode Warning" not in content
 
     def test_no_warning_when_tasks_is_none(self, tmp_path):
         """Should return early when tasks is None."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         self._setup_snapshot(tmp_path, "proj")
 
         # Should not raise
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=None,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -536,12 +536,12 @@ class TestCheckUnparkedPr:
 
     def test_no_warning_when_project_slug_empty(self, tmp_path):
         """Should return early when project_slug is empty."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         tasks = [self._make_task_with_pr_number(100)]
 
         # Should not raise
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="",
             sessions_dir=str(tmp_path),
@@ -549,14 +549,14 @@ class TestCheckUnparkedPr:
 
     def test_no_warning_when_snapshot_file_missing(self, tmp_path):
         """Should not crash when last-session.md doesn't exist."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         # Create project dir but NOT the snapshot file
         (tmp_path / "proj").mkdir()
         tasks = [self._make_task_with_pr_number(99)]
 
         # Should not raise
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -564,11 +564,11 @@ class TestCheckUnparkedPr:
 
     def test_no_warning_when_tasks_empty(self, tmp_path):
         """Should return early for empty task list."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         self._setup_snapshot(tmp_path, "proj")
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=[],
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -576,7 +576,7 @@ class TestCheckUnparkedPr:
 
     def test_handles_malformed_pr_url(self, tmp_path):
         """Should handle handoff values with /pull/ but no valid number."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
@@ -594,7 +594,7 @@ class TestCheckUnparkedPr:
         ]
 
         # Should not crash; may or may not detect depending on parsing
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -602,7 +602,7 @@ class TestCheckUnparkedPr:
 
     def test_best_effort_no_crash_on_ioerror(self, tmp_path):
         """Should not crash when appending to snapshot raises IOError."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [self._make_task_with_pr_number(288)]
@@ -612,7 +612,7 @@ class TestCheckUnparkedPr:
         os.chmod(str(snapshot), 0o444)
 
         # Should not raise
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -621,8 +621,8 @@ class TestCheckUnparkedPr:
         # Restore permissions for cleanup
         os.chmod(str(snapshot), 0o644)
 
-    def test_main_calls_check_unparked_pr(self):
-        """main() should call check_unparked_pr after write_session_snapshot."""
+    def test_main_calls_check_unpaused_pr(self):
+        """main() should call check_unpaused_pr after write_session_snapshot."""
         from session_end import main
 
         env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
@@ -630,7 +630,7 @@ class TestCheckUnparkedPr:
         with patch.dict("os.environ", env, clear=True), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot"), \
-             patch("session_end.check_unparked_pr") as mock_check:
+             patch("session_end.check_unpaused_pr") as mock_check:
             with pytest.raises(SystemExit):
                 main()
 
@@ -641,7 +641,7 @@ class TestCheckUnparkedPr:
 
     def test_pr_number_metadata_takes_priority_over_url(self, tmp_path):
         """When both pr_number and URL exist, pr_number in metadata should be used."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
@@ -658,7 +658,7 @@ class TestCheckUnparkedPr:
             }
         ]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -669,7 +669,7 @@ class TestCheckUnparkedPr:
 
     def test_non_string_handoff_values_skipped(self, tmp_path):
         """Non-string handoff values (dict/list) should be skipped without error."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
@@ -689,7 +689,7 @@ class TestCheckUnparkedPr:
             }
         ]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -697,12 +697,12 @@ class TestCheckUnparkedPr:
 
         content = snapshot.read_text()
         # Should detect PR via pr_number (primary path) despite non-string handoff values
-        assert "## Park-Mode Warning" in content
+        assert "## Pause-Mode Warning" in content
         assert "PR #42" in content
 
     def test_detects_full_github_pr_url(self, tmp_path):
         """Should detect PR from full github.com/org/repo/pull/N URL."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
@@ -718,19 +718,19 @@ class TestCheckUnparkedPr:
             }
         ]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
         )
 
         content = snapshot.read_text()
-        assert "## Park-Mode Warning" in content
+        assert "## Pause-Mode Warning" in content
         assert "PR #123" in content
 
     def test_non_url_pull_text_not_detected(self, tmp_path):
         """Non-URL text containing '/pull/' should NOT be detected after regex change."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
@@ -746,7 +746,7 @@ class TestCheckUnparkedPr:
             }
         ]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -754,11 +754,11 @@ class TestCheckUnparkedPr:
 
         content = snapshot.read_text()
         # After regex change (#11), bare "/pull/" without github.com URL should NOT match
-        assert "## Park-Mode Warning" not in content
+        assert "## Pause-Mode Warning" not in content
 
     def test_handles_metadata_none_in_task(self, tmp_path):
         """Task with 'metadata': None should not crash (or {} guard handles it)."""
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
@@ -771,7 +771,7 @@ class TestCheckUnparkedPr:
         ]
 
         # Should not raise
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="proj",
             sessions_dir=str(tmp_path),
@@ -779,7 +779,7 @@ class TestCheckUnparkedPr:
 
         content = snapshot.read_text()
         # No PR detected, so no warning
-        assert "## Park-Mode Warning" not in content
+        assert "## Pause-Mode Warning" not in content
 
 
 # =============================================================================
@@ -792,7 +792,7 @@ class TestSessionEndFilePermissions:
     Verifies that:
     - write_session_snapshot creates directory with 0o700
     - write_session_snapshot creates file with 0o600
-    - check_unparked_pr re-applies 0o600 after appending to snapshot
+    - check_unpaused_pr re-applies 0o600 after appending to snapshot
     """
 
     def test_write_snapshot_creates_directory_with_700(self, tmp_path):
@@ -831,11 +831,11 @@ class TestSessionEndFilePermissions:
             f"Snapshot file should have mode 0o600, got {oct(file_mode)}"
         )
 
-    def test_check_unparked_pr_reapplies_600_after_append(self, tmp_path):
-        """check_unparked_pr() should re-apply 0o600 after appending warning."""
+    def test_check_unpaused_pr_reapplies_600_after_append(self, tmp_path):
+        """check_unpaused_pr() should re-apply 0o600 after appending warning."""
         import os
         import stat
-        from session_end import check_unparked_pr
+        from session_end import check_unpaused_pr
 
         # Set up snapshot with known permissions
         proj_dir = tmp_path / "perm-proj"
@@ -852,7 +852,7 @@ class TestSessionEndFilePermissions:
             },
         ]
 
-        check_unparked_pr(
+        check_unpaused_pr(
             tasks=tasks,
             project_slug="perm-proj",
             sessions_dir=str(tmp_path),
@@ -860,7 +860,7 @@ class TestSessionEndFilePermissions:
 
         # Verify warning was appended
         content = snapshot.read_text()
-        assert "## Park-Mode Warning" in content
+        assert "## Pause-Mode Warning" in content
 
         # Verify permissions re-applied
         file_mode = stat.S_IMODE(snapshot.stat().st_mode)
