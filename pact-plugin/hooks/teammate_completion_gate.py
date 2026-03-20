@@ -2,17 +2,20 @@
 """
 Location: pact-plugin/hooks/teammate_completion_gate.py
 Summary: TeammateIdle hook that blocks agents from going idle when they own
-         in_progress tasks with HANDOFF metadata already present.
+         in_progress tasks — either with HANDOFF metadata (forgot to mark
+         complete) or without HANDOFF metadata (stuck looping on handoff gate).
 Used by: hooks.json TeammateIdle hook (runs before teammate_idle.py)
 
-This is a mechanical safety net for the "agent forgot to self-complete" bug.
-When an agent finishes work, it stores HANDOFF metadata via TaskUpdate but
-sometimes neglects to mark the task as completed. This hook catches that case
-and sends feedback via exit 2, telling the agent exactly which tasks to complete.
+Two safety nets in one hook:
+1. "Agent forgot to self-complete": Has HANDOFF metadata but didn't mark the
+   task completed. Tells agent to run TaskUpdate(status="completed").
+2. "Agent stuck on handoff gate loop" (#296): Agent went idle without ever
+   storing HANDOFF metadata. Provides a concrete copy-paste example so the
+   agent can self-correct instead of looping.
 
 Exit codes:
-    0 — allow idle (no completable tasks found, or fail-open on error)
-    2 — block idle (agent has tasks ready to complete)
+    0 — allow idle (no actionable tasks found, or fail-open on error)
+    2 — block idle (agent has tasks that need attention)
 
 Input: JSON from stdin with teammate_name, team_name
 Output: stderr feedback on block (exit 2), nothing on allow (exit 0)
@@ -209,7 +212,7 @@ def format_missing_handoff_feedback(missing: list[dict]) -> str:
         f"  \"produced\": [\"file1.py\"], \"decisions\": [\"chose X because Y\"],\n"
         f"  \"uncertainty\": [{{\"LOW\": \"untested edge case\"}}],\n"
         f"  \"integration\": [\"touches module Z\"], \"open_questions\": [\"none\"]\n"
-        f"}}}}))\n\n"
+        f"}}}})\n\n"
         f"Then call: TaskUpdate(taskId=\"{task_id_example}\", status=\"completed\")"
     )
 
