@@ -263,7 +263,7 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 
 6. ⚠️ **Merge Authorization Checkpoint**
 
-   Merge is irreversible. MANDATORY: always use `AskUserQuestion` to request merge authorization from user.
+   Merge is irreversible. MANDATORY: always use `AskUserQuestion` to request merge authorization.
 
    Use `AskUserQuestion` with these exact options:
    - **"Yes, merge"** (description: "Merge the PR and run wrap-up") → merge via `gh pr merge`, then invoke `/PACT:wrap-up`
