@@ -80,8 +80,8 @@ if [ -d "${SESSION_DIR}" ]; then
             # Parse session JSON — use python for reliable JSON parsing if available,
             # fall back to basic grep/sed
             if command -v python3 >/dev/null 2>&1; then
-                SESSION_PID=$(python3 -c "import json,sys; d=json.load(open('${session_file}')); print(d.get('pid','?'))" 2>/dev/null || echo "?")
-                SESSION_PROJECT=$(python3 -c "import json,sys; d=json.load(open('${session_file}')); print(d.get('project','unknown'))" 2>/dev/null || echo "unknown")
+                SESSION_PID=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('pid','?'))" "${session_file}" 2>/dev/null || echo "?")
+                SESSION_PROJECT=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('project','unknown'))" "${session_file}" 2>/dev/null || echo "unknown")
             else
                 # Fallback: basic parsing (less robust but works for simple JSON)
                 SESSION_PID=$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "${session_file}" | grep -o '[0-9]*' || echo "?")

@@ -67,13 +67,19 @@ done
 
 if [ "${PURGE}" = true ]; then
     echo ""
-    echo "Purging all data..."
-    if [ -d "${WORK_DIR}" ]; then
-        echo "Removing: ${WORK_DIR}"
-        rm -rf "${WORK_DIR}"
-        echo "All data and logs removed."
+    read -r -p "This will delete all data and logs at ${WORK_DIR}. Continue? [y/N] " response
+    if [[ ! "${response}" =~ ^[Yy]$ ]]; then
+        echo "Purge cancelled. Data preserved."
+        PURGE=false
     else
-        echo "Work directory not found at ${WORK_DIR} (already removed)."
+        echo "Purging all data..."
+        if [ -d "${WORK_DIR}" ]; then
+            echo "Removing: ${WORK_DIR}"
+            rm -rf "${WORK_DIR}"
+            echo "All data and logs removed."
+        else
+            echo "Work directory not found at ${WORK_DIR} (already removed)."
+        fi
     fi
 else
     echo ""

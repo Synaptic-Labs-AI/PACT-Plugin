@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+# Restrict file permissions for any files we create (logs may contain session content)
+umask 077
+
 # --- Configuration ---
 
 WORK_DIR="${HOME}/.claude/meta-orchestrator"
@@ -42,7 +45,10 @@ add_to_path_if_exists "/opt/homebrew/bin"
 add_to_path_if_exists "/usr/local/bin"
 
 # Node version managers
-add_to_path_if_exists "${HOME}/.nvm/versions/node/$(ls "${HOME}/.nvm/versions/node/" 2>/dev/null | sort -V | tail -1)/bin"
+if [ -d "${HOME}/.nvm/versions/node" ]; then
+    NVM_NODE=$(ls "${HOME}/.nvm/versions/node/" 2>/dev/null | sort -V | tail -1)
+    [ -n "${NVM_NODE}" ] && add_to_path_if_exists "${HOME}/.nvm/versions/node/${NVM_NODE}/bin"
+fi
 add_to_path_if_exists "${HOME}/.volta/bin"
 add_to_path_if_exists "${HOME}/.fnm/aliases/default/bin"
 

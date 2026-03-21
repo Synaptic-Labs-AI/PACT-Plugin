@@ -44,6 +44,13 @@ if launchctl list "${SERVICE_LABEL}" >/dev/null 2>&1; then
     fi
 fi
 
+# Check if claude CLI is available (launch.sh will also check, but fail-fast here)
+if ! command -v claude >/dev/null 2>&1; then
+    echo "WARNING: 'claude' command not found in current PATH."
+    echo "The service may fail to start. Ensure Claude Code CLI is installed."
+    echo ""
+fi
+
 # Verify required source files exist
 for file in launch.sh CLAUDE.md "${PLIST_NAME}"; do
     if [ ! -f "${SCRIPT_DIR}/${file}" ]; then
