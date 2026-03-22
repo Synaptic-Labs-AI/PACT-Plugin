@@ -19,6 +19,8 @@ import subprocess
 import re
 from pathlib import Path
 
+from shared.error_output import hook_error_json
+
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
@@ -371,7 +373,7 @@ def main():
     except Exception as e:
         # If something goes wrong in the hook, log it but don't block
         print(f"Hook Error (git_commit_check): {e}", file=sys.stderr)
-        print(_SUPPRESS_OUTPUT)
+        print(hook_error_json("git_commit_check", e))
         sys.exit(0)
 
 

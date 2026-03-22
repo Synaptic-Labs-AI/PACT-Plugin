@@ -22,6 +22,8 @@ import json
 import sys
 import re
 
+from shared.error_output import hook_error_json
+
 
 # Required handoff elements with their patterns and descriptions
 HANDOFF_ELEMENTS = {
@@ -161,6 +163,7 @@ def main():
     except Exception as e:
         # Don't block on errors - just warn
         print(f"Hook warning (validate_handoff): {e}", file=sys.stderr)
+        print(hook_error_json("validate_handoff", e))
         sys.exit(0)
 
 

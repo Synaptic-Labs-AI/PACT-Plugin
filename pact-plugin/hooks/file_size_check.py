@@ -15,6 +15,8 @@ import json
 import os
 import sys
 
+from shared.error_output import hook_error_json
+
 # Line count thresholds
 WARNING_THRESHOLD = 600  # Trigger guidance at this line count
 CRITICAL_THRESHOLD = 800  # More urgent guidance
@@ -132,6 +134,7 @@ def main():
     except Exception as e:
         # Don't block on errors
         print(f"Hook warning (file_size_check): {e}", file=sys.stderr)
+        print(hook_error_json("file_size_check", e))
         sys.exit(0)
 
 
