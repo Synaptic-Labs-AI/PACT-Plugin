@@ -174,7 +174,7 @@ Branch behavior depends on whether rePACT is invoked with a scope contract:
 **With scope contract** (from ATOMIZE phase):
 - **Receives worktree path** from the parent orchestrator (created by parent via `/PACT:worktree-setup`)
 - **Operates in isolated worktree** on a suffix branch (e.g., `feature-X--{scope_id}`)
-- **Pass worktree path to all agent prompts**: Include "You are working in a git worktree at [worktree_path]. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating CLAUDE.md, flag it in your handoff instead." in specialist dispatches, consistent with orchestrate.md
+- **Pass worktree path to all agent prompts**: Include "You are working in a git worktree at [worktree_path]. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead." in specialist dispatches, consistent with orchestrate.md
 - All commits stay on the suffix branch within the worktree
 - Branch merges back to the feature branch during the CONSOLIDATE phase
 

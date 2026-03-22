@@ -487,7 +487,7 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Persist `s2_boundaries` and `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}, "established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
 
-**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating CLAUDE.md, flag it in your handoff instead."
+**Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
 
