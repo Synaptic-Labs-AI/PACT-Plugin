@@ -26,6 +26,7 @@ import os
 import sys
 from pathlib import Path
 
+from shared.error_output import hook_error_json
 from shared.handoff_example import format_handoff_example
 
 
@@ -229,8 +230,10 @@ def main():
 
         sys.exit(0)
 
-    except Exception:
+    except Exception as e:
         # Fail open — never trap an agent in unrecoverable state
+        print(f"Hook warning (teammate_completion_gate): {e}", file=sys.stderr)
+        print(hook_error_json("teammate_completion_gate", e))
         sys.exit(0)
 
 

@@ -57,6 +57,8 @@ from staleness import (  # noqa: F401
     _estimate_tokens,
 )
 
+from shared.error_output import hook_error_json
+
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
 from shared.claude_md_manager import update_claude_md, ensure_project_memory_md
@@ -227,6 +229,7 @@ def main():
 
     except Exception as e:
         print(f"Hook warning (session_init): {e}", file=sys.stderr)
+        print(hook_error_json("session_init", e))
         sys.exit(0)
 
 

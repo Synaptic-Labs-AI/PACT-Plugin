@@ -10,6 +10,7 @@ This package provides shared utilities for hooks:
 - claude_md_manager: CLAUDE.md file creation and update
 - session_resume: Session info, snapshot restore, resumption context
 - merge_guard_common: Shared constants and cleanup for merge guard hooks
+- error_output: Standardized JSON error output for hook exception handlers
 """
 
 from .task_utils import (
@@ -32,6 +33,7 @@ from .merge_guard_common import (
     TOKEN_PREFIX,
     cleanup_consumed_tokens,
 )
+from .error_output import hook_error_json
 from .constants import PACT_AGENTS
 
 __all__ = [
@@ -50,5 +52,6 @@ __all__ = [
     "TOKEN_DIR",
     "TOKEN_PREFIX",
     "cleanup_consumed_tokens",
+    "hook_error_json",
     "PACT_AGENTS",
 ]

@@ -17,6 +17,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from shared.error_output import hook_error_json
+
 try:
     import fcntl
     HAS_FLOCK = True
@@ -193,6 +195,7 @@ def main():
     except Exception as e:
         # Don't block on errors
         print(f"Hook warning (track_files): {e}", file=sys.stderr)
+        print(hook_error_json("track_files", e))
         sys.exit(0)
 
 

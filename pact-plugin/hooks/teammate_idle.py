@@ -34,6 +34,8 @@ _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
+from shared.error_output import hook_error_json
+
 from shared.task_utils import get_task_list
 
 
@@ -383,6 +385,7 @@ def main():
     except Exception as e:
         # Don't block on errors — just warn and exit cleanly
         print(f"Hook warning (teammate_idle): {e}", file=sys.stderr)
+        print(hook_error_json("teammate_idle", e))
         sys.exit(0)
 
 

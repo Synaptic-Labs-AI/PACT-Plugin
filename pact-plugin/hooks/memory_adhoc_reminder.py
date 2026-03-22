@@ -25,6 +25,8 @@ import os
 import sys
 from pathlib import Path
 
+from shared.error_output import hook_error_json
+
 MIN_TRANSCRIPT_LENGTH = 500
 
 REMINDER_UNCOMPLETED_TASKS = "uncompleted_tasks"
@@ -203,8 +205,10 @@ def main():
 
         sys.exit(0)
 
-    except Exception:
-        # Fail silent — never block session stop
+    except Exception as e:
+        # Fail open — never block session stop
+        print(f"Hook warning (memory_adhoc_reminder): {e}", file=sys.stderr)
+        print(hook_error_json("memory_adhoc_reminder", e))
         sys.exit(0)
 
 

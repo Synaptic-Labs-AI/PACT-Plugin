@@ -25,6 +25,8 @@ from pathlib import Path
 
 # Shared constants and cleanup — single source of truth for both hooks
 sys.path.insert(0, str(Path(__file__).parent))
+from shared.error_output import hook_error_json
+
 from shared.merge_guard_common import (
     TOKEN_TTL,
     TOKEN_DIR,
@@ -232,7 +234,7 @@ def main():
     except Exception as e:
         # Never block on errors — this is an observer hook
         print(f"Hook warning (merge_guard_post): {e}", file=sys.stderr)
-        print(_SUPPRESS_OUTPUT)
+        print(hook_error_json("merge_guard_post", e))
         sys.exit(0)
 
 

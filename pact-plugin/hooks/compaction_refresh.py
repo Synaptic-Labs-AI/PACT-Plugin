@@ -38,6 +38,8 @@ from refresh.checkpoint_builder import (
     checkpoint_to_refresh_message,
 )
 
+from shared.error_output import hook_error_json
+
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import (
     get_task_list,
@@ -323,6 +325,7 @@ def main():
     except Exception as e:
         # Never fail the hook - log and exit cleanly
         print(f"Compaction refresh hook warning: {e}", file=sys.stderr)
+        print(hook_error_json("compaction_refresh", e))
         sys.exit(0)
 
 
