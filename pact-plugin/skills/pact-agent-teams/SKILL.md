@@ -22,6 +22,8 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 5. **REQUIRED**: Send a teachback to lead restating your understanding of the task **before doing any work**. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
 6. Begin work — not before step 5
 
+> **Worktree Scope**: If you are working in a worktree, files that are gitignored (e.g., `CLAUDE.md`) do not exist there. Do not edit or create `CLAUDE.md` — the orchestrator manages it separately. If you need to reference `CLAUDE.md` content, it is auto-loaded into your context. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead of editing it directly.
+
 > **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
 
 ## Reading Upstream Context

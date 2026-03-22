@@ -109,6 +109,8 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 | Fixes span a different domain | **Spawn** domain specialist (reviewer stays for consultation) |
 | Multiple independent fixes in parallel | **Spawn** additional agents alongside reused reviewer |
 
+> **Worktree scope reminder**: When reusing a reviewer as a fixer or spawning a new fixer, include the worktree path and `CLAUDE.md` scope note in the fix task: "`CLAUDE.md` is gitignored and does not exist in worktrees — do not edit it."
+
 ---
 
 **PR Review Workflow**
