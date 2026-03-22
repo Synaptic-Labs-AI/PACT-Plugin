@@ -26,6 +26,8 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 
 > **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
 
+> **Custom start flows**: If your agent definition specifies a custom On Start sequence (e.g., the secretary's session briefing), you must explicitly re-enter this standard lifecycle after your custom flow completes — call `TaskList`, claim assigned tasks, and follow the teachback protocol from the teachback step onward.
+
 ## Reading Upstream Context
 
 Your task description may reference upstream task IDs (e.g., "Architect task: #5").

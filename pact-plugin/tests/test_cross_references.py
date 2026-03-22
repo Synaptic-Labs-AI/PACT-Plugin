@@ -8,6 +8,7 @@ L4. Environment drift cross-references in orchestrate.md, comPACT.md
 L5. Review calibration save step in peer-review.md
 L6. Agent state model cross-reference in pact-agent-stall.md
 L7. Worktree CLAUDE.md scope warnings in dispatch templates and agent-teams skill
+L8. Custom start flows note in agent-teams SKILL.md cross-references pact-secretary.md
 """
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import pytest
 PROTOCOLS_DIR = Path(__file__).parent.parent / "protocols"
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
+AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
 WORKFLOWS_PATH = PROTOCOLS_DIR / "pact-workflows.md"
 ORCHESTRATE_PATH = COMMANDS_DIR / "orchestrate.md"
@@ -25,6 +27,7 @@ REPACT_PATH = COMMANDS_DIR / "rePACT.md"
 PEER_REVIEW_PATH = COMMANDS_DIR / "peer-review.md"
 AGENT_STALL_PATH = PROTOCOLS_DIR / "pact-agent-stall.md"
 AGENT_TEAMS_SKILL_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
+SECRETARY_PATH = AGENTS_DIR / "pact-secretary.md"
 
 
 class TestConversationFailureTaxonomy:
@@ -130,4 +133,32 @@ class TestWorktreeScopeWarnings:
         content = path.read_text(encoding="utf-8")
         assert "CLAUDE.md" in content and "gitignored" in content, (
             f"{label} missing CLAUDE.md worktree scope warning"
+        )
+
+
+class TestCustomStartFlowsCrossReference:
+    """L8: Custom start flows note in agent-teams SKILL.md references pact-secretary.md."""
+
+    @pytest.fixture
+    def skill_content(self):
+        return AGENT_TEAMS_SKILL_PATH.read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def secretary_content(self):
+        return SECRETARY_PATH.read_text(encoding="utf-8")
+
+    def test_skill_has_custom_start_flows_note(self, skill_content):
+        assert "Custom start flows" in skill_content, (
+            "SKILL.md missing 'Custom start flows' note"
+        )
+
+    def test_custom_start_flows_references_secretary(self, skill_content):
+        assert "secretary" in skill_content.lower() and "Custom start flows" in skill_content, (
+            "Custom start flows note must reference the secretary as an example"
+        )
+
+    def test_secretary_has_after_briefing_section(self, secretary_content):
+        assert "After Session Briefing" in secretary_content, (
+            "pact-secretary.md missing 'After Session Briefing' section "
+            "referenced by SKILL.md custom start flows note"
         )

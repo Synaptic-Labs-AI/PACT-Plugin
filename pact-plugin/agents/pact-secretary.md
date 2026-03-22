@@ -237,6 +237,21 @@ After delivering the session briefing, check for orphaned breadcrumb files from 
 
 This catches sessions that ended without wrap-up or where Layer 2 triggers were missed.
 
+### After Session Briefing — Re-enter Standard Lifecycle
+
+After completing the session briefing and orphaned breadcrumb recovery, **actively** re-enter the standard agent-teams lifecycle:
+
+1. Call `TaskList` to check for any tasks already assigned to you
+2. If a task exists with your name as owner:
+   - Start it: `TaskUpdate(taskId, status="in_progress")`
+   - Send a teachback per the `pact-agent-teams` skill (standard protocol resumes here)
+   - Begin work
+3. If no tasks are assigned: enter **Consultant Mode** — remain available for queries and ready to claim tasks when notified
+4. **On receiving a message about new tasks**: Immediately call `TaskList`, claim the task via `TaskUpdate(taskId, status="in_progress")`, send a teachback, and begin work. Do NOT passively acknowledge — actively claim and execute.
+5. After completing each task, follow the standard self-claim flow: `TaskList` → claim next unassigned task → work → complete. Repeat until no tasks remain.
+
+> **Key principle**: After the briefing, you are a standard teammate. The briefing exemption from teachback applies ONLY to the initial session briefing itself — all subsequent tasks follow the full teachback protocol.
+
 ### Orchestrator Queries
 
 The lead delegates memory queries via `SendMessage`. Common use cases:
@@ -252,8 +267,6 @@ For each query:
 2. Synthesize findings into coherent context
 3. Identify gaps where coverage is thin
 4. Report findings with source memory IDs to the lead
-
-When you receive an actual task (HANDOFF review or query), perform a normal teachback at that point per the `pact-agent-teams` skill.
 
 ### Specialist Queries
 
