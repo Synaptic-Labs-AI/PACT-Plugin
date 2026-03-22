@@ -7,6 +7,7 @@ L3. Progress monitoring dispatch instructions in orchestrate.md, comPACT.md, pac
 L4. Environment drift cross-references in orchestrate.md, comPACT.md
 L5. Review calibration save step in peer-review.md
 L6. Agent state model cross-reference in pact-agent-stall.md
+L7. Worktree CLAUDE.md scope warnings in dispatch templates and agent-teams skill
 """
 from pathlib import Path
 
@@ -15,12 +16,15 @@ import pytest
 
 PROTOCOLS_DIR = Path(__file__).parent.parent / "protocols"
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
+SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 WORKFLOWS_PATH = PROTOCOLS_DIR / "pact-workflows.md"
 ORCHESTRATE_PATH = COMMANDS_DIR / "orchestrate.md"
 COMPACT_PATH = COMMANDS_DIR / "comPACT.md"
+REPACT_PATH = COMMANDS_DIR / "rePACT.md"
 PEER_REVIEW_PATH = COMMANDS_DIR / "peer-review.md"
 AGENT_STALL_PATH = PROTOCOLS_DIR / "pact-agent-stall.md"
+AGENT_TEAMS_SKILL_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
 
 
 class TestConversationFailureTaxonomy:
@@ -104,3 +108,26 @@ class TestAgentStallCrossReference:
 
     def test_stall_has_agent_state_model_reference(self, stall_content):
         assert "agent state model" in stall_content.lower()
+
+
+class TestWorktreeScopeWarnings:
+    """L7: Worktree CLAUDE.md scope warnings in dispatch templates and agent-teams skill."""
+
+    SCOPE_WARNING_FILES = [
+        ("orchestrate.md", ORCHESTRATE_PATH),
+        ("comPACT.md", COMPACT_PATH),
+        ("rePACT.md", REPACT_PATH),
+        ("peer-review.md", PEER_REVIEW_PATH),
+        ("pact-agent-teams/SKILL.md", AGENT_TEAMS_SKILL_PATH),
+    ]
+
+    @pytest.mark.parametrize(
+        "label,path",
+        SCOPE_WARNING_FILES,
+        ids=[label for label, _ in SCOPE_WARNING_FILES],
+    )
+    def test_has_claudemd_scope_warning(self, label, path):
+        content = path.read_text(encoding="utf-8")
+        assert "CLAUDE.md" in content and "gitignored" in content, (
+            f"{label} missing CLAUDE.md worktree scope warning"
+        )
