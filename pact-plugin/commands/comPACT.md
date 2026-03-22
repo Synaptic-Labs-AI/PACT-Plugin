@@ -219,13 +219,13 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 > ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.
 
-**Next steps** — After commit, ask: "Work committed. Create PR?"
+**Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"
 
 | User's decision | Specialists | Next action |
 |----------------|-------------|-------------|
-| **Yes** / create PR (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. Shut down after all remediation complete + user merge decision (via `AskUserQuestion`). |
-| **Not yet** / pause | **Shut down after consolidation** — pause preserves knowledge | Invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later. |
-| **More work** / continue | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Continue with `/PACT:comPACT` or `/PACT:orchestrate`. |
+| **Yes, create PR** (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. Shut down after all remediation complete + user merge decision (via `AskUserQuestion`). |
+| **Continue working** | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Do nothing — let the user continue. More work may follow via `/PACT:comPACT` or `/PACT:orchestrate`. |
+| **Pause work for now** | **Shut down after consolidation** — pause preserves knowledge | Invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later. |
 
 **If blocker reported**:
 
