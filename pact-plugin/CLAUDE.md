@@ -475,7 +475,7 @@ Do **not** shut down teammates preemptively. Reuse idle teammates whenever possi
 
 Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
-- comPACT specialists shut down when user chooses "Not yet"
+- comPACT specialists shut down when user chooses "Pause work for now"
 
 ### Recommended Agent Prompting Structure
 

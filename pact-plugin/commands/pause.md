@@ -5,7 +5,7 @@ description: Pause the session — consolidate memory, persist state, shut down 
 
 Pause the current session for later resumption. This is a **memory-critical subset of wrap-up** — it consolidates knowledge and persists session state without cleaning up the worktree or deleting tasks.
 
-> **Cross-reference**: For full end-of-session cleanup (worktree removal, task audit, session decision), see [wrap-up.md](wrap-up.md). Pause is invoked automatically when the user chooses "Not yet" at the merge decision in `/PACT:peer-review` or `/PACT:comPACT`.
+> **Cross-reference**: For full end-of-session cleanup (worktree removal, task audit, session decision), see [wrap-up.md](wrap-up.md). Pause is invoked automatically when the user chooses "Pause work for now" at the merge decision in `/PACT:peer-review` or `/PACT:comPACT`.
 
 ---
 
