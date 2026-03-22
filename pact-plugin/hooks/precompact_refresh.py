@@ -38,6 +38,8 @@ _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
+from shared.error_output import hook_error_json
+
 from refresh.constants import CHECKPOINT_MAX_AGE_DAYS
 from refresh.checkpoint_builder import (
     get_checkpoint_path,
@@ -195,7 +197,7 @@ def main():
     except Exception as e:
         # Never fail the hook - log and exit cleanly
         print(f"PreCompact hook error: {e}", file=sys.stderr)
-        print(json.dumps({"systemMessage": "PACT: checkpoint error"}))
+        print(hook_error_json("precompact_refresh", e))
         sys.exit(0)
 
 

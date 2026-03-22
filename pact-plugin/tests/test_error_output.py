@@ -689,6 +689,53 @@ class TestErrorOutputEdgeCases:
         assert "missing_key" in parsed["systemMessage"]
 
 
+class TestPrecompactRefreshErrorOutput:
+    """precompact_refresh.py exception handler produces JSON on stdout.
+
+    This hook previously used a hand-rolled systemMessage format.
+    Now it uses the shared hook_error_json helper for consistency.
+    """
+
+    def test_exception_outputs_json_with_system_message(self, capsys):
+        from precompact_refresh import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_error_json(captured.out, "precompact_refresh")
+
+    def test_exception_preserves_stderr(self, capsys):
+        """stderr should contain error info."""
+        from precompact_refresh import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "PreCompact hook error" in captured.err
+        assert len(captured.err) > 0
+
+    def test_error_uses_standard_format(self, capsys):
+        """Error output should use the standard 'PACT hook warning' format,
+        not the old 'PACT: checkpoint error' format."""
+        from precompact_refresh import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        parsed = _parse_stdout_json(captured.out)
+        assert "PACT hook warning" in parsed["systemMessage"]
+        assert "precompact_refresh" in parsed["systemMessage"]
+        # Old format should NOT appear
+        assert parsed["systemMessage"] != "PACT: checkpoint error"
+
+
 # =============================================================================
 # Module-level export: hook_error_json is importable from shared
 # =============================================================================
