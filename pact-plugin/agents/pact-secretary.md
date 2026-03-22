@@ -243,7 +243,7 @@ After completing the session briefing and orphaned breadcrumb recovery, **active
 
 1. Call `TaskList` to check for any tasks already assigned to you
 2. If a task exists with your name as owner:
-   - Claim it: `TaskUpdate(taskId, status="in_progress")`
+   - Start it: `TaskUpdate(taskId, status="in_progress")`
    - Send a teachback per the `pact-agent-teams` skill (standard protocol resumes here)
    - Begin work
 3. If no tasks are assigned: enter **Consultant Mode** — remain available for queries and ready to claim tasks when notified
