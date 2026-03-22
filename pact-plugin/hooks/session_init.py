@@ -57,10 +57,11 @@ from staleness import (  # noqa: F401
     _estimate_tokens,
 )
 
+from shared.error_output import hook_error_json
+
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
 from shared.claude_md_manager import update_claude_md, ensure_project_memory_md
-from shared.error_output import hook_error_json
 from shared.session_resume import (
     update_session_info,
     restore_last_session,

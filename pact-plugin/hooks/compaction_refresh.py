@@ -38,8 +38,9 @@ from refresh.checkpoint_builder import (
     checkpoint_to_refresh_message,
 )
 
-# Import shared Task utilities (DRY - used by multiple hooks)
 from shared.error_output import hook_error_json
+
+# Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import (
     get_task_list,
     find_feature_task,

@@ -28,6 +28,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+
 from shared.task_utils import get_task_list
 
 

@@ -26,6 +26,7 @@ from pathlib import Path
 # Shared constants and cleanup — single source of truth for both hooks
 sys.path.insert(0, str(Path(__file__).parent))
 from shared.error_output import hook_error_json
+
 from shared.merge_guard_common import (
     TOKEN_TTL,
     TOKEN_DIR,

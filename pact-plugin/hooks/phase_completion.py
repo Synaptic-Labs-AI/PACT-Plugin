@@ -25,8 +25,9 @@ _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
-# Import shared Task utilities (DRY - used by multiple hooks)
 from shared.error_output import hook_error_json
+
+# Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import get_task_list
 
 
