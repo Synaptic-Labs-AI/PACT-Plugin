@@ -31,4 +31,4 @@ class TestLearningIIPatterns:
         assert "review_calibration" in variety_content
 
     def test_score_adjustment_rule(self, variety_content):
-        assert "3+ memories match" in variety_content
+        assert "5+ memories match" in variety_content

@@ -20,6 +20,7 @@ AGENTS_DIR = Path(__file__).parent.parent / "agents"
 # Expected agent files
 EXPECTED_AGENTS = {
     "pact-architect",
+    "pact-auditor",
     "pact-backend-coder",
     "pact-database-engineer",
     "pact-devops-engineer",
