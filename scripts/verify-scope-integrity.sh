@@ -270,11 +270,11 @@ check_pattern "$PROTOCOLS_DIR/pact-protocols.md" \
     "SSOT S1 extract has 1-level nesting limit" \
     "Nesting limit.*1 level"
 # Implementation agents must have "Max nesting: 1 level"
-# Review-only agents (qa-engineer, security-engineer) don't implement code, so nesting doesn't apply
+# Review/observation-only agents don't implement code, so nesting doesn't apply
 for agent_file in "$AGENTS_DIR"/*.md; do
     agent_name=$(basename "$agent_file" .md)
     case "$agent_name" in
-        pact-qa-engineer|pact-security-engineer) continue ;;
+        pact-qa-engineer|pact-security-engineer|pact-auditor) continue ;;
     esac
     check_pattern "$agent_file" \
         "$agent_name has 1-level nesting limit" \

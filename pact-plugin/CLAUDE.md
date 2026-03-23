@@ -528,7 +528,7 @@ If the `validate_handoff` hook warns about a missing HANDOFF, extract available 
 Use these commands to trigger PACT workflows for delegating tasks:
 - `/PACT:plan-mode`: Multi-agent planning consultation before implementation (no code changes)
 - `/PACT:orchestrate`: Delegate a task to PACT specialist agents (multi-agent, full ceremony)
-- `/PACT:comPACT`: Delegate a focused task to a single specialist (light ceremony)
+- `/PACT:comPACT`: Delegate focused, independent tasks with light ceremony (parallelizable)
 - `/PACT:rePACT`: Recursive nested PACT cycle for complex sub-tasks (single or multi-domain)
 - `/PACT:imPACT`: Triage when blocked (Redo prior phase? Additional agents needed?)
 - `/PACT:peer-review`: Peer review of current work (commit, create PR, multi-agent review)

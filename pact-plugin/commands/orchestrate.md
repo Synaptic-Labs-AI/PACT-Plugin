@@ -543,7 +543,7 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 | Sub-Task Complexity | Indicators | Use |
 |---------------------|------------|-----|
 | **Simple** | Code-only, clear requirements | Direct specialist invocation |
-| **Focused** | Single domain, no research needed | `/PACT:comPACT` |
+| **Focused** | Independent sub-tasks, no research needed | `/PACT:comPACT` |
 | **Complex** | Needs own P→A→C→T cycle | `/PACT:rePACT` |
 
 **When to use `/PACT:rePACT`:**

@@ -920,7 +920,7 @@ The calibration feedback loop provides automatic variety score adjustment based 
 |----------|-------------|----------|
 | **PACT** | Complex/greenfield work | Context-aware multi-agent orchestration |
 | **plan-mode** | Before complex work, need alignment | Multi-agent planning consultation, no implementation |
-| **comPACT** | Focused, single-domain tasks | Single-domain delegation with light ceremony (parallelizable) |
+| **comPACT** | Focused, independent tasks | Light-ceremony delegation for independent sub-tasks (parallelizable) |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
@@ -997,9 +997,9 @@ The calibration feedback loop provides automatic variety score adjustment based 
 
 ## comPACT Protocol
 
-**Core idea**: Single-DOMAIN delegation with light ceremony.
+**Core idea**: Light-ceremony delegation for independent tasks.
 
-comPACT handles tasks within ONE specialist domain. For independent sub-tasks, it can invoke MULTIPLE specialists of the same type in parallel.
+comPACT handles tasks that can be decomposed into independent sub-tasks — single-domain or cross-domain — without shared-file dependencies. For independent sub-tasks, it invokes multiple specialists in parallel.
 
 **Available specialists**:
 | Shorthand | Specialist | Use For |
@@ -1020,18 +1020,20 @@ comPACT handles tasks within ONE specialist domain. For independent sub-tasks, i
 
 ### When to Invoke Multiple Specialists
 
-**MANDATORY: parallel unless tasks share files.** comPACT invokes multiple agents of the same type for independent items.
+**MANDATORY: parallel unless tasks share files or have dependencies.** comPACT invokes multiple agents — same type or mixed types — for independent items.
 
-Invoke multiple specialists of the same type when:
+Invoke multiple specialists when:
 - Multiple independent items (bugs, components, endpoints)
 - No shared files between sub-tasks
-- Same patterns/conventions apply to all
+- No data or ordering dependencies between sub-tasks
 
 | Task | Agents Invoked |
 |------|----------------|
 | "Fix 3 backend bugs" | 3 backend-coders (parallel) |
 | "Add validation to 5 endpoints" | Multiple backend-coders (parallel) |
 | "Update styling on 3 components" | Multiple frontend-coders (parallel) |
+| "Add API endpoint + update DB index" | 1 backend-coder + 1 database-engineer (parallel, independent files) |
+| "Fix CSS layout + add server logging" | 1 frontend-coder + 1 backend-coder (parallel, no shared files) |
 
 ### Pre-Invocation (Required)
 
@@ -1055,9 +1057,15 @@ Invoke multiple specialists of the same type when:
 - For parallel dispatch or novel domains: include "Send progress signals per the agent-teams skill Progress Signals section" in dispatch prompt
 
 **Escalate to `/PACT:orchestrate` when**:
-- Task spans multiple specialist domains
-- Complex cross-domain coordination needed
+- Sub-tasks have shared-file dependencies requiring sequenced coordination
+- Task requires PREPARE or ARCHITECT phases (significant research or design decisions)
 - Specialist reports a blocker (run `/PACT:imPACT` first)
+
+### Auditor Dispatch
+
+When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](pact-audit.md):
+- Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
+- Single coder on Low variety task → skip auditor
 
 ### After Specialist Completes
 
@@ -1427,7 +1435,7 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 ### Bypass Rules
 
 - **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes). Scoped sub-scopes cannot themselves trigger scope detection -- this bypass rule is the primary architectural mechanism; the 1-level nesting limit (see [S1 Autonomy & Recursion](pact-s1-autonomy.md#s1-autonomy--recursion)) serves as the safety net.
-- **comPACT** bypasses scope detection entirely — it is inherently single-domain
+- **comPACT** bypasses scope detection entirely — it handles independent sub-tasks with light ceremony
 - **Manual `/rePACT`** bypasses detection — user has already decided to decompose
 
 ### Evaluation Response
