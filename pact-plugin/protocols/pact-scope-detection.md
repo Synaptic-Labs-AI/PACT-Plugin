@@ -84,49 +84,17 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 ### Evaluation Response
 
-When detection fires (score >= threshold), the orchestrator must present the result to the user using S5 Decision Framing.
-
-#### S5 Confirmation Flow
-
-Use this framing template to propose decomposition:
-
-```
-📐 Scope Change: Multi-scope task detected
-
-Context: [What signals fired and why — e.g., "3 distinct domains identified
-(backend API, frontend UI, database migration) with no shared files"]
-
-Options:
-A) Decompose into sub-scopes: [proposed scope boundaries]
-   - Trade-off: Better isolation, parallel execution; overhead of scope coordination
-
-B) Continue as single scope
-   - Trade-off: Simpler coordination; risk of context overflow with large task
-
-C) Adjust boundaries (specify)
-
-Recommendation: [A or B with brief rationale]
-```
-
-#### User Response Mapping
+When detection fires (score >= threshold), present the result using the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.md)) with icon `📐 Scope Change`. Offer three options: (A) Decompose into sub-scopes, (B) Continue as single scope, (C) Adjust boundaries.
 
 | Response | Action |
 |----------|--------|
-| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
-| Rejected (B) | Continue single scope (today's behavior) |
-| Adjusted (C) | Generate scope contracts with user's modified boundaries, then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase |
+| Rejected (B) | Continue single scope |
+| Adjusted (C) | Generate scope contracts with modified boundaries, then ATOMIZE |
 
 #### Autonomous Tier
 
-When **all** of the following conditions are true, skip user confirmation and proceed directly to decomposition:
-
-1. ALL strong signals fire (not merely meeting the threshold)
-2. NO counter-signals present
-3. CLAUDE.md contains `autonomous-scope-detection: enabled`
-
-**Output format**: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
-
-> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it in CLAUDE.md after trusting the heuristics through repeated Confirmed-tier usage.
+Skip user confirmation when ALL strong signals fire, NO counter-signals present, and CLAUDE.md contains `autonomous-scope-detection: enabled`. Output: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
 
 ### Post-Detection: Scope Contract Generation
 
