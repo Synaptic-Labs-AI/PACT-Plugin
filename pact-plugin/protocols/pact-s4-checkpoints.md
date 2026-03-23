@@ -36,6 +36,15 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 
    *Verification*: At final gates (TEST→PR, comPACT, plan-mode), `SendMessage` to the completing specialist to confirm your understanding. At intermediate boundaries, the downstream agent's teachback verifies shared understanding. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 
+5. **Model Completeness (Conant-Ashby)**: Is the orchestrator's internal model adequate for regulation?
+   - State tracking fidelity: Do task statuses and agent states reflect actual progress?
+   - Assumption validity: Have any environment model assumptions been invalidated?
+   - Predictive accuracy: Did estimates and risk assessments match outcomes?
+
+   > **Cybernetic basis**: Conant-Ashby theorem — "Every good regulator of a system must be a model
+   > of that system." This question is meta-regulatory: questions 1-4 assess the project state;
+   > question 5 asks whether the orchestrator's own model is sufficient for effective regulation.
+
 ### Checkpoint Outcomes
 
 | Finding | Action |
@@ -52,6 +61,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Model: [aligned / diverged: {what}]
 > - Plan: [viable / adapt: {how} / escalate: {why}]
 > - Agreement: [verified / corrected: {what}]
+> - Regulation: [adequate / degraded: {what}]
 
 ### Output Behavior
 
@@ -60,7 +70,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 **Examples**:
 
 *Silent (all clear)*:
-> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified → continue
+> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified, regulation adequate → continue
 
 *Surfaces to user (issue detected)*:
 > **S4 Checkpoint** [PREPARE→ARCHITECT]:
@@ -68,6 +78,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Model: Diverged — Assumed backwards compatibility, now false
 > - Plan: Adapt — Need PREPARE extension to research v3 migration path
 > - Agreement: Corrected — Preparer assumed v2 compatibility; confirmed v3 migration needed
+> - Regulation: Degraded — Variety score 6 proved too low; actual difficulty warranted orchestrate, not comPACT
 
 ### Relationship to Variety Checkpoints
 

@@ -39,7 +39,7 @@ Score each dimension 1-4 and sum:
 Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
 
 1. **Search**: Query pact-memory for `"{domain} orchestration_calibration OR review_calibration"` and `"{domain} blocker OR stall OR rePACT"`
-2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
+2. **Assess**: If 5+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
 3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
 4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
 
@@ -86,5 +86,75 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 
 **Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
 
----
+### Variety Calibration Record
 
+> **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
+> predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
+
+At orchestration completion (wrap-up), the orchestrator captures a calibration record comparing initial variety assessment against actual difficulty. Records are saved to pact-memory via the secretary and feed back into Learning II pattern matching.
+
+**Schema**:
+
+```
+CalibrationRecord:
+  task_id: str                    # Feature task ID
+  domain: str                     # Top-level domain (e.g., "auth", "hooks", "frontend")
+  initial_variety_score: int      # Score at orchestration start (4-16)
+  actual_difficulty_score: int    # Post-hoc assessment (4-16, same scale)
+  dimensions_that_drifted:        # Which dimensions were off
+    - dimension: str              # "novelty" | "scope" | "uncertainty" | "risk"
+      predicted: int              # 1-4
+      actual: int                 # 1-4
+  blocker_count: int              # imPACT cycles triggered
+  phase_reruns: int               # Phases that had to be redone
+  specialist_fit: str | null      # "good" | "undermatched" | "overmatched" | null
+  timestamp: str                  # ISO 8601
+```
+
+**pact-memory mapping**: Saved via secretary with entities including `orchestration_calibration` AND `{domain}` (required for Learning II queries).
+
+**Post-cycle comparison**: At wrap-up, the orchestrator:
+1. Compares initial variety score vs. actual difficulty
+2. Identifies dimensions that drifted (predicted vs. actual)
+3. Notes blocker count and phase reruns as difficulty indicators
+4. Saves calibration record to pact-memory via secretary task
+5. If drift exceeds 2 in any dimension, note as significant for future Learning II queries
+
+### Calibration Feedback Loop
+
+> **Cybernetic basis**: Bateson's deutero-learning extended — beyond pattern detection (Learning II),
+> the system uses quantitative calibration data to auto-adjust scoring with damping.
+
+The calibration feedback loop provides automatic variety score adjustment based on accumulated calibration records. It operates alongside Learning II (qualitative pattern matching) as a quantitative complement.
+
+**Two feedback layers**:
+
+| Layer | Type | Activation | Effect |
+|-------|------|-----------|--------|
+| **Learning II** | Qualitative (pattern matching) | 5+ matching pact-memory entries for domain | +1 to relevant dimension |
+| **Calibration feedback** | Quantitative (drift measurement) | 5+ calibration records for domain | +/-1 to total score |
+
+**Algorithm** (windowed average with domain scoping):
+1. Filter calibration records by task domain
+2. Take most recent 5 records (window)
+3. If fewer than 5 records: no adjustment (cold start)
+4. Compute drift = mean(actual_difficulty - initial_variety) across window
+5. If abs(drift) < 1.0: no adjustment (within noise threshold)
+6. Adjustment = clamp(round(drift), -1, +1)
+7. Apply to base score, clamped to valid range (4-16)
+
+**Parameters**:
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Window size | 5 | Balances recency with stability |
+| Minimum samples | 5 per domain | Prevents cold-start overcorrection |
+| Max adjustment | +/-1 total | Prevents large jumps from single feedback cycle |
+| Noise threshold | 1.0 | Drift below this is random variation, not signal |
+| Domain scoping | Records keyed by domain string | "auth" calibrations don't affect "frontend" scoring |
+
+**Application order**: Learning II adjustment first (dimension-level), then calibration feedback (score-level). Both adjustments are clamped independently.
+
+**Cold-start behavior**: When a domain has fewer than 5 calibration records, Learning II (qualitative) may still fire if 5+ memories match. The system has two independent activation paths — either can provide value alone.
+
+---

@@ -103,31 +103,13 @@ All agents operating in parallel must:
 - Use project glossary and established terminology
 - Use standardized handoff structure (see [Phase Handoffs](pact-phase-transitions.md#phase-handoffs))
 
-### Parallelization Anti-Patterns
+### Parallelization Rules
 
-| Anti-Pattern | Problem | Fix |
-|--------------|---------|-----|
-| **Sequential by default** | Missed parallelization opportunity | Run QDCL; require justification for sequential |
-| **Ignoring shared files** | Merge conflicts; wasted work | QDCL catches this; sequence or assign boundaries |
-| **Over-parallelization** | Coordination overhead; convention drift | Limit parallel agents; use S2 coordination |
-| **Analysis paralysis** | QDCL takes longer than the work | Time-box to 1 minute; default to parallel if unclear |
-| **Single agent for batch** | 4 bugs → 1 coder instead of 2-4 coders | **4+ items = multiple agents** (no exceptions) |
-| **"Simpler to track" rationalization** | Sounds reasonable, wastes time | Not a valid justification; invoke concurrently anyway |
-| **"Related tasks" conflation** | "Related" ≠ "dependent"; false equivalence | Related is NOT blocked; only file/data dependencies block |
-| **"One agent can handle it" excuse** | Can ≠ should; missed efficiency | Capability is not justification for sequential |
+**Default**: Parallel. Sequence ONLY for file/data dependencies. If in doubt, parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
 
-**Recovery**: If in doubt, default to parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
+**Anti-patterns**: Sequential by default, ignoring shared files, "simpler to track" rationalization, "related tasks" conflation (related ≠ dependent), single agent for batch (4+ items = multiple agents).
 
-### Rationalization Detection
-
-When you find yourself thinking these thoughts, STOP—you're rationalizing sequential dispatch:
-
-| Thought | Reality |
-|---------|---------|
-| "They're small tasks" | Small = cheap to invoke together. Split. |
-| "Coordination overhead" | QDCL takes 30 seconds. Split. |
-
-**Valid reasons to sequence** (cite explicitly when choosing sequential):
+**Valid reasons to sequence** (cite explicitly):
 - "File X is modified by both" → Sequence or define boundaries
 - "A's output feeds B's input" → Sequence them
 - "Shared interface undefined" → Define interface first, then parallel
@@ -157,8 +139,36 @@ When dispatching agents during parallel execution, the codebase may have changed
 
 **Skip when**: Single-agent execution (no parallel agents = no drift risk).
 
----
+### Semantic Overlap Detection
 
+Beyond file-level conflicts (Layer 1, handled by Pre-Parallel Coordination Check above), agents can semantically overlap — implementing the same concept independently even when touching different files.
+
+**Three-layer detection**:
+
+| Layer | What It Checks | Precision | Cost |
+|-------|---------------|-----------|------|
+| 1. File scope intersection | Assigned file paths overlap | High | Cheap (set intersection) |
+| 2. Interface contract overlap | Shared dependencies, data types, or API endpoints | High | Cheap (metadata comparison) |
+| 3. Semantic field matching | Task description keyword extraction + concept clustering | Medium | Medium (keyword extraction) |
+
+**Layer 2 — Interface Contract Overlap**: Compare structured metadata fields across agent tasks. If agents share dependencies, data types, or API endpoints, flag as potential overlap. The orchestrator populates these fields during CODE phase dispatch as part of the "define boundaries" step.
+
+**Layer 3 — Semantic Field Matching**: Extract significant terms from task descriptions (filtering common stop words like "error", "validation", "config", "handler", "service", "model"). Cluster by prefix (e.g., "auth-flow", "auth-token" → "auth"). If agents share 2+ concepts, flag for review.
+
+**Severity matrix**:
+
+| Layers Triggered | Severity | Recommended Action |
+|-----------------|----------|-------------------|
+| Layer 1 only | **High** | Sequence or assign strict file boundaries |
+| Layer 2 only | **Medium** | Define contract authority; document who owns the shared interface |
+| Layer 3 only | **Low** | Note for review; may self-resolve; pass to auditor as focus area |
+| Layer 1 + 2 | **High** | Must resolve before parallel dispatch |
+| Layer 2 + 3 | **Medium** | Define contracts + assign concept ownership |
+| All three | **Critical** | Consider sequencing instead of parallel |
+
+**Integration**: Run semantic overlap detection during S2 Pre-Parallel Check. Layer 1 is already implemented above. Layers 2 and 3 extend the check with richer metadata analysis. If the concurrent auditor is active, pass Layer 3 (Low severity) findings as focus areas.
+
+---
 ## Backend ↔ Database Boundary
 
 **Sequence**: Database delivers schema → Backend implements ORM.
@@ -173,4 +183,3 @@ When dispatching agents during parallel execution, the codebase may have changed
 **Collaboration**: If Backend needs a complex query, ask Database. If Database needs to know access patterns, ask Backend.
 
 ---
-

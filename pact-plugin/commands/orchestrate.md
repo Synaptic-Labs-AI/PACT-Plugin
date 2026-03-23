@@ -508,6 +508,18 @@ Spawn multiple coders in parallel (multiple `Task` calls in one response). Inclu
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
+**Dispatch auditor** (concurrent with coders, when conditions are met):
+
+Deploy the pact-auditor as a CODE-phase teammate when ANY of: variety >= 7, multiple coders running in parallel, task touches security-sensitive code, or domain has prior architecture drift history. Skip when: single coder on a Low variety (4-6) task with no security sensitivity.
+
+1. `TaskCreate(subject="auditor: concurrent quality observation", metadata={"completion_type": "signal"})`
+   - Include: architecture doc path, plan path, coder task IDs and scope boundaries
+   - Include: "Your observation targets: {coder-names}. Reference chain: architecture doc > plan > dispatch context."
+2. `TaskUpdate(taskId, owner="auditor")`
+3. `Task(name="auditor", team_name="{team_name}", subagent_type="pact-auditor", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+
+The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate` before marking the task completed. On RED signal: SendMessage to the affected coder and pause their work. On YELLOW: pass finding to test engineer as focus area. See [pact-audit.md](../protocols/pact-audit.md) for the full Concurrent Audit Protocol.
+
 **Before next phase**:
 - [ ] Implementation complete
 - [ ] All tests passing (full test suite; fix any tests your changes break)

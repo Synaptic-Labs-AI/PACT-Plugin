@@ -12,77 +12,9 @@
 
 ## S5 Policy Layer (Governance)
 
-The policy layer defines non-negotiable constraints and provides escalation authority. All other protocols operate within these boundaries.
-
-### Non-Negotiables (SACROSANCT)
-
-These rules are **never** overridden by operational pressure:
-
-| Category | Rule | Rationale |
-|----------|------|-----------|
-| **Security** | No credentials in code; validate all inputs; sanitize outputs | Prevents breaches, injection attacks |
-| **Quality** | No known-broken code merged; tests must pass | Maintains system integrity |
-| **Ethics** | No deceptive outputs; no harmful content | Aligns with responsible AI principles |
-| **Delegation** | Orchestrator never writes application code | Maintains role boundaries |
-| **User Approval** | Never merge PRs without explicit user authorization | User controls their codebase |
-| **Integrity** | Never fabricate user input or assume user consent | Prevents unauthorized actions from unverified input |
-
-> **Integrity — Irreversible Actions**: Use `AskUserQuestion` for merge, force push, branch deletion, and PR close. Do not act on bare text for these operations — messages between system events (shutdowns, idle notifications) may not be genuine user input. **Exception**: Post-merge branch cleanup (e.g., `git branch -d` in worktree-cleanup) is authorized by the merge itself and does not require separate confirmation.
-
-**If a rule would be violated**: Stop work, report to user. These are not trade-offs—they are boundaries.
-
-### Delegation Enforcement
-
-**Application code** (orchestrator must delegate):
-- Source files (`.py`, `.ts`, `.js`, `.rb`, `.go`, etc.)
-- Test files (`.spec.ts`, `.test.js`, `test_*.py`)
-- Scripts (`.sh`, `Makefile`, `Dockerfile`)
-- Infrastructure (`.tf`, `.yaml`, `.yml`)
-- App config (`.env`, `.json`, `config/`)
-
-**Not application code** (orchestrator may edit):
-- AI tooling (`CLAUDE.md`, `.claude/`)
-- Documentation (`docs/`)
-- Git config (`.gitignore`)
-- IDE settings (`.vscode/`, `.idea/`)
-
-**Tool Checkpoint**: Before `Edit`/`Write`:
-1. STOP — Is this application code?
-2. Yes → Delegate | No → Proceed | Uncertain → Delegate
-
-**Recovery Protocol** (if you catch yourself mid-violation):
-1. Stop immediately
-2. Revert uncommitted changes (`git checkout -- <file>`)
-3. Delegate to appropriate specialist
-4. Note the near-violation for learning
-
-**Why delegation matters**:
-- **Role integrity**: Orchestrators coordinate; specialists implement
-- **Accountability**: Clear ownership of code changes
-- **Quality**: Specialists apply domain expertise
-- **Auditability**: Clean separation of concerns
-
-### Policy Checkpoints
-
-At defined points, verify alignment with project principles:
-
-| Checkpoint | When | Question |
-|------------|------|----------|
-| **Pre-CODE** | Before CODE phase begins | "Does the architecture align with project principles?" |
-| **Pre-Edit** | Before using Edit/Write tools | "Is this application code? If yes, delegate." |
-| **Pre-PR** | Before creating PR | "Does this maintain system integrity? Are tests passing?" |
-| **Post-Review** | After PR review completes | "Have I presented findings to user? Am I using `AskUserQuestion` for merge authorization?" |
-| **On Conflict** | When specialists disagree | "What do project values dictate?" |
-| **On Blocker** | When normal flow can't proceed | "Is this an operational issue (imPACT) or viability threat (escalate to user)?" |
-
-### S5 Authority
-
-The **user is ultimate S5**. When conflicts cannot be resolved at lower levels:
-- S3/S4 tension (execution vs adaptation) → Escalate to user
-- Principle conflicts → Escalate to user
-- Unclear non-negotiable boundaries → Escalate to user
-
-The orchestrator has authority to make operational decisions within policy. It does not have authority to override policy.
+> S5 policy content (Non-Negotiables, Delegation Enforcement, Policy Checkpoints, S5 Authority)
+> is authoritative in CLAUDE.md and loaded at runtime. See CLAUDE.md > S5 POLICY.
+> This section retains only content NOT duplicated in CLAUDE.md:
 
 ### Merge Authorization Boundary
 
@@ -124,25 +56,6 @@ C) Other (specify)
 | Principle Conflict | 🎯 | Values in tension |
 | Algedonic (HALT) | 🛑 | Viability threat — stops work |
 | Algedonic (ALERT) | ⚡ | Attention needed — pauses work |
-
-#### Example: Good Framing
-
-> ⚖️ **S3/S4 Tension**: Skip PREPARE phase for faster delivery?
->
-> **Context**: Task appears routine based on description, but touches auth code which has been problematic before.
->
-> **Options**:
-> A) **Skip PREPARE** — Start coding now, handle issues as they arise
->    - Trade-off: Faster start, but may hit avoidable blockers
->
-> B) **Run PREPARE** — Research auth patterns first (~30 min)
->    - Trade-off: Slower start, but informed approach
->
-> **Recommendation**: B — Auth code has caused issues; small investment reduces risk.
-
-#### Example: Poor Framing (Avoid)
-
-> "I'm not sure whether to skip the prepare phase. On one hand we could save time but on the other hand there might be issues. The auth code has been problematic. What do you think we should do? Also there are some other considerations like..."
 
 #### Attenuation Guidelines
 
@@ -192,6 +105,15 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 
    *Verification*: At final gates (TEST→PR, comPACT, plan-mode), `SendMessage` to the completing specialist to confirm your understanding. At intermediate boundaries, the downstream agent's teachback verifies shared understanding. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 
+5. **Model Completeness (Conant-Ashby)**: Is the orchestrator's internal model adequate for regulation?
+   - State tracking fidelity: Do task statuses and agent states reflect actual progress?
+   - Assumption validity: Have any environment model assumptions been invalidated?
+   - Predictive accuracy: Did estimates and risk assessments match outcomes?
+
+   > **Cybernetic basis**: Conant-Ashby theorem — "Every good regulator of a system must be a model
+   > of that system." This question is meta-regulatory: questions 1-4 assess the project state;
+   > question 5 asks whether the orchestrator's own model is sufficient for effective regulation.
+
 ### Checkpoint Outcomes
 
 | Finding | Action |
@@ -208,6 +130,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Model: [aligned / diverged: {what}]
 > - Plan: [viable / adapt: {how} / escalate: {why}]
 > - Agreement: [verified / corrected: {what}]
+> - Regulation: [adequate / degraded: {what}]
 
 ### Output Behavior
 
@@ -216,7 +139,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 **Examples**:
 
 *Silent (all clear)*:
-> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified → continue
+> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified, regulation adequate → continue
 
 *Surfaces to user (issue detected)*:
 > **S4 Checkpoint** [PREPARE→ARCHITECT]:
@@ -224,6 +147,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Model: Diverged — Assumed backwards compatibility, now false
 > - Plan: Adapt — Need PREPARE extension to research v3 migration path
 > - Agreement: Corrected — Preparer assumed v2 compatibility; confirmed v3 migration needed
+> - Regulation: Degraded — Variety score 6 proved too low; actual difficulty warranted orchestrate, not comPACT
 
 ### Relationship to Variety Checkpoints
 
@@ -299,6 +223,20 @@ Created during PREPARE phase, referenced during S4 checkpoints.
 | New constraint discovered | Add to model, assess impact |
 | Unknown resolved | Move from Unknowns to appropriate section |
 | Model significantly outdated | Consider returning to PREPARE |
+
+### Dynamic Model Update Triggers
+
+Beyond manual updates, certain runtime signals should trigger automatic model reassessment:
+
+| Trigger | Source | Model Update |
+|---------|--------|-------------|
+| S2 semantic overlap detected | S2 coordination layer | Add newly discovered interface dependencies to External Dependencies |
+| Agent blocker on missing dependency | imPACT triage | Add dependency to model; reassess Constraints |
+| Calibration drift > 2 in any dimension | Calibration feedback loop | Re-examine Unknowns — systematic blind spot likely |
+| Auditor RED signal | Concurrent audit protocol | Cross-reference against model assumptions — architecture drift may indicate invalidated constraint |
+| 3+ imPACT cycles | Algedonic META-BLOCK | Model likely insufficient — trigger full model review |
+
+**Integration with Conant-Ashby**: When S4 checkpoint question 5 (Model Completeness) detects degraded regulation, dynamic triggers ensure the environment model updates reflect the gap. The model must stay current for effective regulation — stale models produce stale regulation.
 
 ### Relationship to S4 Checkpoints
 
@@ -587,31 +525,13 @@ All agents operating in parallel must:
 - Use project glossary and established terminology
 - Use standardized handoff structure (see [Phase Handoffs](pact-phase-transitions.md#phase-handoffs))
 
-### Parallelization Anti-Patterns
+### Parallelization Rules
 
-| Anti-Pattern | Problem | Fix |
-|--------------|---------|-----|
-| **Sequential by default** | Missed parallelization opportunity | Run QDCL; require justification for sequential |
-| **Ignoring shared files** | Merge conflicts; wasted work | QDCL catches this; sequence or assign boundaries |
-| **Over-parallelization** | Coordination overhead; convention drift | Limit parallel agents; use S2 coordination |
-| **Analysis paralysis** | QDCL takes longer than the work | Time-box to 1 minute; default to parallel if unclear |
-| **Single agent for batch** | 4 bugs → 1 coder instead of 2-4 coders | **4+ items = multiple agents** (no exceptions) |
-| **"Simpler to track" rationalization** | Sounds reasonable, wastes time | Not a valid justification; invoke concurrently anyway |
-| **"Related tasks" conflation** | "Related" ≠ "dependent"; false equivalence | Related is NOT blocked; only file/data dependencies block |
-| **"One agent can handle it" excuse** | Can ≠ should; missed efficiency | Capability is not justification for sequential |
+**Default**: Parallel. Sequence ONLY for file/data dependencies. If in doubt, parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
 
-**Recovery**: If in doubt, default to parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
+**Anti-patterns**: Sequential by default, ignoring shared files, "simpler to track" rationalization, "related tasks" conflation (related ≠ dependent), single agent for batch (4+ items = multiple agents).
 
-### Rationalization Detection
-
-When you find yourself thinking these thoughts, STOP—you're rationalizing sequential dispatch:
-
-| Thought | Reality |
-|---------|---------|
-| "They're small tasks" | Small = cheap to invoke together. Split. |
-| "Coordination overhead" | QDCL takes 30 seconds. Split. |
-
-**Valid reasons to sequence** (cite explicitly when choosing sequential):
+**Valid reasons to sequence** (cite explicitly):
 - "File X is modified by both" → Sequence or define boundaries
 - "A's output feeds B's input" → Sequence them
 - "Shared interface undefined" → Define interface first, then parallel
@@ -640,6 +560,35 @@ When dispatching agents during parallel execution, the codebase may have changed
 - If so, send a brief `SendMessage` to the running agent: "Environment changed: {file} was modified by {agent}. Verify your assumptions about it."
 
 **Skip when**: Single-agent execution (no parallel agents = no drift risk).
+
+### Semantic Overlap Detection
+
+Beyond file-level conflicts (Layer 1, handled by Pre-Parallel Coordination Check above), agents can semantically overlap — implementing the same concept independently even when touching different files.
+
+**Three-layer detection**:
+
+| Layer | What It Checks | Precision | Cost |
+|-------|---------------|-----------|------|
+| 1. File scope intersection | Assigned file paths overlap | High | Cheap (set intersection) |
+| 2. Interface contract overlap | Shared dependencies, data types, or API endpoints | High | Cheap (metadata comparison) |
+| 3. Semantic field matching | Task description keyword extraction + concept clustering | Medium | Medium (keyword extraction) |
+
+**Layer 2 — Interface Contract Overlap**: Compare structured metadata fields across agent tasks. If agents share dependencies, data types, or API endpoints, flag as potential overlap. The orchestrator populates these fields during CODE phase dispatch as part of the "define boundaries" step.
+
+**Layer 3 — Semantic Field Matching**: Extract significant terms from task descriptions (filtering common stop words like "error", "validation", "config", "handler", "service", "model"). Cluster by prefix (e.g., "auth-flow", "auth-token" → "auth"). If agents share 2+ concepts, flag for review.
+
+**Severity matrix**:
+
+| Layers Triggered | Severity | Recommended Action |
+|-----------------|----------|-------------------|
+| Layer 1 only | **High** | Sequence or assign strict file boundaries |
+| Layer 2 only | **Medium** | Define contract authority; document who owns the shared interface |
+| Layer 3 only | **Low** | Note for review; may self-resolve; pass to auditor as focus area |
+| Layer 1 + 2 | **High** | Must resolve before parallel dispatch |
+| Layer 2 + 3 | **Medium** | Define contracts + assign concept ownership |
+| All three | **Critical** | Consider sequencing instead of parallel |
+
+**Integration**: Run semantic overlap detection during S2 Pre-Parallel Check. Layer 1 is already implemented above. Layers 2 and 3 extend the check with richer metadata analysis. If the concurrent auditor is active, pass Layer 3 (Low severity) findings as focus areas.
 
 ---
 
@@ -720,45 +669,87 @@ See [rePACT.md](../commands/rePACT.md) for full command documentation.
 
 ## Algedonic Signals (Emergency Bypass)
 
-Algedonic signals handle viability-threatening conditions that require immediate user attention. Unlike normal blockers (handled by imPACT), algedonic signals bypass normal orchestration flow.
+Viability-threatening conditions bypass normal orchestration and escalate directly to user (S5). See [algedonic.md](algedonic.md) for full protocol, signal format, and trigger conditions.
 
-> **VSM Context**: In Beer's VSM, algedonic signals are "pain/pleasure" signals that bypass management hierarchy to reach policy level (S5) instantly.
-
-For full protocol details, see [algedonic.md](algedonic.md).
-
-### Quick Reference
-
-| Level | Categories | Response |
-|-------|------------|----------|
+| Level | Categories | Action |
+|-------|------------|--------|
 | **HALT** | SECURITY, DATA, ETHICS | All work stops; user must acknowledge |
 | **ALERT** | QUALITY, SCOPE, META-BLOCK | Work pauses; user decides |
 
-### Signal Format
+**Key rules**: Any agent can emit. Orchestrator MUST surface immediately. HALT with parallel agents: broadcast stop, preserve WIP. imPACT handles operational blockers; algedonic handles viability threats. 3+ imPACT cycles without resolution → ALERT (META-BLOCK).
 
-```
-⚠️ ALGEDONIC [HALT|ALERT]: {Category}
+---
 
-**Issue**: {One-line description}
-**Evidence**: {What triggered this}
-**Impact**: {Why this threatens viability}
-**Recommended Action**: {Suggested response}
-```
+## Transduction Protocol
 
-### Key Rules
+> **Cybernetic basis**: Stafford Beer's concept of transduction — information is reconceptualized
+> when crossing VSM level boundaries. Distinct from Shannon's source coding (compression efficiency),
+> which is addressed by the Channel Capacity protocol.
 
-- **Any agent** can emit algedonic signals when they recognize trigger conditions
-- Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
-- HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(type="broadcast")`, preserve work-in-progress, do NOT commit partial work
-- ALERT allows user to choose: Investigate / Continue / Stop
+Transduction defines how information transforms as it crosses boundaries between VSM levels in PACT. Each boundary crossing requires translation because the receiving system operates in a different information domain than the sender.
 
-### Relationship to imPACT
+### Boundary Crossings in PACT
 
-| Situation | Protocol | Scope |
-|-----------|----------|-------|
-| Operational blocker | imPACT | "How do we proceed?" |
-| Repeated blocker (3+ cycles) | imPACT → ALERT | Escalate to user |
-| Viability threat | Algedonic | "Should we proceed at all?" |
+| Crossing | From → To | Translation Required |
+|----------|-----------|---------------------|
+| S1 → S3 | Agent implementation details → Orchestrator operational status | Compress: specific file changes → summary of decisions and produced artifacts |
+| S3 → S4 | Orchestrator execution state → Strategic assessment | Abstract: task progress → phase viability, risk profile, adaptation needs |
+| S4 → S5 | Strategic intelligence → Policy-level decisions | Frame: analysis → decision-ready options with trade-offs (S5 Decision Framing) |
+| S3 → S1 | Orchestrator dispatch → Agent working context | Expand: task assignment → full context with references, boundaries, guidelines |
+
+### Lossless vs. Lossy Fields
+
+Not all handoff fields carry equal fidelity requirements. Some fields must survive boundary crossings intact; others are intentionally compressed because the receiver operates at a different abstraction level.
+
+**Lossless fields** (must survive intact across boundaries):
+- `produced` — File paths and artifacts created/modified (concrete, verifiable)
+- `integration_points` — Components touched beyond the agent's primary scope
+- `open_questions` — Unresolved items that affect downstream work
+
+**Lossy fields** (intentionally compressed at boundaries):
+- `reasoning_chain` — Implementation reasoning is relevant to the coder's peers and test engineer, but the orchestrator only needs the resulting decisions
+- `key_decisions` — Full rationale compresses to decision + brief justification at S3 level; further compresses to just the decision at S4 level
+- `areas_of_uncertainty` — Priority levels survive; detailed descriptions compress to risk categories
+
+**Why lossy?** Not bandwidth — information domain mismatch. A coder's reasoning about algorithm choice is meaningful to another coder but noise to the orchestrator making phase-transition decisions. The information isn't lost; it's in the task metadata for on-demand retrieval via `TaskGet`.
+
+### Transduction Fidelity Standards
+
+At each boundary crossing, verify that essential information survived translation:
+
+| Standard | Check | Failure Signal |
+|----------|-------|----------------|
+| **Completeness** | All lossless fields present in handoff | Missing `produced` or `integration_points` in handoff metadata |
+| **Accuracy** | Produced files actually exist; integration points are real | File listed in `produced` not found in `git diff`; referenced component doesn't exist |
+| **Relevance** | Information matches the receiver's domain | S4 checkpoint receiving implementation-level detail instead of viability assessment |
+| **Actionability** | Receiver can act on the information without requesting clarification | Orchestrator needs to `TaskGet` for basic status; agent needs follow-up `SendMessage` for unclear dispatch |
+
+### Handoff as Transduction
+
+The HANDOFF format (see CLAUDE.md "Expected Agent HANDOFF Format") is PACT's primary transduction mechanism. Each field maps to a fidelity category:
+
+| HANDOFF Field | Fidelity | Boundary Behavior |
+|---------------|----------|-------------------|
+| 1. Produced | Lossless | Passes intact through all boundaries |
+| 2. Key decisions | Lossy | Compresses at S3→S4 (rationale drops, decision survives) |
+| 3. Reasoning chain | Lossy | Available on-demand via `TaskGet`; not forwarded by default |
+| 4. Areas of uncertainty | Mixed | Priority levels lossless; descriptions lossy (compress to categories) |
+| 5. Integration points | Lossless | Passes intact; critical for cross-agent coordination |
+| 6. Open questions | Lossless | Must survive to reach decision-maker (may be S3 or S5) |
+
+### Transduction Quality Indicators
+
+The orchestrator can assess transduction quality at phase boundaries:
+
+- **High fidelity**: Downstream agents start work without requesting clarification; test engineer's focus matches coder's flagged uncertainties
+- **Degraded fidelity**: Agents send `SendMessage` asking for information that should have been in the handoff; test engineer discovers issues not flagged in uncertainty priorities
+- **Failed transduction**: Agent works on wrong problem due to missing context; phase produces output misaligned with upstream intent
+
+### Relationship to Other Protocols
+
+- **Channel Capacity** ([pact-channel-capacity.md](pact-channel-capacity.md)): Addresses throughput limits (how much information can cross a boundary per interaction). Transduction addresses translation quality (whether information retains meaning across boundaries).
+- **S4 Checkpoints** ([pact-s4-checkpoints.md](pact-s4-checkpoints.md)): Question 4 (Shared Understanding) directly tests transduction fidelity between orchestrator and specialist.
+- **Phase Transitions** ([pact-phase-transitions.md](pact-phase-transitions.md)): Handoff format operationalizes transduction at phase boundaries.
 
 ---
 
@@ -803,7 +794,7 @@ Score each dimension 1-4 and sum:
 Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
 
 1. **Search**: Query pact-memory for `"{domain} orchestration_calibration OR review_calibration"` and `"{domain} blocker OR stall OR rePACT"`
-2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
+2. **Assess**: If 5+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
 3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
 4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
 
@@ -849,6 +840,77 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 - Any → Stuck: Intervention needed
 
 **Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
+
+### Variety Calibration Record
+
+> **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
+> predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
+
+At orchestration completion (wrap-up), the orchestrator captures a calibration record comparing initial variety assessment against actual difficulty. Records are saved to pact-memory via the secretary and feed back into Learning II pattern matching.
+
+**Schema**:
+
+```
+CalibrationRecord:
+  task_id: str                    # Feature task ID
+  domain: str                     # Top-level domain (e.g., "auth", "hooks", "frontend")
+  initial_variety_score: int      # Score at orchestration start (4-16)
+  actual_difficulty_score: int    # Post-hoc assessment (4-16, same scale)
+  dimensions_that_drifted:        # Which dimensions were off
+    - dimension: str              # "novelty" | "scope" | "uncertainty" | "risk"
+      predicted: int              # 1-4
+      actual: int                 # 1-4
+  blocker_count: int              # imPACT cycles triggered
+  phase_reruns: int               # Phases that had to be redone
+  specialist_fit: str | null      # "good" | "undermatched" | "overmatched" | null
+  timestamp: str                  # ISO 8601
+```
+
+**pact-memory mapping**: Saved via secretary with entities including `orchestration_calibration` AND `{domain}` (required for Learning II queries).
+
+**Post-cycle comparison**: At wrap-up, the orchestrator:
+1. Compares initial variety score vs. actual difficulty
+2. Identifies dimensions that drifted (predicted vs. actual)
+3. Notes blocker count and phase reruns as difficulty indicators
+4. Saves calibration record to pact-memory via secretary task
+5. If drift exceeds 2 in any dimension, note as significant for future Learning II queries
+
+### Calibration Feedback Loop
+
+> **Cybernetic basis**: Bateson's deutero-learning extended — beyond pattern detection (Learning II),
+> the system uses quantitative calibration data to auto-adjust scoring with damping.
+
+The calibration feedback loop provides automatic variety score adjustment based on accumulated calibration records. It operates alongside Learning II (qualitative pattern matching) as a quantitative complement.
+
+**Two feedback layers**:
+
+| Layer | Type | Activation | Effect |
+|-------|------|-----------|--------|
+| **Learning II** | Qualitative (pattern matching) | 5+ matching pact-memory entries for domain | +1 to relevant dimension |
+| **Calibration feedback** | Quantitative (drift measurement) | 5+ calibration records for domain | +/-1 to total score |
+
+**Algorithm** (windowed average with domain scoping):
+1. Filter calibration records by task domain
+2. Take most recent 5 records (window)
+3. If fewer than 5 records: no adjustment (cold start)
+4. Compute drift = mean(actual_difficulty - initial_variety) across window
+5. If abs(drift) < 1.0: no adjustment (within noise threshold)
+6. Adjustment = clamp(round(drift), -1, +1)
+7. Apply to base score, clamped to valid range (4-16)
+
+**Parameters**:
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Window size | 5 | Balances recency with stability |
+| Minimum samples | 5 per domain | Prevents cold-start overcorrection |
+| Max adjustment | +/-1 total | Prevents large jumps from single feedback cycle |
+| Noise threshold | 1.0 | Drift below this is random variation, not signal |
+| Domain scoping | Records keyed by domain string | "auth" calibrations don't affect "frontend" scoring |
+
+**Application order**: Learning II adjustment first (dimension-level), then calibration feedback (score-level). Both adjustments are clamped independently.
+
+**Cold-start behavior**: When a domain has fewer than 5 calibration records, Learning II (qualitative) may still fire if 5+ memories match. The system has two independent activation paths — either can provide value alone.
 
 ---
 
@@ -1025,6 +1087,8 @@ Invoke multiple specialists of the same type when:
 
 Keep it brief. No templates required.
 
+**Transduction fidelity** (see [pact-transduction.md](pact-transduction.md)): Handoffs cross VSM boundaries. Ensure lossless fields (`produced`, `integration_points`, `open_questions`) are complete and verifiable. Lossy fields (`reasoning_chain`, detailed rationale) remain available on-demand via `TaskGet` — they are compressed, not discarded.
+
 ---
 
 ## Task Hierarchy
@@ -1184,46 +1248,14 @@ Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is 
 
 ### CODE → TEST Handoff
 
-Coders provide handoff summaries to the orchestrator, who passes them to the test engineer.
+Coders provide structured handoff summaries to the orchestrator, who passes them to the test engineer. See CLAUDE.md "Expected Agent HANDOFF Format" for the canonical format (6 fields, items 1-2 and 4-6 required, item 3 reasoning chain recommended).
 
-**Handoff Format**:
-```
-1. Produced: Files created/modified
-2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
-4. Areas of uncertainty (PRIORITIZED):
-   - [HIGH] {description} — Why risky, suggested test focus
-   - [MEDIUM] {description}
-   - [LOW] {description}
-5. Integration points: Other components touched
-6. Open questions: Unresolved items
-```
-
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
-
-**Example**:
-```
-1. Produced: `src/auth/token-manager.ts`, `src/auth/token-manager.test.ts`
-2. Key decisions: Used JWT with 15min expiry (assumed acceptable for this app)
-3. Reasoning chain: Chose JWT because stateless auth required; 15min expiry because short-lived tokens reduce replay risk, which required a refresh mechanism
-4. Areas of uncertainty:
-   - [HIGH] Token refresh race condition — concurrent requests may get stale tokens; test with parallel calls
-   - [MEDIUM] Clock skew handling — assumed <5s drift; may fail with larger skew
-5. Integration points: Modified `src/middleware/auth.ts` to use new manager
-6. Open questions: Should refresh tokens be stored in httpOnly cookies?
-```
-
-**Uncertainty Prioritization**:
+**Uncertainty Prioritization** (guides test engineer focus):
 - **HIGH**: "This could break in production" — Test engineer MUST cover these
 - **MEDIUM**: "I'm not 100% confident" — Test engineer should cover these
 - **LOW**: "Edge case I thought of" — Test engineer uses discretion
 
-**Test Engineer Response**:
-- HIGH uncertainty areas require explicit test cases (mandatory)
-- If skipping a flagged area, document the rationale
-- Report findings using the Signal Output System (GREEN/YELLOW/RED)
-
-**This is context, not prescription.** The test engineer decides *how* to test, but flagged HIGH uncertainty areas must be addressed.
+**Test Engineer Response**: HIGH uncertainty areas require explicit test cases (mandatory). Report findings using the Signal Output System (GREEN/YELLOW/RED). This is context, not prescription — the test engineer decides *how* to test.
 
 ---
 
@@ -1236,41 +1268,6 @@ Before completing any phase, consider:
 - **Observability**: Logging, error tracking
 
 Not a checklist—just awareness.
-
----
-
-## Architecture Review (Optional)
-
-For complex features, before Code phase:
-- Coders quickly validate architect's design is implementable
-- Flag blockers early, not during implementation
-
-Skip for simple features or when "just build it."
-
----
-
-## Documentation Locations
-
-| Phase | Output Location |
-|-------|-----------------|
-| Plan | `docs/plans/` |
-| Prepare | `docs/preparation/` |
-| Architect | `docs/architecture/` |
-
-**Plan vs. Architecture artifacts**:
-- **Plans** (`docs/plans/`): Pre-approval roadmaps created by `/PACT:plan-mode`. Created *before* implementation begins.
-- **Architecture** (`docs/architecture/`): Formal specifications created by `pact-architect` *during* the Architect phase.
-
-**No persistent logging for CODE/TEST phases.** Context passes via structured handoffs between agents. Git commits capture the audit trail.
-
----
-
-## Session Continuity
-
-If work spans sessions, update CLAUDE.md with:
-- Current phase and task
-- Blockers or open questions
-- Next steps
 
 ---
 
@@ -1433,49 +1430,17 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 ### Evaluation Response
 
-When detection fires (score >= threshold), the orchestrator must present the result to the user using S5 Decision Framing.
-
-#### S5 Confirmation Flow
-
-Use this framing template to propose decomposition:
-
-```
-📐 Scope Change: Multi-scope task detected
-
-Context: [What signals fired and why — e.g., "3 distinct domains identified
-(backend API, frontend UI, database migration) with no shared files"]
-
-Options:
-A) Decompose into sub-scopes: [proposed scope boundaries]
-   - Trade-off: Better isolation, parallel execution; overhead of scope coordination
-
-B) Continue as single scope
-   - Trade-off: Simpler coordination; risk of context overflow with large task
-
-C) Adjust boundaries (specify)
-
-Recommendation: [A or B with brief rationale]
-```
-
-#### User Response Mapping
+When detection fires (score >= threshold), present the result using the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.md)) with icon `📐 Scope Change`. Offer three options: (A) Decompose into sub-scopes, (B) Continue as single scope, (C) Adjust boundaries.
 
 | Response | Action |
 |----------|--------|
-| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
-| Rejected (B) | Continue single scope (today's behavior) |
-| Adjusted (C) | Generate scope contracts with user's modified boundaries, then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase |
+| Rejected (B) | Continue single scope |
+| Adjusted (C) | Generate scope contracts with modified boundaries, then ATOMIZE |
 
 #### Autonomous Tier
 
-When **all** of the following conditions are true, skip user confirmation and proceed directly to decomposition:
-
-1. ALL strong signals fire (not merely meeting the threshold)
-2. NO counter-signals present
-3. CLAUDE.md contains `autonomous-scope-detection: enabled`
-
-**Output format**: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
-
-> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it in CLAUDE.md after trusting the heuristics through repeated Confirmed-tier usage.
+Skip user confirmation when ALL strong signals fire, NO counter-signals present, and CLAUDE.md contains `autonomous-scope-detection: enabled`. Output: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
 
 ### Post-Detection: Scope Contract Generation
 
@@ -1597,50 +1562,6 @@ rePACT implements the executor interface as follows:
 
 See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
 
-#### Future Executor: Agent Teams
-
-> **Status**: Agent Teams is experimental, gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
-> The API has evolved from earlier community-documented versions (monolithic `TeammateTool` with 13 operations)
-> into separate purpose-built tools. The mappings below reflect the current API shape but may change
-> before official release. This section is documentation/future reference, not current behavior.
-
-When Claude Code Agent Teams reaches stable release, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
-
-| Interface Element | Agent Teams Mapping |
-|-------------------|---------------------|
-| **Input: scope_contract** | Passed in the teammate spawn prompt via `Task` tool (with `team_name` and `name` parameters) |
-| **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
-| **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
-| **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
-| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
-| **Output: commits** | Teammate commits directly to the feature branch |
-| **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
-| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
-
-**Key Agent Teams tools**:
-
-| Tool | Purpose | PACT Mapping |
-|------|---------|--------------|
-| `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
-| `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
-| `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
-| `SendMessage` (type: `"broadcast"`) | Message to all teammates | Cross-scope coordination (used sparingly) |
-| `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
-| `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
-| `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
-
-**Architectural notes**:
-
-- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
-- No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
-- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
-
-#### Design Constraints
-
-- **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
-- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (standard handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
-- **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
-
 ---
 
 ## Scoped Phases (ATOMIZE and CONSOLIDATE)
@@ -1723,6 +1644,293 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 - [pact-scope-detection.md](pact-scope-detection.md) — Heuristics for detecting multi-scope tasks
 - [pact-scope-contract.md](pact-scope-contract.md) — Contract format and lifecycle
 - [rePACT.md](../commands/rePACT.md) — Recursive PACT command for sub-scope execution
+
+---
+
+## Concurrent Audit Protocol
+
+> **Cybernetic basis**: Ashby's Law of Requisite Variety applied to quality assurance —
+> a pure post-hoc review (TEST phase) has lower variety than concurrent observation.
+> Real-time observation during CODE phase catches architecture drift before it compounds.
+
+The pact-auditor agent provides independent quality observation during the CODE phase, complementing (not replacing) the TEST phase and peer review.
+
+### Dispatch Conditions
+
+Deploy the auditor as a CODE-phase teammate when ANY of:
+- Variety score >= 7 (Medium or higher)
+- Multiple coders running in parallel
+- Task touches security-sensitive code (auth, crypto, user input handling)
+- Domain has prior history of architecture drift (from pact-memory calibration data)
+
+**Skip when**: Single coder on a Low variety (4-6) task with no security sensitivity.
+
+### Hybrid Observation Model
+
+The auditor operates primarily through file observation, not messaging. This minimizes disruption to coders while maintaining quality oversight.
+
+| Method | When | Cost |
+|--------|------|------|
+| **File reading** (git diff, Read) | Primary — every observation cycle | Zero disruption |
+| **TaskList monitoring** | Check coder progress, task status | Zero disruption |
+| **SendMessage to coder** | Only when file observation raises a question code alone can't answer | Low disruption (one specific question per message) |
+| **RED signal to orchestrator** | Clear architecture violation or requirement misunderstanding | Appropriate disruption |
+
+**Rule of thumb**: 80%+ of observation should be silent file reading. If the auditor is messaging coders frequently, it's disrupting more than observing.
+
+### Observation Phases
+
+**Phase A: Warm-up** (while coders start):
+1. Read all available references (architecture doc, plan, dispatch context)
+2. Identify key interfaces, high-risk dimensions, cross-cutting requirements
+3. Note coder assignments from TaskList
+4. Wait for coders to produce initial output before observing
+
+**Phase B: Observation cycles** (periodic):
+1. Check modified files: `git diff`, read changed files
+2. Compare against reference chain: architecture spec > approved plan > dispatch context
+3. Assess concern level and respond:
+   - No concern → silent, continue next cycle
+   - Minor concern → log internally, observe next cycle (may self-resolve)
+   - Significant but ambiguous → SendMessage to coder (one specific question)
+   - Clear violation → RED signal to orchestrator immediately
+
+**Phase C: Final observation** (triggered by orchestrator or all coders completing):
+1. Sweep all modified files
+2. Emit summary signal (GREEN/YELLOW/RED)
+3. Store audit summary in task metadata
+
+### Audit Criteria (Priority Order)
+
+1. **Architecture drift** — Module boundaries, interfaces, data flow, dependencies matching the design
+2. **Risk-proportional concerns** — High uncertainty areas from variety assessment get extra attention
+3. **Cross-agent consistency** — When parallel coders: compatible interfaces? Consistent naming? No semantic overlap?
+4. **Cross-cutting gaps** — Error handling patterns, security basics, performance red flags
+5. **Requirement alignment** — Solving the right problem as specified?
+
+**NOT audited**: Code style, test coverage (TEST phase), code cleanliness mid-work, micro-optimization.
+
+### Signal Format
+
+```
+📋 AUDIT SIGNAL: [GREEN|YELLOW|RED]
+
+Reference: [architecture doc / plan / dispatch context]
+Scope: [which coder(s) / which files]
+Finding: [One-line summary]
+Evidence: [Specific file:line or diff excerpt]
+Action: [None (GREEN) / Route to test (YELLOW) / Intervene (RED)]
+```
+
+### Signal Levels
+
+| Signal | Meaning | When | Orchestrator Response |
+|--------|---------|------|---------------------|
+| **GREEN** | On track | Final summary; silence during cycles is implicit GREEN | None needed |
+| **YELLOW** | Worth noting | Minor drift, convention inconsistency, potential edge case | Pass finding to test engineer as focus area |
+| **RED** | Intervene now | Architecture violation, requirement misunderstanding, security concern | SendMessage to affected coder; may pause coder's work |
+
+**Before emitting RED**: Verify via targeted question to the coder when practical. Skip verification for clear-cut violations (e.g., wrong module boundary, missing auth check on sensitive endpoint).
+
+### Reference Fallback Chain
+
+The auditor checks implementation against available references in priority order:
+
+1. **Architecture doc** (`docs/architecture/`) — Most authoritative for design decisions
+2. **Approved plan** (`docs/plans/`) — Authoritative for scope and approach
+3. **Dispatch context** (task description/metadata) — Authoritative for specific agent instructions
+4. **Established conventions** (existing codebase patterns) — When no explicit reference exists
+
+If no reference exists for a concern, the auditor logs it as YELLOW (convention gap) rather than RED (violation).
+
+### Completion Lifecycle
+
+The auditor uses signal-based completion rather than standard HANDOFF:
+
+1. Task is created with `metadata: {"completion_type": "signal"}`
+2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
+3. Auditor marks task completed
+4. Completion gate accepts `audit_summary` as the completion artifact (see teammate_completion_gate.py)
+
+**audit_summary format**:
+```json
+{
+  "signal": "GREEN",
+  "findings": [
+    {"level": "YELLOW", "scope": "backend-coder", "finding": "Error handling inconsistent in auth module"}
+  ],
+  "observation_cycles": 3,
+  "files_reviewed": 12
+}
+```
+
+### Algedonic Escalation
+
+If the auditor discovers a viability threat (not just a quality issue), bypass the signal system and emit a full algedonic signal per [algedonic.md](algedonic.md). Examples:
+- Hardcoded credentials discovered in coder's work → HALT SECURITY
+- PII being logged → HALT DATA
+- Fundamental misunderstanding of requirements → ALERT SCOPE
+
+### Relationship to Other Quality Mechanisms
+
+| Mechanism | Timing | Focus | Scope |
+|-----------|--------|-------|-------|
+| **Auditor** | During CODE | Architecture drift, requirement alignment | Concurrent observation |
+| **TEST phase** | After CODE | Functional correctness, edge cases, coverage | Comprehensive testing |
+| **Peer review** | After TEST | Cross-domain quality, code health | Multi-reviewer synthesis |
+| **Security review** | During review | Adversarial security analysis | Security-focused |
+
+The auditor is additive — it catches issues during CODE that would otherwise only surface in TEST or review, when the cost of correction is higher.
+
+---
+
+## Self-Repair Protocol
+
+> **Cybernetic basis**: Maturana & Varela's autopoiesis — a living system continuously regenerates
+> its own components while maintaining its organizational identity. In PACT, the "organization"
+> is the VSM structure (S1-S5 roles, phase sequence, coordination protocols); the "structure"
+> is the current instantiation (active agents, tasks, session state).
+
+Self-repair enables PACT to reconstitute its operational structure after disruptions (agent failures, session interruptions, context compaction) while preserving its organizational identity.
+
+### Organization vs. Structure
+
+| Concept | Definition | PACT Example | Survives Disruption? |
+|---------|-----------|--------------|---------------------|
+| **Organization** | Invariant pattern of relations | VSM roles, phase sequence P→A→C→T, coordination protocols | Yes (defined in protocols) |
+| **Structure** | Current instantiation of relations | Which agents are running, current tasks, session state | No (must be reconstituted) |
+
+**Key insight**: Self-repair reconstitutes *structure*, not organization. The organization is already defined in protocols and CLAUDE.md. Recovery means rebuilding the current state to match the invariant pattern.
+
+### Pattern 1: Organizational State Snapshot (Prevention)
+
+At defined checkpoints, capture a snapshot of the system's organizational state to enable recovery.
+
+**When to capture**: At phase boundaries (same trigger as S4 checkpoints). Store in task metadata on the feature task via `TaskUpdate`.
+
+**Snapshot fields**:
+- `vsm_roles`: Which agents fill which VSM roles (S1 specialists, S2 conventions, S3 orchestrator state)
+- `memory_layers`: Status of auto-memory, pact-memory, agent persistent memory
+- `regulatory_mechanisms`: Which hooks/gates are active (completion gate, breadcrumb file, handoff validation)
+- `phase_state`: Current phase, completed phases, pending work
+
+**Recovery use**: After session interruption or context compaction, read the snapshot via `TaskGet` to reconstruct system state rather than inferring it from scattered signals.
+
+### Pattern 2: Agent Boundary Reconstitution (Recovery)
+
+When an agent fails (stall detected, context exhausted), spawn a replacement with recovered context.
+
+**Steps**:
+1. **Detect**: Stall detection (see [pact-agent-stall.md](pact-agent-stall.md)) identifies failed agent
+2. **Assess**: Before spawning replacement, verify the *role* needs filling — if the phase has progressed past needing that specialist, don't replace
+3. **Recover context**:
+   - Extract partial work from failed agent's task metadata and file changes (`git diff`)
+   - Query peer agent outputs via `TaskList`/`TaskGet` for context accumulated since failed agent was briefed
+   - Check environment drift via `file-edits.json` for files modified since failure
+4. **Spawn**: Create replacement agent with recovered context in dispatch prompt
+5. **Verify**: After replacement starts, verify VSM structure is intact (all necessary roles filled, coordination protocols active)
+
+**Extends**: pact-agent-stall.md (which handles detection and basic recovery). This protocol adds boundary awareness, enhanced context recovery, and organizational integrity verification.
+
+### Recovery Context Sources
+
+| Source | What It Provides | Access Method |
+|--------|-----------------|---------------|
+| Task system | Task states, metadata, handoffs | `TaskList`, `TaskGet` |
+| Git state | Commits, branches, file changes | `git log`, `git diff`, `git worktree list` |
+| pact-memory | Institutional knowledge, calibration data | Secretary query via `SendMessage` |
+| Breadcrumb file | Temporal ordering of completions | Read `~/.claude/pact-sessions/{slug}/breadcrumbs.jsonl` |
+| paused-state.json | Session checkpoint | Read `~/.claude/pact-sessions/{slug}/paused-state.json` |
+| Organizational snapshot | VSM state at last checkpoint | `TaskGet(featureTaskId).metadata.org_snapshot` |
+| Structured error output | Last hook failure context | Hook JSON output (see `error_output.py`) |
+
+### Relationship to Other Protocols
+
+- **Agent Stall Detection** ([pact-agent-stall.md](pact-agent-stall.md)): Detects failures; self-repair provides the recovery framework
+- **S4 Checkpoints** ([pact-s4-checkpoints.md](pact-s4-checkpoints.md)): Question 5 (Conant-Ashby) assesses whether the model is adequate for regulation — self-repair acts when regulation has degraded
+- **Channel Capacity** ([pact-channel-capacity.md](pact-channel-capacity.md)): Context compaction is a structural disruption; self-repair provides recovery patterns for post-compaction state reconstruction
+- **State Recovery** (CLAUDE.md): Existing protocol provides the procedural steps; self-repair adds organizational awareness and verification
+
+---
+
+## Channel Capacity Management
+
+> **Cybernetic basis**: Shannon's Channel Capacity Theorem — every communication channel has a
+> finite throughput. In PACT, the "channel" is the context window; exceeding capacity degrades
+> signal quality. Distinct from source coding (handoff compression), which is addressed by the
+> Transduction Protocol.
+
+Channel capacity defines how much information can cross a VSM boundary per interaction without degradation, and what to do when capacity is approached.
+
+### Context Window as Channel
+
+| Property | Shannon Channel | PACT Context Window |
+|----------|----------------|---------------------|
+| **Capacity** | Bits per second | Tokens per interaction |
+| **Noise** | Physical interference | Irrelevant context, stale state, compaction artifacts |
+| **Throughput** | Data rate | Useful information processed per phase |
+| **Error** | Bit errors | Misunderstood requirements, dropped context, hallucinated state |
+
+### Capacity Indicators
+
+The orchestrator monitors these signals to assess current channel load:
+
+| Indicator | Healthy | Degraded | Critical |
+|-----------|---------|----------|----------|
+| **Compaction frequency** | 0-1 per phase | 2-3 per phase | 4+ per phase |
+| **State reconstruction** | Not needed | Occasional TaskGet for recovery | Frequent state loss requiring full reconstruction |
+| **Agent dispatch clarity** | Agents start work without clarification | Occasional teachback corrections | Agents frequently misunderstand assignments |
+| **Handoff fidelity** | Lossless fields intact | Some fields missing, recoverable | Critical fields lost, requires re-work |
+
+### Batch Protocol
+
+When capacity indicators show degradation, batch information to reduce boundary crossings:
+
+**Batching strategies**:
+1. **Combine handoffs**: If multiple agents complete near-simultaneously, process handoffs in one batch rather than interleaving with other work
+2. **Defer non-critical updates**: CLAUDE.md updates, memory processing, and status reporting can be deferred to natural pauses
+3. **Compress dispatch context**: For subsequent agents, reference upstream task IDs for `TaskGet` retrieval rather than inlining full context
+4. **Prioritize lossless fields**: When summarizing, preserve lossless fields (produced, integration_points, open_questions) and compress lossy fields (reasoning_chain, detailed rationale)
+
+### Capacity Signals
+
+```
+📊 CAPACITY SIGNAL: [NOMINAL|ELEVATED|CRITICAL]
+
+Current load: [compaction count / dispatch clarity / handoff fidelity]
+Trend: [stable / increasing / decreasing]
+Recommended action: [continue | batch | compact | pause-and-recover]
+```
+
+| Signal | Meaning | Action |
+|--------|---------|--------|
+| **NOMINAL** | Capacity healthy | Continue normal operations |
+| **ELEVATED** | Approaching limits | Batch handoffs; compress dispatch context; defer non-critical work |
+| **CRITICAL** | Capacity exceeded | Pause dispatching; recover state via TaskGet; consider session checkpoint |
+
+### Active Back-Pressure
+
+When capacity signals indicate ELEVATED or CRITICAL, the orchestrator applies back-pressure to reduce throughput demands:
+
+**ELEVATED back-pressure**:
+- Sequence remaining agent dispatches instead of parallel (reduce concurrent load)
+- Compress dispatch prompts to essential context + TaskGet references
+- Defer memory processing and CLAUDE.md updates to next natural pause
+- Request shorter progress signals from agents ("summary only, skip reasoning")
+
+**CRITICAL back-pressure**:
+- Pause all new agent dispatches
+- Trigger session checkpoint via `/PACT:pause` (persists state to paused-state.json)
+- Invoke self-repair Pattern 1 (organizational state snapshot) before proceeding
+- If resuming: use TaskGet + organizational snapshot for state reconstruction instead of re-reading files
+
+**Self-regulation**: Back-pressure is the orchestrator's primary response to its own capacity limits. It bridges the gap between observing capacity degradation (monitoring) and acting on it (adaptation). The orchestrator should apply back-pressure before capacity signals reach CRITICAL — early intervention at ELEVATED prevents cascading degradation.
+
+### Relationship to Other Protocols
+
+- **Transduction** ([pact-transduction.md](pact-transduction.md)): Transduction addresses *translation quality* (does meaning survive?). Channel capacity addresses *throughput limits* (can we process this volume?). They are complementary — high-fidelity transduction is meaningless if the channel is overloaded.
+- **S4 Checkpoints** ([pact-s4-checkpoints.md](pact-s4-checkpoints.md)): Capacity degradation should trigger an S4 checkpoint — "Is our approach still viable given capacity constraints?"
+- **Variety Management** ([pact-variety.md](pact-variety.md)): High-variety tasks consume more channel capacity. Variety scoring should inform capacity planning.
 
 ---
 
