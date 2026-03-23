@@ -515,6 +515,49 @@ class TestComputeCalibrationDrift:
         # Drifts: [0, 4, 4, 4, 4] → mean = 16/5 = 3.2
         assert abs(compute_calibration_drift(records, "auth") - 3.2) < 0.001
 
+    def test_empty_string_timestamp_treated_as_no_timestamp(self):
+        """Record with timestamp="" is falsy for any() but still participates
+        in sort when other records have real timestamps.
+
+        The sort key `r.get("timestamp", "")` maps both missing-key and ""
+        to the same key, so stable sort preserves their original order.
+        """
+        records = [
+            _make_cal_record("auth", 8, 8),                              # no ts key, drift=0
+            {"domain": "auth", "initial_variety_score": 8,
+             "actual_difficulty_score": 12, "timestamp": ""},            # "" ts, drift=4
+            _make_cal_record("auth", 8, 12, "2026-03-02T00:00:00"),      # ts, drift=4
+            _make_cal_record("auth", 8, 12, "2026-03-03T00:00:00"),      # ts, drift=4
+            _make_cal_record("auth", 8, 12, "2026-03-04T00:00:00"),      # ts, drift=4
+        ]
+        # any() sees "" as falsy but "2026-03-02" as truthy → sort triggered.
+        # Sort key: r.get("timestamp", ""). Both missing-key and "" → "".
+        # Descending stable sort: "2026-03-04"(4), "2026-03-03"(4), "2026-03-02"(4),
+        #   then the two "" keys in original order: no-key(0), ""(4)
+        # Window of 5: drifts [4, 4, 4, 0, 4] → mean = 16/5 = 3.2
+        assert abs(compute_calibration_drift(records, "auth") - 3.2) < 0.001
+
+    def test_all_empty_string_timestamps_no_sort(self):
+        """All records with timestamp="" → all falsy, no sort triggered.
+
+        Needs >= CALIBRATION_MIN_SAMPLES (5) records to get a non-zero result.
+        """
+        records = [
+            {"domain": "auth", "initial_variety_score": 8,
+             "actual_difficulty_score": 8, "timestamp": ""},
+            {"domain": "auth", "initial_variety_score": 8,
+             "actual_difficulty_score": 8, "timestamp": ""},
+            {"domain": "auth", "initial_variety_score": 8,
+             "actual_difficulty_score": 12, "timestamp": ""},
+            {"domain": "auth", "initial_variety_score": 8,
+             "actual_difficulty_score": 12, "timestamp": ""},
+            {"domain": "auth", "initial_variety_score": 8,
+             "actual_difficulty_score": 12, "timestamp": ""},
+        ]
+        # any() → all "" are falsy → no sort, take first 5 from list order
+        # Drifts: [0, 0, 4, 4, 4] → mean = 12/5 = 2.4
+        assert abs(compute_calibration_drift(records, "auth") - 2.4) < 0.001
+
     def test_mixed_timestamps_first_with_triggers_sort(self):
         """First record with timestamp → sort by timestamp descending.
 

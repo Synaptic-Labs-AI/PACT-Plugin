@@ -100,10 +100,17 @@ def _scan_owned_tasks(
                     completable.append(entry)
                 else:
                     missing_handoff.append(entry)
-            elif metadata.get("handoff"):
-                completable.append(entry)
             else:
-                missing_handoff.append(entry)
+                if completion_type != "handoff":
+                    sys.stderr.write(
+                        f"Warning: unrecognized completion_type "
+                        f"'{completion_type}' on task {task_id}, "
+                        f"falling through to handoff behavior\n"
+                    )
+                if metadata.get("handoff"):
+                    completable.append(entry)
+                else:
+                    missing_handoff.append(entry)
     except OSError:
         return [], []  # Can't scan directory — fail open
 

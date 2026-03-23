@@ -205,44 +205,46 @@ class TestValidRangeInvariant:
 try:
     from hypothesis import given, settings
     from hypothesis import strategies as st
+    HAS_HYPOTHESIS = True
+except ImportError:
+    HAS_HYPOTHESIS = False
+
+
+@pytest.mark.skipif(not HAS_HYPOTHESIS, reason="hypothesis not installed")
+class TestHypothesisProperties:
+    """Property-based tests using hypothesis."""
 
     VALID_DIM = st.integers(min_value=MIN_DIMENSION, max_value=MAX_DIMENSION)
 
-    class TestHypothesisProperties:
-        """Property-based tests using hypothesis."""
+    @given(n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM)
+    @settings(max_examples=500)
+    def test_score_in_range(self, n, s, u, r):
+        score = score_variety(n, s, u, r)
+        assert MIN_SCORE <= score <= MAX_SCORE
 
-        @given(n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM)
-        @settings(max_examples=500)
-        def test_score_in_range(self, n, s, u, r):
-            score = score_variety(n, s, u, r)
-            assert MIN_SCORE <= score <= MAX_SCORE
+    @given(n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM)
+    @settings(max_examples=500)
+    def test_score_is_sum(self, n, s, u, r):
+        assert score_variety(n, s, u, r) == n + s + u + r
 
-        @given(n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM)
-        @settings(max_examples=500)
-        def test_score_is_sum(self, n, s, u, r):
-            assert score_variety(n, s, u, r) == n + s + u + r
+    @given(n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM)
+    @settings(max_examples=500)
+    def test_route_is_valid(self, n, s, u, r):
+        score = score_variety(n, s, u, r)
+        route = route_workflow(score)
+        assert route in TIER_ORDER
 
-        @given(n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM)
-        @settings(max_examples=500)
-        def test_route_is_valid(self, n, s, u, r):
-            score = score_variety(n, s, u, r)
-            route = route_workflow(score)
-            assert route in TIER_ORDER
-
-        @given(
-            n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM,
-            dim=st.integers(min_value=0, max_value=3),
-        )
-        @settings(max_examples=500)
-        def test_monotonicity(self, n, s, u, r, dim):
-            """Increasing a dimension never decreases the score."""
-            dims = [n, s, u, r]
-            if dims[dim] >= MAX_DIMENSION:
-                return
-            base = score_variety(*dims)
-            dims[dim] += 1
-            bumped = score_variety(*dims)
-            assert bumped >= base
-
-except ImportError:
-    pass  # hypothesis not available; parametrized tests above provide coverage
+    @given(
+        n=VALID_DIM, s=VALID_DIM, u=VALID_DIM, r=VALID_DIM,
+        dim=st.integers(min_value=0, max_value=3),
+    )
+    @settings(max_examples=500)
+    def test_monotonicity(self, n, s, u, r, dim):
+        """Increasing a dimension never decreases the score."""
+        dims = [n, s, u, r]
+        if dims[dim] >= MAX_DIMENSION:
+            return
+        base = score_variety(*dims)
+        dims[dim] += 1
+        bumped = score_variety(*dims)
+        assert bumped >= base

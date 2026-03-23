@@ -621,6 +621,58 @@ class TestMain:
         assert "TaskUpdate" in captured.err
         assert "produced" in captured.err
 
+    def test_blocks_signal_type_with_audit_summary(self, tmp_path, capsys):
+        """Signal-type task with audit_summary → exit 2 (completable)."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "9", "backend-coder", "in_progress", {
+            "completion_type": "signal",
+            "audit_summary": "Signal: GREEN\nCoverage: 85%",
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "#9" in captured.err
+        assert "TaskUpdate" in captured.err
+
+    def test_blocks_signal_type_missing_audit_summary(self, tmp_path, capsys):
+        """Signal-type task without audit_summary → exit 2 with audit guidance."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "9", "backend-coder", "in_progress", {
+            "completion_type": "signal",
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "audit_summary" in captured.err
+
     def test_allows_when_no_tasks(self, tmp_path, capsys):
         """P0: Empty task directory → exit 0."""
         from teammate_completion_gate import main
@@ -785,7 +837,7 @@ class TestMain:
             "team_name": "pact-test",
         })
 
-        with patch("teammate_completion_gate.find_completable_tasks",
+        with patch("teammate_completion_gate._scan_owned_tasks",
                     side_effect=RuntimeError("unexpected")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):

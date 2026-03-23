@@ -109,7 +109,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 ## SIGNAL FORMAT
 
 ```
-AUDIT SIGNAL: {GREEN|YELLOW|RED}
+📋 AUDIT SIGNAL: {GREEN|YELLOW|RED}
 
 Reference: {architecture doc section or plan item checked}
 Scope: {which coder(s) or file(s) this applies to}

@@ -189,10 +189,10 @@ def compute_calibration_drift(
     and computes mean(actual - initial).
 
     Args:
-        calibration_records: List of CalibrationRecord dicts. Each must
+        calibration_records: List of CalibrationRecord dicts. Each should
             contain 'domain', 'actual_difficulty_score',
             'initial_variety_score', and optionally 'timestamp' for
-            recency ordering.
+            recency ordering. Records missing score fields are skipped.
         domain: Domain to filter by
 
     Returns:
@@ -211,16 +211,25 @@ def compute_calibration_drift(
 
     # Sort by timestamp descending (most recent first) if timestamps exist,
     # otherwise take the last N records (assuming append-order)
-    if domain_records[0].get("timestamp"):
+    if any(r.get("timestamp") for r in domain_records):
         domain_records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
 
     window = domain_records[:CALIBRATION_WINDOW_SIZE]
 
+    # Skip records missing either score field (defensive against malformed data)
+    scored = [
+        r for r in window
+        if r.get("actual_difficulty_score") is not None
+        and r.get("initial_variety_score") is not None
+    ]
+    if not scored:
+        return 0.0
+
     total_drift = sum(
         r["actual_difficulty_score"] - r["initial_variety_score"]
-        for r in window
+        for r in scored
     )
-    return total_drift / len(window)
+    return total_drift / len(scored)
 
 
 def apply_calibration_adjustment(
