@@ -204,28 +204,39 @@ def format_missing_handoff_feedback(missing: list[dict]) -> str:
     else:
         task_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in missing)
 
-    # Check if any tasks are signal-type for type-specific guidance
+    # Partition by completion type for type-appropriate guidance
     signal_tasks = [
         t for t in missing if t.get("completion_type") == "signal"
     ]
+    handoff_tasks = [
+        t for t in missing if t.get("completion_type", "handoff") == "handoff"
+    ]
 
-    if signal_tasks and len(signal_tasks) == len(missing):
-        # All missing tasks are signal-type — provide signal-specific guidance
-        task_id_example = missing[0]["id"]
-        return (
-            f"You went idle with in_progress tasks missing audit_summary: "
-            f"{task_ref}. Store your audit summary via "
-            f'TaskUpdate(taskId="{task_id_example}", '
+    parts = []
+
+    if signal_tasks:
+        sig_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in signal_tasks)
+        sig_id = signal_tasks[0]["id"]
+        parts.append(
+            f"Signal-type tasks missing audit_summary: {sig_ref}. "
+            f"Store your audit summary via "
+            f'TaskUpdate(taskId="{sig_id}", '
             f'metadata={{"audit_summary": {{"signal": "GREEN|YELLOW|RED", '
             f'"findings": [...]}}}}) then mark the task completed.'
         )
 
-    task_id_example = missing[0]["id"]
+    if handoff_tasks:
+        ho_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in handoff_tasks)
+        ho_id = handoff_tasks[0]["id"]
+        parts.append(
+            f"Handoff-type tasks missing HANDOFF metadata: {ho_ref}. "
+            f"You must store handoff metadata BEFORE marking the task completed.\n\n"
+            + format_handoff_example(ho_id)
+        )
 
     return (
-        f"You went idle with in_progress tasks missing HANDOFF metadata: {task_ref}. "
-        f"You must store handoff metadata BEFORE marking the task completed.\n\n"
-        + format_handoff_example(task_id_example)
+        f"You went idle with in_progress tasks missing completion artifacts: "
+        f"{task_ref}.\n\n" + "\n\n".join(parts)
     )
 
 

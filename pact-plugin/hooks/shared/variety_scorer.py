@@ -165,7 +165,10 @@ def apply_learning_ii_adjustment(
 
     Args:
         base_score: Original variety score (4-16)
-        domain: Task domain string (e.g., "auth", "hooks")
+        domain: Task domain string (e.g., "auth", "hooks"). The caller
+            pre-filters calibration matches by domain before passing the
+            count; this parameter is retained for API consistency and
+            future domain-specific scoring extensions.
         calibration_matches: Number of matching pact-memory entries
 
     Returns:

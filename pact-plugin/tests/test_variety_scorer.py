@@ -458,22 +458,20 @@ class TestComputeCalibrationDrift:
         # Window of 5 most recent: all +4 drift -> mean = 4.0
         assert compute_calibration_drift(records, "auth") == 4.0
 
-    def test_without_timestamps_uses_last_n(self):
-        """Without timestamps, takes the last N records (append order)."""
+    def test_without_timestamps_uses_first_n(self):
+        """Without timestamps, takes the first N records (list order, no sort)."""
         records = [
-            _make_cal_record("auth", 8, 8),   # older (index 0)
-            _make_cal_record("auth", 8, 8),   # older (index 1)
-            _make_cal_record("auth", 8, 10),  # recent-ish
-            _make_cal_record("auth", 8, 10),  # recent
-            _make_cal_record("auth", 8, 10),  # recent
-            _make_cal_record("auth", 8, 10),  # recent
-            _make_cal_record("auth", 8, 10),  # recent
+            _make_cal_record("auth", 8, 8),   # index 0, drift=0
+            _make_cal_record("auth", 8, 8),   # index 1, drift=0
+            _make_cal_record("auth", 8, 10),  # index 2, drift=2
+            _make_cal_record("auth", 8, 10),  # index 3, drift=2
+            _make_cal_record("auth", 8, 10),  # index 4, drift=2
+            _make_cal_record("auth", 8, 10),  # index 5 (outside window)
+            _make_cal_record("auth", 8, 10),  # index 6 (outside window)
         ]
-        # Window of 5 first records (no timestamp → takes first 5 from list):
-        # Records: [0, 0, 2, 2, 2] → drift = (0+0+2+2+2)/5 = 1.2
-        result = compute_calibration_drift(records, "auth")
-        assert isinstance(result, float)
-        # Just verify it computes *something* — exact value depends on ordering semantics
+        # Window of first 5 records (no timestamp → no sort, takes [:5]):
+        # Drifts: [0, 0, 2, 2, 2] → mean = (0+0+2+2+2)/5 = 1.2
+        assert abs(compute_calibration_drift(records, "auth") - 1.2) < 0.001
 
     def test_mixed_drift_values(self):
         """Records with varying drift compute correct mean."""
@@ -496,6 +494,45 @@ class TestComputeCalibrationDrift:
         """Records missing 'domain' field are skipped in filtering."""
         records = [{"initial_variety_score": 8, "actual_difficulty_score": 10}] * 5
         assert compute_calibration_drift(records, "auth") == 0.0
+
+    # --- Mixed-timestamp edge cases (first-record heuristic) ---
+
+    def test_mixed_timestamps_first_without_skips_sort(self):
+        """First record without timestamp → no sort, takes first N from list.
+
+        The implementation checks only domain_records[0].get("timestamp")
+        to decide whether to sort. If the first record lacks a timestamp,
+        no sort occurs even if later records have timestamps.
+        """
+        records = [
+            _make_cal_record("auth", 8, 8),                              # no ts, drift=0
+            _make_cal_record("auth", 8, 12, "2026-03-01T00:00:00"),      # ts, drift=4
+            _make_cal_record("auth", 8, 12, "2026-03-02T00:00:00"),      # ts, drift=4
+            _make_cal_record("auth", 8, 12, "2026-03-03T00:00:00"),      # ts, drift=4
+            _make_cal_record("auth", 8, 12, "2026-03-04T00:00:00"),      # ts, drift=4
+        ]
+        # No sort (first record has no timestamp), window = all 5:
+        # Drifts: [0, 4, 4, 4, 4] → mean = 16/5 = 3.2
+        assert abs(compute_calibration_drift(records, "auth") - 3.2) < 0.001
+
+    def test_mixed_timestamps_first_with_triggers_sort(self):
+        """First record with timestamp → sort by timestamp descending.
+
+        Records without timestamps sort with empty string key, landing
+        at the end after descending sort.
+        """
+        records = [
+            _make_cal_record("auth", 8, 12, "2026-03-01T00:00:00"),      # ts, drift=4
+            _make_cal_record("auth", 8, 8),                              # no ts, drift=0
+            _make_cal_record("auth", 8, 8),                              # no ts, drift=0
+            _make_cal_record("auth", 8, 8),                              # no ts, drift=0
+            _make_cal_record("auth", 8, 8),                              # no ts, drift=0
+        ]
+        # Sort triggered (first record has timestamp), descending by timestamp.
+        # "2026-03-01" sorts before "" (empty), so sorted order is:
+        #   [ts="2026-03-01"(drift=4), ""(0), ""(0), ""(0), ""(0)]
+        # Window of 5: drifts [4, 0, 0, 0, 0] → mean = 4/5 = 0.8
+        assert abs(compute_calibration_drift(records, "auth") - 0.8) < 0.001
 
 
 # =============================================================================

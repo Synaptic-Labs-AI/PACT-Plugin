@@ -470,6 +470,69 @@ class TestFormatMissingHandoffFeedback:
             f"Unbalanced parens: {msg.count('(')} open vs {msg.count(')')} close"
         )
 
+    # --- Signal-type completion feedback ---
+
+    def test_signal_type_all_missing_produces_audit_summary_guidance(self):
+        """Signal-type tasks get audit_summary-specific feedback."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor observation", "completion_type": "signal"},
+        ])
+        assert "audit_summary" in msg
+        assert "GREEN|YELLOW|RED" in msg
+        assert 'TaskUpdate(taskId="42"' in msg
+        # Should NOT mention HANDOFF metadata
+        assert "missing HANDOFF metadata" not in msg
+
+    def test_signal_type_multiple_all_signal_produces_audit_guidance(self):
+        """Multiple signal-type tasks all get audit_summary guidance."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor obs 1", "completion_type": "signal"},
+            {"id": "43", "subject": "auditor obs 2", "completion_type": "signal"},
+        ])
+        assert "audit_summary" in msg
+        assert "#42" in msg
+        assert "#43" in msg
+
+    def test_mixed_signal_and_handoff_provides_both_guidance(self):
+        """Mixed signal + handoff tasks get type-specific guidance for each."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor observation", "completion_type": "signal"},
+            {"id": "5", "subject": "CODE: auth", "completion_type": "handoff"},
+        ])
+        # Mixed case provides guidance for both types
+        assert "audit_summary" in msg  # signal-type guidance
+        assert "missing HANDOFF metadata" in msg  # handoff-type guidance
+        assert "#42" in msg
+        assert "#5" in msg
+
+    def test_signal_type_feedback_has_balanced_parens(self):
+        """Signal-type feedback must have matching parentheses."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor observation", "completion_type": "signal"},
+        ])
+        assert msg.count("(") == msg.count(")"), (
+            f"Unbalanced parens in signal feedback: "
+            f"{msg.count('(')} open vs {msg.count(')')} close"
+        )
+
+    def test_no_completion_type_defaults_to_handoff_path(self):
+        """Tasks without completion_type use the handoff template."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "5", "subject": "CODE: auth"},
+        ])
+        assert "missing HANDOFF metadata" in msg
+        assert "audit_summary" not in msg
+
 
 class TestMain:
     """Integration tests for teammate_completion_gate.main()."""

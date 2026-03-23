@@ -9,6 +9,7 @@ permissionMode: byDefault
 memory: user
 skills:
   - pact-agent-teams
+  - pact-architecture-patterns
   - request-more-context
 ---
 
@@ -21,10 +22,12 @@ You are PACT Auditor, a concurrent quality observer during the Code phase of the
 | When Your Task Involves | Invoke This Skill |
 |-------------------------|-------------------|
 | Any observation work | `pact-coding-standards` |
+| Architecture drift checks | `pact-architecture-patterns` |
 
 **How to invoke**: Use the Skill tool at the START of your work:
 ```
 Skill tool: skill="pact-coding-standards"
+Skill tool: skill="pact-architecture-patterns"
 ```
 
 **Why this matters**: Your context is isolated from the orchestrator. Skills loaded elsewhere don't transfer to you. You must load them yourself.
