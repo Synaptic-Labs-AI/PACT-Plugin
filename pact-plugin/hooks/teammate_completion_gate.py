@@ -83,10 +83,24 @@ def _scan_owned_tasks(
 
             task_id = task_file.stem  # filename without .json
             subject = data.get("subject", "unknown")
-            entry = {"id": task_id, "subject": subject}
-
             metadata = data.get("metadata", {})
-            if metadata.get("handoff"):
+
+            # Semantic dispatch: branch on what the completion IS,
+            # not who the agent IS (extensible to any signal-only agent)
+            completion_type = metadata.get("completion_type", "handoff")
+            entry = {
+                "id": task_id,
+                "subject": subject,
+                "completion_type": completion_type,
+            }
+
+            if completion_type == "signal":
+                # Signal-based completion: accept audit_summary as artifact
+                if metadata.get("audit_summary"):
+                    completable.append(entry)
+                else:
+                    missing_handoff.append(entry)
+            elif metadata.get("handoff"):
                 completable.append(entry)
             else:
                 missing_handoff.append(entry)
@@ -172,14 +186,14 @@ def format_feedback(completable: list[dict]) -> str:
 
 def format_missing_handoff_feedback(missing: list[dict]) -> str:
     """
-    Format feedback for an idle agent whose tasks are missing HANDOFF metadata.
+    Format feedback for an idle agent whose tasks are missing completion artifacts.
 
-    Provides a concrete example from the shared template so agents can
-    self-correct from a copy-paste-ready template rather than looping on
-    the schema description.
+    For standard handoff-type tasks, provides a concrete HANDOFF example.
+    For signal-type tasks (e.g., auditor), references audit_summary instead.
 
     Args:
-        missing: List of dicts with 'id' and 'subject'
+        missing: List of dicts with 'id', 'subject', and optionally
+                 'completion_type' ("handoff" or "signal")
 
     Returns:
         Feedback message string for stderr
@@ -189,6 +203,22 @@ def format_missing_handoff_feedback(missing: list[dict]) -> str:
         task_ref = f"Task #{task['id']} ({task['subject']})"
     else:
         task_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in missing)
+
+    # Check if any tasks are signal-type for type-specific guidance
+    signal_tasks = [
+        t for t in missing if t.get("completion_type") == "signal"
+    ]
+
+    if signal_tasks and len(signal_tasks) == len(missing):
+        # All missing tasks are signal-type — provide signal-specific guidance
+        task_id_example = missing[0]["id"]
+        return (
+            f"You went idle with in_progress tasks missing audit_summary: "
+            f"{task_ref}. Store your audit summary via "
+            f'TaskUpdate(taskId="{task_id_example}", '
+            f'metadata={{"audit_summary": {{"signal": "GREEN|YELLOW|RED", '
+            f'"findings": [...]}}}}) then mark the task completed.'
+        )
 
     task_id_example = missing[0]["id"]
 
