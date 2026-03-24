@@ -217,13 +217,17 @@ class TestCheckPhaseCompletion:
 class TestPhaseCompletionTriggerContent:
     """Verify reminder message content for phase completions."""
 
-    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
-    def test_reminder_mentions_organizational_state(self, phase):
-        assert "organizational state" in REMINDER_MESSAGE.lower()
+    def test_reminder_mentions_key_decisions(self):
+        assert "key decisions" in REMINDER_MESSAGE
 
-    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
-    def test_reminder_mentions_active_agents(self, phase):
-        assert "active agents" in REMINDER_MESSAGE
+    def test_reminder_mentions_scope_or_assumption_changes(self):
+        assert "scope or assumption" in REMINDER_MESSAGE
+
+    def test_reminder_mentions_specialist_findings(self):
+        assert "specialist findings" in REMINDER_MESSAGE
+
+    def test_reminder_mentions_task_update(self):
+        assert "TaskUpdate" in REMINDER_MESSAGE
 
 
 # =============================================================================

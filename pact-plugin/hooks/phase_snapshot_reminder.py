@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/phase_snapshot_reminder.py
-Summary: PostToolUse hook on TaskUpdate that reminds the orchestrator to save
-         organizational state when a PACT phase task is marked completed.
+Summary: PostToolUse hook on TaskUpdate that reminds the orchestrator to persist
+         phase findings to feature task metadata when a phase task completes.
 Used by: hooks.json PostToolUse hook (matcher: TaskUpdate)
 
 Reads the task file from disk (using taskId from tool_input) to get the task
@@ -26,8 +26,9 @@ from shared.error_output import hook_error_json
 PHASE_KEYWORDS = ("PREPARE:", "ARCHITECT:", "CODE:", "TEST:")
 
 REMINDER_MESSAGE = (
-    "Phase complete -- save organizational state (active agents, phase status, "
-    "memory layer status) to feature task metadata."
+    "Phase complete. Before proceeding, persist to feature task metadata via "
+    "TaskUpdate: (1) key decisions from this phase, (2) any scope or assumption "
+    "changes discovered, (3) specialist findings that inform the next phase."
 )
 
 
