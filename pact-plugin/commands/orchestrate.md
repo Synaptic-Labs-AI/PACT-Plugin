@@ -510,7 +510,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 
 **Dispatch auditor** (concurrent with coders, when conditions are met):
 
-Deploy the pact-auditor as a CODE-phase teammate when ANY of: variety >= 7, multiple coders running in parallel, task touches security-sensitive code, or domain has prior architecture drift history. Skip when: single coder on a Low variety (4-6) task with no security sensitivity.
+Deploy the pact-auditor as a CODE-phase teammate when ANY of: variety >= 7, 3+ coders running in parallel, task touches security-sensitive code, or domain has prior architecture drift history. Skip when: single coder on a Low variety (4-6) task with no security sensitivity.
 
 1. `TaskCreate(subject="auditor: concurrent quality observation", metadata={"completion_type": "signal"})`
    - Include: architecture doc path, plan path, coder task IDs and scope boundaries

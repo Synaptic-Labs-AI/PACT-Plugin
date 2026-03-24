@@ -4,7 +4,7 @@ Tests for cross-references across cybernetic improvement files.
 Tests cover:
 1. Audit protocol file exists with required content
 2. Variety thresholds match between variety_scorer.py and pact-variety.md
-3. S4 checkpoints has 5 questions (including Conant-Ashby)
+3. S4 checkpoints has 4 questions
 4. Auditor dispatch thresholds consistent across pact-audit.md and orchestrate.md
 5. CalibrationRecord fields consistent across protocol and architecture doc
 6. Learning II threshold=5 consistent across protocol and code

@@ -3,11 +3,12 @@ Tests for hooks/phase_snapshot_reminder.py — PostToolUse hook on TaskUpdate th
 emits a reminder when a PACT phase task is marked completed.
 
 Tests cover:
-1. Phase task completion triggers reminder (each phase keyword)
-2. Non-phase task completion does NOT trigger
-3. Status != "completed" does NOT trigger
-4. Fail-open on malformed input and exceptions
-5. check_phase_completion unit tests
+1. _read_task_subject reads task files from disk
+2. check_phase_completion integrates disk read with phase keyword detection
+3. Phase task completion triggers reminder (each phase keyword)
+4. Non-phase task completion does NOT trigger
+5. Status != "completed" does NOT trigger
+6. Fail-open on malformed input and exceptions (subprocess)
 """
 import json
 import subprocess
@@ -17,8 +18,217 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+from phase_snapshot_reminder import (
+    PHASE_KEYWORDS,
+    REMINDER_MESSAGE,
+    _read_task_subject,
+    check_phase_completion,
+)
 
 HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "phase_snapshot_reminder.py")
+
+
+def _create_task_file(
+    tasks_dir: Path,
+    team_name: str,
+    task_id: str,
+    subject: str,
+) -> Path:
+    """Create a task JSON file on disk for testing.
+
+    Task files live at {tasks_dir}/{team_name}/{task_id}.json.
+    Returns the path to the created file.
+    """
+    team_dir = tasks_dir / team_name
+    team_dir.mkdir(parents=True, exist_ok=True)
+    task_file = team_dir / f"{task_id}.json"
+    task_file.write_text(
+        json.dumps({"subject": subject, "status": "completed"}),
+        encoding="utf-8",
+    )
+    return task_file
+
+
+# =============================================================================
+# _read_task_subject: disk-read behavior
+# =============================================================================
+
+
+class TestReadTaskSubject:
+    """Verify _read_task_subject scans task directories correctly."""
+
+    def test_reads_subject_from_task_file(self, tmp_path):
+        _create_task_file(tmp_path, "pact-abc123", "42", "CODE: backend")
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result == "CODE: backend"
+
+    def test_scans_multiple_team_directories(self, tmp_path):
+        _create_task_file(tmp_path, "pact-team-a", "10", "unrelated task")
+        _create_task_file(tmp_path, "pact-team-b", "42", "PREPARE: research")
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result == "PREPARE: research"
+
+    def test_returns_none_for_missing_task(self, tmp_path):
+        _create_task_file(tmp_path, "pact-abc123", "99", "some task")
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result is None
+
+    def test_returns_none_for_empty_task_id(self, tmp_path):
+        result = _read_task_subject("", tasks_base_dir=str(tmp_path))
+        assert result is None
+
+    def test_returns_none_for_nonexistent_base_dir(self):
+        result = _read_task_subject("42", tasks_base_dir="/nonexistent/path")
+        assert result is None
+
+    def test_returns_empty_string_when_subject_missing(self, tmp_path):
+        """Task file exists but has no subject field."""
+        team_dir = tmp_path / "pact-abc123"
+        team_dir.mkdir()
+        task_file = team_dir / "42.json"
+        task_file.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result == ""
+
+    def test_handles_malformed_json_gracefully(self, tmp_path):
+        """Malformed task file is skipped, returns None."""
+        team_dir = tmp_path / "pact-abc123"
+        team_dir.mkdir()
+        task_file = team_dir / "42.json"
+        task_file.write_text("not valid json", encoding="utf-8")
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result is None
+
+    def test_skips_non_directory_entries(self, tmp_path):
+        """Files in the tasks base dir (not directories) are skipped."""
+        (tmp_path / "stray-file.txt").write_text("hello")
+        _create_task_file(tmp_path, "pact-abc123", "42", "TEST: coverage")
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result == "TEST: coverage"
+
+    def test_returns_none_for_empty_tasks_dir(self, tmp_path):
+        """No team directories at all."""
+        result = _read_task_subject("42", tasks_base_dir=str(tmp_path))
+        assert result is None
+
+
+# =============================================================================
+# check_phase_completion: integration of disk read + phase detection
+# =============================================================================
+
+
+class TestCheckPhaseCompletion:
+    """Unit tests for check_phase_completion with disk-backed task files."""
+
+    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
+    def test_completed_phase_returns_true(self, tmp_path, phase):
+        _create_task_file(tmp_path, "pact-team", "42", f"{phase} auth implementation")
+        result = check_phase_completion(
+            {"taskId": "42", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is True
+
+    def test_non_completed_status_returns_false(self, tmp_path):
+        _create_task_file(tmp_path, "pact-team", "42", "CODE: backend")
+        result = check_phase_completion(
+            {"taskId": "42", "status": "in_progress"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_non_phase_subject_returns_false(self, tmp_path):
+        _create_task_file(tmp_path, "pact-team", "42", "Fix backend bug")
+        result = check_phase_completion(
+            {"taskId": "42", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_missing_task_id_returns_false(self, tmp_path):
+        result = check_phase_completion(
+            {"status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_empty_dict_returns_false(self, tmp_path):
+        result = check_phase_completion({}, tasks_base_dir=str(tmp_path))
+        assert result is False
+
+    def test_missing_status_returns_false(self, tmp_path):
+        _create_task_file(tmp_path, "pact-team", "42", "PREPARE: research")
+        result = check_phase_completion(
+            {"taskId": "42"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_task_not_on_disk_returns_false(self, tmp_path):
+        """Task ID exists in tool_input but no matching file on disk."""
+        result = check_phase_completion(
+            {"taskId": "999", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_phase_keyword_in_middle_of_subject(self, tmp_path):
+        _create_task_file(
+            tmp_path, "pact-team", "42", "Feature: CODE: backend implementation"
+        )
+        result = check_phase_completion(
+            {"taskId": "42", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is True
+
+    def test_lowercase_phase_keyword_returns_false(self, tmp_path):
+        """Phase keywords are case-sensitive (uppercase with colon)."""
+        _create_task_file(tmp_path, "pact-team", "42", "prepare: research")
+        result = check_phase_completion(
+            {"taskId": "42", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_auditor_task_returns_false(self, tmp_path):
+        _create_task_file(tmp_path, "pact-team", "42", "auditor observation")
+        result = check_phase_completion(
+            {"taskId": "42", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+    def test_empty_subject_on_disk_returns_false(self, tmp_path):
+        """Task file exists but subject is empty string."""
+        _create_task_file(tmp_path, "pact-team", "42", "")
+        result = check_phase_completion(
+            {"taskId": "42", "status": "completed"},
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result is False
+
+
+# =============================================================================
+# Phase completion triggers reminder (output content)
+# =============================================================================
+
+
+class TestPhaseCompletionTriggerContent:
+    """Verify reminder message content for phase completions."""
+
+    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
+    def test_reminder_mentions_organizational_state(self, phase):
+        assert "organizational state" in REMINDER_MESSAGE.lower()
+
+    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
+    def test_reminder_mentions_active_agents(self, phase):
+        assert "active agents" in REMINDER_MESSAGE
+
+
+# =============================================================================
+# Fail-open behavior (subprocess tests — no disk I/O needed)
+# =============================================================================
 
 
 def run_hook(stdin_data: str | None = None) -> subprocess.CompletedProcess:
@@ -30,111 +240,6 @@ def run_hook(stdin_data: str | None = None) -> subprocess.CompletedProcess:
         text=True,
         timeout=10,
     )
-
-
-def _make_input(subject: str, status: str = "completed") -> str:
-    """Create a valid hook input JSON string."""
-    return json.dumps({
-        "tool_name": "TaskUpdate",
-        "tool_input": {
-            "taskId": "42",
-            "subject": subject,
-            "status": status,
-        },
-        "tool_output": {},
-    })
-
-
-# =============================================================================
-# Phase completion triggers reminder
-# =============================================================================
-
-
-class TestPhaseCompletionTrigger:
-    """Verify each phase keyword triggers the reminder."""
-
-    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
-    def test_phase_keyword_triggers_reminder(self, phase):
-        result = run_hook(_make_input(f"{phase} auth implementation"))
-        assert result.returncode == 0
-        output = json.loads(result.stdout.strip())
-        assert "systemMessage" in output
-
-    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
-    def test_reminder_mentions_organizational_state(self, phase):
-        result = run_hook(_make_input(f"{phase} task"))
-        output = json.loads(result.stdout.strip())
-        assert "organizational state" in output["systemMessage"].lower()
-
-    @pytest.mark.parametrize("phase", ["PREPARE:", "ARCHITECT:", "CODE:", "TEST:"])
-    def test_reminder_mentions_active_agents(self, phase):
-        result = run_hook(_make_input(f"{phase} task"))
-        output = json.loads(result.stdout.strip())
-        assert "active agents" in output["systemMessage"]
-
-    def test_phase_keyword_in_middle_of_subject(self):
-        result = run_hook(_make_input("Feature: CODE: backend implementation"))
-        output = json.loads(result.stdout.strip())
-        assert "systemMessage" in output
-
-
-# =============================================================================
-# Non-phase tasks do NOT trigger
-# =============================================================================
-
-
-class TestNonPhaseTasks:
-    """Verify non-phase task completions do not trigger the reminder."""
-
-    def test_regular_task_no_reminder(self):
-        result = run_hook(_make_input("Fix backend bug"))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-    def test_auditor_task_no_reminder(self):
-        result = run_hook(_make_input("auditor observation"))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-    def test_empty_subject_no_reminder(self):
-        result = run_hook(_make_input(""))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-    def test_lowercase_phase_keyword_no_reminder(self):
-        """Phase keywords are case-sensitive (uppercase with colon)."""
-        result = run_hook(_make_input("prepare: research"))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-
-# =============================================================================
-# Status != "completed" does NOT trigger
-# =============================================================================
-
-
-class TestNonCompletedStatus:
-    """Verify only 'completed' status triggers the reminder."""
-
-    def test_in_progress_no_reminder(self):
-        result = run_hook(_make_input("PREPARE: research", status="in_progress"))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-    def test_pending_no_reminder(self):
-        result = run_hook(_make_input("CODE: implementation", status="pending"))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-    def test_deleted_no_reminder(self):
-        result = run_hook(_make_input("TEST: coverage", status="deleted"))
-        assert result.returncode == 0
-        assert result.stdout.strip() == ""
-
-
-# =============================================================================
-# Fail-open behavior
-# =============================================================================
 
 
 class TestPhaseSnapshotFailOpen:
@@ -158,53 +263,17 @@ class TestPhaseSnapshotFailOpen:
         assert result.stdout.strip() == ""
 
     def test_missing_status_exits_zero(self):
+        """tool_input without status field — hook reads disk but finds no match."""
         result = run_hook(json.dumps({
-            "tool_input": {"subject": "PREPARE: research"},
+            "tool_input": {"taskId": "nonexistent-999"},
         }))
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-
-# =============================================================================
-# Unit tests for check_phase_completion
-# =============================================================================
-
-
-class TestCheckPhaseCompletion:
-    """Unit tests for the check_phase_completion function."""
-
-    def test_completed_prepare_returns_true(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert check_phase_completion({"status": "completed", "subject": "PREPARE: research"})
-
-    def test_completed_architect_returns_true(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert check_phase_completion({"status": "completed", "subject": "ARCHITECT: design"})
-
-    def test_completed_code_returns_true(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert check_phase_completion({"status": "completed", "subject": "CODE: backend"})
-
-    def test_completed_test_returns_true(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert check_phase_completion({"status": "completed", "subject": "TEST: coverage"})
-
-    def test_non_completed_returns_false(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert not check_phase_completion({"status": "in_progress", "subject": "CODE: backend"})
-
-    def test_non_phase_returns_false(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert not check_phase_completion({"status": "completed", "subject": "Fix bug"})
-
-    def test_empty_dict_returns_false(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert not check_phase_completion({})
-
-    def test_missing_subject_returns_false(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert not check_phase_completion({"status": "completed"})
-
-    def test_missing_status_returns_false(self):
-        from phase_snapshot_reminder import check_phase_completion
-        assert not check_phase_completion({"subject": "PREPARE: research"})
+    def test_missing_task_id_exits_zero(self):
+        """tool_input with status but no taskId — returns early."""
+        result = run_hook(json.dumps({
+            "tool_input": {"status": "completed"},
+        }))
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
