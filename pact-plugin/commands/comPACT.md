@@ -222,12 +222,7 @@ If dispatching an auditor, create its task with `metadata: {"completion_type": "
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
-- [ ] **Save CalibrationRecord** — Compare initial variety assessment to actual difficulty encountered. Route via secretary TaskCreate:
-  ```
-  TaskCreate(subject="secretary: save calibration record",
-    description="Save a CalibrationRecord to pact-memory. Data: domain={domain}, initial_variety_score={score}, actual_difficulty_score={actual}, dimensions_that_drifted=[...], blocker_count={n}, phase_reruns=0. Include entities: orchestration_calibration, {domain}.")
-  TaskUpdate(taskId, owner="secretary")
-  ```
+- [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
   TaskCreate(subject="secretary: process pending HANDOFFs",

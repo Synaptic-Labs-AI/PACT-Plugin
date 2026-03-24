@@ -719,7 +719,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 > **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
 > predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
 
-At orchestration completion (wrap-up), the orchestrator captures a calibration record comparing initial variety assessment against actual difficulty. Records are saved to pact-memory via the secretary and feed back into Learning II pattern matching.
+At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
 
 **Schema**:
 
@@ -741,12 +741,12 @@ CalibrationRecord:
 
 **pact-memory mapping**: Saved via secretary with entities including `orchestration_calibration` AND `{domain}` (required for Learning II queries).
 
-**Post-cycle comparison**: At wrap-up, the orchestrator:
-1. Compares initial variety score vs. actual difficulty
-2. Identifies dimensions that drifted (predicted vs. actual)
-3. Notes blocker count and phase reruns as difficulty indicators
-4. Saves calibration record to pact-memory via secretary task
-5. If drift exceeds 2 in any dimension, note as significant for future Learning II queries
+**Post-cycle comparison**: During HANDOFF processing, the secretary:
+1. Reads feature task metadata for initial_variety_score
+2. Scans TaskList for blocker count and phase rerun count
+3. Asks the lead for a brief difficulty assessment (higher, lower, or about the same)
+4. Computes the full CalibrationRecord and saves to pact-memory
+5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
 
 ---
 
@@ -910,12 +910,7 @@ When comPACT dispatches multiple specialists in parallel, consider attaching an 
 2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
 4. **Create atomic commit(s)** — stage and commit before proceeding
-5. **Save CalibrationRecord** — Compare initial variety assessment to actual difficulty encountered. Route via secretary TaskCreate:
-   ```
-   TaskCreate(subject="secretary: save calibration record",
-     description="Save a CalibrationRecord to pact-memory. Data: domain={domain}, initial_variety_score={score}, actual_difficulty_score={actual}, dimensions_that_drifted=[...], blocker_count={n}, phase_reruns=0. Include entities: orchestration_calibration, {domain}.")
-   TaskUpdate(taskId, owner="secretary")
-   ```
+5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`

@@ -172,15 +172,6 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/auditor_reminder.py\""
           }
         ]
-      },
-      {
-        "matcher": "TaskUpdate",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/phase_snapshot_reminder.py\""
-          }
-        ]
       }
     ]
   }

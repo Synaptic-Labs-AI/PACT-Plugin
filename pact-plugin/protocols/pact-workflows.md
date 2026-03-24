@@ -158,12 +158,7 @@ When comPACT dispatches multiple specialists in parallel, consider attaching an 
 2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
 4. **Create atomic commit(s)** — stage and commit before proceeding
-5. **Save CalibrationRecord** — Compare initial variety assessment to actual difficulty encountered. Route via secretary TaskCreate:
-   ```
-   TaskCreate(subject="secretary: save calibration record",
-     description="Save a CalibrationRecord to pact-memory. Data: domain={domain}, initial_variety_score={score}, actual_difficulty_score={actual}, dimensions_that_drifted=[...], blocker_count={n}, phase_reruns=0. Include entities: orchestration_calibration, {domain}.")
-   TaskUpdate(taskId, owner="secretary")
-   ```
+5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`
@@ -176,3 +171,4 @@ When comPACT dispatches multiple specialists in parallel, consider attaching an 
 3. May escalate to `/PACT:orchestrate` if task exceeds single-specialist scope
 
 ---
+
