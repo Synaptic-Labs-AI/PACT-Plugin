@@ -11,6 +11,9 @@ Tests cover:
 5. main() prefers last_assistant_message over transcript (SDK v2.1.47+)
 6. main() falls back to transcript when last_assistant_message absent
 7. main() entry point: stdin JSON, exit codes, output format
+8. Lossless field validation (Produced, Key decisions) in structured HANDOFFs
+9. Signal-type completion bypass (AUDIT SIGNAL / audit_summary)
+10. check_lossless_fields() and is_signal_completion() unit tests
 """
 import io
 import json
@@ -54,7 +57,7 @@ class TestValidateHandoff:
     def test_explicit_handoff_section_is_valid(self):
         from validate_handoff import validate_handoff
 
-        is_valid, missing = validate_handoff(GOOD_HANDOFF)
+        is_valid, missing, *_ = validate_handoff(GOOD_HANDOFF)
         assert is_valid is True
         assert missing == []
 
@@ -68,7 +71,7 @@ class TestValidateHandoff:
             "I chose JWT tokens because they are stateless. "
             "Next, the test engineer should verify token expiry."
         )
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
         assert missing == []
 
@@ -77,14 +80,14 @@ class TestValidateHandoff:
 
         # Has "implemented" (what_produced) and "approach" (key_decisions)
         # Missing next_steps — but 2/3 is still valid
-        is_valid, missing = validate_handoff(PARTIAL_HANDOFF)
+        is_valid, missing, *_ = validate_handoff(PARTIAL_HANDOFF)
         assert is_valid is True
         assert len(missing) <= 1
 
     def test_missing_handoff_is_invalid(self):
         from validate_handoff import validate_handoff
 
-        is_valid, missing = validate_handoff(MISSING_HANDOFF)
+        is_valid, missing, *_ = validate_handoff(MISSING_HANDOFF)
         assert is_valid is False
         assert len(missing) >= 2
 
@@ -92,7 +95,7 @@ class TestValidateHandoff:
         from validate_handoff import validate_handoff
 
         text = "## handoff\nProduced: files. Decisions: none. Next: test."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
 
 
@@ -343,7 +346,7 @@ class TestValidateHandoffEdgeCases:
         from validate_handoff import validate_handoff
 
         text = "# Handoff\nHere is what I did."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
 
     def test_handoff_section_with_colon(self):
@@ -351,7 +354,7 @@ class TestValidateHandoffEdgeCases:
         from validate_handoff import validate_handoff
 
         text = "Handoff:\nProduced files."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
 
     def test_deliverables_section_detected(self):
@@ -359,7 +362,7 @@ class TestValidateHandoffEdgeCases:
         from validate_handoff import validate_handoff
 
         text = "## Deliverables\nCreated auth module."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
 
     def test_summary_section_detected(self):
@@ -367,7 +370,7 @@ class TestValidateHandoffEdgeCases:
         from validate_handoff import validate_handoff
 
         text = "## Summary\nDid the work."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
 
     def test_output_section_detected(self):
@@ -375,14 +378,14 @@ class TestValidateHandoffEdgeCases:
         from validate_handoff import validate_handoff
 
         text = "## Output\nFiles produced."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
 
     def test_empty_string_is_invalid(self):
         """Empty string has no handoff elements."""
         from validate_handoff import validate_handoff
 
-        is_valid, missing = validate_handoff("")
+        is_valid, missing, *_ = validate_handoff("")
         assert is_valid is False
         assert len(missing) == 3  # All 3 elements missing
 
@@ -393,7 +396,7 @@ class TestValidateHandoffEdgeCases:
         # Has "produced" (what_produced) and "decided to" (key_decisions)
         # Missing next_steps entirely
         text = "I produced the auth module. I decided to use JWT tokens."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is True
         assert len(missing) <= 1
 
@@ -404,7 +407,7 @@ class TestValidateHandoffEdgeCases:
         # Only has "produced" (what_produced)
         # Missing key_decisions and next_steps
         text = "I produced the auth module and it works great and is ready."
-        is_valid, missing = validate_handoff(text)
+        is_valid, missing, *_ = validate_handoff(text)
         assert is_valid is False
         assert len(missing) >= 2
 
@@ -436,3 +439,300 @@ class TestIsPactAgentEdgeCases:
 
         with pytest.raises(AttributeError):
             is_pact_agent(123)
+
+
+# =============================================================================
+# Lossless Field Validation Tests
+# =============================================================================
+
+# Test data for lossless field scenarios
+HANDOFF_BOTH_LOSSLESS = """
+## HANDOFF
+
+1. Produced: Created src/auth.py with JWT authentication middleware
+2. Key decisions: Chose JWT over session tokens for stateless design
+3. Areas of uncertainty:
+   - [HIGH] Token refresh logic untested
+4. Integration points: user_service.py
+5. Open questions: Token expiry config?
+"""
+
+HANDOFF_MISSING_PRODUCED = """
+## HANDOFF
+
+1. Key decisions: Chose JWT over session tokens for stateless design
+2. Areas of uncertainty:
+   - [HIGH] Token refresh logic untested
+3. Integration points: user_service.py
+4. Open questions: Token expiry config?
+"""
+
+HANDOFF_MISSING_KEY_DECISIONS = """
+## HANDOFF
+
+1. Produced: Created src/auth.py with JWT authentication middleware
+2. Areas of uncertainty:
+   - [HIGH] Token refresh logic untested
+3. Integration points: user_service.py
+4. Open questions: Token expiry config?
+"""
+
+HANDOFF_MISSING_BOTH_LOSSLESS = """
+## HANDOFF
+
+1. Areas of uncertainty:
+   - [HIGH] Token refresh logic untested
+2. Integration points: user_service.py
+3. Open questions: Token expiry config?
+"""
+
+SIGNAL_COMPLETION_TRANSCRIPT = """
+## Summary
+
+AUDIT SIGNAL: Code quality observation
+
+The concurrent implementation looks solid. No critical issues found.
+Stored audit_summary in task metadata.
+"""
+
+
+class TestLosslessFieldValidation:
+    """Tests for lossless field checking in structured HANDOFF sections."""
+
+    def test_handoff_with_both_lossless_fields_no_warning(self):
+        """HANDOFF with both Produced and Key decisions: no lossless warnings."""
+        from validate_handoff import validate_handoff
+
+        is_valid, missing, lossless = validate_handoff(HANDOFF_BOTH_LOSSLESS)
+        assert is_valid is True
+        assert missing == []
+        assert lossless == []
+
+    def test_handoff_missing_produced_warns(self):
+        """HANDOFF missing 'Produced:' subsection: warns about Produced."""
+        from validate_handoff import validate_handoff
+
+        is_valid, missing, lossless = validate_handoff(HANDOFF_MISSING_PRODUCED)
+        assert is_valid is True  # Still valid — warnings don't block
+        assert missing == []
+        assert "Produced" in lossless
+        assert "Key decisions" not in lossless
+
+    def test_handoff_missing_key_decisions_warns(self):
+        """HANDOFF missing 'Key decisions:' subsection: warns about Key decisions."""
+        from validate_handoff import validate_handoff
+
+        is_valid, missing, lossless = validate_handoff(HANDOFF_MISSING_KEY_DECISIONS)
+        assert is_valid is True
+        assert missing == []
+        assert "Key decisions" in lossless
+        assert "Produced" not in lossless
+
+    def test_handoff_missing_both_warns_both(self):
+        """HANDOFF missing both lossless fields: warns about both."""
+        from validate_handoff import validate_handoff
+
+        is_valid, missing, lossless = validate_handoff(HANDOFF_MISSING_BOTH_LOSSLESS)
+        assert is_valid is True
+        assert missing == []
+        assert "Produced" in lossless
+        assert "Key decisions" in lossless
+        assert len(lossless) == 2
+
+    def test_no_handoff_section_uses_keyword_matching(self):
+        """Without a structured HANDOFF section, existing keyword matching applies.
+        No lossless validation is performed."""
+        from validate_handoff import validate_handoff
+
+        # Has produced + decisions keywords but no HANDOFF section header
+        text = (
+            "I produced the auth module. "
+            "I chose JWT tokens because they are stateless. "
+            "Next, the test engineer should verify token expiry."
+        )
+        is_valid, missing, lossless = validate_handoff(text)
+        assert is_valid is True
+        assert lossless == []  # No lossless check on implicit path
+
+    def test_signal_completion_skips_lossless_validation(self):
+        """Signal-type completions (AUDIT SIGNAL) skip lossless field validation."""
+        from validate_handoff import validate_handoff
+
+        is_valid, missing, lossless = validate_handoff(SIGNAL_COMPLETION_TRANSCRIPT)
+        assert is_valid is True
+        assert missing == []
+        assert lossless == []  # Skipped entirely for signal completions
+
+    def test_produced_with_numbered_prefix(self):
+        """'1. Produced:' format should be detected."""
+        from validate_handoff import validate_handoff
+
+        text = "## Handoff\n1. Produced: Created files\n2. Key decisions: Used JWT\n"
+        is_valid, missing, lossless = validate_handoff(text)
+        assert is_valid is True
+        assert lossless == []
+
+    def test_key_decision_singular_detected(self):
+        """'Key decision:' (singular) should also be detected."""
+        from validate_handoff import validate_handoff
+
+        text = "## Handoff\n1. Produced: Created files\n2. Key decision: Used JWT\n"
+        is_valid, missing, lossless = validate_handoff(text)
+        assert is_valid is True
+        assert lossless == []
+
+    def test_lossless_fields_case_insensitive(self):
+        """Lossless field matching should be case-insensitive."""
+        from validate_handoff import validate_handoff
+
+        text = "## HANDOFF\nPRODUCED: stuff\nKEY DECISIONS: things\n"
+        is_valid, missing, lossless = validate_handoff(text)
+        assert is_valid is True
+        assert lossless == []
+
+
+class TestCheckLosslessFields:
+    """Unit tests for check_lossless_fields() function."""
+
+    def test_both_present_returns_empty(self):
+        from validate_handoff import check_lossless_fields
+
+        text = "1. Produced: Files\n2. Key decisions: Choices"
+        assert check_lossless_fields(text) == []
+
+    def test_neither_present_returns_both(self):
+        from validate_handoff import check_lossless_fields
+
+        text = "Some text without the fields"
+        result = check_lossless_fields(text)
+        assert len(result) == 2
+        assert "Produced" in result
+        assert "Key decisions" in result
+
+    def test_only_produced_present(self):
+        from validate_handoff import check_lossless_fields
+
+        text = "Produced: Files created"
+        result = check_lossless_fields(text)
+        assert result == ["Key decisions"]
+
+    def test_only_key_decisions_present(self):
+        from validate_handoff import check_lossless_fields
+
+        text = "Key decisions: Chose JWT"
+        result = check_lossless_fields(text)
+        assert result == ["Produced"]
+
+
+class TestIsSignalCompletion:
+    """Unit tests for is_signal_completion() function."""
+
+    def test_audit_signal_detected(self):
+        from validate_handoff import is_signal_completion
+
+        assert is_signal_completion("AUDIT SIGNAL: quality check") is True
+
+    def test_audit_summary_detected(self):
+        from validate_handoff import is_signal_completion
+
+        assert is_signal_completion("Stored audit_summary in metadata") is True
+
+    def test_completion_type_signal_detected(self):
+        from validate_handoff import is_signal_completion
+
+        assert is_signal_completion('completion_type: "signal"') is True
+
+    def test_normal_handoff_not_signal(self):
+        from validate_handoff import is_signal_completion
+
+        assert is_signal_completion("## HANDOFF\n1. Produced: files") is False
+
+    def test_empty_string_not_signal(self):
+        from validate_handoff import is_signal_completion
+
+        assert is_signal_completion("") is False
+
+    def test_case_insensitive(self):
+        from validate_handoff import is_signal_completion
+
+        assert is_signal_completion("audit signal: observation") is True
+
+
+class TestMainLosslessWarnings:
+    """Integration tests for lossless warnings in main() output."""
+
+    def test_main_emits_lossless_warning_when_produced_missing(self, capsys):
+        """main() should emit lossless warning when Produced is missing."""
+        from validate_handoff import main
+
+        # Pad to exceed 100 char minimum + has HANDOFF section but missing Produced
+        transcript = HANDOFF_MISSING_PRODUCED + " " * max(0, 100 - len(HANDOFF_MISSING_PRODUCED))
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",
+            "last_assistant_message": transcript,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "Lossless Field Warning" in output["systemMessage"]
+        assert "Produced" in output["systemMessage"]
+
+    def test_main_emits_lossless_warning_when_both_missing(self, capsys):
+        """main() should name both missing fields in the warning."""
+        from validate_handoff import main
+
+        transcript = HANDOFF_MISSING_BOTH_LOSSLESS + " " * max(0, 100 - len(HANDOFF_MISSING_BOTH_LOSSLESS))
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",
+            "last_assistant_message": transcript,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "Lossless Field Warning" in output["systemMessage"]
+        assert "Produced" in output["systemMessage"]
+        assert "Key decisions" in output["systemMessage"]
+
+    def test_main_no_warning_when_both_lossless_present(self, capsys):
+        """main() should emit no warning when both lossless fields are present."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_id": "pact-backend-coder",
+            "last_assistant_message": HANDOFF_BOTH_LOSSLESS,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_main_no_lossless_warning_for_signal_completion(self, capsys):
+        """main() should not emit lossless warnings for signal-type completions."""
+        from validate_handoff import main
+
+        input_data = json.dumps({
+            "agent_id": "pact-auditor",
+            "last_assistant_message": SIGNAL_COMPLETION_TRANSCRIPT,
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
