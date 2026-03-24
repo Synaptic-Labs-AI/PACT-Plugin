@@ -159,6 +159,15 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/merge_guard_post.py\""
           }
         ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/auditor_reminder.py\""
+          }
+        ]
       }
     ]
   }
