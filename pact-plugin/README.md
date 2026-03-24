@@ -28,7 +28,7 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Prof
 
 ```
 /PACT:orchestrate <task>          # Full multi-agent workflow
-/PACT:comPACT <domain> <task>     # Standalone tasks, bypasses PACT phases
+/PACT:comPACT <domain> <task>     # Self-contained tasks, no PACT phases
 /PACT:plan-mode <task>            # Strategic planning before implementation
 ```
 

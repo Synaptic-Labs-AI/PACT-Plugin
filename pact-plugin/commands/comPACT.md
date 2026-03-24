@@ -1,8 +1,8 @@
 ---
-description: Dispatch specialists directly to perform standalone tasks (bypasses standard sequence of PACT phases)
+description: Dispatch concurrent specialists for self-contained tasks. No PACT phases needed.
 argument-hint: [backend|frontend|database|prepare|test|architect|devops|security|qa] <task>
 ---
-Dispatch specialists directly for this standalone task: $ARGUMENTS
+Dispatch concurrent specialists for this self-contained task: $ARGUMENTS
 
 **MANDATORY: invoke concurrently for independent sub-tasks.** Sequential requires explicit file conflict or data dependency. If the task contains multiple independent items (bugs, endpoints, components), dispatch multiple specialists together — same type or mixed types — unless they share files.
 
@@ -15,7 +15,7 @@ Dispatch specialists directly for this standalone task: $ARGUMENTS
 Create a simpler Task hierarchy than full orchestrate:
 
 ```
-1. `TaskCreate`: Feature task "{verb} {feature}" (standalone task)
+1. `TaskCreate`: Feature task "{verb} {feature}" (self-contained task)
 2. `TaskUpdate`: Feature task status = "in_progress"
 3. Analyze: How many agents needed?
 4. `TaskCreate`: Agent task(s) — direct children of feature
@@ -245,13 +245,13 @@ Examples of blockers:
 - Task requires a different specialist's domain
 - Missing dependencies, access, or information
 - Same error persists after multiple fix attempts
-- Scope exceeds standalone capability (needs PREPARE/ARCHITECT phases)
+- Scope exceeds self-contained capability (needs PREPARE/ARCHITECT phases)
 - Concurrent agents have unresolvable conflicts
 
 When blocker is reported:
 1. Receive blocker report from specialist
 2. Run `/PACT:imPACT` to triage
-3. May escalate to `/PACT:orchestrate` if task exceeds standalone scope
+3. May escalate to `/PACT:orchestrate` if task exceeds self-contained scope
 
 ---
 

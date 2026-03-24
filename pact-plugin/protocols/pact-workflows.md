@@ -4,7 +4,7 @@
 |----------|-------------|----------|
 | **PACT** | Complex/greenfield work | Context-aware multi-agent orchestration |
 | **plan-mode** | Before complex work, need alignment | Multi-agent planning consultation, no implementation |
-| **comPACT** | Focused, independent tasks | Dispatch specialists directly for standalone tasks (bypasses PACT phases) |
+| **comPACT** | Focused, independent tasks | Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
@@ -81,7 +81,7 @@
 
 ## comPACT Protocol
 
-**Core idea**: Dispatch specialists directly to perform standalone tasks. Bypasses the standard sequence of PACT phases. Use orchestrate when phases need to chain — research informing design, design informing code.
+**Core idea**: Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. Use orchestrate when phases need to chain — research informing design, design informing code.
 
 comPACT handles tasks that can be decomposed into independent sub-tasks — single-domain or cross-domain — without shared-file dependencies. For independent sub-tasks, it invokes multiple specialists in parallel.
 
