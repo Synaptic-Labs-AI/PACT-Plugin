@@ -44,6 +44,8 @@ MUST_BE_SYNC = {
     "peer_inject.py",     # Injects peer context on agent start
     "git_commit_check.py",  # Checks git commit conventions
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
+    "auditor_reminder.py",  # Injects auditor dispatch reminder into context
+    "precompact_state_reminder.py",  # Emits state snapshot before compaction
 }
 
 # Hooks that SHOULD be async (non-blocking, fire-and-forget)

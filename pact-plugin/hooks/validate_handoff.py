@@ -46,7 +46,7 @@ LOSSLESS_FIELDS = {
 SIGNAL_COMPLETION_PATTERNS = [
     r"AUDIT\s+SIGNAL",
     r"audit_summary",
-    r"completion_type.*signal",
+    r"completion_type.+signal",
 ]
 
 
