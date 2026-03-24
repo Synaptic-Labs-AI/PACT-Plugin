@@ -211,12 +211,14 @@ def format_missing_handoff_feedback(missing: list[dict]) -> str:
     else:
         task_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in missing)
 
-    # Partition by completion type for type-appropriate guidance
+    # Partition by completion type for type-appropriate guidance.
+    # Unrecognized types default to handoff partition (handoff guidance
+    # is the safe fallback for any unknown completion type).
     signal_tasks = [
         t for t in missing if t.get("completion_type") == "signal"
     ]
     handoff_tasks = [
-        t for t in missing if t.get("completion_type", "handoff") == "handoff"
+        t for t in missing if t.get("completion_type") != "signal"
     ]
 
     parts = []

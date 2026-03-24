@@ -673,6 +673,39 @@ class TestMain:
         captured = capsys.readouterr()
         assert "audit_summary" in captured.err
 
+    def test_unrecognized_completion_type_warns_and_falls_through(
+        self, tmp_path, capsys,
+    ):
+        """Unrecognized completion_type emits stderr warning and falls through
+        to handoff behavior. Without handoff metadata → missing_handoff → exit 2."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "11", "backend-coder", "in_progress", {
+            "completion_type": "unknown_type",
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        # Verify the warning message was emitted
+        assert "unrecognized completion_type" in captured.err
+        assert "'unknown_type'" in captured.err
+        assert "falling through to handoff" in captured.err
+        # Verify it still gives missing-completion guidance (falls through to handoff path)
+        assert "missing completion artifacts" in captured.err
+
     def test_allows_when_no_tasks(self, tmp_path, capsys):
         """P0: Empty task directory → exit 0."""
         from teammate_completion_gate import main

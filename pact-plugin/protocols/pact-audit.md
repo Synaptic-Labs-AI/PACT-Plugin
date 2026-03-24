@@ -10,11 +10,11 @@ The pact-auditor agent provides independent quality observation during the CODE 
 
 Deploy the auditor as a CODE-phase teammate when ANY of:
 - Variety score >= 7 (Medium or higher)
-- Multiple coders running in parallel
+- 3+ coders running in parallel (coordination complexity warrants observation)
 - Task touches security-sensitive code (auth, crypto, user input handling)
 - Domain has prior history of architecture drift (from pact-memory calibration data)
 
-**Skip when**: Single coder on a Low variety (4-6) task with no security sensitivity.
+**Skip when**: Single coder or 2 coders on a Low variety (4-6) task with no security sensitivity.
 
 ### Hybrid Observation Model
 
@@ -132,5 +132,7 @@ If the auditor discovers a viability threat (not just a quality issue), bypass t
 | **Security review** | During review | Adversarial security analysis | Security-focused |
 
 The auditor is additive — it catches issues during CODE that would otherwise only surface in TEST or review, when the cost of correction is higher.
+
+**Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals feed into S4 dynamic model update triggers, prompting the orchestrator to reassess plan viability.
 
 ---

@@ -72,9 +72,9 @@ verify "pact-completeness.md" "Completeness Signals (lines 1317-1355)" "1317,135
 verify "pact-scope-detection.md" "Scope Detection (lines 1357-1459)" "1357,1459"
 verify "pact-scope-contract.md" "Scope Contract (lines 1461-1575)" "1461,1575"
 verify "pact-scope-phases.md" "Scoped Phases (lines 1577-1658)" "1577,1658"
-verify "pact-audit.md" "Concurrent Audit (lines 1660-1795)" "1660,1795"
-verify "pact-self-repair.md" "Self-Repair (lines 1797-1864)" "1797,1864"
-verify "pact-channel-capacity.md" "Channel Capacity (lines 1866-1945)" "1866,1945"
+verify "pact-audit.md" "Concurrent Audit (lines 1660-1797)" "1660,1797"
+verify "pact-self-repair.md" "Self-Repair (lines 1799-1866)" "1799,1866"
+verify "pact-channel-capacity.md" "Channel Capacity (lines 1868-1947)" "1868,1947"
 
 echo ""
 echo "=== Summary ==="

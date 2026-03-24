@@ -207,6 +207,8 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](../protocols/pact-audit.md):
 - Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
+- 3+ parallel coders → dispatch auditor (coordination complexity warrants observation)
+- 2 coders on Low variety task → skip auditor
 - Single coder on Low variety task → skip auditor
 
 If dispatching an auditor, create its task with `metadata: {"completion_type": "signal"}` so the completion gate accepts `audit_summary` instead of standard HANDOFF.

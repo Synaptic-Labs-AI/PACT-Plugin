@@ -55,7 +55,7 @@ LEARNING_II_MAX_BUMP = 1  # max +1 per dimension
 CALIBRATION_WINDOW_SIZE = 5
 CALIBRATION_MIN_SAMPLES = 5
 CALIBRATION_MAX_ADJUSTMENT = 1  # max +/-1 total score adjustment
-CALIBRATION_NOISE_THRESHOLD = 1.0  # abs(drift) must exceed this
+CALIBRATION_NOISE_THRESHOLD = 1.0  # abs(drift) must meet or exceed this
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +210,9 @@ def compute_calibration_drift(
         return 0.0
 
     # Sort by timestamp descending (most recent first) if timestamps exist,
-    # otherwise take the last N records (assuming append-order)
+    # otherwise take the first N records (assuming append-order).
+    # Note: records without timestamps get sort key "" which sorts to
+    # the front with reverse=True, treating them as most recent.
     if any(r.get("timestamp") for r in domain_records):
         domain_records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
 
