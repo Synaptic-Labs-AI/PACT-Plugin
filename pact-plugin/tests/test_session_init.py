@@ -277,6 +277,267 @@ class TestTeamResumeDetection:
         assert additional.startswith("Your FIRST action must be")
 
 
+class TestSourceAwareness:
+    """Tests for session source detection in session_init.main().
+
+    The hook reads input_data["source"] which has 4 values:
+    - "startup": fresh session (full init)
+    - "resume": resumed session (model retains context)
+    - "compact": context window compacted (model lost context)
+    - "clear": /clear command (intentional context reset)
+
+    Tests cover all 8 combinations (4 sources x 2 team states) plus edge cases.
+    """
+
+    def _run_main_with_source(
+        self, monkeypatch, tmp_path, source, team_exists=False
+    ):
+        """Helper: run main() with given source and team state.
+
+        Returns (additionalContext, mock_symlinks_called, mock_claude_md_called).
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        if team_exists:
+            team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+            team_dir.mkdir(parents=True)
+            (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": source,
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None) as mock_symlinks, \
+             patch("session_init.update_claude_md", return_value=None) as mock_claude_md, \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        return additional, mock_symlinks.called, mock_claude_md.called
+
+    # --- Path 1: startup + no team (fresh session) ---
+
+    def test_startup_no_team_creates_team(self, monkeypatch, tmp_path):
+        """startup + no team: should emit TeamCreate instruction."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "Do not call TeamCreate" not in additional
+        assert "WARNING" not in additional
+
+    def test_startup_calls_symlinks_and_claude_md(self, monkeypatch, tmp_path):
+        """startup should run full init (symlinks + CLAUDE.md)."""
+        _, symlinks_called, claude_md_called = self._run_main_with_source(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+
+        assert symlinks_called
+        assert claude_md_called
+
+    # --- Path 2: resume + team exists (normal resume) ---
+
+    def test_resume_team_exists_reuse(self, monkeypatch, tmp_path):
+        """resume + team exists: should emit reuse instruction with paused-state hint."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+
+        assert "existing — resumed session" in additional
+        assert "Do not call TeamCreate" in additional
+        assert "pact-aabb1122" in additional
+        assert "paused-state.json" in additional
+        # Should NOT have recovery instructions for context resets
+        assert "compact-summary.txt" not in additional
+        assert "CONTEXT CLEARED" not in additional
+        assert "POST-COMPACTION" not in additional
+
+    def test_resume_calls_symlinks_and_claude_md(self, monkeypatch, tmp_path):
+        """resume should run full init (symlinks + CLAUDE.md)."""
+        _, symlinks_called, claude_md_called = self._run_main_with_source(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+
+        assert symlinks_called
+        assert claude_md_called
+
+    # --- Path 3: compact + team exists (post-compaction recovery) ---
+
+    def test_compact_team_exists_recovery(self, monkeypatch, tmp_path):
+        """compact + team exists: should emit POST-COMPACTION recovery instructions."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="compact", team_exists=True
+        )
+
+        assert "existing — resumed session" in additional
+        assert "Do not call TeamCreate" in additional
+        assert "POST-COMPACTION" in additional
+        assert "compact-summary.txt" in additional
+        assert "TaskList" in additional
+        assert "secretary" in additional
+
+    def test_compact_skips_symlinks(self, monkeypatch, tmp_path):
+        """compact should skip symlink setup (already done)."""
+        _, symlinks_called, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="compact", team_exists=True
+        )
+
+        assert not symlinks_called
+
+    def test_compact_skips_claude_md_update(self, monkeypatch, tmp_path):
+        """compact should skip CLAUDE.md update (already installed)."""
+        _, _, claude_md_called = self._run_main_with_source(
+            monkeypatch, tmp_path, source="compact", team_exists=True
+        )
+
+        assert not claude_md_called
+
+    # --- Path 4: clear + team exists (context intentionally cleared) ---
+
+    def test_clear_team_exists_context_cleared(self, monkeypatch, tmp_path):
+        """clear + team exists: should emit CONTEXT CLEARED with recovery."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="clear", team_exists=True
+        )
+
+        assert "existing — resumed session" in additional
+        assert "Do not call TeamCreate" in additional
+        assert "CONTEXT CLEARED" in additional
+        assert "TaskList" in additional
+        assert "secretary" in additional
+        # Should NOT reference compact-summary (no file created on /clear)
+        assert "compact-summary.txt" not in additional
+
+    def test_clear_skips_symlinks(self, monkeypatch, tmp_path):
+        """clear should skip symlink setup (already done)."""
+        _, symlinks_called, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="clear", team_exists=True
+        )
+
+        assert not symlinks_called
+
+    def test_clear_skips_claude_md_update(self, monkeypatch, tmp_path):
+        """clear should skip CLAUDE.md update (already installed)."""
+        _, _, claude_md_called = self._run_main_with_source(
+            monkeypatch, tmp_path, source="clear", team_exists=True
+        )
+
+        assert not claude_md_called
+
+    # --- Path 5: anomalous combinations ---
+
+    def test_startup_team_exists_anomalous(self, monkeypatch, tmp_path):
+        """startup + team exists: anomalous — should reuse team with note."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="startup", team_exists=True
+        )
+
+        assert "existing — resumed session" in additional
+        assert "Do not call TeamCreate" in additional
+        assert "Unexpected" in additional or "Note" in additional
+        assert "TaskList" in additional
+
+    def test_resume_no_team_anomalous(self, monkeypatch, tmp_path):
+        """resume + no team: anomalous — should create team with warning."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="resume", team_exists=False
+        )
+
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "WARNING" in additional
+
+    def test_compact_no_team_anomalous(self, monkeypatch, tmp_path):
+        """compact + no team: anomalous — should create team with warning."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="compact", team_exists=False
+        )
+
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "WARNING" in additional
+        assert "team not found" in additional.lower()
+
+    def test_clear_no_team_anomalous(self, monkeypatch, tmp_path):
+        """clear + no team: anomalous — should create team with warning."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="clear", team_exists=False
+        )
+
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "WARNING" in additional
+
+    # --- Edge cases ---
+
+    def test_missing_source_defaults_to_startup(self, monkeypatch, tmp_path):
+        """Missing source field should default to startup behavior."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # stdin_data without "source" key
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None) as mock_symlinks, \
+             patch("session_init.update_claude_md", return_value=None) as mock_claude_md, \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # Should behave like startup: full init, TeamCreate
+        assert mock_symlinks.called
+        assert mock_claude_md.called
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "POST-COMPACTION" not in additional
+        assert "CONTEXT CLEARED" not in additional
+
+    def test_unknown_source_with_team_is_anomalous(self, monkeypatch, tmp_path):
+        """Unknown source value + team exists: should reuse team with note."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="unknown_value", team_exists=True
+        )
+
+        assert "existing — resumed session" in additional
+        assert "Unexpected" in additional or "Note" in additional
+
+    def test_unknown_source_without_team_creates_with_warning(self, monkeypatch, tmp_path):
+        """Unknown source value + no team: should create team with warning."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="unknown_value", team_exists=False
+        )
+
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+        assert "WARNING" in additional
+
+
 class TestMainPausedStateIntegration:
     """Integration test: check_paused_state wiring in session_init.main()."""
 

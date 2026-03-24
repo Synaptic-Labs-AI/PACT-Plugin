@@ -133,20 +133,29 @@ def main():
         context_parts = []
         system_messages = []
 
+        # Detect session source: startup, resume, compact, clear
+        # Default to "startup" if missing (backwards compat with older Claude Code)
+        source = input_data.get("source", "startup")
+        is_context_reset = source in ("compact", "clear")
+
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
-        symlink_result = setup_plugin_symlinks()
-        if symlink_result and "failed" in symlink_result.lower():
-            system_messages.append(symlink_result)
-        elif symlink_result:
-            context_parts.append(symlink_result)
+        # Context resets (compact/clear): symlinks are already set up from original session
+        if not is_context_reset:
+            symlink_result = setup_plugin_symlinks()
+            if symlink_result and "failed" in symlink_result.lower():
+                system_messages.append(symlink_result)
+            elif symlink_result:
+                context_parts.append(symlink_result)
 
         # 2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
-        claude_md_msg = update_claude_md()
-        if claude_md_msg:
-            if "failed" in claude_md_msg.lower() or "unmanaged" in claude_md_msg.lower():
-                system_messages.append(claude_md_msg)
-            else:
-                context_parts.append(claude_md_msg)
+        # Context resets (compact/clear): CLAUDE.md is already installed from original session
+        if not is_context_reset:
+            claude_md_msg = update_claude_md()
+            if claude_md_msg:
+                if "failed" in claude_md_msg.lower() or "unmanaged" in claude_md_msg.lower():
+                    system_messages.append(claude_md_msg)
+                else:
+                    context_parts.append(claude_md_msg)
 
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
@@ -172,10 +181,68 @@ def main():
         except OSError:
             # Fail-open: if filesystem check fails, assume fresh session
             team_exists = False
-        if team_exists:
-            context_parts.insert(0, f'Your team is `{team_name}` (existing — resumed session). Do not call TeamCreate — the team already exists. Use the name `{team_name}` wherever {{team_name}} appears in commands.')
+
+        # Build context message based on source × team_exists (5 paths)
+        _team_reuse = (
+            f'Your team is `{team_name}` (existing — resumed session). '
+            f'Do not call TeamCreate — the team already exists. '
+            f'Use the name `{team_name}` wherever {{team_name}} appears in commands.'
+        )
+        _team_create = (
+            f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). '
+            f'Do not read files, explore code, or respond to the user until the team is created. '
+            f'Use the name `{team_name}` wherever {{team_name}} appears in commands.'
+        )
+
+        if source == "compact" and team_exists:
+            # Post-compaction: context window was compacted, guide state recovery
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'POST-COMPACTION: Your context was compacted — recover state: '
+                f'(1) Read ~/.claude/pact-sessions/compact-summary.txt for prior context, '
+                f'(2) Run TaskList to find in-progress work, '
+                f'(3) TaskGet on in-progress tasks for details. '
+                f"Re-engage secretary: SendMessage(to='secretary', "
+                f"message='Post-compaction: deliver session briefing with current state.')."
+            ))
+        elif source == "clear" and team_exists:
+            # Context cleared via /clear: no compact-summary, but team and tasks survive
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'CONTEXT CLEARED: Your context was cleared via /clear. '
+                f'State recovery: '
+                f'(1) TaskList for current tasks, '
+                f'(2) TaskGet on in-progress tasks. '
+                f"Re-engage secretary: SendMessage(to='secretary', "
+                f"message='Context cleared: deliver fresh briefing with current project state.')."
+            ))
+        elif source == "resume" and team_exists:
+            # Normal resume: model retains context, team exists
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'Check for paused-state.json at ~/.claude/pact-sessions/ '
+                f'for session state from /PACT:pause.'
+            ))
+        elif source == "startup" and not team_exists:
+            # Fresh session: full initialization
+            context_parts.insert(0, _team_create)
+        elif team_exists:
+            # Anomalous: unexpected source but team exists (e.g., startup + team exists)
+            # Reuse team, note the anomaly
+            context_parts.insert(0, (
+                f'{_team_reuse} '
+                f'Note: Unexpected session source "{source}" with existing team — '
+                f'reusing team. Run TaskList to check current state.'
+            ))
         else:
-            context_parts.insert(0, f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). Do not read files, explore code, or respond to the user until the team is created. Use the name `{team_name}` wherever {{team_name}} appears in commands.')
+            # Anomalous: context reset but no team (e.g., compact/clear + no team)
+            # or unknown source without team — create team with warning
+            context_parts.insert(0, (
+                f'{_team_create} '
+                f'WARNING: Session source "{source}" but team not found — '
+                f'previous session state may be lost. '
+                f'Check TaskList for recovery context.'
+            ))
 
         # 5b. Write session resume info to project CLAUDE.md
         raw_id = input_data.get("session_id")
