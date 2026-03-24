@@ -649,7 +649,12 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 3. **`TaskUpdate`**: Feature task status = "completed" (all phases done, all work committed)
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
-6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
+6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time? Save a CalibrationRecord: compare initial variety score to actual difficulty. Include domain, dimensions_that_drifted, blocker_count, phase_reruns. Create a TaskCreate for the secretary with this data:
+   ```
+   TaskCreate(subject="secretary: save calibration record",
+     description="Save a CalibrationRecord to pact-memory. Data: domain={domain}, initial_variety_score={score}, actual_difficulty_score={actual}, dimensions_that_drifted=[{dimension, predicted, actual}], blocker_count={n}, phase_reruns={n}, specialist_fit={good|undermatched|overmatched}. Include entities: orchestration_calibration, {domain}.")
+   TaskUpdate(taskId, owner="secretary")
+   ```
 7. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
    ```
    TaskCreate(subject="secretary: process pending HANDOFFs (post-review)",

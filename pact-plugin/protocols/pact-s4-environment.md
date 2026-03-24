@@ -63,20 +63,6 @@ Created during PREPARE phase, referenced during S4 checkpoints.
 | Unknown resolved | Move from Unknowns to appropriate section |
 | Model significantly outdated | Consider returning to PREPARE |
 
-### Dynamic Model Update Triggers
-
-Beyond manual updates, certain runtime signals should trigger automatic model reassessment:
-
-| Trigger | Source | Model Update |
-|---------|--------|-------------|
-| S2 semantic overlap detected | S2 coordination layer | Add newly discovered interface dependencies to External Dependencies |
-| Agent blocker on missing dependency | imPACT triage | Add dependency to model; reassess Constraints |
-| Calibration drift > 2 in any dimension | Calibration feedback loop | Re-examine Unknowns — systematic blind spot likely |
-| Auditor RED signal | Concurrent audit protocol | Cross-reference against model assumptions — architecture drift may indicate invalidated constraint |
-| 3+ imPACT cycles | Algedonic META-BLOCK | Model likely insufficient — trigger full model review |
-
-**Integration with Conant-Ashby**: When S4 checkpoint question 5 (Model Completeness) detects degraded regulation, dynamic triggers ensure the environment model updates reflect the gap. The model must stay current for effective regulation — stale models produce stale regulation.
-
 ### Relationship to S4 Checkpoints
 
 The Environment Model is the baseline against which S4 checkpoints assess:

@@ -133,6 +133,6 @@ If the auditor discovers a viability threat (not just a quality issue), bypass t
 
 The auditor is additive — it catches issues during CODE that would otherwise only surface in TEST or review, when the cost of correction is higher.
 
-**Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals feed into S4 dynamic model update triggers, prompting the orchestrator to reassess plan viability.
+**Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals should prompt an S4 checkpoint to reassess plan viability.
 
 ---

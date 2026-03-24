@@ -29,6 +29,4 @@ Metadata: `{"stalled": true, "reason": "..."}` | `{"failed": true, "reason": "..
 
 **Convention**: All non-happy-path terminations use `completed` with metadata — no `failed` status exists. This preserves the `pending → in_progress → completed` lifecycle.
 
-For enhanced recovery patterns including organizational state snapshots, see [pact-self-repair.md](pact-self-repair.md).
-
 ---

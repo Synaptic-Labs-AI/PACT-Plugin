@@ -7,9 +7,7 @@ Codifies the canonical variety scoring thresholds from pact-variety.md.
 The orchestrator continues reasoning about variety; this module provides
 the deterministic scoring backbone.
 
-Phase 1 functions: validate_dimension, score_variety, route_workflow
-Phase 3 functions: apply_learning_ii_adjustment, compute_calibration_drift,
-                   apply_calibration_adjustment
+Functions: validate_dimension, score_variety, route_workflow
 """
 
 from __future__ import annotations
@@ -50,16 +48,7 @@ LEARNING_II_MIN_MATCHES = 5
 LEARNING_II_MAX_BUMP = 1  # max +1 per dimension
 
 # ---------------------------------------------------------------------------
-# Calibration feedback parameters
-# ---------------------------------------------------------------------------
-CALIBRATION_WINDOW_SIZE = 5
-CALIBRATION_MIN_SAMPLES = 5
-CALIBRATION_MAX_ADJUSTMENT = 1  # max +/-1 total score adjustment
-CALIBRATION_NOISE_THRESHOLD = 1.0  # abs(drift) must meet or exceed this
-
-
-# ---------------------------------------------------------------------------
-# Phase 1 functions
+# Functions
 # ---------------------------------------------------------------------------
 
 
@@ -144,119 +133,3 @@ def route_workflow(score: int) -> str:
     if score <= PLAN_MODE_MAX:
         return ROUTE_PLAN_MODE
     return ROUTE_RESEARCH_SPIKE
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 functions
-# ---------------------------------------------------------------------------
-
-
-def apply_learning_ii_adjustment(
-    base_score: int,
-    domain: str,
-    calibration_matches: int,
-) -> int:
-    """Apply Learning II pattern-adjusted scoring.
-
-    If sufficient calibration matches exist for the domain, bumps the
-    score by +1. The specific dimension to bump is determined by the
-    orchestrator's reasoning, not this function — this function applies
-    the aggregate bump to the total score.
-
-    Args:
-        base_score: Original variety score (4-16)
-        domain: Task domain string (e.g., "auth", "hooks"). The caller
-            pre-filters calibration matches by domain before passing the
-            count; this parameter is retained for API consistency and
-            future domain-specific scoring extensions.
-        calibration_matches: Number of matching pact-memory entries
-
-    Returns:
-        Adjusted score (base_score or base_score + 1, clamped to MAX_SCORE)
-    """
-    if calibration_matches < LEARNING_II_MIN_MATCHES:
-        return base_score
-    return min(base_score + LEARNING_II_MAX_BUMP, MAX_SCORE)
-
-
-def compute_calibration_drift(
-    calibration_records: list[dict],
-    domain: str,
-) -> float:
-    """Compute mean drift from calibration records for a domain.
-
-    Filters records by domain, takes the most recent CALIBRATION_WINDOW_SIZE,
-    and computes mean(actual - initial).
-
-    Args:
-        calibration_records: List of CalibrationRecord dicts. Each should
-            contain 'domain', 'actual_difficulty_score',
-            'initial_variety_score', and optionally 'timestamp' for
-            recency ordering. Records missing score fields are skipped.
-        domain: Domain to filter by
-
-    Returns:
-        Mean drift (positive = underestimation, negative = overestimation).
-        Returns 0.0 if insufficient samples (< CALIBRATION_MIN_SAMPLES).
-    """
-    # Filter by domain (case-insensitive)
-    domain_lower = domain.lower()
-    domain_records = [
-        r for r in calibration_records
-        if r.get("domain", "").lower() == domain_lower
-    ]
-
-    if len(domain_records) < CALIBRATION_MIN_SAMPLES:
-        return 0.0
-
-    # Sort by timestamp descending (most recent first) if timestamps exist,
-    # otherwise take the first N records (assuming append-order).
-    # Note: records without timestamps get sort key "" which sorts to
-    # the front with reverse=True, treating them as most recent.
-    if any(r.get("timestamp") for r in domain_records):
-        domain_records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
-
-    window = domain_records[:CALIBRATION_WINDOW_SIZE]
-
-    # Skip records missing either score field (defensive against malformed data)
-    scored = [
-        r for r in window
-        if r.get("actual_difficulty_score") is not None
-        and r.get("initial_variety_score") is not None
-    ]
-    if not scored:
-        return 0.0
-
-    total_drift = sum(
-        r["actual_difficulty_score"] - r["initial_variety_score"]
-        for r in scored
-    )
-    return total_drift / len(scored)
-
-
-def apply_calibration_adjustment(
-    base_score: int,
-    drift: float,
-) -> int:
-    """Apply calibration-based score adjustment.
-
-    Args:
-        base_score: Score after Learning II adjustment (4-16)
-        drift: Mean drift from compute_calibration_drift
-
-    Returns:
-        Adjusted score, clamped to [MIN_SCORE, MAX_SCORE].
-        Adjustment is at most +/-CALIBRATION_MAX_ADJUSTMENT.
-        No adjustment if abs(drift) < CALIBRATION_NOISE_THRESHOLD.
-    """
-    if abs(drift) < CALIBRATION_NOISE_THRESHOLD:
-        return base_score
-
-    # Clamp adjustment to +/-1
-    adjustment = max(
-        -CALIBRATION_MAX_ADJUSTMENT,
-        min(round(drift), CALIBRATION_MAX_ADJUSTMENT),
-    )
-
-    # Clamp result to valid score range
-    return max(MIN_SCORE, min(base_score + adjustment, MAX_SCORE))

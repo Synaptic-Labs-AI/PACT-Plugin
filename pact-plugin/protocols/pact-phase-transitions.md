@@ -7,8 +7,6 @@
 
 Keep it brief. No templates required.
 
-**Transduction fidelity** (see [pact-transduction.md](pact-transduction.md)): Handoffs cross VSM boundaries. Ensure lossless fields (`produced`, `integration_points`, `open_questions`) are complete and verifiable. Lossy fields (`reasoning_chain`, detailed rationale) remain available on-demand via `TaskGet` — they are compressed, not discarded.
-
 ---
 ## Test Engagement
 

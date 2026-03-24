@@ -4,8 +4,6 @@ Tests for CalibrationRecord schema validation and consistency.
 Tests cover:
 1. CalibrationRecord schema: required fields, types
 2. Schema consistency between architecture doc and pact-variety.md protocol
-3. Learning II + calibration interaction (both at threshold=5)
-4. Calibration record roundtrip validation
 """
 import sys
 from pathlib import Path
@@ -15,16 +13,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared.variety_scorer import (
-    CALIBRATION_MAX_ADJUSTMENT,
-    CALIBRATION_MIN_SAMPLES,
-    CALIBRATION_NOISE_THRESHOLD,
-    CALIBRATION_WINDOW_SIZE,
     LEARNING_II_MIN_MATCHES,
     MAX_SCORE,
     MIN_SCORE,
-    apply_calibration_adjustment,
-    apply_learning_ii_adjustment,
-    compute_calibration_drift,
 )
 
 PROTOCOLS_DIR = Path(__file__).parent.parent / "protocols"
@@ -151,107 +142,3 @@ class TestSchemaProtocolConsistency:
 
     def test_protocol_has_timestamp(self, variety_content):
         assert "timestamp" in variety_content
-
-
-# =============================================================================
-# Learning II + Calibration interaction
-# =============================================================================
-
-
-class TestLearningCalibrationInteraction:
-    """Test the two feedback layers operating together."""
-
-    def test_both_layers_same_threshold(self):
-        """Both Learning II and calibration have 5-sample threshold."""
-        assert LEARNING_II_MIN_MATCHES == CALIBRATION_MIN_SAMPLES == 5
-
-    def test_learning_ii_fires_before_calibration(self):
-        """Learning II (qualitative) can fire even if calibration data insufficient."""
-        # 5 matching memories but 0 calibration records
-        base = 8
-        adjusted = apply_learning_ii_adjustment(base, "auth", 5)
-        assert adjusted == 9  # Learning II bumps
-
-        # Calibration has no records -> no drift
-        drift = compute_calibration_drift([], "auth")
-        assert drift == 0.0
-
-        # Final score after both layers: 9 (only Learning II fired)
-        final = apply_calibration_adjustment(adjusted, drift)
-        assert final == 9
-
-    def test_both_layers_fire_independently(self):
-        """When both have enough data, both adjust."""
-        base = 8
-
-        # Learning II: 5+ matches -> +1
-        after_l2 = apply_learning_ii_adjustment(base, "auth", 6)
-        assert after_l2 == 9
-
-        # Calibration: positive drift -> +1 more
-        records = [
-            {"domain": "auth", "initial_variety_score": 8,
-             "actual_difficulty_score": 11}
-            for _ in range(5)
-        ]
-        drift = compute_calibration_drift(records, "auth")
-        assert drift == 3.0  # mean(11-8) = 3.0
-
-        after_cal = apply_calibration_adjustment(after_l2, drift)
-        assert after_cal == 10  # 9 + 1 (clamped adjustment)
-
-    def test_combined_clamped_at_max(self):
-        """Combined adjustments cannot exceed MAX_SCORE."""
-        base = 15
-
-        # Learning II: +1 -> 16
-        after_l2 = apply_learning_ii_adjustment(base, "auth", 5)
-        assert after_l2 == 16
-
-        # Calibration: large positive drift -> would want +1 more, but clamped
-        records = [
-            {"domain": "auth", "initial_variety_score": 8,
-             "actual_difficulty_score": 14}
-            for _ in range(5)
-        ]
-        drift = compute_calibration_drift(records, "auth")
-        after_cal = apply_calibration_adjustment(after_l2, drift)
-        assert after_cal == MAX_SCORE  # Cannot exceed 16
-
-    def test_calibration_fires_without_learning_ii(self):
-        """Calibration works even with insufficient Learning II matches."""
-        base = 8
-
-        # Learning II: only 2 matches -> no bump
-        after_l2 = apply_learning_ii_adjustment(base, "auth", 2)
-        assert after_l2 == 8
-
-        # Calibration: 5 records with positive drift -> +1
-        records = [
-            {"domain": "auth", "initial_variety_score": 8,
-             "actual_difficulty_score": 10}
-            for _ in range(5)
-        ]
-        drift = compute_calibration_drift(records, "auth")
-        after_cal = apply_calibration_adjustment(after_l2, drift)
-        assert after_cal == 9
-
-    def test_opposing_adjustments_cancel(self):
-        """Learning II bumps up, calibration bumps down -> net effect."""
-        base = 10
-
-        # Learning II: +1 -> 11
-        after_l2 = apply_learning_ii_adjustment(base, "auth", 5)
-        assert after_l2 == 11
-
-        # Calibration: overestimation (negative drift) -> -1
-        records = [
-            {"domain": "auth", "initial_variety_score": 10,
-             "actual_difficulty_score": 7}
-            for _ in range(5)
-        ]
-        drift = compute_calibration_drift(records, "auth")
-        assert drift == -3.0
-
-        after_cal = apply_calibration_adjustment(after_l2, drift)
-        assert after_cal == 10  # 11 - 1 = 10 (net zero)

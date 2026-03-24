@@ -139,35 +139,6 @@ When dispatching agents during parallel execution, the codebase may have changed
 
 **Skip when**: Single-agent execution (no parallel agents = no drift risk).
 
-### Semantic Overlap Detection
-
-Beyond file-level conflicts (Layer 1, handled by Pre-Parallel Coordination Check above), agents can semantically overlap — implementing the same concept independently even when touching different files.
-
-**Three-layer detection**:
-
-| Layer | What It Checks | Precision | Cost |
-|-------|---------------|-----------|------|
-| 1. File scope intersection | Assigned file paths overlap | High | Cheap (set intersection) |
-| 2. Interface contract overlap | Shared dependencies, data types, or API endpoints | High | Cheap (metadata comparison) |
-| 3. Semantic field matching | Task description keyword extraction + concept clustering | Medium | Medium (keyword extraction) |
-
-**Layer 2 — Interface Contract Overlap**: Compare structured metadata fields across agent tasks. If agents share dependencies, data types, or API endpoints, flag as potential overlap. The orchestrator populates these fields during CODE phase dispatch as part of the "define boundaries" step.
-
-**Layer 3 — Semantic Field Matching**: Extract significant terms from task descriptions (filtering common stop words like "error", "validation", "config", "handler", "service", "model"). Cluster by prefix (e.g., "auth-flow", "auth-token" → "auth"). If agents share 2+ concepts, flag for review.
-
-**Severity matrix**:
-
-| Layers Triggered | Severity | Recommended Action |
-|-----------------|----------|-------------------|
-| Layer 1 only | **High** | Sequence or assign strict file boundaries |
-| Layer 2 only | **Medium** | Define contract authority; document who owns the shared interface |
-| Layer 3 only | **Low** | Note for review; may self-resolve; pass to auditor as focus area |
-| Layer 1 + 2 | **High** | Must resolve before parallel dispatch |
-| Layer 2 + 3 | **Medium** | Define contracts + assign concept ownership |
-| All three | **Critical** | Consider sequencing instead of parallel |
-
-**Integration**: Run semantic overlap detection during S2 Pre-Parallel Check. Layer 1 is already implemented above. Layers 2 and 3 extend the check with richer metadata analysis. If the concurrent auditor is active, pass Layer 3 (Low severity) findings as focus areas.
-
 ---
 ## Backend ↔ Database Boundary
 

@@ -105,15 +105,6 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 
    *Verification*: At final gates (TEST→PR, comPACT, plan-mode), `SendMessage` to the completing specialist to confirm your understanding. At intermediate boundaries, the downstream agent's teachback verifies shared understanding. Background: [pact-ct-teachback.md](pact-ct-teachback.md).
 
-5. **Model Completeness (Conant-Ashby)**: Is the orchestrator's internal model adequate for regulation?
-   - State tracking fidelity: Do task statuses and agent states reflect actual progress?
-   - Assumption validity: Have any environment model assumptions been invalidated?
-   - Predictive accuracy: Did estimates and risk assessments match outcomes?
-
-   > **Cybernetic basis**: Conant-Ashby theorem — "Every good regulator of a system must be a model
-   > of that system." This question is meta-regulatory: questions 1-4 assess the project state;
-   > question 5 asks whether the orchestrator's own model is sufficient for effective regulation.
-
 ### Checkpoint Outcomes
 
 | Finding | Action |
@@ -130,7 +121,6 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Model: [aligned / diverged: {what}]
 > - Plan: [viable / adapt: {how} / escalate: {why}]
 > - Agreement: [verified / corrected: {what}]
-> - Regulation: [adequate / degraded: {what}]
 
 ### Output Behavior
 
@@ -139,7 +129,7 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 **Examples**:
 
 *Silent (all clear)*:
-> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified, regulation adequate → continue
+> (Internal) S4 Checkpoint Post-PREPARE: Environment stable, model aligned, plan viable, agreement verified → continue
 
 *Surfaces to user (issue detected)*:
 > **S4 Checkpoint** [PREPARE→ARCHITECT]:
@@ -147,7 +137,6 @@ At phase boundaries, the orchestrator performs an S4 checkpoint to assess whethe
 > - Model: Diverged — Assumed backwards compatibility, now false
 > - Plan: Adapt — Need PREPARE extension to research v3 migration path
 > - Agreement: Corrected — Preparer assumed v2 compatibility; confirmed v3 migration needed
-> - Regulation: Degraded — Variety score 6 proved too low; actual difficulty warranted orchestrate, not comPACT
 
 ### Relationship to Variety Checkpoints
 
@@ -223,20 +212,6 @@ Created during PREPARE phase, referenced during S4 checkpoints.
 | New constraint discovered | Add to model, assess impact |
 | Unknown resolved | Move from Unknowns to appropriate section |
 | Model significantly outdated | Consider returning to PREPARE |
-
-### Dynamic Model Update Triggers
-
-Beyond manual updates, certain runtime signals should trigger automatic model reassessment:
-
-| Trigger | Source | Model Update |
-|---------|--------|-------------|
-| S2 semantic overlap detected | S2 coordination layer | Add newly discovered interface dependencies to External Dependencies |
-| Agent blocker on missing dependency | imPACT triage | Add dependency to model; reassess Constraints |
-| Calibration drift > 2 in any dimension | Calibration feedback loop | Re-examine Unknowns — systematic blind spot likely |
-| Auditor RED signal | Concurrent audit protocol | Cross-reference against model assumptions — architecture drift may indicate invalidated constraint |
-| 3+ imPACT cycles | Algedonic META-BLOCK | Model likely insufficient — trigger full model review |
-
-**Integration with Conant-Ashby**: When S4 checkpoint question 5 (Model Completeness) detects degraded regulation, dynamic triggers ensure the environment model updates reflect the gap. The model must stay current for effective regulation — stale models produce stale regulation.
 
 ### Relationship to S4 Checkpoints
 
@@ -561,35 +536,6 @@ When dispatching agents during parallel execution, the codebase may have changed
 
 **Skip when**: Single-agent execution (no parallel agents = no drift risk).
 
-### Semantic Overlap Detection
-
-Beyond file-level conflicts (Layer 1, handled by Pre-Parallel Coordination Check above), agents can semantically overlap — implementing the same concept independently even when touching different files.
-
-**Three-layer detection**:
-
-| Layer | What It Checks | Precision | Cost |
-|-------|---------------|-----------|------|
-| 1. File scope intersection | Assigned file paths overlap | High | Cheap (set intersection) |
-| 2. Interface contract overlap | Shared dependencies, data types, or API endpoints | High | Cheap (metadata comparison) |
-| 3. Semantic field matching | Task description keyword extraction + concept clustering | Medium | Medium (keyword extraction) |
-
-**Layer 2 — Interface Contract Overlap**: Compare structured metadata fields across agent tasks. If agents share dependencies, data types, or API endpoints, flag as potential overlap. The orchestrator populates these fields during CODE phase dispatch as part of the "define boundaries" step.
-
-**Layer 3 — Semantic Field Matching**: Extract significant terms from task descriptions (filtering common stop words like "error", "validation", "config", "handler", "service", "model"). Cluster by prefix (e.g., "auth-flow", "auth-token" → "auth"). If agents share 2+ concepts, flag for review.
-
-**Severity matrix**:
-
-| Layers Triggered | Severity | Recommended Action |
-|-----------------|----------|-------------------|
-| Layer 1 only | **High** | Sequence or assign strict file boundaries |
-| Layer 2 only | **Medium** | Define contract authority; document who owns the shared interface |
-| Layer 3 only | **Low** | Note for review; may self-resolve; pass to auditor as focus area |
-| Layer 1 + 2 | **High** | Must resolve before parallel dispatch |
-| Layer 2 + 3 | **Medium** | Define contracts + assign concept ownership |
-| All three | **Critical** | Consider sequencing instead of parallel |
-
-**Integration**: Run semantic overlap detection during S2 Pre-Parallel Check. Layer 1 is already implemented above. Layers 2 and 3 extend the check with richer metadata analysis. If the concurrent auditor is active, pass Layer 3 (Low severity) findings as focus areas.
-
 ---
 
 ## S1 Autonomy & Recursion
@@ -677,79 +623,6 @@ Viability-threatening conditions bypass normal orchestration and escalate direct
 | **ALERT** | QUALITY, SCOPE, META-BLOCK | Work pauses; user decides |
 
 **Key rules**: Any agent can emit. Orchestrator MUST surface immediately. HALT with parallel agents: broadcast stop, preserve WIP. imPACT handles operational blockers; algedonic handles viability threats. 3+ imPACT cycles without resolution → ALERT (META-BLOCK).
-
----
-
-## Transduction Protocol
-
-> **Cybernetic basis**: Stafford Beer's concept of transduction — information is reconceptualized
-> when crossing VSM level boundaries. Distinct from Shannon's source coding (compression efficiency),
-> which is addressed by the Channel Capacity protocol.
-
-Transduction defines how information transforms as it crosses boundaries between VSM levels in PACT. Each boundary crossing requires translation because the receiving system operates in a different information domain than the sender.
-
-### Boundary Crossings in PACT
-
-| Crossing | From → To | Translation Required |
-|----------|-----------|---------------------|
-| S1 → S3 | Agent implementation details → Orchestrator operational status | Compress: specific file changes → summary of decisions and produced artifacts |
-| S3 → S4 | Orchestrator execution state → Strategic assessment | Abstract: task progress → phase viability, risk profile, adaptation needs |
-| S4 → S5 | Strategic intelligence → Policy-level decisions | Frame: analysis → decision-ready options with trade-offs (S5 Decision Framing) |
-| S3 → S1 | Orchestrator dispatch → Agent working context | Expand: task assignment → full context with references, boundaries, guidelines |
-
-### Lossless vs. Lossy Fields
-
-Not all handoff fields carry equal fidelity requirements. Some fields must survive boundary crossings intact; others are intentionally compressed because the receiver operates at a different abstraction level.
-
-**Lossless fields** (must survive intact across boundaries):
-- `produced` — File paths and artifacts created/modified (concrete, verifiable)
-- `integration_points` — Components touched beyond the agent's primary scope
-- `open_questions` — Unresolved items that affect downstream work
-
-**Lossy fields** (intentionally compressed at boundaries):
-- `reasoning_chain` — Implementation reasoning is relevant to the coder's peers and test engineer, but the orchestrator only needs the resulting decisions
-- `key_decisions` — Full rationale compresses to decision + brief justification at S3 level; further compresses to just the decision at S4 level
-- `areas_of_uncertainty` — Priority levels survive; detailed descriptions compress to risk categories
-
-**Why lossy?** Not bandwidth — information domain mismatch. A coder's reasoning about algorithm choice is meaningful to another coder but noise to the orchestrator making phase-transition decisions. The information isn't lost; it's in the task metadata for on-demand retrieval via `TaskGet`.
-
-### Transduction Fidelity Standards
-
-At each boundary crossing, verify that essential information survived translation:
-
-| Standard | Check | Failure Signal |
-|----------|-------|----------------|
-| **Completeness** | All lossless fields present in handoff | Missing `produced` or `integration_points` in handoff metadata |
-| **Accuracy** | Produced files actually exist; integration points are real | File listed in `produced` not found in `git diff`; referenced component doesn't exist |
-| **Relevance** | Information matches the receiver's domain | S4 checkpoint receiving implementation-level detail instead of viability assessment |
-| **Actionability** | Receiver can act on the information without requesting clarification | Orchestrator needs to `TaskGet` for basic status; agent needs follow-up `SendMessage` for unclear dispatch |
-
-### Handoff as Transduction
-
-The HANDOFF format (see CLAUDE.md "Expected Agent HANDOFF Format") is PACT's primary transduction mechanism. Each field maps to a fidelity category:
-
-| HANDOFF Field | Fidelity | Boundary Behavior |
-|---------------|----------|-------------------|
-| 1. Produced | Lossless | Passes intact through all boundaries |
-| 2. Key decisions | Lossy | Compresses at S3→S4 (rationale drops, decision survives) |
-| 3. Reasoning chain | Lossy | Available on-demand via `TaskGet`; not forwarded by default |
-| 4. Areas of uncertainty | Mixed | Priority levels lossless; descriptions lossy (compress to categories) |
-| 5. Integration points | Lossless | Passes intact; critical for cross-agent coordination |
-| 6. Open questions | Lossless | Must survive to reach decision-maker (may be S3 or S5) |
-
-### Transduction Quality Indicators
-
-The orchestrator can assess transduction quality at phase boundaries:
-
-- **High fidelity**: Downstream agents start work without requesting clarification; test engineer's focus matches coder's flagged uncertainties
-- **Degraded fidelity**: Agents send `SendMessage` asking for information that should have been in the handoff; test engineer discovers issues not flagged in uncertainty priorities
-- **Failed transduction**: Agent works on wrong problem due to missing context; phase produces output misaligned with upstream intent
-
-### Relationship to Other Protocols
-
-- **Channel Capacity** ([pact-channel-capacity.md](pact-channel-capacity.md)): Addresses throughput limits (how much information can cross a boundary per interaction). Transduction addresses translation quality (whether information retains meaning across boundaries).
-- **S4 Checkpoints** ([pact-s4-checkpoints.md](pact-s4-checkpoints.md)): Question 4 (Shared Understanding) directly tests transduction fidelity between orchestrator and specialist.
-- **Phase Transitions** ([pact-phase-transitions.md](pact-phase-transitions.md)): Handoff format operationalizes transduction at phase boundaries.
 
 ---
 
@@ -874,43 +747,6 @@ CalibrationRecord:
 3. Notes blocker count and phase reruns as difficulty indicators
 4. Saves calibration record to pact-memory via secretary task
 5. If drift exceeds 2 in any dimension, note as significant for future Learning II queries
-
-### Calibration Feedback Loop
-
-> **Cybernetic basis**: Bateson's deutero-learning extended — beyond pattern detection (Learning II),
-> the system uses quantitative calibration data to auto-adjust scoring with damping.
-
-The calibration feedback loop provides automatic variety score adjustment based on accumulated calibration records. It operates alongside Learning II (qualitative pattern matching) as a quantitative complement.
-
-**Two feedback layers**:
-
-| Layer | Type | Activation | Effect |
-|-------|------|-----------|--------|
-| **Learning II** | Qualitative (pattern matching) | 5+ matching pact-memory entries for domain | +1 to relevant dimension |
-| **Calibration feedback** | Quantitative (drift measurement) | 5+ calibration records for domain | +/-1 to total score |
-
-**Algorithm** (windowed average with domain scoping):
-1. Filter calibration records by task domain
-2. Take most recent 5 records (window)
-3. If fewer than 5 records: no adjustment (cold start)
-4. Compute drift = mean(actual_difficulty - initial_variety) across window
-5. If abs(drift) < 1.0: no adjustment (within noise threshold)
-6. Adjustment = clamp(round(drift), -1, +1)
-7. Apply to base score, clamped to valid range (4-16)
-
-**Parameters**:
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Window size | 5 | Balances recency with stability |
-| Minimum samples | 5 per domain | Prevents cold-start overcorrection |
-| Max adjustment | +/-1 total | Prevents large jumps from single feedback cycle |
-| Noise threshold | 1.0 | Drift below this is random variation, not signal |
-| Domain scoping | Records keyed by domain string | "auth" calibrations don't affect "frontend" scoring |
-
-**Application order**: Learning II adjustment first (dimension-level), then calibration feedback (score-level). Both adjustments are clamped independently.
-
-**Cold-start behavior**: When a domain has fewer than 5 calibration records, Learning II (qualitative) may still fire if 5+ memories match. The system has two independent activation paths — either can provide value alone.
 
 ---
 
@@ -1074,6 +910,12 @@ When comPACT dispatches multiple specialists in parallel, consider attaching an 
 2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
 4. **Create atomic commit(s)** — stage and commit before proceeding
+5. **Save CalibrationRecord** — Compare initial variety assessment to actual difficulty encountered. Route via secretary TaskCreate:
+   ```
+   TaskCreate(subject="secretary: save calibration record",
+     description="Save a CalibrationRecord to pact-memory. Data: domain={domain}, initial_variety_score={score}, actual_difficulty_score={actual}, dimensions_that_drifted=[...], blocker_count={n}, phase_reruns=0. Include entities: orchestration_calibration, {domain}.")
+   TaskUpdate(taskId, owner="secretary")
+   ```
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`
@@ -1095,8 +937,6 @@ When comPACT dispatches multiple specialists in parallel, consider attaching an 
 3. What the next agent needs to know
 
 Keep it brief. No templates required.
-
-**Transduction fidelity** (see [pact-transduction.md](pact-transduction.md)): Handoffs cross VSM boundaries. Ensure lossless fields (`produced`, `integration_points`, `open_questions`) are complete and verifiable. Lossy fields (`reasoning_chain`, detailed rationale) remain available on-demand via `TaskGet` — they are compressed, not discarded.
 
 ---
 
@@ -1310,8 +1150,6 @@ When an agent cannot complete normally (stall, failure, or unresolvable blocker)
 Metadata: `{"stalled": true, "reason": "..."}` | `{"failed": true, "reason": "..."}` | `{"blocked": true, "blocker_task": "..."}`
 
 **Convention**: All non-happy-path terminations use `completed` with metadata — no `failed` status exists. This preserves the `pending → in_progress → completed` lifecycle.
-
-For enhanced recovery patterns including organizational state snapshots, see [pact-self-repair.md](pact-self-repair.md).
 
 ---
 
@@ -1793,157 +1631,7 @@ If the auditor discovers a viability threat (not just a quality issue), bypass t
 
 The auditor is additive — it catches issues during CODE that would otherwise only surface in TEST or review, when the cost of correction is higher.
 
-**Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals feed into S4 dynamic model update triggers, prompting the orchestrator to reassess plan viability.
-
----
-
-## Self-Repair Protocol
-
-> **Cybernetic basis**: Maturana & Varela's autopoiesis — a living system continuously regenerates
-> its own components while maintaining its organizational identity. In PACT, the "organization"
-> is the VSM structure (S1-S5 roles, phase sequence, coordination protocols); the "structure"
-> is the current instantiation (active agents, tasks, session state).
-
-Self-repair enables PACT to reconstitute its operational structure after disruptions (agent failures, session interruptions, context compaction) while preserving its organizational identity.
-
-### Organization vs. Structure
-
-| Concept | Definition | PACT Example | Survives Disruption? |
-|---------|-----------|--------------|---------------------|
-| **Organization** | Invariant pattern of relations | VSM roles, phase sequence P→A→C→T, coordination protocols | Yes (defined in protocols) |
-| **Structure** | Current instantiation of relations | Which agents are running, current tasks, session state | No (must be reconstituted) |
-
-**Key insight**: Self-repair reconstitutes *structure*, not organization. The organization is already defined in protocols and CLAUDE.md. Recovery means rebuilding the current state to match the invariant pattern.
-
-### Pattern 1: Organizational State Snapshot (Prevention)
-
-At defined checkpoints, capture a snapshot of the system's organizational state to enable recovery.
-
-**When to capture**: At phase boundaries (same trigger as S4 checkpoints). Store in task metadata on the feature task via `TaskUpdate`.
-
-**Snapshot fields**:
-- `vsm_roles`: Which agents fill which VSM roles (S1 specialists, S2 conventions, S3 orchestrator state)
-- `memory_layers`: Status of auto-memory, pact-memory, agent persistent memory
-- `regulatory_mechanisms`: Which hooks/gates are active (completion gate, breadcrumb file, handoff validation)
-- `phase_state`: Current phase, completed phases, pending work
-
-**Recovery use**: After session interruption or context compaction, read the snapshot via `TaskGet` to reconstruct system state rather than inferring it from scattered signals.
-
-### Pattern 2: Agent Boundary Reconstitution (Recovery)
-
-When an agent fails (stall detected, context exhausted), spawn a replacement with recovered context.
-
-**Steps**:
-1. **Detect**: Stall detection (see [pact-agent-stall.md](pact-agent-stall.md)) identifies failed agent
-2. **Assess**: Before spawning replacement, verify the *role* needs filling — if the phase has progressed past needing that specialist, don't replace
-3. **Recover context**:
-   - Extract partial work from failed agent's task metadata and file changes (`git diff`)
-   - Query peer agent outputs via `TaskList`/`TaskGet` for context accumulated since failed agent was briefed
-   - Check environment drift via `file-edits.json` for files modified since failure
-4. **Spawn**: Create replacement agent with recovered context in dispatch prompt
-5. **Verify**: After replacement starts, verify VSM structure is intact (all necessary roles filled, coordination protocols active)
-
-**Extends**: pact-agent-stall.md (which handles detection and basic recovery). This protocol adds boundary awareness, enhanced context recovery, and organizational integrity verification.
-
-### Recovery Context Sources
-
-| Source | What It Provides | Access Method |
-|--------|-----------------|---------------|
-| Task system | Task states, metadata, handoffs | `TaskList`, `TaskGet` |
-| Git state | Commits, branches, file changes | `git log`, `git diff`, `git worktree list` |
-| pact-memory | Institutional knowledge, calibration data | Secretary query via `SendMessage` |
-| Breadcrumb file | Temporal ordering of completions | Read `~/.claude/pact-sessions/{slug}/breadcrumbs.jsonl` |
-| paused-state.json | Session checkpoint | Read `~/.claude/pact-sessions/{slug}/paused-state.json` |
-| Organizational snapshot | VSM state at last checkpoint | `TaskGet(featureTaskId).metadata.org_snapshot` |
-| Structured error output | Last hook failure context | Hook JSON output (see `error_output.py`) |
-
-### Relationship to Other Protocols
-
-- **Agent Stall Detection** ([pact-agent-stall.md](pact-agent-stall.md)): Detects failures; self-repair provides the recovery framework
-- **S4 Checkpoints** ([pact-s4-checkpoints.md](pact-s4-checkpoints.md)): Question 5 (Conant-Ashby) assesses whether the model is adequate for regulation — self-repair acts when regulation has degraded
-- **Channel Capacity** ([pact-channel-capacity.md](pact-channel-capacity.md)): Context compaction is a structural disruption; self-repair provides recovery patterns for post-compaction state reconstruction
-- **State Recovery** (CLAUDE.md): Existing protocol provides the procedural steps; self-repair adds organizational awareness and verification
-
----
-
-## Channel Capacity Management
-
-> **Cybernetic basis**: Shannon's Channel Capacity Theorem — every communication channel has a
-> finite throughput. In PACT, the "channel" is the context window; exceeding capacity degrades
-> signal quality. Distinct from source coding (handoff compression), which is addressed by the
-> Transduction Protocol.
-
-Channel capacity defines how much information can cross a VSM boundary per interaction without degradation, and what to do when capacity is approached.
-
-### Context Window as Channel
-
-| Property | Shannon Channel | PACT Context Window |
-|----------|----------------|---------------------|
-| **Capacity** | Bits per second | Tokens per interaction |
-| **Noise** | Physical interference | Irrelevant context, stale state, compaction artifacts |
-| **Throughput** | Data rate | Useful information processed per phase |
-| **Error** | Bit errors | Misunderstood requirements, dropped context, hallucinated state |
-
-### Capacity Indicators
-
-The orchestrator monitors these signals to assess current channel load:
-
-| Indicator | Healthy | Degraded | Critical |
-|-----------|---------|----------|----------|
-| **Compaction frequency** | 0-1 per phase | 2-3 per phase | 4+ per phase |
-| **State reconstruction** | Not needed | Occasional TaskGet for recovery | Frequent state loss requiring full reconstruction |
-| **Agent dispatch clarity** | Agents start work without clarification | Occasional teachback corrections | Agents frequently misunderstand assignments |
-| **Handoff fidelity** | Lossless fields intact | Some fields missing, recoverable | Critical fields lost, requires re-work |
-
-### Batch Protocol
-
-When capacity indicators show degradation, batch information to reduce boundary crossings:
-
-**Batching strategies**:
-1. **Combine handoffs**: If multiple agents complete near-simultaneously, process handoffs in one batch rather than interleaving with other work
-2. **Defer non-critical updates**: CLAUDE.md updates, memory processing, and status reporting can be deferred to natural pauses
-3. **Compress dispatch context**: For subsequent agents, reference upstream task IDs for `TaskGet` retrieval rather than inlining full context
-4. **Prioritize lossless fields**: When summarizing, preserve lossless fields (produced, integration_points, open_questions) and compress lossy fields (reasoning_chain, detailed rationale)
-
-### Capacity Signals
-
-```
-📊 CAPACITY SIGNAL: [NOMINAL|ELEVATED|CRITICAL]
-
-Current load: [compaction count / dispatch clarity / handoff fidelity]
-Trend: [stable / increasing / decreasing]
-Recommended action: [continue | batch | compact | pause-and-recover]
-```
-
-| Signal | Meaning | Action |
-|--------|---------|--------|
-| **NOMINAL** | Capacity healthy | Continue normal operations |
-| **ELEVATED** | Approaching limits | Batch handoffs; compress dispatch context; defer non-critical work |
-| **CRITICAL** | Capacity exceeded | Pause dispatching; recover state via TaskGet; consider session checkpoint |
-
-### Active Back-Pressure
-
-When capacity signals indicate ELEVATED or CRITICAL, the orchestrator applies back-pressure to reduce throughput demands:
-
-**ELEVATED back-pressure**:
-- Sequence remaining agent dispatches instead of parallel (reduce concurrent load)
-- Compress dispatch prompts to essential context + TaskGet references
-- Defer memory processing and CLAUDE.md updates to next natural pause
-- Request shorter progress signals from agents ("summary only, skip reasoning")
-
-**CRITICAL back-pressure**:
-- Pause all new agent dispatches
-- Trigger session checkpoint via `/PACT:pause` (persists state to paused-state.json)
-- Invoke self-repair Pattern 1 (organizational state snapshot) before proceeding
-- If resuming: use TaskGet + organizational snapshot for state reconstruction instead of re-reading files
-
-**Self-regulation**: Back-pressure is the orchestrator's primary response to its own capacity limits. It bridges the gap between observing capacity degradation (monitoring) and acting on it (adaptation). The orchestrator should apply back-pressure before capacity signals reach CRITICAL — early intervention at ELEVATED prevents cascading degradation.
-
-### Relationship to Other Protocols
-
-- **Transduction** ([pact-transduction.md](pact-transduction.md)): Transduction addresses *translation quality* (does meaning survive?). Channel capacity addresses *throughput limits* (can we process this volume?). They are complementary — high-fidelity transduction is meaningless if the channel is overloaded.
-- **S4 Checkpoints** ([pact-s4-checkpoints.md](pact-s4-checkpoints.md)): Capacity degradation should trigger an S4 checkpoint — "Is our approach still viable given capacity constraints?"
-- **Variety Management** ([pact-variety.md](pact-variety.md)): High-variety tasks consume more channel capacity. Variety scoring should inform capacity planning.
+**Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals should prompt an S4 checkpoint to reassess plan viability.
 
 ---
 
