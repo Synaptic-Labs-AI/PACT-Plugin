@@ -232,7 +232,9 @@ You are **exempted from the standard teachback** at spawn. There is no task to t
 
 3. **Search for calibration data**: Search pact-memory for `orchestration_calibration` entries. Summarize by domain: sample count, mean drift direction (underestimating or overestimating difficulty), and whether the 5-sample activation threshold for Learning II is met. Include this in the session briefing so the orchestrator has calibration context before any variety scoring.
 
-4. **Deliver a session briefing** to the lead via `SendMessage`:
+4. **Check for compact summary**: If `~/.claude/pact-sessions/compact-summary.txt` exists, read it and compare against pact-memory context. Flag any discrepancies between the compaction summary and institutional memory. Delete the file after processing (it is single-use — written by the postcompact_verify hook). Include findings in the session briefing.
+
+5. **Deliver a session briefing** to the lead via `SendMessage`:
 
 ```
 SendMessage(to="team-lead",

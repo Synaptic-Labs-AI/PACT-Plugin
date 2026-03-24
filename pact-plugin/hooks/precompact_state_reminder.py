@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/precompact_state_reminder.py
-Summary: PreCompact hook that gathers mechanical state from disk and instructs
-         the orchestrator to persist ephemeral context before compaction.
+Summary: PreCompact hook that gathers mechanical state from disk and emits both
+         custom_instructions (for the compaction model) and a systemMessage
+         (brain dump instructions for the orchestrator).
 Used by: hooks.json PreCompact hook
 
 Reads task files and team config to build a concrete state snapshot:
 - Task counts by status (completed, in_progress, pending)
 - Active teammate names from team config
-- Feature task subject (highest-level non-phase task)
+- Feature task subject and ID (highest-level non-phase task)
+- Current phase (from Phase:-prefixed in_progress tasks)
+- Variety score (from feature task metadata)
+- Team name(s) from team directories
 
-Then emits a systemMessage with that snapshot plus instructions for the
-orchestrator to (a) TaskCreate a brain dump task and (b) SendMessage to
-the secretary with what only exists in the context window.
+Emits two fields:
+- custom_instructions: Injected into the compaction model to guide preservation
+- systemMessage: Brain dump instructions for the orchestrator
 
 This is a non-blocking reminder (always exits 0), not a gate.
 
 Input: JSON from stdin (PreCompact event data)
-Output: JSON systemMessage on stdout
+Output: JSON with custom_instructions and systemMessage on stdout
 """
 
 import json
@@ -32,21 +36,24 @@ from shared.error_output import hook_error_json
 # ---------------------------------------------------------------------------
 
 
-def _gather_task_counts(
+def _gather_task_state(
     tasks_base_dir: str | None = None,
 ) -> dict:
     """
-    Scan all team task directories for task counts by status.
+    Scan all team task directories for task state.
 
     Returns dict with keys: completed, in_progress, pending, total,
-    feature_subject (str or None).
+    feature_subject, feature_id, current_phase, variety_score.
     """
-    counts = {
+    state = {
         "completed": 0,
         "in_progress": 0,
         "pending": 0,
         "total": 0,
         "feature_subject": None,
+        "feature_id": None,
+        "current_phase": None,
+        "variety_score": None,
     }
 
     if tasks_base_dir is None:
@@ -54,7 +61,7 @@ def _gather_task_counts(
 
     base = Path(tasks_base_dir)
     if not base.exists():
-        return counts
+        return state
 
     try:
         for team_dir in base.iterdir():
@@ -69,18 +76,28 @@ def _gather_task_counts(
                     continue
 
                 status = data.get("status", "pending")
-                if status in counts:
-                    counts[status] += 1
-                counts["total"] += 1
+                if status in ("completed", "in_progress", "pending"):
+                    state[status] += 1
+                state["total"] += 1
 
-                # Heuristic: feature task = in_progress task without
-                # "Phase:" or "BLOCKER:" or "ALERT:" or "HALT:" prefix
+                subject = data.get("subject", "")
+                task_id = data.get("id", task_file.stem)
+                metadata = data.get("metadata") or {}
+
+                # Phase detection: in_progress task with "Phase:" prefix
                 if (
                     status == "in_progress"
-                    and counts["feature_subject"] is None
+                    and subject.startswith("Phase:")
+                    and state["current_phase"] is None
                 ):
-                    subject = data.get("subject", "")
-                    if subject and not any(
+                    state["current_phase"] = subject
+
+                # Feature task: in_progress without system prefixes
+                if (
+                    status == "in_progress"
+                    and state["feature_subject"] is None
+                    and subject
+                    and not any(
                         subject.startswith(prefix)
                         for prefix in (
                             "Phase:",
@@ -88,30 +105,38 @@ def _gather_task_counts(
                             "ALERT:",
                             "HALT:",
                         )
-                    ):
-                        counts["feature_subject"] = subject
+                    )
+                ):
+                    state["feature_subject"] = subject
+                    state["feature_id"] = str(task_id)
+
+                    # Variety score from feature task metadata
+                    variety = metadata.get("variety")
+                    if variety is not None:
+                        state["variety_score"] = variety
     except OSError:
         pass  # Can't read base dir — return whatever we have
 
-    return counts
+    return state
 
 
-def _gather_active_teammates(
+def _gather_team_info(
     teams_base_dir: str | None = None,
-) -> list[str]:
+) -> dict:
     """
-    Read team config files for active teammate names.
+    Read team config files for active teammate names and team names.
 
-    Returns list of teammate name strings.
+    Returns dict with keys: teammates (list[str]), team_names (list[str]).
     """
+    info = {"teammates": [], "team_names": []}
+
     if teams_base_dir is None:
         teams_base_dir = str(Path.home() / ".claude" / "teams")
 
     base = Path(teams_base_dir)
     if not base.exists():
-        return []
+        return info
 
-    names: list[str] = []
     try:
         for team_dir in base.iterdir():
             if not team_dir.is_dir():
@@ -124,47 +149,107 @@ def _gather_active_teammates(
             except (json.JSONDecodeError, OSError):
                 continue
 
+            # Track team name from config or directory name
+            team_name = data.get("name", team_dir.name)
+            if team_name:
+                info["team_names"].append(team_name)
+
             # config.json has "members" list with "name" fields
             members = data.get("members", [])
             for member in members:
                 name = member.get("name", "") if isinstance(member, dict) else ""
                 if name:
-                    names.append(name)
+                    info["teammates"].append(name)
     except OSError:
-        pass  # Can't read teams dir — return empty
+        pass  # Can't read teams dir — return defaults
 
-    return names
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Output builders
+# ---------------------------------------------------------------------------
 
 
 def _build_state_summary(
-    task_counts: dict,
-    active_teammates: list[str],
+    task_state: dict,
+    team_info: dict,
 ) -> str:
     """Build a human-readable state summary from gathered data."""
     lines = []
 
     # Task counts
-    total = task_counts["total"]
+    total = task_state["total"]
     if total > 0:
         lines.append(
-            f"Tasks: {task_counts['completed']} completed, "
-            f"{task_counts['in_progress']} in_progress, "
-            f"{task_counts['pending']} pending "
+            f"Tasks: {task_state['completed']} completed, "
+            f"{task_state['in_progress']} in_progress, "
+            f"{task_state['pending']} pending "
             f"(total: {total})"
         )
     else:
         lines.append("Tasks: none found on disk")
 
     # Feature subject
-    feature = task_counts.get("feature_subject")
+    feature = task_state.get("feature_subject")
+    feature_id = task_state.get("feature_id")
     if feature:
-        lines.append(f"Feature: {feature}")
+        id_str = f" (task #{feature_id})" if feature_id else ""
+        lines.append(f"Feature: {feature}{id_str}")
+
+    # Current phase
+    phase = task_state.get("current_phase")
+    if phase:
+        lines.append(f"Current phase: {phase}")
 
     # Active teammates
-    if active_teammates:
-        lines.append(f"Active teammates: {', '.join(active_teammates)}")
+    teammates = team_info.get("teammates", [])
+    if teammates:
+        lines.append(f"Active teammates: {', '.join(teammates)}")
     else:
         lines.append("Active teammates: none found")
+
+    return "\n".join(lines)
+
+
+def build_custom_instructions(
+    task_state: dict,
+    team_info: dict,
+) -> str:
+    """
+    Build custom_instructions for the compaction model.
+
+    These tell the compaction model what critical context to preserve.
+    """
+    lines = ["CRITICAL CONTEXT TO PRESERVE:"]
+
+    feature = task_state.get("feature_subject")
+    feature_id = task_state.get("feature_id")
+    if feature:
+        id_str = f" (task #{feature_id})" if feature_id else ""
+        lines.append(f"- Feature: {feature}{id_str}")
+
+    phase = task_state.get("current_phase")
+    if phase:
+        lines.append(f"- Current phase: {phase}")
+    else:
+        lines.append("- Current phase: unknown")
+
+    teammates = team_info.get("teammates", [])
+    if teammates:
+        lines.append(f"- Active agents: {', '.join(teammates)}")
+    else:
+        lines.append("- Active agents: none found")
+
+    variety = task_state.get("variety_score")
+    if variety is not None:
+        lines.append(f"- Variety score: {variety}")
+
+    team_names = team_info.get("team_names", [])
+    if team_names:
+        lines.append(f"- Team name: {', '.join(team_names)}")
+
+    lines.append("Preserve task IDs and agent names exactly.")
 
     return "\n".join(lines)
 
@@ -194,9 +279,9 @@ def build_message(
 
     Separated from main() for testability. Accepts optional dir overrides.
     """
-    task_counts = _gather_task_counts(tasks_base_dir)
-    active_teammates = _gather_active_teammates(teams_base_dir)
-    state_summary = _build_state_summary(task_counts, active_teammates)
+    task_state = _gather_task_state(tasks_base_dir)
+    team_info = _gather_team_info(teams_base_dir)
+    state_summary = _build_state_summary(task_state, team_info)
 
     return (
         f"Compaction imminent — mechanical state snapshot:\n"
@@ -207,6 +292,36 @@ def build_message(
     )
 
 
+def build_hook_output(
+    tasks_base_dir: str | None = None,
+    teams_base_dir: str | None = None,
+) -> dict:
+    """
+    Build the complete hook output with both custom_instructions and
+    systemMessage.
+
+    Returns dict ready for json.dumps().
+    """
+    task_state = _gather_task_state(tasks_base_dir)
+    team_info = _gather_team_info(teams_base_dir)
+    state_summary = _build_state_summary(task_state, team_info)
+
+    system_message = (
+        f"Compaction imminent — mechanical state snapshot:\n"
+        f"\n"
+        f"{state_summary}\n"
+        f"\n"
+        f"{BRAIN_DUMP_INSTRUCTIONS}"
+    )
+
+    custom_instructions = build_custom_instructions(task_state, team_info)
+
+    return {
+        "custom_instructions": custom_instructions,
+        "systemMessage": system_message,
+    }
+
+
 def main():
     try:
         # Consume stdin (PreCompact may provide transcript_path, etc.)
@@ -215,8 +330,8 @@ def main():
         except (json.JSONDecodeError, ValueError):
             pass
 
-        message = build_message()
-        print(json.dumps({"systemMessage": message}))
+        output = build_hook_output()
+        print(json.dumps(output))
         sys.exit(0)
 
     except Exception as e:
