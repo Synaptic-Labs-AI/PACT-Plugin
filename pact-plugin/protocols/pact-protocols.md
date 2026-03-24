@@ -1065,7 +1065,8 @@ Invoke multiple specialists when:
 
 When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](pact-audit.md):
 - Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
-- Single coder on Low variety task → skip auditor
+- 3+ coders running in parallel (coordination complexity warrants observation)
+- Single coder or 2 coders on a Low variety (4-6) task → skip auditor
 
 ### After Specialist Completes
 

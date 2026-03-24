@@ -21,7 +21,9 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 
-# Coder agent types that warrant an auditor check
+# Coder agent types that warrant an auditor check.
+# pact-n8n is excluded: it produces JSON workflow configs, not source code;
+# auditor observation is less applicable.
 CODER_TYPES = frozenset({
     "pact-backend-coder",
     "pact-frontend-coder",

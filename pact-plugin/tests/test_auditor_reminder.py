@@ -18,7 +18,7 @@ import pytest
 # Ensure hooks directory is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
-from auditor_reminder import CODER_TYPES, _team_has_auditor, check_auditor_needed
+from auditor_reminder import CODER_TYPES, _team_has_auditor, check_auditor_needed, main
 
 
 # ---------------------------------------------------------------------------
@@ -200,18 +200,16 @@ class TestMain:
                 "team_name": "test-team",
             },
         })
-        with patch("sys.stdin", __class__=type(sys.stdin)):
-            import io
-            with patch("sys.stdin", io.StringIO(stdin_data)), \
-                 patch("auditor_reminder._team_has_auditor", return_value=False), \
-                 pytest.raises(SystemExit) as exc_info:
-                from auditor_reminder import main
-                main()
-            assert exc_info.value.code == 0
-            captured = capsys.readouterr()
-            output = json.loads(captured.out)
-            assert "systemMessage" in output
-            assert "pact-audit.md" in output["systemMessage"]
+        import io
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("auditor_reminder._team_has_auditor", return_value=False), \
+             pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert "systemMessage" in output
+        assert "pact-audit.md" in output["systemMessage"]
 
     def test_non_coder_silent(self, capsys):
         """No output for non-coder agent types."""
@@ -225,7 +223,6 @@ class TestMain:
         import io
         with patch("sys.stdin", io.StringIO(stdin_data)), \
              pytest.raises(SystemExit) as exc_info:
-            from auditor_reminder import main
             main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
@@ -236,7 +233,6 @@ class TestMain:
         import io
         with patch("sys.stdin", io.StringIO("not json")), \
              pytest.raises(SystemExit) as exc_info:
-            from auditor_reminder import main
             main()
         assert exc_info.value.code == 0
 
@@ -254,7 +250,6 @@ class TestMain:
              patch("auditor_reminder.check_auditor_needed",
                    side_effect=RuntimeError("boom")), \
              pytest.raises(SystemExit) as exc_info:
-            from auditor_reminder import main
             main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
