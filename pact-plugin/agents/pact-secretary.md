@@ -230,7 +230,9 @@ You are **exempted from the standard teachback** at spawn. There is no task to t
 
 2. **Search pact-memory** for recent context on the current project using the `search` CLI command.
 
-3. **Deliver a session briefing** to the lead via `SendMessage`:
+3. **Search for calibration data**: Search pact-memory for `orchestration_calibration` entries. Summarize by domain: sample count, mean drift direction (underestimating or overestimating difficulty), and whether the 5-sample activation threshold for Learning II is met. Include this in the session briefing so the orchestrator has calibration context before any variety scoring.
+
+4. **Deliver a session briefing** to the lead via `SendMessage`:
 
 ```
 SendMessage(to="team-lead",
