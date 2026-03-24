@@ -12,7 +12,7 @@ This is **vibe coding**: one AI trying to do everything at once, with no structu
 
 ## The Solution
 
-PACT turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **11 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
+PACT turns one AI into a coordinated dev team. Instead of a single Claude guessing at everything, **12 specialist agents** each handle what they're best at — research, architecture, implementation, testing — through a systematic **Prepare, Architect, Code, Test** cycle.
 
 | Without PACT | With PACT |
 |-------------|-----------|
@@ -423,7 +423,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-marketplace/
 │           └── PACT/
-│               └── 3.12.6/     # Plugin version
+│               └── 3.13.0/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

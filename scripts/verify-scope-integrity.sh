@@ -354,9 +354,6 @@ check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
 check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
     "Scope contract is backend-agnostic" \
     "Backend-agnostic"
-check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
-    "Scope contract documents TeamCreate tool" \
-    "TeamCreate"
 echo ""
 
 # --- 17. Agent persistent memory ---
@@ -395,11 +392,7 @@ check_pattern "$SSOT" \
 echo ""
 
 # --- 20. Agent Teams documentation (post-D2) ---
-# Verify that the executor interface section documents the key Agent Teams tools.
-echo "20. Agent Teams documentation (post-D2):"
-check_pattern "$PROTOCOLS_DIR/pact-scope-contract.md" \
-    "Scope contract documents SendMessage tool" \
-    "SendMessage"
+# (TeamCreate and SendMessage checks removed — Future Executor section consolidated in v3.13.0)
 echo ""
 
 # --- 21. plan-mode inline checklist sync ---

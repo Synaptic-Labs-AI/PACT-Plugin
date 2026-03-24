@@ -438,6 +438,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🛡️ pact-security-engineer** (Review): Adversarial security code review
 - **🔍 pact-qa-engineer** (Review): Runtime verification, exploratory testing
+- **📋 pact-auditor** (Code): Independent quality observer during concurrent CODE phase
 - **🧠 pact-secretary** (Secretary): Research assistant, knowledge distiller, context preservation
 
 ### Agent Teams Dispatch

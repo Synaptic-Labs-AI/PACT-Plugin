@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.12.6
+> **Version**: 3.13.0
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
