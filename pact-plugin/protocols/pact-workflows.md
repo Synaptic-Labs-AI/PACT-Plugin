@@ -4,7 +4,7 @@
 |----------|-------------|----------|
 | **PACT** | Complex/greenfield work | Context-aware multi-agent orchestration |
 | **plan-mode** | Before complex work, need alignment | Multi-agent planning consultation, no implementation |
-| **comPACT** | Focused, independent tasks | Light-ceremony delegation for independent sub-tasks (parallelizable) |
+| **comPACT** | Focused, independent tasks | Dispatch specialists directly for standalone tasks (bypasses PACT phases) |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
@@ -81,7 +81,7 @@
 
 ## comPACT Protocol
 
-**Core idea**: Light-ceremony delegation for independent tasks.
+**Core idea**: Dispatch specialists directly to perform standalone tasks. Bypasses the standard sequence of PACT phases. Use orchestrate when phases need to chain — research informing design, design informing code.
 
 comPACT handles tasks that can be decomposed into independent sub-tasks — single-domain or cross-domain — without shared-file dependencies. For independent sub-tasks, it invokes multiple specialists in parallel.
 
@@ -132,7 +132,7 @@ Invoke multiple specialists when:
 3. **Set convention authority** — First agent's choices become standard for the batch
 4. **Environment drift** — When dispatching subsequent agents after earlier agents complete, check `file-edits.json` for files modified since last dispatch and include relevant deltas in prompts
 
-### Light ceremony instructions (injected when invoking specialist)
+### Specialist instructions (injected when invoking specialist)
 
 - Work directly from task description
 - Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context

@@ -1,8 +1,8 @@
 ---
-description: Light-ceremony delegation—concurrent agents for independent sub-tasks
+description: Dispatch specialists directly to perform standalone tasks (bypasses standard sequence of PACT phases)
 argument-hint: [backend|frontend|database|prepare|test|architect|devops|security|qa] <task>
 ---
-Delegate this focused task with light ceremony: $ARGUMENTS
+Dispatch specialists directly for this standalone task: $ARGUMENTS
 
 **MANDATORY: invoke concurrently for independent sub-tasks.** Sequential requires explicit file conflict or data dependency. If the task contains multiple independent items (bugs, endpoints, components), dispatch multiple specialists together — same type or mixed types — unless they share files.
 
@@ -15,7 +15,7 @@ Delegate this focused task with light ceremony: $ARGUMENTS
 Create a simpler Task hierarchy than full orchestrate:
 
 ```
-1. `TaskCreate`: Feature task "{verb} {feature}" (light-ceremony work)
+1. `TaskCreate`: Feature task "{verb} {feature}" (standalone task)
 2. `TaskUpdate`: Feature task status = "in_progress"
 3. Analyze: How many agents needed?
 4. `TaskCreate`: Agent task(s) — direct children of feature
@@ -245,13 +245,13 @@ Examples of blockers:
 - Task requires a different specialist's domain
 - Missing dependencies, access, or information
 - Same error persists after multiple fix attempts
-- Scope exceeds light-ceremony capability (needs PREPARE/ARCHITECT phases)
+- Scope exceeds standalone capability (needs PREPARE/ARCHITECT phases)
 - Concurrent agents have unresolvable conflicts
 
 When blocker is reported:
 1. Receive blocker report from specialist
 2. Run `/PACT:imPACT` to triage
-3. May escalate to `/PACT:orchestrate` if task exceeds light-ceremony scope
+3. May escalate to `/PACT:orchestrate` if task exceeds standalone scope
 
 ---
 
