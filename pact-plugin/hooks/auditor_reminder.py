@@ -83,9 +83,11 @@ def check_auditor_needed(tool_input: dict, teams_dir: str | None = None) -> str 
         return None
 
     return (
-        "Coder dispatched without auditor. "
-        "Check pact-audit.md dispatch conditions "
-        "(variety 7+, 3+ parallel coders, security-sensitive)."
+        "\U0001f50e Coder dispatched without a concurrent auditor. "
+        "Deploy pact-auditor if ANY of these apply: "
+        "(1) variety score \u2265 7, (2) 3+ parallel coders, "
+        "or (3) security-sensitive code. "
+        "See pact-audit.md for full dispatch protocol."
     )
 
 

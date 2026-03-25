@@ -136,7 +136,7 @@ class TestCheckAuditorNeeded:
         result = check_auditor_needed(tool_input, teams_dir)
         assert result is not None
         assert "pact-audit.md" in result
-        assert "dispatch conditions" in result
+        assert "dispatch protocol" in result
 
     def test_coder_with_auditor_suppressed(self, teams_dir):
         """Returns None when auditor already present."""
