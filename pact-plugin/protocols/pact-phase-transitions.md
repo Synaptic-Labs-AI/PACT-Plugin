@@ -23,7 +23,7 @@ Keep it brief. No templates required.
 
 ### CODE → TEST Handoff
 
-Coders provide structured handoff summaries to the orchestrator, who passes them to the test engineer. See CLAUDE.md "Expected Agent HANDOFF Format" for the canonical format (6 fields, items 1-2 and 4-6 required, item 3 reasoning chain recommended).
+Coders provide structured handoff summaries to the orchestrator, who passes them to the test engineer. See [CLAUDE.md](../CLAUDE.md) "Expected Agent HANDOFF Format" for the canonical format (6 fields, items 1-2 and 4-6 required, item 3 reasoning chain recommended).
 
 **Uncertainty Prioritization** (guides test engineer focus):
 - **HIGH**: "This could break in production" — Test engineer MUST cover these

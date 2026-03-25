@@ -1,8 +1,8 @@
 ## S5 Policy Layer (Governance)
 
 > S5 policy content (Non-Negotiables, Delegation Enforcement, Policy Checkpoints, S5 Authority)
-> is authoritative in CLAUDE.md and loaded at runtime. See CLAUDE.md > S5 POLICY.
-> This section retains only content NOT duplicated in CLAUDE.md:
+> is authoritative in [CLAUDE.md](../CLAUDE.md) and loaded at runtime. See [CLAUDE.md](../CLAUDE.md) > S5 POLICY.
+> This section retains only content NOT duplicated in [CLAUDE.md](../CLAUDE.md):
 
 ### Merge Authorization Boundary
 

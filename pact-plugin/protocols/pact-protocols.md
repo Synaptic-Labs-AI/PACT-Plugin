@@ -13,8 +13,8 @@
 ## S5 Policy Layer (Governance)
 
 > S5 policy content (Non-Negotiables, Delegation Enforcement, Policy Checkpoints, S5 Authority)
-> is authoritative in CLAUDE.md and loaded at runtime. See CLAUDE.md > S5 POLICY.
-> This section retains only content NOT duplicated in CLAUDE.md:
+> is authoritative in [CLAUDE.md](../CLAUDE.md) and loaded at runtime. See [CLAUDE.md](../CLAUDE.md) > S5 POLICY.
+> This section retains only content NOT duplicated in [CLAUDE.md](../CLAUDE.md):
 
 ### Merge Authorization Boundary
 
@@ -71,7 +71,7 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See `CLAUDE.md > Temporal Horizons` for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`CLAUDE.md`](../CLAUDE.md) > Temporal Horizons for the full horizon model.
 
 ### Trigger Points
 
@@ -252,7 +252,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does CLAUDE.md favor speed or quality for this project?
+   - Does [CLAUDE.md](../CLAUDE.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 
@@ -683,7 +683,7 @@ Before finalizing the variety score, search pact-memory for recurring patterns i
 
 **Amplify** (increase response capacity):
 - Invoke additional specialists
-- Enable parallel execution (primary CODE phase strategy; use QDCL from orchestrate.md)
+- Enable parallel execution (primary CODE phase strategy; use QDCL from [orchestrate.md](../commands/orchestrate.md))
 - Invoke nested PACT (`/PACT:rePACT`) for complex sub-components
 - Run PREPARE phase to build understanding
 - Apply risk-tiered testing (CRITICAL/HIGH) for high-risk areas
@@ -1092,7 +1092,7 @@ Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is 
 
 ### CODE → TEST Handoff
 
-Coders provide structured handoff summaries to the orchestrator, who passes them to the test engineer. See CLAUDE.md "Expected Agent HANDOFF Format" for the canonical format (6 fields, items 1-2 and 4-6 required, item 3 reasoning chain recommended).
+Coders provide structured handoff summaries to the orchestrator, who passes them to the test engineer. See [CLAUDE.md](../CLAUDE.md) "Expected Agent HANDOFF Format" for the canonical format (6 fields, items 1-2 and 4-6 required, item 3 reasoning chain recommended).
 
 **Uncertainty Prioritization** (guides test engineer focus):
 - **HIGH**: "This could break in production" — Test engineer MUST cover these
@@ -1156,7 +1156,7 @@ Metadata: `{"stalled": true, "reason": "..."}` | `{"failed": true, "reason": "..
 
 A plan section may exist without being complete. Before skipping a phase, the orchestrator checks the corresponding plan section for these 7 incompleteness signals. **Any signal present means the phase should run.**
 
-> **Layer 2**: This protocol serves as Layer 2 of the phase-skip protection system. See orchestrate.md "Context Assessment: Phase Skip Decision Flow" for the full 3-layer gate model.
+> **Layer 2**: This protocol serves as Layer 2 of the phase-skip protection system. See [orchestrate.md](../commands/orchestrate.md) "Context Assessment: Phase Skip Decision Flow" for the full 3-layer gate model.
 
 ---
 
@@ -1184,7 +1184,7 @@ A plan section may exist without being complete. Before skipping a phase, the or
 
 **In `plan-mode` (Phase 2 synthesis)**: Check each phase's plan section for these signals to populate the Phase Requirements table.
 
-**In `orchestrate` (Context Assessment: Phase Skip Decision Flow)**: The completeness check is Layer 2 of the 3-layer skip protection. Before skipping a phase via an approved plan, verify its plan section passes — all 7 signals absent. Use skip reason `"plan_section_complete"`. (Phases can also be skipped via Layer 3 structured analysis with reason `"structured_gate_passed"` — see orchestrate.md for the full decision flow.)
+**In `orchestrate` (Context Assessment: Phase Skip Decision Flow)**: The completeness check is Layer 2 of the 3-layer skip protection. Before skipping a phase via an approved plan, verify its plan section passes — all 7 signals absent. Use skip reason `"plan_section_complete"`. (Phases can also be skipped via Layer 3 structured analysis with reason `"structured_gate_passed"` — see [orchestrate.md](../commands/orchestrate.md) for the full decision flow.)
 
 ---
 

@@ -342,7 +342,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See CLAUDE.md Memory Management.
+- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [CLAUDE.md](../CLAUDE.md) Memory Management.
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -613,7 +613,7 @@ Monitor for blocker/algedonic signals via:
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
-On signal detected: Follow Signal Task Handling in CLAUDE.md.
+On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
