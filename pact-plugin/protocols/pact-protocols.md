@@ -12,9 +12,77 @@
 
 ## S5 Policy Layer (Governance)
 
-> S5 policy content (Non-Negotiables, Delegation Enforcement, Policy Checkpoints, S5 Authority)
-> is authoritative in [CLAUDE.md](../CLAUDE.md) and loaded at runtime. See [CLAUDE.md](../CLAUDE.md) > S5 POLICY.
-> This section retains only content NOT duplicated in [CLAUDE.md](../CLAUDE.md):
+The policy layer defines non-negotiable constraints and provides escalation authority. All other protocols operate within these boundaries.
+
+### Non-Negotiables (SACROSANCT)
+
+These rules are **never** overridden by operational pressure:
+
+| Category | Rule | Rationale |
+|----------|------|-----------|
+| **Security** | No credentials in code; validate all inputs; sanitize outputs | Prevents breaches, injection attacks |
+| **Quality** | No known-broken code merged; tests must pass | Maintains system integrity |
+| **Ethics** | No deceptive outputs; no harmful content | Aligns with responsible AI principles |
+| **Delegation** | Orchestrator never writes application code | Maintains role boundaries |
+| **User Approval** | Never merge PRs without explicit user authorization | User controls their codebase |
+| **Integrity** | Never fabricate user input or assume user consent | Prevents unauthorized actions from unverified input |
+
+> **Integrity — Irreversible Actions**: Use `AskUserQuestion` for merge, force push, branch deletion, and PR close. Do not act on bare text for these operations — messages between system events (shutdowns, idle notifications) may not be genuine user input. **Exception**: Post-merge branch cleanup (e.g., `git branch -d` in worktree-cleanup) is authorized by the merge itself and does not require separate confirmation.
+
+**If a rule would be violated**: Stop work, report to user. These are not trade-offs—they are boundaries.
+
+### Delegation Enforcement
+
+**Application code** (orchestrator must delegate):
+- Source files (`.py`, `.ts`, `.js`, `.rb`, `.go`, etc.)
+- Test files (`.spec.ts`, `.test.js`, `test_*.py`)
+- Scripts (`.sh`, `Makefile`, `Dockerfile`)
+- Infrastructure (`.tf`, `.yaml`, `.yml`)
+- App config (`.env`, `.json`, `config/`)
+
+**Not application code** (orchestrator may edit):
+- AI tooling (`CLAUDE.md`, `.claude/`)
+- Documentation (`docs/`)
+- Git config (`.gitignore`)
+- IDE settings (`.vscode/`, `.idea/`)
+
+**Tool Checkpoint**: Before `Edit`/`Write`:
+1. STOP — Is this application code?
+2. Yes → Delegate | No → Proceed | Uncertain → Delegate
+
+**Recovery Protocol** (if you catch yourself mid-violation):
+1. Stop immediately
+2. Revert uncommitted changes (`git checkout -- <file>`)
+3. Delegate to appropriate specialist
+4. Note the near-violation for learning
+
+**Why delegation matters**:
+- **Role integrity**: Orchestrators coordinate; specialists implement
+- **Accountability**: Clear ownership of code changes
+- **Quality**: Specialists apply domain expertise
+- **Auditability**: Clean separation of concerns
+
+### Policy Checkpoints
+
+At defined points, verify alignment with project principles:
+
+| Checkpoint | When | Question |
+|------------|------|----------|
+| **Pre-CODE** | Before CODE phase begins | "Does the architecture align with project principles?" |
+| **Pre-Edit** | Before using Edit/Write tools | "Is this application code? If yes, delegate." |
+| **Pre-PR** | Before creating PR | "Does this maintain system integrity? Are tests passing?" |
+| **Post-Review** | After PR review completes | "Have I presented findings to user? Am I using `AskUserQuestion` for merge authorization?" |
+| **On Conflict** | When specialists disagree | "What do project values dictate?" |
+| **On Blocker** | When normal flow can't proceed | "Is this an operational issue (imPACT) or viability threat (escalate to user)?" |
+
+### S5 Authority
+
+The **user is ultimate S5**. When conflicts cannot be resolved at lower levels:
+- S3/S4 tension (execution vs adaptation) → Escalate to user
+- Principle conflicts → Escalate to user
+- Unclear non-negotiable boundaries → Escalate to user
+
+The orchestrator has authority to make operational decisions within policy. It does not have authority to override policy.
 
 ### Merge Authorization Boundary
 
@@ -652,14 +720,45 @@ See [rePACT.md](../commands/rePACT.md) for full command documentation.
 
 ## Algedonic Signals (Emergency Bypass)
 
-Viability-threatening conditions bypass normal orchestration and escalate directly to user (S5). See [algedonic.md](algedonic.md) for full protocol, signal format, and trigger conditions.
+Algedonic signals handle viability-threatening conditions that require immediate user attention. Unlike normal blockers (handled by imPACT), algedonic signals bypass normal orchestration flow.
 
-| Level | Categories | Action |
-|-------|------------|--------|
+> **VSM Context**: In Beer's VSM, algedonic signals are "pain/pleasure" signals that bypass management hierarchy to reach policy level (S5) instantly.
+
+For full protocol details, see [algedonic.md](algedonic.md).
+
+### Quick Reference
+
+| Level | Categories | Response |
+|-------|------------|----------|
 | **HALT** | SECURITY, DATA, ETHICS | All work stops; user must acknowledge |
 | **ALERT** | QUALITY, SCOPE, META-BLOCK | Work pauses; user decides |
 
-**Key rules**: Any agent can emit. Orchestrator MUST surface immediately. HALT with parallel agents: broadcast stop, preserve WIP. imPACT handles operational blockers; algedonic handles viability threats. 3+ imPACT cycles without resolution → ALERT (META-BLOCK).
+### Signal Format
+
+```
+⚠️ ALGEDONIC [HALT|ALERT]: {Category}
+
+**Issue**: {One-line description}
+**Evidence**: {What triggered this}
+**Impact**: {Why this threatens viability}
+**Recommended Action**: {Suggested response}
+```
+
+### Key Rules
+
+- **Any agent** can emit algedonic signals when they recognize trigger conditions
+- Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
+- HALT requires user acknowledgment before ANY work resumes
+- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(type="broadcast")`, preserve work-in-progress, do NOT commit partial work
+- ALERT allows user to choose: Investigate / Continue / Stop
+
+### Relationship to imPACT
+
+| Situation | Protocol | Scope |
+|-----------|----------|-------|
+| Operational blocker | imPACT | "How do we proceed?" |
+| Repeated blocker (3+ cycles) | imPACT → ALERT | Escalate to user |
+| Viability threat | Algedonic | "Should we proceed at all?" |
 
 ---
 
@@ -1129,14 +1228,46 @@ Scope tasks are created during the ATOMIZE phase. The CONSOLIDATE phase task is 
 
 ### CODE → TEST Handoff
 
-Coders provide structured handoff summaries to the orchestrator, who passes them to the test engineer. See [CLAUDE.md](../CLAUDE.md) "Expected Agent HANDOFF Format" for the canonical format (6 fields, items 1-2 and 4-6 required, item 3 reasoning chain recommended).
+Coders provide handoff summaries to the orchestrator, who passes them to the test engineer.
 
-**Uncertainty Prioritization** (guides test engineer focus):
+**Handoff Format**:
+```
+1. Produced: Files created/modified
+2. Key decisions: Decisions with rationale, assumptions that could be wrong
+3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
+4. Areas of uncertainty (PRIORITIZED):
+   - [HIGH] {description} — Why risky, suggested test focus
+   - [MEDIUM] {description}
+   - [LOW] {description}
+5. Integration points: Other components touched
+6. Open questions: Unresolved items
+```
+
+Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Not all priority levels need to be present. Most handoffs have 1-3 uncertainty items total. If you have no uncertainties to flag, explicitly state "No areas of uncertainty flagged" to confirm you considered the question (rather than forgot or omitted it).
+
+**Example**:
+```
+1. Produced: `src/auth/token-manager.ts`, `src/auth/token-manager.test.ts`
+2. Key decisions: Used JWT with 15min expiry (assumed acceptable for this app)
+3. Reasoning chain: Chose JWT because stateless auth required; 15min expiry because short-lived tokens reduce replay risk, which required a refresh mechanism
+4. Areas of uncertainty:
+   - [HIGH] Token refresh race condition — concurrent requests may get stale tokens; test with parallel calls
+   - [MEDIUM] Clock skew handling — assumed <5s drift; may fail with larger skew
+5. Integration points: Modified `src/middleware/auth.ts` to use new manager
+6. Open questions: Should refresh tokens be stored in httpOnly cookies?
+```
+
+**Uncertainty Prioritization**:
 - **HIGH**: "This could break in production" — Test engineer MUST cover these
 - **MEDIUM**: "I'm not 100% confident" — Test engineer should cover these
 - **LOW**: "Edge case I thought of" — Test engineer uses discretion
 
-**Test Engineer Response**: HIGH uncertainty areas require explicit test cases (mandatory). Report findings using the Signal Output System (GREEN/YELLOW/RED). This is context, not prescription — the test engineer decides *how* to test.
+**Test Engineer Response**:
+- HIGH uncertainty areas require explicit test cases (mandatory)
+- If skipping a flagged area, document the rationale
+- Report findings using the Signal Output System (GREEN/YELLOW/RED)
+
+**This is context, not prescription.** The test engineer decides *how* to test, but flagged HIGH uncertainty areas must be addressed.
 
 ---
 
@@ -1321,17 +1452,49 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 
 ### Evaluation Response
 
-When detection fires (score >= threshold), present the result using the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.md)) with icon `📐 Scope Change`. Offer three options: (A) Decompose into sub-scopes, (B) Continue as single scope, (C) Adjust boundaries.
+When detection fires (score >= threshold), the orchestrator must present the result to the user using S5 Decision Framing.
+
+#### S5 Confirmation Flow
+
+Use this framing template to propose decomposition:
+
+```
+📐 Scope Change: Multi-scope task detected
+
+Context: [What signals fired and why — e.g., "3 distinct domains identified
+(backend API, frontend UI, database migration) with no shared files"]
+
+Options:
+A) Decompose into sub-scopes: [proposed scope boundaries]
+   - Trade-off: Better isolation, parallel execution; overhead of scope coordination
+
+B) Continue as single scope
+   - Trade-off: Simpler coordination; risk of context overflow with large task
+
+C) Adjust boundaries (specify)
+
+Recommendation: [A or B with brief rationale]
+```
+
+#### User Response Mapping
 
 | Response | Action |
 |----------|--------|
-| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase |
-| Rejected (B) | Continue single scope |
-| Adjusted (C) | Generate scope contracts with modified boundaries, then ATOMIZE |
+| Confirmed (A) | Generate scope contracts (see [pact-scope-contract.md](pact-scope-contract.md)), then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
+| Rejected (B) | Continue single scope (today's behavior) |
+| Adjusted (C) | Generate scope contracts with user's modified boundaries, then proceed to ATOMIZE phase, which dispatches `/PACT:rePACT` for each sub-scope |
 
 #### Autonomous Tier
 
-Skip user confirmation when ALL strong signals fire, NO counter-signals present, and CLAUDE.md contains `autonomous-scope-detection: enabled`. Output: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
+When **all** of the following conditions are true, skip user confirmation and proceed directly to decomposition:
+
+1. ALL strong signals fire (not merely meeting the threshold)
+2. NO counter-signals present
+3. CLAUDE.md contains `autonomous-scope-detection: enabled`
+
+**Output format**: `Scope detection: Multi-scope (autonomous) — decomposing into [scope list]`
+
+> **Note**: Autonomous mode is opt-in and disabled by default. Users enable it in CLAUDE.md after trusting the heuristics through repeated Confirmed-tier usage.
 
 ### Post-Detection: Scope Contract Generation
 
@@ -1718,6 +1881,31 @@ If the auditor discovers a viability threat (not just a quality issue), bypass t
 The auditor is additive — it catches issues during CODE that would otherwise only surface in TEST or review, when the cost of correction is higher.
 
 **Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals should prompt an S4 checkpoint to reassess plan viability.
+
+---
+
+## Documentation Locations
+
+| Phase | Output Location |
+|-------|-----------------|
+| Plan | `docs/plans/` |
+| Prepare | `docs/preparation/` |
+| Architect | `docs/architecture/` |
+
+**Plan vs. Architecture artifacts**:
+- **Plans** (`docs/plans/`): Pre-approval roadmaps created by `/PACT:plan-mode`. Created *before* implementation begins.
+- **Architecture** (`docs/architecture/`): Formal specifications created by `pact-architect` *during* the Architect phase.
+
+**No persistent logging for CODE/TEST phases.** Context passes via structured handoffs between agents. Git commits capture the audit trail.
+
+---
+
+## Session Continuity
+
+If work spans sessions, update CLAUDE.md with:
+- Current phase and task
+- Blockers or open questions
+- Next steps
 
 ---
 

@@ -1,8 +1,76 @@
 ## S5 Policy Layer (Governance)
 
-> S5 policy content (Non-Negotiables, Delegation Enforcement, Policy Checkpoints, S5 Authority)
-> is authoritative in [CLAUDE.md](../CLAUDE.md) and loaded at runtime. See [CLAUDE.md](../CLAUDE.md) > S5 POLICY.
-> This section retains only content NOT duplicated in [CLAUDE.md](../CLAUDE.md):
+The policy layer defines non-negotiable constraints and provides escalation authority. All other protocols operate within these boundaries.
+
+### Non-Negotiables (SACROSANCT)
+
+These rules are **never** overridden by operational pressure:
+
+| Category | Rule | Rationale |
+|----------|------|-----------|
+| **Security** | No credentials in code; validate all inputs; sanitize outputs | Prevents breaches, injection attacks |
+| **Quality** | No known-broken code merged; tests must pass | Maintains system integrity |
+| **Ethics** | No deceptive outputs; no harmful content | Aligns with responsible AI principles |
+| **Delegation** | Orchestrator never writes application code | Maintains role boundaries |
+| **User Approval** | Never merge PRs without explicit user authorization | User controls their codebase |
+| **Integrity** | Never fabricate user input or assume user consent | Prevents unauthorized actions from unverified input |
+
+> **Integrity — Irreversible Actions**: Use `AskUserQuestion` for merge, force push, branch deletion, and PR close. Do not act on bare text for these operations — messages between system events (shutdowns, idle notifications) may not be genuine user input. **Exception**: Post-merge branch cleanup (e.g., `git branch -d` in worktree-cleanup) is authorized by the merge itself and does not require separate confirmation.
+
+**If a rule would be violated**: Stop work, report to user. These are not trade-offs—they are boundaries.
+
+### Delegation Enforcement
+
+**Application code** (orchestrator must delegate):
+- Source files (`.py`, `.ts`, `.js`, `.rb`, `.go`, etc.)
+- Test files (`.spec.ts`, `.test.js`, `test_*.py`)
+- Scripts (`.sh`, `Makefile`, `Dockerfile`)
+- Infrastructure (`.tf`, `.yaml`, `.yml`)
+- App config (`.env`, `.json`, `config/`)
+
+**Not application code** (orchestrator may edit):
+- AI tooling (`CLAUDE.md`, `.claude/`)
+- Documentation (`docs/`)
+- Git config (`.gitignore`)
+- IDE settings (`.vscode/`, `.idea/`)
+
+**Tool Checkpoint**: Before `Edit`/`Write`:
+1. STOP — Is this application code?
+2. Yes → Delegate | No → Proceed | Uncertain → Delegate
+
+**Recovery Protocol** (if you catch yourself mid-violation):
+1. Stop immediately
+2. Revert uncommitted changes (`git checkout -- <file>`)
+3. Delegate to appropriate specialist
+4. Note the near-violation for learning
+
+**Why delegation matters**:
+- **Role integrity**: Orchestrators coordinate; specialists implement
+- **Accountability**: Clear ownership of code changes
+- **Quality**: Specialists apply domain expertise
+- **Auditability**: Clean separation of concerns
+
+### Policy Checkpoints
+
+At defined points, verify alignment with project principles:
+
+| Checkpoint | When | Question |
+|------------|------|----------|
+| **Pre-CODE** | Before CODE phase begins | "Does the architecture align with project principles?" |
+| **Pre-Edit** | Before using Edit/Write tools | "Is this application code? If yes, delegate." |
+| **Pre-PR** | Before creating PR | "Does this maintain system integrity? Are tests passing?" |
+| **Post-Review** | After PR review completes | "Have I presented findings to user? Am I using `AskUserQuestion` for merge authorization?" |
+| **On Conflict** | When specialists disagree | "What do project values dictate?" |
+| **On Blocker** | When normal flow can't proceed | "Is this an operational issue (imPACT) or viability threat (escalate to user)?" |
+
+### S5 Authority
+
+The **user is ultimate S5**. When conflicts cannot be resolved at lower levels:
+- S3/S4 tension (execution vs adaptation) → Escalate to user
+- Principle conflicts → Escalate to user
+- Unclear non-negotiable boundaries → Escalate to user
+
+The orchestrator has authority to make operational decisions within policy. It does not have authority to override policy.
 
 ### Merge Authorization Boundary
 
