@@ -103,13 +103,31 @@ All agents operating in parallel must:
 - Use project glossary and established terminology
 - Use standardized handoff structure (see [Phase Handoffs](pact-phase-transitions.md#phase-handoffs))
 
-### Parallelization Rules
+### Parallelization Anti-Patterns
 
-**Default**: Parallel. Sequence ONLY for file/data dependencies. If in doubt, parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
+| Anti-Pattern | Problem | Fix |
+|--------------|---------|-----|
+| **Sequential by default** | Missed parallelization opportunity | Run QDCL; require justification for sequential |
+| **Ignoring shared files** | Merge conflicts; wasted work | QDCL catches this; sequence or assign boundaries |
+| **Over-parallelization** | Coordination overhead; convention drift | Limit parallel agents; use S2 coordination |
+| **Analysis paralysis** | QDCL takes longer than the work | Time-box to 1 minute; default to parallel if unclear |
+| **Single agent for batch** | 4 bugs → 1 coder instead of 2-4 coders | **4+ items = multiple agents** (no exceptions) |
+| **"Simpler to track" rationalization** | Sounds reasonable, wastes time | Not a valid justification; invoke concurrently anyway |
+| **"Related tasks" conflation** | "Related" ≠ "dependent"; false equivalence | Related is NOT blocked; only file/data dependencies block |
+| **"One agent can handle it" excuse** | Can ≠ should; missed efficiency | Capability is not justification for sequential |
 
-**Anti-patterns**: Sequential by default, ignoring shared files, "simpler to track" rationalization, "related tasks" conflation (related ≠ dependent), single agent for batch (4+ items = multiple agents).
+**Recovery**: If in doubt, default to parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
 
-**Valid reasons to sequence** (cite explicitly):
+### Rationalization Detection
+
+When you find yourself thinking these thoughts, STOP—you're rationalizing sequential dispatch:
+
+| Thought | Reality |
+|---------|---------|
+| "They're small tasks" | Small = cheap to invoke together. Split. |
+| "Coordination overhead" | QDCL takes 30 seconds. Split. |
+
+**Valid reasons to sequence** (cite explicitly when choosing sequential):
 - "File X is modified by both" → Sequence or define boundaries
 - "A's output feeds B's input" → Sequence them
 - "Shared interface undefined" → Define interface first, then parallel

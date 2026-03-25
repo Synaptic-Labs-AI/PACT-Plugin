@@ -45,3 +45,13 @@ Before completing any phase, consider:
 Not a checklist—just awareness.
 
 ---
+
+## Architecture Review (Optional)
+
+For complex features, before Code phase:
+- Coders quickly validate architect's design is implementable
+- Flag blockers early, not during implementation
+
+Skip for simple features or when "just build it."
+
+---

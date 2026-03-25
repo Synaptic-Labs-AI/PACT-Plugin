@@ -57,6 +57,25 @@ C) Other (specify)
 | Algedonic (HALT) | 🛑 | Viability threat — stops work |
 | Algedonic (ALERT) | ⚡ | Attention needed — pauses work |
 
+#### Example: Good Framing
+
+> ⚖️ **S3/S4 Tension**: Skip PREPARE phase for faster delivery?
+>
+> **Context**: Task appears routine based on description, but touches auth code which has been problematic before.
+>
+> **Options**:
+> A) **Skip PREPARE** — Start coding now, handle issues as they arise
+>    - Trade-off: Faster start, but may hit avoidable blockers
+>
+> B) **Run PREPARE** — Research auth patterns first (~30 min)
+>    - Trade-off: Slower start, but informed approach
+>
+> **Recommendation**: B — Auth code has caused issues; small investment reduces risk.
+
+#### Example: Poor Framing (Avoid)
+
+> "I'm not sure whether to skip the prepare phase. On one hand we could save time but on the other hand there might be issues. The auth code has been problematic. What do you think we should do? Also there are some other considerations like..."
+
 #### Attenuation Guidelines
 
 1. **Limit options to 2-3** — More creates decision paralysis
@@ -500,13 +519,31 @@ All agents operating in parallel must:
 - Use project glossary and established terminology
 - Use standardized handoff structure (see [Phase Handoffs](pact-phase-transitions.md#phase-handoffs))
 
-### Parallelization Rules
+### Parallelization Anti-Patterns
 
-**Default**: Parallel. Sequence ONLY for file/data dependencies. If in doubt, parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
+| Anti-Pattern | Problem | Fix |
+|--------------|---------|-----|
+| **Sequential by default** | Missed parallelization opportunity | Run QDCL; require justification for sequential |
+| **Ignoring shared files** | Merge conflicts; wasted work | QDCL catches this; sequence or assign boundaries |
+| **Over-parallelization** | Coordination overhead; convention drift | Limit parallel agents; use S2 coordination |
+| **Analysis paralysis** | QDCL takes longer than the work | Time-box to 1 minute; default to parallel if unclear |
+| **Single agent for batch** | 4 bugs → 1 coder instead of 2-4 coders | **4+ items = multiple agents** (no exceptions) |
+| **"Simpler to track" rationalization** | Sounds reasonable, wastes time | Not a valid justification; invoke concurrently anyway |
+| **"Related tasks" conflation** | "Related" ≠ "dependent"; false equivalence | Related is NOT blocked; only file/data dependencies block |
+| **"One agent can handle it" excuse** | Can ≠ should; missed efficiency | Capability is not justification for sequential |
 
-**Anti-patterns**: Sequential by default, ignoring shared files, "simpler to track" rationalization, "related tasks" conflation (related ≠ dependent), single agent for batch (4+ items = multiple agents).
+**Recovery**: If in doubt, default to parallel with S2 coordination active. Conflicts are recoverable; lost time is not.
 
-**Valid reasons to sequence** (cite explicitly):
+### Rationalization Detection
+
+When you find yourself thinking these thoughts, STOP—you're rationalizing sequential dispatch:
+
+| Thought | Reality |
+|---------|---------|
+| "They're small tasks" | Small = cheap to invoke together. Split. |
+| "Coordination overhead" | QDCL takes 30 seconds. Split. |
+
+**Valid reasons to sequence** (cite explicitly when choosing sequential):
 - "File X is modified by both" → Sequence or define boundaries
 - "A's output feeds B's input" → Sequence them
 - "Shared interface undefined" → Define interface first, then parallel
@@ -1115,6 +1152,16 @@ Not a checklist—just awareness.
 
 ---
 
+## Architecture Review (Optional)
+
+For complex features, before Code phase:
+- Coders quickly validate architect's design is implementable
+- Flag blockers early, not during implementation
+
+Skip for simple features or when "just build it."
+
+---
+
 ## Agent Stall Detection
 
 **Stalled indicators** (Agent Teams model):
@@ -1405,6 +1452,50 @@ rePACT implements the executor interface as follows:
 | **Delivery mechanism** | Synchronous — agent completes and returns handoff text directly to orchestrator |
 
 See [rePACT.md](../commands/rePACT.md) for the full command documentation, including scope contract reception and contract-aware handoff format.
+
+#### Future Executor: Agent Teams
+
+> **Status**: Agent Teams is experimental, gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
+> The API has evolved from earlier community-documented versions (monolithic `TeammateTool` with 13 operations)
+> into separate purpose-built tools. The mappings below reflect the current API shape but may change
+> before official release. This section is documentation/future reference, not current behavior.
+
+When Claude Code Agent Teams reaches stable release, it could serve as an alternative executor backend. The interface shape remains the same; only the delivery mechanism changes.
+
+| Interface Element | Agent Teams Mapping |
+|-------------------|---------------------|
+| **Input: scope_contract** | Passed in the teammate spawn prompt via `Task` tool (with `team_name` and `name` parameters) |
+| **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
+| **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
+| **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
+| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
+| **Output: commits** | Teammate commits directly to the feature branch |
+| **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
+| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
+
+**Key Agent Teams tools**:
+
+| Tool | Purpose | PACT Mapping |
+|------|---------|--------------|
+| `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
+| `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
+| `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
+| `SendMessage` (type: `"broadcast"`) | Message to all teammates | Cross-scope coordination (used sparingly) |
+| `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
+| `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
+| `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
+
+**Architectural notes**:
+
+- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
+- No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
+- Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
+
+#### Design Constraints
+
+- **Backend-agnostic**: The parent orchestrator's logic (contract generation, consolidate phase, failure routing) does not change based on which executor fulfills the scope. Only the dispatch and collection mechanisms differ.
+- **Same output shape**: Both rePACT and a future Agent Teams executor produce the same structured output (standard handoff + contract fulfillment). The consolidate phase consumes this output identically regardless of source.
+- **Experimental API**: The Agent Teams tool names documented above reflect the current API shape (as of early 2026). Since the feature is experimental and gated, these names may change before stable release. The executor interface abstraction insulates PACT from such changes — only the mapping table needs updating.
 
 ---
 

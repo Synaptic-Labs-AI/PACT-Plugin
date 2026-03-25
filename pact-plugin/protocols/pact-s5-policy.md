@@ -45,6 +45,25 @@ C) Other (specify)
 | Algedonic (HALT) | 🛑 | Viability threat — stops work |
 | Algedonic (ALERT) | ⚡ | Attention needed — pauses work |
 
+#### Example: Good Framing
+
+> ⚖️ **S3/S4 Tension**: Skip PREPARE phase for faster delivery?
+>
+> **Context**: Task appears routine based on description, but touches auth code which has been problematic before.
+>
+> **Options**:
+> A) **Skip PREPARE** — Start coding now, handle issues as they arise
+>    - Trade-off: Faster start, but may hit avoidable blockers
+>
+> B) **Run PREPARE** — Research auth patterns first (~30 min)
+>    - Trade-off: Slower start, but informed approach
+>
+> **Recommendation**: B — Auth code has caused issues; small investment reduces risk.
+
+#### Example: Poor Framing (Avoid)
+
+> "I'm not sure whether to skip the prepare phase. On one hand we could save time but on the other hand there might be issues. The auth code has been problematic. What do you think we should do? Also there are some other considerations like..."
+
 #### Attenuation Guidelines
 
 1. **Limit options to 2-3** — More creates decision paralysis
