@@ -11,11 +11,14 @@ Tests cover:
 5. Full hook output (both fields)
 6. Subprocess integration (JSON output, exit code)
 7. Fail-open on malformed input, missing dirs, bad JSON files
+8. Outer exception handler (hook_error_json output on unexpected errors)
 """
 import json
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -566,3 +569,55 @@ class TestConstants:
         assert "TaskCreate" in BRAIN_DUMP_INSTRUCTIONS
         assert "SendMessage" in BRAIN_DUMP_INSTRUCTIONS
         assert "secretary" in BRAIN_DUMP_INSTRUCTIONS
+
+
+# ---------------------------------------------------------------------------
+# Outer exception handler tests
+# ---------------------------------------------------------------------------
+
+
+class TestPrecompactOuterExceptionHandler:
+    """Verify that main() catches unexpected exceptions, exits 0,
+    emits hook_error_json on stdout and error info on stderr."""
+
+    def test_exits_zero_on_unexpected_error(self):
+        """main() must exit 0 even when build_hook_output raises."""
+        from precompact_state_reminder import main
+
+        with patch("sys.stdin", StringIO("{}")), \
+             patch("precompact_state_reminder.build_hook_output",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+    def test_stderr_contains_error_info(self, capsys):
+        """Error details must appear on stderr for logging."""
+        from precompact_state_reminder import main
+
+        with patch("sys.stdin", StringIO("{}")), \
+             patch("precompact_state_reminder.build_hook_output",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "precompact_state_reminder" in captured.err
+        assert "test error" in captured.err
+
+    def test_stdout_contains_hook_error_json(self, capsys):
+        """Stdout must contain structured JSON from hook_error_json."""
+        from precompact_state_reminder import main
+
+        with patch("sys.stdin", StringIO("{}")), \
+             patch("precompact_state_reminder.build_hook_output",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert "systemMessage" in output
+        assert "PACT hook warning" in output["systemMessage"]
+        assert "precompact_state_reminder" in output["systemMessage"]
+        assert "test error" in output["systemMessage"]

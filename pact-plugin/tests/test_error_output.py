@@ -736,6 +736,76 @@ class TestPrecompactRefreshErrorOutput:
         assert parsed["systemMessage"] != "PACT: checkpoint error"
 
 
+class TestPrecompactStateReminderErrorOutput:
+    """precompact_state_reminder.py exception handler produces JSON on stdout."""
+
+    def test_exception_outputs_json_with_system_message(self, capsys):
+        from precompact_state_reminder import main
+
+        with patch("sys.stdin", io.StringIO("{}")), \
+             patch("precompact_state_reminder.build_hook_output",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_error_json(captured.out, "precompact_state_reminder")
+
+    def test_exception_preserves_stderr(self, capsys):
+        """stderr should contain the hook name and the specific error message."""
+        from precompact_state_reminder import main
+
+        with patch("sys.stdin", io.StringIO("{}")), \
+             patch("precompact_state_reminder.build_hook_output",
+                   side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "precompact_state_reminder" in captured.err
+        assert "boom" in captured.err
+
+
+class TestPostcompactVerifyErrorOutput:
+    """postcompact_verify.py exception handler produces JSON on stdout."""
+
+    def test_exception_outputs_json_with_system_message(self, capsys):
+        from postcompact_verify import main
+
+        input_data = json.dumps({
+            "compact_summary": "test summary",
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("postcompact_verify.build_verification_message",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_error_json(captured.out, "postcompact_verify")
+
+    def test_exception_preserves_stderr(self, capsys):
+        """stderr should contain the hook name and the specific error message."""
+        from postcompact_verify import main
+
+        input_data = json.dumps({
+            "compact_summary": "test summary",
+        })
+
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("postcompact_verify.build_verification_message",
+                   side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "postcompact_verify" in captured.err
+        assert "boom" in captured.err
+
+
 # =============================================================================
 # Module-level export: hook_error_json is importable from shared
 # =============================================================================

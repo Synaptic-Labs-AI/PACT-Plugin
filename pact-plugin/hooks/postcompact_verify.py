@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 from shared.error_output import hook_error_json
+from shared.task_scanner import scan_all_tasks
 
 
 # ---------------------------------------------------------------------------
@@ -91,47 +92,26 @@ def _gather_expected_items(
         "team_names": [],
     }
 
-    # Gather from tasks
-    if tasks_base_dir is None:
-        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+    # Gather from tasks (uses shared scanner)
+    _system_prefixes = ("Phase:", "BLOCKER:", "ALERT:", "HALT:")
 
-    base = Path(tasks_base_dir)
-    if base.exists():
-        try:
-            for team_dir in base.iterdir():
-                if not team_dir.is_dir():
-                    continue
-                for task_file in team_dir.iterdir():
-                    if not task_file.name.endswith(".json"):
-                        continue
-                    try:
-                        data = json.loads(
-                            task_file.read_text(encoding="utf-8")
-                        )
-                    except (json.JSONDecodeError, OSError):
-                        continue
+    for data in scan_all_tasks(tasks_base_dir):
+        status = data.get("status", "pending")
+        subject = data.get("subject", "")
+        task_id = data.get("id", "")
 
-                    status = data.get("status", "pending")
-                    subject = data.get("subject", "")
-                    task_id = data.get("id", task_file.stem)
+        if status == "in_progress" and subject.startswith("Phase:"):
+            if expected["current_phase"] is None:
+                expected["current_phase"] = subject
 
-                    if status == "in_progress" and subject.startswith("Phase:"):
-                        if expected["current_phase"] is None:
-                            expected["current_phase"] = subject
-
-                    if (
-                        status == "in_progress"
-                        and expected["feature_subject"] is None
-                        and subject
-                        and not any(
-                            subject.startswith(p)
-                            for p in ("Phase:", "BLOCKER:", "ALERT:", "HALT:")
-                        )
-                    ):
-                        expected["feature_subject"] = subject
-                        expected["feature_id"] = str(task_id)
-        except OSError:
-            pass
+        if (
+            status == "in_progress"
+            and expected["feature_subject"] is None
+            and subject
+            and not any(subject.startswith(p) for p in _system_prefixes)
+        ):
+            expected["feature_subject"] = subject
+            expected["feature_id"] = str(task_id)
 
     # Gather from teams
     if teams_base_dir is None:

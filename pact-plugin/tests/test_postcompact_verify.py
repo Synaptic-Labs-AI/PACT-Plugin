@@ -8,13 +8,16 @@ Tests cover:
 3. Verification message composition
 4. Subprocess integration (JSON output, exit code)
 5. Fail-open on malformed input and errors
+6. Outer exception handler (hook_error_json output on unexpected errors)
 """
 import json
 import os
 import stat
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -310,3 +313,58 @@ class TestConstants:
     def test_compact_summary_filename(self):
         from postcompact_verify import COMPACT_SUMMARY_FILENAME
         assert COMPACT_SUMMARY_FILENAME == "compact-summary.txt"
+
+
+# ---------------------------------------------------------------------------
+# Outer exception handler tests
+# ---------------------------------------------------------------------------
+
+
+class TestPostcompactOuterExceptionHandler:
+    """Verify that main() catches unexpected exceptions, exits 0,
+    emits hook_error_json on stdout and error info on stderr."""
+
+    def test_exits_zero_on_unexpected_error(self):
+        """main() must exit 0 even when build_verification_message raises."""
+        from postcompact_verify import main
+
+        stdin_data = json.dumps({"compact_summary": "test"})
+        with patch("sys.stdin", StringIO(stdin_data)), \
+             patch("postcompact_verify.build_verification_message",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+    def test_stderr_contains_error_info(self, capsys):
+        """Error details must appear on stderr for logging."""
+        from postcompact_verify import main
+
+        stdin_data = json.dumps({"compact_summary": "test"})
+        with patch("sys.stdin", StringIO(stdin_data)), \
+             patch("postcompact_verify.build_verification_message",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        assert "postcompact_verify" in captured.err
+        assert "test error" in captured.err
+
+    def test_stdout_contains_hook_error_json(self, capsys):
+        """Stdout must contain structured JSON from hook_error_json."""
+        from postcompact_verify import main
+
+        stdin_data = json.dumps({"compact_summary": "test"})
+        with patch("sys.stdin", StringIO(stdin_data)), \
+             patch("postcompact_verify.build_verification_message",
+                   side_effect=RuntimeError("test error")):
+            with pytest.raises(SystemExit):
+                main()
+
+        captured = capsys.readouterr()
+        output = json.loads(captured.out.strip())
+        assert "systemMessage" in output
+        assert "PACT hook warning" in output["systemMessage"]
+        assert "postcompact_verify" in output["systemMessage"]
+        assert "test error" in output["systemMessage"]

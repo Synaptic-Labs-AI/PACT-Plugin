@@ -29,6 +29,11 @@ import sys
 from pathlib import Path
 
 from shared.error_output import hook_error_json
+from shared.task_scanner import scan_all_tasks
+
+
+# Prefixes that indicate system tasks (not feature tasks)
+_SYSTEM_PREFIXES = ("Phase:", "BLOCKER:", "ALERT:", "HALT:")
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +45,11 @@ def _gather_task_state(
     tasks_base_dir: str | None = None,
 ) -> dict:
     """
-    Scan all team task directories for task state.
+    Analyze task state from all team task directories.
+
+    Uses shared.task_scanner.scan_all_tasks() for file I/O, then applies
+    precompact-specific analysis: status counts, feature/phase detection,
+    variety score extraction.
 
     Returns dict with keys: completed, in_progress, pending, total,
     feature_subject, feature_id, current_phase, variety_score.
@@ -56,66 +65,38 @@ def _gather_task_state(
         "variety_score": None,
     }
 
-    if tasks_base_dir is None:
-        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+    for data in scan_all_tasks(tasks_base_dir):
+        status = data.get("status", "pending")
+        if status in ("completed", "in_progress", "pending"):
+            state[status] += 1
+        state["total"] += 1
 
-    base = Path(tasks_base_dir)
-    if not base.exists():
-        return state
+        subject = data.get("subject", "")
+        task_id = str(data.get("id", ""))
+        metadata = data.get("metadata") or {}
 
-    try:
-        for team_dir in base.iterdir():
-            if not team_dir.is_dir():
-                continue
-            for task_file in team_dir.iterdir():
-                if not task_file.name.endswith(".json"):
-                    continue
-                try:
-                    data = json.loads(task_file.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    continue
+        # Phase detection: in_progress task with "Phase:" prefix
+        if (
+            status == "in_progress"
+            and subject.startswith("Phase:")
+            and state["current_phase"] is None
+        ):
+            state["current_phase"] = subject
 
-                status = data.get("status", "pending")
-                if status in ("completed", "in_progress", "pending"):
-                    state[status] += 1
-                state["total"] += 1
+        # Feature task: in_progress without system prefixes
+        if (
+            status == "in_progress"
+            and state["feature_subject"] is None
+            and subject
+            and not any(subject.startswith(p) for p in _SYSTEM_PREFIXES)
+        ):
+            state["feature_subject"] = subject
+            state["feature_id"] = task_id
 
-                subject = data.get("subject", "")
-                task_id = data.get("id", task_file.stem)
-                metadata = data.get("metadata") or {}
-
-                # Phase detection: in_progress task with "Phase:" prefix
-                if (
-                    status == "in_progress"
-                    and subject.startswith("Phase:")
-                    and state["current_phase"] is None
-                ):
-                    state["current_phase"] = subject
-
-                # Feature task: in_progress without system prefixes
-                if (
-                    status == "in_progress"
-                    and state["feature_subject"] is None
-                    and subject
-                    and not any(
-                        subject.startswith(prefix)
-                        for prefix in (
-                            "Phase:",
-                            "BLOCKER:",
-                            "ALERT:",
-                            "HALT:",
-                        )
-                    )
-                ):
-                    state["feature_subject"] = subject
-                    state["feature_id"] = str(task_id)
-
-                    # Variety score from feature task metadata
-                    variety = metadata.get("variety")
-                    if variety is not None:
-                        state["variety_score"] = variety
-    except OSError:
-        pass  # Can't read base dir — return whatever we have
+            # Variety score from feature task metadata
+            variety = metadata.get("variety")
+            if variety is not None:
+                state["variety_score"] = variety
 
     return state
 
