@@ -86,7 +86,7 @@ Audit and optionally clean up Task state:
 
 ## 7. Session Decision
 
-Use `AskUserQuestion`: "Continue working in this session?"
-
-- **Yes**: Keep team alive. Report "Ready for next task."
-- **No**: Shut down remaining teammates (send `shutdown_request` to each active teammate and wait for responses). Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
+Use `AskUserQuestion` with these exact options:
+- **"Yes, continue"** (description: "Keep team alive, ready for next task") → On selection: Report "Ready for next task."
+- **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
+- **"No, end session"** (description: "Shut down teammates and close session") → On selection: Shut down remaining teammates (send `shutdown_request` to each active teammate and wait for responses). Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
