@@ -98,8 +98,11 @@ class TestAskUserQuestionOptions:
     # --- wrap-up.md Step 7 ---
 
     def test_wrapup_has_three_options(self, wrapup_content):
-        labels = _extract_option_labels(wrapup_content)
-        assert len(labels) == 3, f"wrap-up.md should have 3 options, found {len(labels)}: {labels}"
+        """Step 7 session decision has 3 options."""
+        # Extract only from the Session Decision section (after "Session Decision")
+        session_section = wrapup_content.split("Session Decision")[1]
+        labels = _extract_option_labels(session_section)
+        assert len(labels) == 3, f"wrap-up.md session decision should have 3 options, found {len(labels)}: {labels}"
 
     def test_wrapup_yes_continue_option(self, wrapup_content):
         assert '"Yes, continue"' in wrapup_content
