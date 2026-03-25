@@ -62,10 +62,10 @@ verify "pact-s1-autonomy.md" "S1 Autonomy (lines 646-719)" "646,719"
 verify "pact-variety.md" "Variety (lines 765-887)" "765,887"
 
 # Combined-range extracts
-verify "pact-s2-coordination.md" "S2 Coordination (lines 485-644 + 1201-1214)" "485,644" "1201,1214"
+verify "pact-s2-coordination.md" "S2 Coordination (lines 485-645 + 1201-1215)" "485,645" "1201,1215"
 verify "pact-workflows.md" "Workflows (lines 889-1062)" "889,1062"
 verify "pact-task-hierarchy.md" "Task Hierarchy (lines 1074-1199)" "1074,1199"
-verify "pact-phase-transitions.md" "Phase Transitions (lines 1063-1072 + 1216-1294)" "1063,1072" "1216,1294"
+verify "pact-phase-transitions.md" "Phase Transitions (lines 1063-1072 + 1215-1295)" "1063,1072" "1215,1295"
 verify "pact-agent-stall.md" "Agent Stall Detection (lines 1296-1327)" "1296,1327"
 verify "pact-completeness.md" "Completeness Signals (lines 1329-1367)" "1329,1367"
 verify "pact-scope-detection.md" "Scope Detection (lines 1369-1503)" "1369,1503"

@@ -158,6 +158,7 @@ When dispatching agents during parallel execution, the codebase may have changed
 **Skip when**: Single-agent execution (no parallel agents = no drift risk).
 
 ---
+
 ## Backend ↔ Database Boundary
 
 **Sequence**: Database delivers schema → Backend implements ORM.
@@ -172,3 +173,4 @@ When dispatching agents during parallel execution, the codebase may have changed
 **Collaboration**: If Backend needs a complex query, ask Database. If Database needs to know access patterns, ask Backend.
 
 ---
+
