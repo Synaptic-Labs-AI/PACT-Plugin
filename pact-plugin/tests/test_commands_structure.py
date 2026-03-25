@@ -7,7 +7,9 @@ Tests cover:
 3. Frontmatter has description field
 4. Command body contains substantive content
 5. Commands reference $ARGUMENTS where appropriate
+6. AskUserQuestion option labels and counts in wrap-up.md and peer-review.md
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -75,3 +77,73 @@ class TestCommandBody:
             if f.stem == "orchestrate":
                 text = f.read_text(encoding="utf-8")
                 assert "$ARGUMENTS" in text, "orchestrate.md should reference $ARGUMENTS"
+
+
+def _extract_option_labels(text):
+    """Extract AskUserQuestion option labels from **"Label"** pattern."""
+    return re.findall(r'\*\*"([^"]+)"\*\*', text)
+
+
+class TestAskUserQuestionOptions:
+    """Validate AskUserQuestion option labels and counts in session-decision commands."""
+
+    @pytest.fixture
+    def wrapup_content(self):
+        return (COMMANDS_DIR / "wrap-up.md").read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def peer_review_content(self):
+        return (COMMANDS_DIR / "peer-review.md").read_text(encoding="utf-8")
+
+    # --- wrap-up.md Step 7 ---
+
+    def test_wrapup_has_three_options(self, wrapup_content):
+        labels = _extract_option_labels(wrapup_content)
+        assert len(labels) == 3, f"wrap-up.md should have 3 options, found {len(labels)}: {labels}"
+
+    def test_wrapup_yes_continue_option(self, wrapup_content):
+        assert '"Yes, continue"' in wrapup_content
+
+    def test_wrapup_pause_option(self, wrapup_content):
+        assert '"Pause work for now"' in wrapup_content
+
+    def test_wrapup_no_end_session_option(self, wrapup_content):
+        assert '"No, end session"' in wrapup_content
+
+    def test_wrapup_pause_invokes_pause_command(self, wrapup_content):
+        """Pause option should invoke /PACT:pause."""
+        assert "/PACT:pause" in wrapup_content
+
+    # --- peer-review.md step 6 ---
+
+    def test_peer_review_has_three_merge_options(self, peer_review_content):
+        """Step 6 merge authorization has 3 options."""
+        # Extract only from the merge authorization section (after "Merge Authorization")
+        merge_section = peer_review_content.split("Merge Authorization")[1]
+        labels = _extract_option_labels(merge_section)
+        assert len(labels) == 3, (
+            f"peer-review.md merge section should have 3 options, found {len(labels)}: {labels}"
+        )
+
+    def test_peer_review_yes_merge_option(self, peer_review_content):
+        assert '"Yes, merge"' in peer_review_content
+
+    def test_peer_review_continue_reviewing_option(self, peer_review_content):
+        assert '"Continue reviewing"' in peer_review_content
+
+    def test_peer_review_pause_option(self, peer_review_content):
+        assert '"Pause work for now"' in peer_review_content
+
+    # --- Shared Pause option consistency ---
+
+    def test_pause_option_label_consistent(self, wrapup_content, peer_review_content):
+        """Both commands should use the same Pause option label."""
+        label = "Pause work for now"
+        assert label in wrapup_content, "wrap-up.md missing shared Pause label"
+        assert label in peer_review_content, "peer-review.md missing shared Pause label"
+
+    def test_pause_description_consistent(self, wrapup_content, peer_review_content):
+        """Both commands should use the same Pause description."""
+        desc = "Save session knowledge and pause"
+        assert desc in wrapup_content, "wrap-up.md missing shared Pause description"
+        assert desc in peer_review_content, "peer-review.md missing shared Pause description"
