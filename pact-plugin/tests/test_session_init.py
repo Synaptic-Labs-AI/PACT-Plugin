@@ -598,3 +598,68 @@ class TestMainPausedStateIntegration:
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert "Paused work" not in additional
+
+
+class TestCompactSummaryCleanup:
+    """Tests for stale compact-summary.txt cleanup in session_init.main()."""
+
+    def _run_main_with_source_and_summary(self, monkeypatch, tmp_path, source):
+        """Helper: run main() with compact-summary.txt present.
+
+        Returns whether compact-summary.txt still exists after main().
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Create compact-summary.txt
+        sessions_dir = tmp_path / ".claude" / "pact-sessions"
+        sessions_dir.mkdir(parents=True)
+        summary_file = sessions_dir / "compact-summary.txt"
+        summary_file.write_text("Prior compaction context")
+
+        # Patch COMPACT_SUMMARY_PATH to point to our tmp_path version
+        patched_path = summary_file
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": source,
+        })
+
+        with patch("session_init.COMPACT_SUMMARY_PATH", patched_path), \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        return summary_file.exists()
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_non_compact_source_deletes_stale_summary(self, monkeypatch, tmp_path, source):
+        """Non-compact sources (startup, resume, clear) should delete compact-summary.txt."""
+        still_exists = self._run_main_with_source_and_summary(
+            monkeypatch, tmp_path, source
+        )
+        assert not still_exists, (
+            f"compact-summary.txt should be deleted for source='{source}'"
+        )
+
+    def test_compact_source_preserves_summary(self, monkeypatch, tmp_path):
+        """Compact source should preserve compact-summary.txt (it was just written)."""
+        still_exists = self._run_main_with_source_and_summary(
+            monkeypatch, tmp_path, "compact"
+        )
+        assert still_exists, (
+            "compact-summary.txt should be preserved for source='compact'"
+        )

@@ -142,3 +142,46 @@ class TestSchemaProtocolConsistency:
 
     def test_protocol_has_timestamp(self, variety_content):
         assert "timestamp" in variety_content
+
+
+# =============================================================================
+# Cross-reference: secretary calibration gathering vs CalibrationRecord schema
+# =============================================================================
+
+SECRETARY_AGENT = Path(__file__).parent.parent / "agents" / "pact-secretary.md"
+
+# Fields the secretary must reference (exact snake_case or semantic equivalent)
+_SECRETARY_FIELD_CHECKS = {
+    "initial_variety_score": ["initial_variety_score"],
+    "domain": ["domain"],
+    "blocker_count": ["blocker_count", "blocker count"],
+    "phase_reruns": ["phase_reruns", "phase rerun"],
+    "specialist_fit": ["specialist_fit", "specialist fit"],
+    "actual_difficulty_score": ["actual_difficulty_score", "actual difficulty"],
+}
+
+
+class TestSecretaryCalibrationCrossRef:
+    """Verify secretary's calibration gathering (step 13) references CalibrationRecord fields."""
+
+    @pytest.fixture
+    def secretary_content(self):
+        return SECRETARY_AGENT.read_text(encoding="utf-8")
+
+    def test_secretary_has_calibration_gathering_step(self, secretary_content):
+        """Secretary agent definition must include calibration gathering instructions."""
+        assert "calibration" in secretary_content.lower()
+        assert "CalibrationRecord" in secretary_content
+
+    @pytest.mark.parametrize(
+        "field,search_terms",
+        list(_SECRETARY_FIELD_CHECKS.items()),
+        ids=list(_SECRETARY_FIELD_CHECKS.keys()),
+    )
+    def test_secretary_references_calibration_field(self, secretary_content, field, search_terms):
+        """Each CalibrationRecord field must be referenced in secretary's calibration protocol."""
+        found = any(term in secretary_content for term in search_terms)
+        assert found, (
+            f"CalibrationRecord field '{field}' not found in pact-secretary.md. "
+            f"Searched for: {search_terms}"
+        )

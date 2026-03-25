@@ -7,10 +7,10 @@ Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
-2. Reads current task state from disk (same pattern as PreCompact)
+2. Reads current task state from disk (via shared.task_scanner)
 3. Checks if the compact_summary mentions key items: feature task ID,
    current phase, active agents
-4. Writes the compact_summary to ~/.claude/pact-sessions/compact-summary.txt
+4. Writes the compact_summary to the canonical COMPACT_SUMMARY_PATH
    (the secretary reads this during post-compaction briefing)
 5. Emits systemMessage flagging any gaps
 
@@ -25,15 +25,14 @@ import os
 import sys
 from pathlib import Path
 
+from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
-from shared.task_scanner import scan_all_tasks
+from shared.task_scanner import analyze_task_state, scan_team_members
 
 
 # ---------------------------------------------------------------------------
 # Compact summary persistence
 # ---------------------------------------------------------------------------
-
-COMPACT_SUMMARY_FILENAME = "compact-summary.txt"
 
 
 def _get_summary_path(
@@ -41,8 +40,8 @@ def _get_summary_path(
 ) -> Path:
     """Get the path for the compact summary file."""
     if sessions_base_dir is None:
-        sessions_base_dir = str(Path.home() / ".claude" / "pact-sessions")
-    return Path(sessions_base_dir) / COMPACT_SUMMARY_FILENAME
+        return COMPACT_SUMMARY_PATH
+    return Path(sessions_base_dir) / COMPACT_SUMMARY_PATH.name
 
 
 def write_compact_summary(
@@ -81,75 +80,22 @@ def _gather_expected_items(
     """
     Gather key items that should appear in the compact summary.
 
+    Uses shared analyze_task_state() for feature/phase detection and
+    scan_team_members() for agent/team name gathering.
+
     Returns dict with keys: feature_id, feature_subject, current_phase,
     agent_names, team_names.
     """
-    expected = {
-        "feature_id": None,
-        "feature_subject": None,
-        "current_phase": None,
-        "agent_names": [],
-        "team_names": [],
+    task_state = analyze_task_state(tasks_base_dir)
+    team_info = scan_team_members(teams_base_dir)
+
+    return {
+        "feature_id": task_state.get("feature_id"),
+        "feature_subject": task_state.get("feature_subject"),
+        "current_phase": task_state.get("current_phase"),
+        "agent_names": team_info.get("teammates", []),
+        "team_names": team_info.get("team_names", []),
     }
-
-    # Gather from tasks (uses shared scanner)
-    _system_prefixes = ("Phase:", "BLOCKER:", "ALERT:", "HALT:")
-
-    for data in scan_all_tasks(tasks_base_dir):
-        status = data.get("status", "pending")
-        subject = data.get("subject", "")
-        task_id = data.get("id", "")
-
-        if status == "in_progress" and subject.startswith("Phase:"):
-            if expected["current_phase"] is None:
-                expected["current_phase"] = subject
-
-        if (
-            status == "in_progress"
-            and expected["feature_subject"] is None
-            and subject
-            and not any(subject.startswith(p) for p in _system_prefixes)
-        ):
-            expected["feature_subject"] = subject
-            expected["feature_id"] = str(task_id)
-
-    # Gather from teams
-    if teams_base_dir is None:
-        teams_base_dir = str(Path.home() / ".claude" / "teams")
-
-    teams_path = Path(teams_base_dir)
-    if teams_path.exists():
-        try:
-            for team_dir in teams_path.iterdir():
-                if not team_dir.is_dir():
-                    continue
-                config_path = team_dir / "config.json"
-                if not config_path.exists():
-                    continue
-                try:
-                    data = json.loads(
-                        config_path.read_text(encoding="utf-8")
-                    )
-                except (json.JSONDecodeError, OSError):
-                    continue
-
-                team_name = data.get("name", team_dir.name)
-                if team_name:
-                    expected["team_names"].append(team_name)
-
-                members = data.get("members", [])
-                for member in members:
-                    name = (
-                        member.get("name", "")
-                        if isinstance(member, dict)
-                        else ""
-                    )
-                    if name:
-                        expected["agent_names"].append(name)
-        except OSError:
-            pass
-
-    return expected
 
 
 def check_summary_gaps(

@@ -57,6 +57,7 @@ from staleness import (  # noqa: F401
     _estimate_tokens,
 )
 
+from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -138,6 +139,14 @@ def main():
         source = input_data.get("source", "startup")
         is_context_reset = source in ("compact", "clear")
 
+        # Clean up stale compact-summary from previous sessions.
+        # Only "compact" source needs it (just written by postcompact_verify).
+        if source != "compact":
+            try:
+                COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass  # Fail-open: don't block session init for cleanup
+
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session
         if not is_context_reset:
@@ -199,7 +208,7 @@ def main():
             context_parts.insert(0, (
                 f'{_team_reuse} '
                 f'POST-COMPACTION: Your context was compacted — recover state: '
-                f'(1) Read ~/.claude/pact-sessions/compact-summary.txt for prior context, '
+                f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
                 f'(2) Run TaskList to find in-progress work, '
                 f'(3) TaskGet on in-progress tasks for details. '
                 f"Re-engage secretary: SendMessage(to='secretary', "

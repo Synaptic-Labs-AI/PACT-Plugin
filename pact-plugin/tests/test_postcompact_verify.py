@@ -310,9 +310,17 @@ class TestPostcompactFailOpen:
 class TestConstants:
     """Verify module-level constants."""
 
-    def test_compact_summary_filename(self):
-        from postcompact_verify import COMPACT_SUMMARY_FILENAME
-        assert COMPACT_SUMMARY_FILENAME == "compact-summary.txt"
+    def test_compact_summary_path_from_shared_constants(self):
+        from shared.constants import COMPACT_SUMMARY_PATH
+        assert COMPACT_SUMMARY_PATH.name == "compact-summary.txt"
+        assert "pact-sessions" in str(COMPACT_SUMMARY_PATH)
+
+    def test_postcompact_uses_shared_path(self):
+        """Verify postcompact_verify imports COMPACT_SUMMARY_PATH from shared."""
+        from postcompact_verify import _get_summary_path
+        from shared.constants import COMPACT_SUMMARY_PATH
+        # Default path (no override) should match the shared constant
+        assert _get_summary_path() == COMPACT_SUMMARY_PATH
 
 
 # ---------------------------------------------------------------------------

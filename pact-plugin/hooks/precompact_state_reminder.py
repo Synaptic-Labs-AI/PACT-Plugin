@@ -26,125 +26,9 @@ Output: JSON with custom_instructions and systemMessage on stdout
 
 import json
 import sys
-from pathlib import Path
 
 from shared.error_output import hook_error_json
-from shared.task_scanner import scan_all_tasks
-
-
-# Prefixes that indicate system tasks (not feature tasks)
-_SYSTEM_PREFIXES = ("Phase:", "BLOCKER:", "ALERT:", "HALT:")
-
-
-# ---------------------------------------------------------------------------
-# Disk state gathering — all functions fail open (return defaults on error)
-# ---------------------------------------------------------------------------
-
-
-def _gather_task_state(
-    tasks_base_dir: str | None = None,
-) -> dict:
-    """
-    Analyze task state from all team task directories.
-
-    Uses shared.task_scanner.scan_all_tasks() for file I/O, then applies
-    precompact-specific analysis: status counts, feature/phase detection,
-    variety score extraction.
-
-    Returns dict with keys: completed, in_progress, pending, total,
-    feature_subject, feature_id, current_phase, variety_score.
-    """
-    state = {
-        "completed": 0,
-        "in_progress": 0,
-        "pending": 0,
-        "total": 0,
-        "feature_subject": None,
-        "feature_id": None,
-        "current_phase": None,
-        "variety_score": None,
-    }
-
-    for data in scan_all_tasks(tasks_base_dir):
-        status = data.get("status", "pending")
-        if status in ("completed", "in_progress", "pending"):
-            state[status] += 1
-        state["total"] += 1
-
-        subject = data.get("subject", "")
-        task_id = str(data.get("id", ""))
-        metadata = data.get("metadata") or {}
-
-        # Phase detection: in_progress task with "Phase:" prefix
-        if (
-            status == "in_progress"
-            and subject.startswith("Phase:")
-            and state["current_phase"] is None
-        ):
-            state["current_phase"] = subject
-
-        # Feature task: in_progress without system prefixes
-        if (
-            status == "in_progress"
-            and state["feature_subject"] is None
-            and subject
-            and not any(subject.startswith(p) for p in _SYSTEM_PREFIXES)
-        ):
-            state["feature_subject"] = subject
-            state["feature_id"] = task_id
-
-            # Variety score from feature task metadata
-            variety = metadata.get("variety")
-            if variety is not None:
-                state["variety_score"] = variety
-
-    return state
-
-
-def _gather_team_info(
-    teams_base_dir: str | None = None,
-) -> dict:
-    """
-    Read team config files for active teammate names and team names.
-
-    Returns dict with keys: teammates (list[str]), team_names (list[str]).
-    """
-    info = {"teammates": [], "team_names": []}
-
-    if teams_base_dir is None:
-        teams_base_dir = str(Path.home() / ".claude" / "teams")
-
-    base = Path(teams_base_dir)
-    if not base.exists():
-        return info
-
-    try:
-        for team_dir in base.iterdir():
-            if not team_dir.is_dir():
-                continue
-            config_path = team_dir / "config.json"
-            if not config_path.exists():
-                continue
-            try:
-                data = json.loads(config_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-
-            # Track team name from config or directory name
-            team_name = data.get("name", team_dir.name)
-            if team_name:
-                info["team_names"].append(team_name)
-
-            # config.json has "members" list with "name" fields
-            members = data.get("members", [])
-            for member in members:
-                name = member.get("name", "") if isinstance(member, dict) else ""
-                if name:
-                    info["teammates"].append(name)
-    except OSError:
-        pass  # Can't read teams dir — return defaults
-
-    return info
+from shared.task_scanner import analyze_task_state, scan_team_members
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +145,8 @@ def build_hook_output(
 
     Returns dict ready for json.dumps().
     """
-    task_state = _gather_task_state(tasks_base_dir)
-    team_info = _gather_team_info(teams_base_dir)
+    task_state = analyze_task_state(tasks_base_dir)
+    team_info = scan_team_members(teams_base_dir)
     state_summary = _build_state_summary(task_state, team_info)
 
     system_message = (
