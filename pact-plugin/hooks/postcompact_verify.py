@@ -56,7 +56,7 @@ def write_compact_summary(
     """
     try:
         path = _get_summary_path(sessions_base_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Secure write: 0o600 permissions
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:

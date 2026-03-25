@@ -270,28 +270,6 @@ BRAIN_DUMP_INSTRUCTIONS = (
 )
 
 
-def build_message(
-    tasks_base_dir: str | None = None,
-    teams_base_dir: str | None = None,
-) -> str:
-    """
-    Build the full precompact systemMessage.
-
-    Separated from main() for testability. Accepts optional dir overrides.
-    """
-    task_state = _gather_task_state(tasks_base_dir)
-    team_info = _gather_team_info(teams_base_dir)
-    state_summary = _build_state_summary(task_state, team_info)
-
-    return (
-        f"Compaction imminent — mechanical state snapshot:\n"
-        f"\n"
-        f"{state_summary}\n"
-        f"\n"
-        f"{BRAIN_DUMP_INSTRUCTIONS}"
-    )
-
-
 def build_hook_output(
     tasks_base_dir: str | None = None,
     teams_base_dir: str | None = None,
