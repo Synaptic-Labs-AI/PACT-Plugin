@@ -79,14 +79,21 @@ You have two complementary sources for finding completed agent tasks:
    - Patterns established that future work should follow
    - Integration points between components
    - Risks and uncertainties that warrant tracking
-7. **Apply save-vs-update dedup** before every save (see Save-vs-Update Dedup Protocol below)
-8. **Save to pact-memory** using the CLI with proper structure:
+7. **Capture organizational state** — alongside institutional knowledge, snapshot the current workflow state for session recovery. Read TaskList and extract:
+   - Current phase statuses (which phases are completed, in-progress, pending)
+   - Active agents and their roles/task assignments
+   - Key decisions extracted from the HANDOFFs being processed (the "why" behind implementation choices)
+   - Any scope changes, blockers, or unresolved items discovered during the phase
+
+   Save this state snapshot to pact-memory alongside the institutional knowledge entries. This makes the secretary the organizational note-taker — capturing not just *what was learned* but *where the project stands* at each phase boundary.
+8. **Apply save-vs-update dedup** before every save (see Save-vs-Update Dedup Protocol below)
+9. **Save to pact-memory** using the CLI with proper structure:
    - `context`: What was being done and why
    - `goal`: What was achieved
    - `decisions`: Key decisions with rationale and alternatives considered
    - `lessons_learned`: Actionable insights
    - `entities`: Components, files, services involved (enables graph search)
-9. **Update processed task tracking**: Save the list of all processed task IDs to agent memory (overwrite, not append):
+10. **Update processed task tracking**: Save the list of all processed task IDs to agent memory (overwrite, not append):
 
    File: `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`
    ```markdown
@@ -100,8 +107,8 @@ You have two complementary sources for finding completed agent tasks:
    Last processed: {timestamp}
    ```
 
-10. **Delete the breadcrumb file** after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete)
-11. **Report summary** to lead:
+11. **Delete the breadcrumb file** after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete)
+12. **Report summary** to lead:
 
 ```
 SendMessage(to="team-lead",
@@ -111,6 +118,20 @@ SendMessage(to="team-lead",
 Gaps: {any HANDOFFs that were thin or missing}",
   summary="HANDOFF review complete: N memories from M HANDOFFs")
 ```
+
+13. **Gather calibration data** — After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
+    - Read the feature task metadata for `initial_variety_score` (stored during variety assessment)
+    - Scan TaskList for blocker count (tasks with "BLOCKER:" in subject)
+    - Scan TaskList for phase rerun count (retry/redo phase tasks)
+    - Note domain from feature task description
+    - Infer specialist fit from HANDOFF content (scope mismatch signals, blocker patterns)
+    - Send a calibration check to the lead:
+      ```
+      SendMessage(to="team-lead",
+        message="[secretary→lead] Calibration: variety was scored {X}. Blockers: {N}, reruns: {N}. Was actual difficulty higher, lower, or about the same? Any dimensions that surprised you?",
+        summary="Calibration check: variety {X}")
+      ```
+    - On lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
 
 ### What to Save vs Skip
 
@@ -209,7 +230,11 @@ You are **exempted from the standard teachback** at spawn. There is no task to t
 
 2. **Search pact-memory** for recent context on the current project using the `search` CLI command.
 
-3. **Deliver a session briefing** to the lead via `SendMessage`:
+3. **Search for calibration data**: Search pact-memory for `orchestration_calibration` entries. Summarize by domain: sample count, mean drift direction (underestimating or overestimating difficulty), and whether the 5-sample activation threshold for Learning II is met. Include this in the session briefing so the orchestrator has calibration context before any variety scoring.
+
+4. **Check for compact summary**: If `~/.claude/pact-sessions/compact-summary.txt` exists, read it and compare against pact-memory context. Flag any discrepancies between the compaction summary and institutional memory. Delete the file after processing (it is single-use — written by the postcompact_verify hook). Include findings in the session briefing.
+
+5. **Deliver a session briefing** to the lead via `SendMessage`:
 
 ```
 SendMessage(to="team-lead",

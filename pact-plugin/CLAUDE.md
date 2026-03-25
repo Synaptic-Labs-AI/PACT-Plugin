@@ -438,6 +438,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 - **🧪 pact-test-engineer** (Test): Testing and quality assurance
 - **🛡️ pact-security-engineer** (Review): Adversarial security code review
 - **🔍 pact-qa-engineer** (Review): Runtime verification, exploratory testing
+- **📋 pact-auditor** (Code): Independent quality observer during concurrent CODE phase
 - **🧠 pact-secretary** (Secretary): Research assistant, knowledge distiller, context preservation
 
 ### Agent Teams Dispatch
@@ -528,7 +529,7 @@ If the `validate_handoff` hook warns about a missing HANDOFF, extract available 
 Use these commands to trigger PACT workflows for delegating tasks:
 - `/PACT:plan-mode`: Multi-agent planning consultation before implementation (no code changes)
 - `/PACT:orchestrate`: Delegate a task to PACT specialist agents (multi-agent, full ceremony)
-- `/PACT:comPACT`: Delegate a focused task to a single specialist (light ceremony)
+- `/PACT:comPACT`: Dispatch concurrent specialists for self-contained tasks (no PACT phases needed)
 - `/PACT:rePACT`: Recursive nested PACT cycle for complex sub-tasks (single or multi-domain)
 - `/PACT:imPACT`: Triage when blocked (Redo prior phase? Additional agents needed?)
 - `/PACT:peer-review`: Peer review of current work (commit, create PR, multi-agent review)
@@ -555,7 +556,7 @@ To invoke specialist agents, follow this sequence:
 
 Within each phase, invoke **multiple specialists concurrently** for non-conflicting tasks.
 
-> ⚠️ **Single domain ≠ single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Default to concurrent dispatch unless tasks share files or have dependencies.
+> ⚠️ **Single domain ≠ single agent, and comPACT is not limited to a single domain.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Independent tasks across domains can also run concurrently. Default to concurrent dispatch unless tasks share files or have dependencies.
 
 **After all phases complete**: Run `/PACT:peer-review` to create a PR.
 

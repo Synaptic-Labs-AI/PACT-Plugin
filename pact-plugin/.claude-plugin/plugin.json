@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "3.12.6",
+  "version": "3.13.0",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "ProfSynapse",
@@ -47,6 +47,7 @@
     "./agents/pact-test-engineer.md",
     "./agents/pact-security-engineer.md",
     "./agents/pact-qa-engineer.md",
+    "./agents/pact-auditor.md",
     "./agents/pact-secretary.md"
   ],
   "skills": "./skills/"

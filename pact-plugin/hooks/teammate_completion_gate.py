@@ -83,13 +83,34 @@ def _scan_owned_tasks(
 
             task_id = task_file.stem  # filename without .json
             subject = data.get("subject", "unknown")
-            entry = {"id": task_id, "subject": subject}
-
             metadata = data.get("metadata", {})
-            if metadata.get("handoff"):
-                completable.append(entry)
+
+            # Semantic dispatch: branch on what the completion IS,
+            # not who the agent IS (extensible to any signal-only agent)
+            completion_type = metadata.get("completion_type", "handoff")
+            entry = {
+                "id": task_id,
+                "subject": subject,
+                "completion_type": completion_type,
+            }
+
+            if completion_type == "signal":
+                # Signal-based completion: accept audit_summary as artifact
+                if metadata.get("audit_summary"):
+                    completable.append(entry)
+                else:
+                    missing_handoff.append(entry)
             else:
-                missing_handoff.append(entry)
+                if completion_type != "handoff":
+                    sys.stderr.write(
+                        f"Warning: unrecognized completion_type "
+                        f"'{completion_type}' on task {task_id}, "
+                        f"falling through to handoff behavior\n"
+                    )
+                if metadata.get("handoff"):
+                    completable.append(entry)
+                else:
+                    missing_handoff.append(entry)
     except OSError:
         return [], []  # Can't scan directory — fail open
 
@@ -172,14 +193,14 @@ def format_feedback(completable: list[dict]) -> str:
 
 def format_missing_handoff_feedback(missing: list[dict]) -> str:
     """
-    Format feedback for an idle agent whose tasks are missing HANDOFF metadata.
+    Format feedback for an idle agent whose tasks are missing completion artifacts.
 
-    Provides a concrete example from the shared template so agents can
-    self-correct from a copy-paste-ready template rather than looping on
-    the schema description.
+    For standard handoff-type tasks, provides a concrete HANDOFF example.
+    For signal-type tasks (e.g., auditor), references audit_summary instead.
 
     Args:
-        missing: List of dicts with 'id' and 'subject'
+        missing: List of dicts with 'id', 'subject', and optionally
+                 'completion_type' ("handoff" or "signal")
 
     Returns:
         Feedback message string for stderr
@@ -190,12 +211,41 @@ def format_missing_handoff_feedback(missing: list[dict]) -> str:
     else:
         task_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in missing)
 
-    task_id_example = missing[0]["id"]
+    # Partition by completion type for type-appropriate guidance.
+    # Unrecognized types default to handoff partition (handoff guidance
+    # is the safe fallback for any unknown completion type).
+    signal_tasks = [
+        t for t in missing if t.get("completion_type") == "signal"
+    ]
+    handoff_tasks = [
+        t for t in missing if t.get("completion_type") != "signal"
+    ]
+
+    parts = []
+
+    if signal_tasks:
+        sig_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in signal_tasks)
+        sig_id = signal_tasks[0]["id"]
+        parts.append(
+            f"Signal-type tasks missing audit_summary: {sig_ref}. "
+            f"Store your audit summary via "
+            f'TaskUpdate(taskId="{sig_id}", '
+            f'metadata={{"audit_summary": {{"signal": "GREEN|YELLOW|RED", '
+            f'"findings": [...]}}}}) then mark the task completed.'
+        )
+
+    if handoff_tasks:
+        ho_ref = ", ".join(f"#{t['id']} ({t['subject']})" for t in handoff_tasks)
+        ho_id = handoff_tasks[0]["id"]
+        parts.append(
+            f"Handoff-type tasks missing HANDOFF metadata: {ho_ref}. "
+            f"You must store handoff metadata BEFORE marking the task completed.\n\n"
+            + format_handoff_example(ho_id)
+        )
 
     return (
-        f"You went idle with in_progress tasks missing HANDOFF metadata: {task_ref}. "
-        f"You must store handoff metadata BEFORE marking the task completed.\n\n"
-        + format_handoff_example(task_id_example)
+        f"You went idle with in_progress tasks missing completion artifacts: "
+        f"{task_ref}.\n\n" + "\n\n".join(parts)
     )
 
 

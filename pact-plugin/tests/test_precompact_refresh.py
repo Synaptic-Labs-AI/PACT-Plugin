@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -617,3 +618,111 @@ class TestExceptionHandlingPaths:
             checkpoint = json.loads(checkpoint_path.read_text())
             # Session ID should be "unknown" when not set
             assert checkpoint.get("session_id") == "unknown"
+
+
+class TestCleanupOldCheckpoints:
+    """Tests for cleanup_old_checkpoints() function."""
+
+    def test_nonexistent_directory_returns_zero(self, tmp_path: Path):
+        """Non-existent checkpoint directory returns 0 without error."""
+        from precompact_refresh import cleanup_old_checkpoints
+
+        result = cleanup_old_checkpoints(tmp_path / "does-not-exist")
+
+        assert result == 0
+
+    def test_empty_directory_returns_zero(self, tmp_path: Path):
+        """Empty checkpoint directory returns 0."""
+        from precompact_refresh import cleanup_old_checkpoints
+
+        result = cleanup_old_checkpoints(tmp_path)
+
+        assert result == 0
+
+    def test_old_checkpoint_files_deleted(self, tmp_path: Path):
+        """Checkpoint files older than CHECKPOINT_MAX_AGE_DAYS are deleted."""
+        from precompact_refresh import cleanup_old_checkpoints
+        from refresh.constants import CHECKPOINT_MAX_AGE_DAYS
+
+        # Create files with old mtimes (older than max age)
+        old_time = time.time() - (CHECKPOINT_MAX_AGE_DAYS + 1) * 24 * 60 * 60
+        for name in ("old-project-a.json", "old-project-b.json"):
+            f = tmp_path / name
+            f.write_text(json.dumps({"old": True}))
+            os.utime(f, (old_time, old_time))
+
+        result = cleanup_old_checkpoints(tmp_path)
+
+        assert result == 2
+        assert not (tmp_path / "old-project-a.json").exists()
+        assert not (tmp_path / "old-project-b.json").exists()
+
+    def test_recent_checkpoint_files_preserved(self, tmp_path: Path):
+        """Checkpoint files newer than CHECKPOINT_MAX_AGE_DAYS are kept."""
+        from precompact_refresh import cleanup_old_checkpoints
+        from refresh.constants import CHECKPOINT_MAX_AGE_DAYS
+
+        # Create old file and recent file
+        old_time = time.time() - (CHECKPOINT_MAX_AGE_DAYS + 1) * 24 * 60 * 60
+        old_file = tmp_path / "old.json"
+        old_file.write_text(json.dumps({"old": True}))
+        os.utime(old_file, (old_time, old_time))
+
+        recent_file = tmp_path / "recent.json"
+        recent_file.write_text(json.dumps({"recent": True}))
+        # recent_file keeps its current mtime (just created)
+
+        result = cleanup_old_checkpoints(tmp_path)
+
+        assert result == 1
+        assert not old_file.exists()
+        assert recent_file.exists()
+
+    def test_oserror_on_individual_file_deletion_handled(self, tmp_path: Path):
+        """OSError during individual file deletion is caught gracefully."""
+        from precompact_refresh import cleanup_old_checkpoints
+        from refresh.constants import CHECKPOINT_MAX_AGE_DAYS
+
+        old_time = time.time() - (CHECKPOINT_MAX_AGE_DAYS + 1) * 24 * 60 * 60
+        f = tmp_path / "undeletable.json"
+        f.write_text(json.dumps({"data": True}))
+        os.utime(f, (old_time, old_time))
+
+        # Patch unlink to raise OSError
+        original_unlink = Path.unlink
+
+        def mock_unlink(self, *args, **kwargs):
+            if self.name == "undeletable.json":
+                raise OSError("Permission denied")
+            return original_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", mock_unlink):
+            result = cleanup_old_checkpoints(tmp_path)
+
+        # File deletion failed, so cleaned count stays 0
+        assert result == 0
+        # File still exists since unlink failed
+        assert f.exists()
+
+    def test_non_json_files_ignored(self, tmp_path: Path):
+        """Non-.json files are not touched by cleanup."""
+        from precompact_refresh import cleanup_old_checkpoints
+        from refresh.constants import CHECKPOINT_MAX_AGE_DAYS
+
+        old_time = time.time() - (CHECKPOINT_MAX_AGE_DAYS + 1) * 24 * 60 * 60
+
+        # Non-json file with old mtime
+        txt_file = tmp_path / "notes.txt"
+        txt_file.write_text("some notes")
+        os.utime(txt_file, (old_time, old_time))
+
+        # Old json file (should be deleted)
+        json_file = tmp_path / "old-checkpoint.json"
+        json_file.write_text(json.dumps({"data": True}))
+        os.utime(json_file, (old_time, old_time))
+
+        result = cleanup_old_checkpoints(tmp_path)
+
+        assert result == 1
+        assert txt_file.exists()  # Non-json preserved
+        assert not json_file.exists()  # Json cleaned up

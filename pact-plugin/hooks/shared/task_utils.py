@@ -156,6 +156,7 @@ def find_active_agents(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "test-engineer:",
         "security-engineer:",
         "qa-engineer:",
+        "auditor:",
         "secretary:",
     )
 

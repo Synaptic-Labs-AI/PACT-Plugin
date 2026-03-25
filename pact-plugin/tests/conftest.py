@@ -574,7 +574,7 @@ def create_compact_transcript(
 
     # Specialist selection
     lines.append(make_assistant_message(
-        f"invoking-specialist: Delegating to pact-{specialist}-coder with light ceremony.",
+        f"invoking-specialist: Delegating to pact-{specialist}-coder for self-contained task.",
         timestamp="2025-01-22T14:00:05Z",
     ))
 

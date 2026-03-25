@@ -202,9 +202,9 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
    - **No recommendations**: If the table is empty (no blocking, minor, or future items), proceed directly to step 4.
    - **Blocking**: Automatically address all blocking items:
      - Batch fixes by selecting appropriate workflow(s) based on combined scope:
-       - Single-domain items → `/PACT:comPACT` (invoke concurrently if independent)
-       - Multi-domain items → `/PACT:orchestrate`
-       - Mixed (both single and multi-domain) → Use `/PACT:comPACT` for the single-domain batch AND `/PACT:orchestrate` for the multi-domain batch (can run in parallel if independent)
+       - Independent items (no shared files) → `/PACT:comPACT` (invoke concurrently, same or mixed domain)
+       - Items with shared-file dependencies or needing PREPARE/ARCHITECT → `/PACT:orchestrate`
+       - Mixed (both independent and dependent) → Use `/PACT:comPACT` for the independent batch AND `/PACT:orchestrate` for the dependent batch (can run in parallel if non-overlapping)
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
      - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
    - **Minor + Future**:
@@ -244,8 +244,8 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
          - Handle inline: provide context immediately, get the answer, then continue to the next recommendation
        - **Collect all answers first**, then batch work:
          - Group all minor=Yes items AND future="Address now" items → Select workflow based on combined scope:
-           - Single-domain items → `/PACT:comPACT` (invoke concurrently if independent)
-           - Multi-domain items → `/PACT:orchestrate`
+           - Independent items (no shared files) → `/PACT:comPACT` (invoke concurrently, same or mixed domain)
+           - Items with shared-file dependencies or needing PREPARE/ARCHITECT → `/PACT:orchestrate`
          - Group all future="Create GitHub issue" items → Create GitHub issues
        - If any items fixed (minor or future addressed now) → re-run review to verify fixes only (see Verify-Only Re-Review above)
 
@@ -285,4 +285,4 @@ Monitor for blocker/algedonic signals via:
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 
-On signal detected: Follow Signal Task Handling in CLAUDE.md.
+On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).

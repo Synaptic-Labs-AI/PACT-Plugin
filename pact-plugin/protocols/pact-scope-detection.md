@@ -79,7 +79,7 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 ### Bypass Rules
 
 - **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes). Scoped sub-scopes cannot themselves trigger scope detection -- this bypass rule is the primary architectural mechanism; the 1-level nesting limit (see [S1 Autonomy & Recursion](pact-s1-autonomy.md#s1-autonomy--recursion)) serves as the safety net.
-- **comPACT** bypasses scope detection entirely — it is inherently single-domain
+- **comPACT** bypasses scope detection entirely — it dispatches specialists directly without phase chaining
 - **Manual `/rePACT`** bypasses detection — user has already decided to decompose
 
 ### Evaluation Response

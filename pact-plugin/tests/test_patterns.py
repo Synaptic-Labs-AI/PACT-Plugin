@@ -539,6 +539,7 @@ class TestAgentListConsistency:
             "pact-test-engineer",
             "pact-security-engineer",
             "pact-qa-engineer",
+            "pact-auditor",
             "pact-secretary",
         ]
         assert PACT_AGENTS == lifecycle_order, (

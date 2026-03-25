@@ -39,7 +39,7 @@ Score each dimension 1-4 and sum:
 Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
 
 1. **Search**: Query pact-memory for `"{domain} orchestration_calibration OR review_calibration"` and `"{domain} blocker OR stall OR rePACT"`
-2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
+2. **Assess**: If 5+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
 3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
 4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
 
@@ -55,7 +55,7 @@ Before finalizing the variety score, search pact-memory for recurring patterns i
 
 **Amplify** (increase response capacity):
 - Invoke additional specialists
-- Enable parallel execution (primary CODE phase strategy; use QDCL from orchestrate.md)
+- Enable parallel execution (primary CODE phase strategy; use QDCL from [orchestrate.md](../commands/orchestrate.md))
 - Invoke nested PACT (`/PACT:rePACT`) for complex sub-components
 - Run PREPARE phase to build understanding
 - Apply risk-tiered testing (CRITICAL/HIGH) for high-risk areas
@@ -86,5 +86,38 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 
 **Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
 
----
+### Variety Calibration Record
 
+> **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
+> predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
+
+At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+
+**Schema**:
+
+```
+CalibrationRecord:
+  task_id: str                    # Feature task ID
+  domain: str                     # Top-level domain (e.g., "auth", "hooks", "frontend")
+  initial_variety_score: int      # Score at orchestration start (4-16)
+  actual_difficulty_score: int    # Post-hoc assessment (4-16, same scale)
+  dimensions_that_drifted:        # Which dimensions were off
+    - dimension: str              # "novelty" | "scope" | "uncertainty" | "risk"
+      predicted: int              # 1-4
+      actual: int                 # 1-4
+  blocker_count: int              # imPACT cycles triggered
+  phase_reruns: int               # Phases that had to be redone
+  specialist_fit: str | null      # "good" | "undermatched" | "overmatched" | null
+  timestamp: str                  # ISO 8601
+```
+
+**pact-memory mapping**: Saved via secretary with entities including `orchestration_calibration` AND `{domain}` (required for Learning II queries).
+
+**Post-cycle comparison**: During HANDOFF processing, the secretary:
+1. Reads feature task metadata for initial_variety_score
+2. Scans TaskList for blocker count and phase rerun count
+3. Asks the lead for a brief difficulty assessment (higher, lower, or about the same)
+4. Computes the full CalibrationRecord and saves to pact-memory
+5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
+
+---

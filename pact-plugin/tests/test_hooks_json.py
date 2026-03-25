@@ -26,6 +26,7 @@ VALID_HOOK_EVENTS = {
     "SessionStart",
     "SessionEnd",
     "PreCompact",
+    "PostCompact",
     "PreToolUse",
     "PostToolUse",
     "SubagentStart",
@@ -44,6 +45,9 @@ MUST_BE_SYNC = {
     "peer_inject.py",     # Injects peer context on agent start
     "git_commit_check.py",  # Checks git commit conventions
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
+    "auditor_reminder.py",  # Injects auditor dispatch reminder into context
+    "precompact_state_reminder.py",  # Emits state snapshot before compaction
+    "postcompact_verify.py",  # Verifies compaction preserved critical context
 }
 
 # Hooks that SHOULD be async (non-blocking, fire-and-forget)

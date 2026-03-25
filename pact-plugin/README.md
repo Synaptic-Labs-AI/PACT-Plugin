@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.12.6
+> **Version**: 3.13.0
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -28,7 +28,7 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Prof
 
 ```
 /PACT:orchestrate <task>          # Full multi-agent workflow
-/PACT:comPACT <domain> <task>     # Single specialist, light process
+/PACT:comPACT <domain> <task>     # Self-contained tasks, no PACT phases
 /PACT:plan-mode <task>            # Strategic planning before implementation
 ```
 

@@ -470,6 +470,69 @@ class TestFormatMissingHandoffFeedback:
             f"Unbalanced parens: {msg.count('(')} open vs {msg.count(')')} close"
         )
 
+    # --- Signal-type completion feedback ---
+
+    def test_signal_type_all_missing_produces_audit_summary_guidance(self):
+        """Signal-type tasks get audit_summary-specific feedback."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor observation", "completion_type": "signal"},
+        ])
+        assert "audit_summary" in msg
+        assert "GREEN|YELLOW|RED" in msg
+        assert 'TaskUpdate(taskId="42"' in msg
+        # Should NOT mention HANDOFF metadata
+        assert "missing HANDOFF metadata" not in msg
+
+    def test_signal_type_multiple_all_signal_produces_audit_guidance(self):
+        """Multiple signal-type tasks all get audit_summary guidance."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor obs 1", "completion_type": "signal"},
+            {"id": "43", "subject": "auditor obs 2", "completion_type": "signal"},
+        ])
+        assert "audit_summary" in msg
+        assert "#42" in msg
+        assert "#43" in msg
+
+    def test_mixed_signal_and_handoff_provides_both_guidance(self):
+        """Mixed signal + handoff tasks get type-specific guidance for each."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor observation", "completion_type": "signal"},
+            {"id": "5", "subject": "CODE: auth", "completion_type": "handoff"},
+        ])
+        # Mixed case provides guidance for both types
+        assert "audit_summary" in msg  # signal-type guidance
+        assert "missing HANDOFF metadata" in msg  # handoff-type guidance
+        assert "#42" in msg
+        assert "#5" in msg
+
+    def test_signal_type_feedback_has_balanced_parens(self):
+        """Signal-type feedback must have matching parentheses."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "42", "subject": "auditor observation", "completion_type": "signal"},
+        ])
+        assert msg.count("(") == msg.count(")"), (
+            f"Unbalanced parens in signal feedback: "
+            f"{msg.count('(')} open vs {msg.count(')')} close"
+        )
+
+    def test_no_completion_type_defaults_to_handoff_path(self):
+        """Tasks without completion_type use the handoff template."""
+        from teammate_completion_gate import format_missing_handoff_feedback
+
+        msg = format_missing_handoff_feedback([
+            {"id": "5", "subject": "CODE: auth"},
+        ])
+        assert "missing HANDOFF metadata" in msg
+        assert "audit_summary" not in msg
+
 
 class TestMain:
     """Integration tests for teammate_completion_gate.main()."""
@@ -557,6 +620,91 @@ class TestMain:
         assert "missing HANDOFF metadata" in captured.err
         assert "TaskUpdate" in captured.err
         assert "produced" in captured.err
+
+    def test_blocks_signal_type_with_audit_summary(self, tmp_path, capsys):
+        """Signal-type task with audit_summary → exit 2 (completable)."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "9", "backend-coder", "in_progress", {
+            "completion_type": "signal",
+            "audit_summary": "Signal: GREEN\nCoverage: 85%",
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "#9" in captured.err
+        assert "TaskUpdate" in captured.err
+
+    def test_blocks_signal_type_missing_audit_summary(self, tmp_path, capsys):
+        """Signal-type task without audit_summary → exit 2 with audit guidance."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "9", "backend-coder", "in_progress", {
+            "completion_type": "signal",
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "audit_summary" in captured.err
+
+    def test_unrecognized_completion_type_warns_and_falls_through(
+        self, tmp_path, capsys,
+    ):
+        """Unrecognized completion_type emits stderr warning and falls through
+        to handoff behavior. Without handoff metadata → missing_handoff → exit 2."""
+        from teammate_completion_gate import main
+
+        task_dir = self._make_task_dir(tmp_path)
+        _make_task_file(task_dir, "11", "backend-coder", "in_progress", {
+            "completion_type": "unknown_type",
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
+
+        with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ, env, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        # Verify the warning message was emitted
+        assert "unrecognized completion_type" in captured.err
+        assert "'unknown_type'" in captured.err
+        assert "falling through to handoff" in captured.err
+        # Verify it still gives missing-completion guidance (falls through to handoff path)
+        assert "missing completion artifacts" in captured.err
 
     def test_allows_when_no_tasks(self, tmp_path, capsys):
         """P0: Empty task directory → exit 0."""
@@ -722,7 +870,7 @@ class TestMain:
             "team_name": "pact-test",
         })
 
-        with patch("teammate_completion_gate.find_completable_tasks",
+        with patch("teammate_completion_gate._scan_owned_tasks",
                     side_effect=RuntimeError("unexpected")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):

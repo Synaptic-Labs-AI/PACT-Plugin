@@ -158,7 +158,7 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See `CLAUDE.md > Temporal Horizons` for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`CLAUDE.md`](../CLAUDE.md) > Temporal Horizons for the full horizon model.
 
 ### Trigger Points
 
@@ -339,7 +339,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does CLAUDE.md favor speed or quality for this project?
+   - Does [CLAUDE.md](../CLAUDE.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 
@@ -803,7 +803,7 @@ Score each dimension 1-4 and sum:
 Before finalizing the variety score, search pact-memory for recurring patterns in the task's domain. This implements Bateson's Learning II — learning to learn from past experience.
 
 1. **Search**: Query pact-memory for `"{domain} orchestration_calibration OR review_calibration"` and `"{domain} blocker OR stall OR rePACT"`
-2. **Assess**: If 3+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
+2. **Assess**: If 5+ memories match a recurring pattern (e.g., "auth tasks consistently underestimated"), bump the relevant variety dimension by 1
 3. **Note specialist patterns**: If past calibrations indicate specialist mismatch for this domain, note for specialist selection
 4. **Document**: "Variety adjusted from {X} to {Y} due to recurring {pattern}"
 
@@ -819,7 +819,7 @@ Before finalizing the variety score, search pact-memory for recurring patterns i
 
 **Amplify** (increase response capacity):
 - Invoke additional specialists
-- Enable parallel execution (primary CODE phase strategy; use QDCL from orchestrate.md)
+- Enable parallel execution (primary CODE phase strategy; use QDCL from [orchestrate.md](../commands/orchestrate.md))
 - Invoke nested PACT (`/PACT:rePACT`) for complex sub-components
 - Run PREPARE phase to build understanding
 - Apply risk-tiered testing (CRITICAL/HIGH) for high-risk areas
@@ -850,6 +850,40 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 
 **Dependency**: Requires progress signal data from agents. Request progress monitoring in dispatch prompts for tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains).
 
+### Variety Calibration Record
+
+> **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
+> predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
+
+At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+
+**Schema**:
+
+```
+CalibrationRecord:
+  task_id: str                    # Feature task ID
+  domain: str                     # Top-level domain (e.g., "auth", "hooks", "frontend")
+  initial_variety_score: int      # Score at orchestration start (4-16)
+  actual_difficulty_score: int    # Post-hoc assessment (4-16, same scale)
+  dimensions_that_drifted:        # Which dimensions were off
+    - dimension: str              # "novelty" | "scope" | "uncertainty" | "risk"
+      predicted: int              # 1-4
+      actual: int                 # 1-4
+  blocker_count: int              # imPACT cycles triggered
+  phase_reruns: int               # Phases that had to be redone
+  specialist_fit: str | null      # "good" | "undermatched" | "overmatched" | null
+  timestamp: str                  # ISO 8601
+```
+
+**pact-memory mapping**: Saved via secretary with entities including `orchestration_calibration` AND `{domain}` (required for Learning II queries).
+
+**Post-cycle comparison**: During HANDOFF processing, the secretary:
+1. Reads feature task metadata for initial_variety_score
+2. Scans TaskList for blocker count and phase rerun count
+3. Asks the lead for a brief difficulty assessment (higher, lower, or about the same)
+4. Computes the full CalibrationRecord and saves to pact-memory
+5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
+
 ---
 
 ## The PACT Workflow Family
@@ -858,7 +892,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 |----------|-------------|----------|
 | **PACT** | Complex/greenfield work | Context-aware multi-agent orchestration |
 | **plan-mode** | Before complex work, need alignment | Multi-agent planning consultation, no implementation |
-| **comPACT** | Focused, single-domain tasks | Single-domain delegation with light ceremony (parallelizable) |
+| **comPACT** | Focused, independent tasks | Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
@@ -935,9 +969,9 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 
 ## comPACT Protocol
 
-**Core idea**: Single-DOMAIN delegation with light ceremony.
+**Core idea**: Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. Use orchestrate when phases need to chain — research informing design, design informing code.
 
-comPACT handles tasks within ONE specialist domain. For independent sub-tasks, it can invoke MULTIPLE specialists of the same type in parallel.
+comPACT handles tasks that can be decomposed into independent sub-tasks — single-domain or cross-domain — without shared-file dependencies. For independent sub-tasks, it invokes multiple specialists in parallel.
 
 **Available specialists**:
 | Shorthand | Specialist | Use For |
@@ -958,18 +992,20 @@ comPACT handles tasks within ONE specialist domain. For independent sub-tasks, i
 
 ### When to Invoke Multiple Specialists
 
-**MANDATORY: parallel unless tasks share files.** comPACT invokes multiple agents of the same type for independent items.
+**MANDATORY: parallel unless tasks share files or have dependencies.** comPACT invokes multiple agents — same type or mixed types — for independent items.
 
-Invoke multiple specialists of the same type when:
+Invoke multiple specialists when:
 - Multiple independent items (bugs, components, endpoints)
 - No shared files between sub-tasks
-- Same patterns/conventions apply to all
+- No data or ordering dependencies between sub-tasks
 
 | Task | Agents Invoked |
 |------|----------------|
 | "Fix 3 backend bugs" | 3 backend-coders (parallel) |
 | "Add validation to 5 endpoints" | Multiple backend-coders (parallel) |
 | "Update styling on 3 components" | Multiple frontend-coders (parallel) |
+| "Add API endpoint + update DB index" | 1 backend-coder + 1 database-engineer (parallel, independent files) |
+| "Fix CSS layout + add server logging" | 1 frontend-coder + 1 backend-coder (parallel, no shared files) |
 
 ### Pre-Invocation (Required)
 
@@ -984,7 +1020,7 @@ Invoke multiple specialists of the same type when:
 3. **Set convention authority** — First agent's choices become standard for the batch
 4. **Environment drift** — When dispatching subsequent agents after earlier agents complete, check `file-edits.json` for files modified since last dispatch and include relevant deltas in prompts
 
-### Light ceremony instructions (injected when invoking specialist)
+### Specialist instructions (injected when invoking specialist)
 
 - Work directly from task description
 - Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context
@@ -993,9 +1029,16 @@ Invoke multiple specialists of the same type when:
 - For parallel dispatch or novel domains: include "Send progress signals per the agent-teams skill Progress Signals section" in dispatch prompt
 
 **Escalate to `/PACT:orchestrate` when**:
-- Task spans multiple specialist domains
-- Complex cross-domain coordination needed
+- Sub-tasks have shared-file dependencies requiring sequenced coordination
+- Task requires PREPARE or ARCHITECT phases (significant research or design decisions)
 - Specialist reports a blocker (run `/PACT:imPACT` first)
+
+### Auditor Dispatch
+
+When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](pact-audit.md):
+- Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
+- 3+ coders running in parallel (coordination complexity warrants observation)
+- Single coder or 2 coders on a Low variety (4-6) task → skip auditor
 
 ### After Specialist Completes
 
@@ -1003,6 +1046,7 @@ Invoke multiple specialists of the same type when:
 2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
 4. **Create atomic commit(s)** — stage and commit before proceeding
+5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`
@@ -1249,31 +1293,6 @@ Skip for simple features or when "just build it."
 
 ---
 
-## Documentation Locations
-
-| Phase | Output Location |
-|-------|-----------------|
-| Plan | `docs/plans/` |
-| Prepare | `docs/preparation/` |
-| Architect | `docs/architecture/` |
-
-**Plan vs. Architecture artifacts**:
-- **Plans** (`docs/plans/`): Pre-approval roadmaps created by `/PACT:plan-mode`. Created *before* implementation begins.
-- **Architecture** (`docs/architecture/`): Formal specifications created by `pact-architect` *during* the Architect phase.
-
-**No persistent logging for CODE/TEST phases.** Context passes via structured handoffs between agents. Git commits capture the audit trail.
-
----
-
-## Session Continuity
-
-If work spans sessions, update CLAUDE.md with:
-- Current phase and task
-- Blockers or open questions
-- Next steps
-
----
-
 ## Agent Stall Detection
 
 **Stalled indicators** (Agent Teams model):
@@ -1315,7 +1334,7 @@ Metadata: `{"stalled": true, "reason": "..."}` | `{"failed": true, "reason": "..
 
 A plan section may exist without being complete. Before skipping a phase, the orchestrator checks the corresponding plan section for these 7 incompleteness signals. **Any signal present means the phase should run.**
 
-> **Layer 2**: This protocol serves as Layer 2 of the phase-skip protection system. See orchestrate.md "Context Assessment: Phase Skip Decision Flow" for the full 3-layer gate model.
+> **Layer 2**: This protocol serves as Layer 2 of the phase-skip protection system. See [orchestrate.md](../commands/orchestrate.md) "Context Assessment: Phase Skip Decision Flow" for the full 3-layer gate model.
 
 ---
 
@@ -1343,7 +1362,7 @@ A plan section may exist without being complete. Before skipping a phase, the or
 
 **In `plan-mode` (Phase 2 synthesis)**: Check each phase's plan section for these signals to populate the Phase Requirements table.
 
-**In `orchestrate` (Context Assessment: Phase Skip Decision Flow)**: The completeness check is Layer 2 of the 3-layer skip protection. Before skipping a phase via an approved plan, verify its plan section passes — all 7 signals absent. Use skip reason `"plan_section_complete"`. (Phases can also be skipped via Layer 3 structured analysis with reason `"structured_gate_passed"` — see orchestrate.md for the full decision flow.)
+**In `orchestrate` (Context Assessment: Phase Skip Decision Flow)**: The completeness check is Layer 2 of the 3-layer skip protection. Before skipping a phase via an approved plan, verify its plan section passes — all 7 signals absent. Use skip reason `"plan_section_complete"`. (Phases can also be skipped via Layer 3 structured analysis with reason `"structured_gate_passed"` — see [orchestrate.md](../commands/orchestrate.md) for the full decision flow.)
 
 ---
 
@@ -1428,7 +1447,7 @@ When autonomous mode is not enabled, all detection-triggered decomposition uses 
 ### Bypass Rules
 
 - **Ongoing sub-scope execution** does not re-evaluate detection (no recursive detection within sub-scopes). Scoped sub-scopes cannot themselves trigger scope detection -- this bypass rule is the primary architectural mechanism; the 1-level nesting limit (see [S1 Autonomy & Recursion](pact-s1-autonomy.md#s1-autonomy--recursion)) serves as the safety net.
-- **comPACT** bypasses scope detection entirely — it is inherently single-domain
+- **comPACT** bypasses scope detection entirely — it dispatches specialists directly without phase chaining
 - **Manual `/rePACT`** bypasses detection — user has already decided to decompose
 
 ### Evaluation Response
@@ -1723,6 +1742,170 @@ This phase verifies that independently-developed sub-scopes are compatible befor
 - [pact-scope-detection.md](pact-scope-detection.md) — Heuristics for detecting multi-scope tasks
 - [pact-scope-contract.md](pact-scope-contract.md) — Contract format and lifecycle
 - [rePACT.md](../commands/rePACT.md) — Recursive PACT command for sub-scope execution
+
+---
+
+## Concurrent Audit Protocol
+
+> **Cybernetic basis**: Ashby's Law of Requisite Variety applied to quality assurance —
+> a pure post-hoc review (TEST phase) has lower variety than concurrent observation.
+> Real-time observation during CODE phase catches architecture drift before it compounds.
+
+The pact-auditor agent provides independent quality observation during the CODE phase, complementing (not replacing) the TEST phase and peer review.
+
+### Dispatch Conditions
+
+Deploy the auditor as a CODE-phase teammate when ANY of:
+- Variety score >= 7 (Medium or higher)
+- 3+ coders running in parallel (coordination complexity warrants observation)
+- Task touches security-sensitive code (auth, crypto, user input handling)
+- Domain has prior history of architecture drift (from pact-memory calibration data)
+
+**Skip when**: Single coder or 2 coders on a Low variety (4-6) task with no security sensitivity.
+
+### Hybrid Observation Model
+
+The auditor operates primarily through file observation, not messaging. This minimizes disruption to coders while maintaining quality oversight.
+
+| Method | When | Cost |
+|--------|------|------|
+| **File reading** (git diff, Read) | Primary — every observation cycle | Zero disruption |
+| **TaskList monitoring** | Check coder progress, task status | Zero disruption |
+| **SendMessage to coder** | Only when file observation raises a question code alone can't answer | Low disruption (one specific question per message) |
+| **RED signal to orchestrator** | Clear architecture violation or requirement misunderstanding | Appropriate disruption |
+
+**Rule of thumb**: 80%+ of observation should be silent file reading. If the auditor is messaging coders frequently, it's disrupting more than observing.
+
+### Observation Phases
+
+**Phase A: Warm-up** (while coders start):
+1. Read all available references (architecture doc, plan, dispatch context)
+2. Identify key interfaces, high-risk dimensions, cross-cutting requirements
+3. Note coder assignments from TaskList
+4. Wait for coders to produce initial output before observing
+
+**Phase B: Observation cycles** (periodic):
+1. Check modified files: `git diff`, read changed files
+2. Compare against reference chain: architecture spec > approved plan > dispatch context
+3. Assess concern level and respond:
+   - No concern → silent, continue next cycle
+   - Minor concern → log internally, observe next cycle (may self-resolve)
+   - Significant but ambiguous → SendMessage to coder (one specific question)
+   - Clear violation → RED signal to orchestrator immediately
+
+**Phase C: Final observation** (triggered by orchestrator or all coders completing):
+1. Sweep all modified files
+2. Emit summary signal (GREEN/YELLOW/RED)
+3. Store audit summary in task metadata
+
+### Audit Criteria (Priority Order)
+
+1. **Architecture drift** — Module boundaries, interfaces, data flow, dependencies matching the design
+2. **Risk-proportional concerns** — High uncertainty areas from variety assessment get extra attention
+3. **Cross-agent consistency** — When parallel coders: compatible interfaces? Consistent naming? No semantic overlap?
+4. **Cross-cutting gaps** — Error handling patterns, security basics, performance red flags
+5. **Requirement alignment** — Solving the right problem as specified?
+
+**NOT audited**: Code style, test coverage (TEST phase), code cleanliness mid-work, micro-optimization.
+
+### Signal Format
+
+```
+📋 AUDIT SIGNAL: [GREEN|YELLOW|RED]
+
+Reference: [architecture doc / plan / dispatch context]
+Scope: [which coder(s) / which files]
+Finding: [One-line summary]
+Evidence: [Specific file:line or diff excerpt]
+Action: [None (GREEN) / Route to test (YELLOW) / Intervene (RED)]
+```
+
+### Signal Levels
+
+| Signal | Meaning | When | Orchestrator Response |
+|--------|---------|------|---------------------|
+| **GREEN** | On track | Final summary; silence during cycles is implicit GREEN | None needed |
+| **YELLOW** | Worth noting | Minor drift, convention inconsistency, potential edge case | Pass finding to test engineer as focus area |
+| **RED** | Intervene now | Architecture violation, requirement misunderstanding, security concern | SendMessage to affected coder; may pause coder's work |
+
+**Before emitting RED**: Verify via targeted question to the coder when practical. Skip verification for clear-cut violations (e.g., wrong module boundary, missing auth check on sensitive endpoint).
+
+### Reference Fallback Chain
+
+The auditor checks implementation against available references in priority order:
+
+1. **Architecture doc** (`docs/architecture/`) — Most authoritative for design decisions
+2. **Approved plan** (`docs/plans/`) — Authoritative for scope and approach
+3. **Dispatch context** (task description/metadata) — Authoritative for specific agent instructions
+4. **Established conventions** (existing codebase patterns) — When no explicit reference exists
+
+If no reference exists for a concern, the auditor logs it as YELLOW (convention gap) rather than RED (violation).
+
+### Completion Lifecycle
+
+The auditor uses signal-based completion rather than standard HANDOFF:
+
+1. Task is created with `metadata: {"completion_type": "signal"}`
+2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
+3. Auditor marks task completed
+4. Completion gate accepts `audit_summary` as the completion artifact (see teammate_completion_gate.py)
+
+**audit_summary format**:
+```json
+{
+  "signal": "GREEN",
+  "findings": [
+    {"level": "YELLOW", "scope": "backend-coder", "finding": "Error handling inconsistent in auth module"}
+  ],
+  "observation_cycles": 3,
+  "files_reviewed": 12
+}
+```
+
+### Algedonic Escalation
+
+If the auditor discovers a viability threat (not just a quality issue), bypass the signal system and emit a full algedonic signal per [algedonic.md](algedonic.md). Examples:
+- Hardcoded credentials discovered in coder's work → HALT SECURITY
+- PII being logged → HALT DATA
+- Fundamental misunderstanding of requirements → ALERT SCOPE
+
+### Relationship to Other Quality Mechanisms
+
+| Mechanism | Timing | Focus | Scope |
+|-----------|--------|-------|-------|
+| **Auditor** | During CODE | Architecture drift, requirement alignment | Concurrent observation |
+| **TEST phase** | After CODE | Functional correctness, edge cases, coverage | Comprehensive testing |
+| **Peer review** | After TEST | Cross-domain quality, code health | Multi-reviewer synthesis |
+| **Security review** | During review | Adversarial security analysis | Security-focused |
+
+The auditor is additive — it catches issues during CODE that would otherwise only surface in TEST or review, when the cost of correction is higher.
+
+**Related protocol**: [S4 Checkpoints](pact-s4-checkpoints.md) — Auditor RED signals should prompt an S4 checkpoint to reassess plan viability.
+
+---
+
+## Documentation Locations
+
+| Phase | Output Location |
+|-------|-----------------|
+| Plan | `docs/plans/` |
+| Prepare | `docs/preparation/` |
+| Architect | `docs/architecture/` |
+
+**Plan vs. Architecture artifacts**:
+- **Plans** (`docs/plans/`): Pre-approval roadmaps created by `/PACT:plan-mode`. Created *before* implementation begins.
+- **Architecture** (`docs/architecture/`): Formal specifications created by `pact-architect` *during* the Architect phase.
+
+**No persistent logging for CODE/TEST phases.** Context passes via structured handoffs between agents. Git commits capture the audit trail.
+
+---
+
+## Session Continuity
+
+If work spans sessions, update CLAUDE.md with:
+- Current phase and task
+- Blockers or open questions
+- Next steps
 
 ---
 

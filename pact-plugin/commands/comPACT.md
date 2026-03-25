@@ -1,12 +1,12 @@
 ---
-description: Delegate within a single domain—concurrent agents for independent sub-tasks
+description: Dispatch concurrent specialists for self-contained tasks. No PACT phases needed.
 argument-hint: [backend|frontend|database|prepare|test|architect|devops|security|qa] <task>
 ---
-Delegate this focused task within a single PACT domain: $ARGUMENTS
+Dispatch concurrent specialists for this self-contained task: $ARGUMENTS
 
-**MANDATORY: invoke concurrently for independent sub-tasks.** Sequential requires explicit file conflict or data dependency. If the task contains multiple independent items (bugs, endpoints, components), dispatch multiple specialists of the same type together unless they share files.
+**MANDATORY: invoke concurrently for independent sub-tasks.** Sequential requires explicit file conflict or data dependency. If the task contains multiple independent items (bugs, endpoints, components), dispatch multiple specialists together — same type or mixed types — unless they share files.
 
-> ⚠️ **Single domain ≠ single agent.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. The domain is singular; the agents are not.
+> ⚠️ **Independent ≠ same domain.** "Fix CSS layout + add server logging" = 1 frontend-coder + 1 backend-coder in parallel. The key criterion is independence (no shared files, no data dependencies), not domain uniformity.
 
 ---
 
@@ -15,7 +15,7 @@ Delegate this focused task within a single PACT domain: $ARGUMENTS
 Create a simpler Task hierarchy than full orchestrate:
 
 ```
-1. `TaskCreate`: Feature task "{verb} {feature}" (single-domain work)
+1. `TaskCreate`: Feature task "{verb} {feature}" (self-contained task)
 2. `TaskUpdate`: Feature task status = "in_progress"
 3. Analyze: How many agents needed?
 4. `TaskCreate`: Agent task(s) — direct children of feature
@@ -96,6 +96,8 @@ Invoke concurrently when:
 | "Fix 3 backend bugs" | 3 backend-coders at once |
 | "Add validation to 5 endpoints" | Multiple backend-coders simultaneously |
 | "Update styling on 3 components" | Multiple frontend-coders together |
+| "Add API endpoint + update DB index" | 1 backend-coder + 1 database-engineer (parallel) |
+| "Fix CSS layout + add server logging" | 1 frontend-coder + 1 backend-coder (parallel) |
 
 **Do NOT invoke concurrently when:**
 - Sub-tasks modify the same files
@@ -195,9 +197,21 @@ Monitor for blocker/algedonic signals via:
 - **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
-On signal detected: Follow Signal Task Handling in CLAUDE.md.
+On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
 
 For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.md#agent-stall-detection).
+
+---
+
+## Auditor Dispatch
+
+When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](../protocols/pact-audit.md):
+- Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
+- 3+ parallel coders → dispatch auditor (coordination complexity warrants observation)
+- 2 coders on Low variety task → skip auditor
+- Single coder on Low variety task → skip auditor
+
+If dispatching an auditor, create its task with `metadata: {"completion_type": "signal"}` so the completion gate accepts `audit_summary` instead of standard HANDOFF.
 
 ---
 
@@ -208,6 +222,7 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
+- [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
   TaskCreate(subject="secretary: process pending HANDOFFs",
@@ -233,21 +248,21 @@ Examples of blockers:
 - Task requires a different specialist's domain
 - Missing dependencies, access, or information
 - Same error persists after multiple fix attempts
-- Scope exceeds single-domain capability (needs cross-domain coordination)
+- Scope exceeds self-contained capability (needs PREPARE/ARCHITECT phases)
 - Concurrent agents have unresolvable conflicts
 
 When blocker is reported:
 1. Receive blocker report from specialist
 2. Run `/PACT:imPACT` to triage
-3. May escalate to `/PACT:orchestrate` if task exceeds single-domain scope
+3. May escalate to `/PACT:orchestrate` if task exceeds self-contained scope
 
 ---
 
 ## When to Escalate
 
 Recommend `/PACT:orchestrate` instead if:
-- Task spans multiple specialist domains
-- Complex cross-domain coordination needed
+- Sub-tasks have shared-file dependencies requiring sequenced coordination
+- Task requires PREPARE or ARCHITECT phases (significant research or design decisions)
 - Architectural decisions affect multiple components
 - Full preparation/architecture documentation is needed
 
@@ -257,7 +272,7 @@ During comPACT execution, if you discover the task is more complex than expected
 
 | Discovery | Variety Signal | Action |
 |-----------|----------------|--------|
-| Task spans multiple domains | Medium+ (7+) | Escalate to `/PACT:orchestrate` |
+| Sub-tasks have shared-file dependencies | Medium+ (7+) | Escalate to `/PACT:orchestrate` |
 | Significant ambiguity/uncertainty | High (11+) | Escalate; may need PREPARE phase |
 | Architectural decisions required | High (11+) | Escalate; need ARCHITECT phase |
 | Higher risk than expected | High (11+) | Consider `/PACT:plan-mode` first |

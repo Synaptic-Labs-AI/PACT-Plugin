@@ -4,7 +4,7 @@
 |----------|-------------|----------|
 | **PACT** | Complex/greenfield work | Context-aware multi-agent orchestration |
 | **plan-mode** | Before complex work, need alignment | Multi-agent planning consultation, no implementation |
-| **comPACT** | Focused, single-domain tasks | Single-domain delegation with light ceremony (parallelizable) |
+| **comPACT** | Focused, independent tasks | Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
@@ -81,9 +81,9 @@
 
 ## comPACT Protocol
 
-**Core idea**: Single-DOMAIN delegation with light ceremony.
+**Core idea**: Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. Use orchestrate when phases need to chain — research informing design, design informing code.
 
-comPACT handles tasks within ONE specialist domain. For independent sub-tasks, it can invoke MULTIPLE specialists of the same type in parallel.
+comPACT handles tasks that can be decomposed into independent sub-tasks — single-domain or cross-domain — without shared-file dependencies. For independent sub-tasks, it invokes multiple specialists in parallel.
 
 **Available specialists**:
 | Shorthand | Specialist | Use For |
@@ -104,18 +104,20 @@ comPACT handles tasks within ONE specialist domain. For independent sub-tasks, i
 
 ### When to Invoke Multiple Specialists
 
-**MANDATORY: parallel unless tasks share files.** comPACT invokes multiple agents of the same type for independent items.
+**MANDATORY: parallel unless tasks share files or have dependencies.** comPACT invokes multiple agents — same type or mixed types — for independent items.
 
-Invoke multiple specialists of the same type when:
+Invoke multiple specialists when:
 - Multiple independent items (bugs, components, endpoints)
 - No shared files between sub-tasks
-- Same patterns/conventions apply to all
+- No data or ordering dependencies between sub-tasks
 
 | Task | Agents Invoked |
 |------|----------------|
 | "Fix 3 backend bugs" | 3 backend-coders (parallel) |
 | "Add validation to 5 endpoints" | Multiple backend-coders (parallel) |
 | "Update styling on 3 components" | Multiple frontend-coders (parallel) |
+| "Add API endpoint + update DB index" | 1 backend-coder + 1 database-engineer (parallel, independent files) |
+| "Fix CSS layout + add server logging" | 1 frontend-coder + 1 backend-coder (parallel, no shared files) |
 
 ### Pre-Invocation (Required)
 
@@ -130,7 +132,7 @@ Invoke multiple specialists of the same type when:
 3. **Set convention authority** — First agent's choices become standard for the batch
 4. **Environment drift** — When dispatching subsequent agents after earlier agents complete, check `file-edits.json` for files modified since last dispatch and include relevant deltas in prompts
 
-### Light ceremony instructions (injected when invoking specialist)
+### Specialist instructions (injected when invoking specialist)
 
 - Work directly from task description
 - Check docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist—reference relevant context
@@ -139,9 +141,16 @@ Invoke multiple specialists of the same type when:
 - For parallel dispatch or novel domains: include "Send progress signals per the agent-teams skill Progress Signals section" in dispatch prompt
 
 **Escalate to `/PACT:orchestrate` when**:
-- Task spans multiple specialist domains
-- Complex cross-domain coordination needed
+- Sub-tasks have shared-file dependencies requiring sequenced coordination
+- Task requires PREPARE or ARCHITECT phases (significant research or design decisions)
 - Specialist reports a blocker (run `/PACT:imPACT` first)
+
+### Auditor Dispatch
+
+When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](pact-audit.md):
+- Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
+- 3+ coders running in parallel (coordination complexity warrants observation)
+- Single coder or 2 coders on a Low variety (4-6) task → skip auditor
 
 ### After Specialist Completes
 
@@ -149,6 +158,7 @@ Invoke multiple specialists of the same type when:
 2. **Verify deliverables** — confirm files listed in "Produced" were actually modified (e.g., `git diff --stat`, line counts, grep checks). Never report completion based solely on agent handoff.
 3. **Run tests** — verify work passes. If tests fail → return to specialist for fixes before committing.
 4. **Create atomic commit(s)** — stage and commit before proceeding
+5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
 **Next steps** — After commit, ask: "Work committed. Create PR?"
 - Yes (Recommended) → invoke `/PACT:peer-review`

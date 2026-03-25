@@ -25,6 +25,31 @@ import re
 from shared.error_output import hook_error_json
 
 
+# Lossless fields — information that would be lost when agent context ends.
+# When a structured HANDOFF section is present, these must appear as subsections.
+LOSSLESS_FIELDS = {
+    "produced": {
+        "patterns": [
+            r"(?:^|\n)\s*\d*\.?\s*produced\s*:",
+        ],
+        "description": "Produced",
+    },
+    "key_decisions": {
+        "patterns": [
+            r"(?:^|\n)\s*\d*\.?\s*key\s+decisions?\s*:",
+        ],
+        "description": "Key decisions",
+    },
+}
+
+# Signal-type completions (e.g., pact-auditor) use audit_summary, not HANDOFF format
+SIGNAL_COMPLETION_PATTERNS = [
+    r"AUDIT\s+SIGNAL",
+    r"audit_summary",
+    r"completion_type.+signal",
+]
+
+
 # Required handoff elements with their patterns and descriptions
 HANDOFF_ELEMENTS = {
     "what_produced": {
@@ -54,6 +79,53 @@ HANDOFF_ELEMENTS = {
 }
 
 
+def is_signal_completion(transcript: str) -> bool:
+    """
+    Check if transcript represents a signal-type completion (e.g., pact-auditor).
+
+    Signal-type completions use audit_summary in task metadata rather than
+    the standard HANDOFF format, so lossless field validation does not apply.
+
+    Args:
+        transcript: The agent's complete output/transcript
+
+    Returns:
+        True if this is a signal-type completion
+    """
+    for pattern in SIGNAL_COMPLETION_PATTERNS:
+        if re.search(pattern, transcript, re.IGNORECASE):
+            return True
+    return False
+
+
+def check_lossless_fields(transcript: str) -> list:
+    """
+    Check if a structured HANDOFF section contains the lossless fields.
+
+    Lossless fields are information that would be lost when the agent's
+    context window ends: what was produced and what decisions were made.
+
+    Args:
+        transcript: The agent's complete output/transcript
+
+    Returns:
+        List of missing lossless field descriptions (empty if all present)
+    """
+    missing_lossless = []
+    transcript_lower = transcript.lower()
+
+    for field_key, field_info in LOSSLESS_FIELDS.items():
+        found = False
+        for pattern in field_info["patterns"]:
+            if re.search(pattern, transcript_lower):
+                found = True
+                break
+        if not found:
+            missing_lossless.append(field_info["description"])
+
+    return missing_lossless
+
+
 def validate_handoff(transcript: str) -> tuple:
     """
     Check if transcript contains proper handoff elements.
@@ -62,7 +134,10 @@ def validate_handoff(transcript: str) -> tuple:
         transcript: The agent's complete output/transcript
 
     Returns:
-        Tuple of (is_valid, missing_elements)
+        Tuple of (is_valid, missing_elements, lossless_warnings)
+        - is_valid: True if handoff passes validation
+        - missing_elements: list of missing element descriptions
+        - lossless_warnings: list of missing lossless field names (structured path only)
     """
     missing = []
 
@@ -73,9 +148,14 @@ def validate_handoff(transcript: str) -> tuple:
         re.IGNORECASE
     ))
 
-    # If there's an explicit handoff section, be more lenient
+    # If there's an explicit handoff section, validate lossless fields
     if has_handoff_section:
-        return True, []
+        # Signal-type completions skip lossless validation
+        if is_signal_completion(transcript):
+            return True, [], []
+
+        lossless_missing = check_lossless_fields(transcript)
+        return True, [], lossless_missing
 
     # Otherwise, check for implicit handoff elements
     transcript_lower = transcript.lower()
@@ -94,7 +174,7 @@ def validate_handoff(transcript: str) -> tuple:
     # (some agents may not have explicit decisions if straightforward)
     is_valid = len(missing) <= 1
 
-    return is_valid, missing
+    return is_valid, missing, []
 
 
 def is_pact_agent(agent_id: str) -> bool:
@@ -142,13 +222,20 @@ def main():
 
         # Skip transcript validation if very short (likely an error case)
         if len(transcript) >= 100:
-            is_valid, missing = validate_handoff(transcript)
+            is_valid, missing, lossless_missing = validate_handoff(transcript)
 
             if not is_valid and missing:
                 warnings.append(
                     f"PACT Handoff Warning: Agent '{agent_id}' completed without "
                     f"proper handoff. Missing: {', '.join(missing)}. "
                     "Consider including: what was produced, key decisions, and next steps."
+                )
+
+            if lossless_missing:
+                warnings.append(
+                    f"PACT Lossless Field Warning: Agent '{agent_id}' HANDOFF "
+                    f"section is missing: {', '.join(lossless_missing)}. "
+                    "These fields preserve information that would otherwise be lost."
                 )
 
         # Output warnings if any

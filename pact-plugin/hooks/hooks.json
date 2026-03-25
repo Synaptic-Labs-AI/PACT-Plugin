@@ -20,6 +20,20 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/precompact_refresh.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/precompact_state_reminder.py\""
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/postcompact_verify.py\""
           }
         ]
       }
@@ -69,7 +83,7 @@
     ],
     "SubagentStart": [
       {
-        "matcher": "pact-preparer|pact-architect|pact-backend-coder|pact-frontend-coder|pact-database-engineer|pact-devops-engineer|pact-n8n|pact-test-engineer|pact-security-engineer|pact-qa-engineer|pact-secretary",
+        "matcher": "pact-preparer|pact-architect|pact-backend-coder|pact-frontend-coder|pact-database-engineer|pact-devops-engineer|pact-n8n|pact-test-engineer|pact-security-engineer|pact-qa-engineer|pact-auditor|pact-secretary",
         "hooks": [
           {
             "type": "command",
@@ -157,6 +171,15 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/merge_guard_post.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/auditor_reminder.py\""
           }
         ]
       }

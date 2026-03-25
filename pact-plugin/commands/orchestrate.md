@@ -342,7 +342,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See CLAUDE.md Memory Management.
+- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [CLAUDE.md](../CLAUDE.md) Memory Management.
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -508,6 +508,18 @@ Spawn multiple coders in parallel (multiple `Task` calls in one response). Inclu
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
+**Dispatch auditor** (concurrent with coders, when conditions are met):
+
+Deploy the pact-auditor as a CODE-phase teammate when ANY of: variety >= 7, 3+ coders running in parallel, task touches security-sensitive code, or domain has prior architecture drift history. Skip when: single coder on a Low variety (4-6) task with no security sensitivity.
+
+1. `TaskCreate(subject="auditor: concurrent quality observation", metadata={"completion_type": "signal"})`
+   - Include: architecture doc path, plan path, coder task IDs and scope boundaries
+   - Include: "Your observation targets: {coder-names}. Reference chain: architecture doc > plan > dispatch context."
+2. `TaskUpdate(taskId, owner="auditor")`
+3. `Task(name="auditor", team_name="{team_name}", subagent_type="pact-auditor", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+
+The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate` before marking the task completed. On RED signal: SendMessage to the affected coder and pause their work. On YELLOW: pass finding to test engineer as focus area. See [pact-audit.md](../protocols/pact-audit.md) for the full Concurrent Audit Protocol.
+
 **Before next phase**:
 - [ ] Implementation complete
 - [ ] All tests passing (full test suite; fix any tests your changes break)
@@ -531,7 +543,7 @@ If a sub-task emerges that is too complex for a single specialist invocation:
 | Sub-Task Complexity | Indicators | Use |
 |---------------------|------------|-----|
 | **Simple** | Code-only, clear requirements | Direct specialist invocation |
-| **Focused** | Single domain, no research needed | `/PACT:comPACT` |
+| **Focused** | Independent sub-tasks, no research needed | `/PACT:comPACT` |
 | **Complex** | Needs own P→A→C→T cycle | `/PACT:rePACT` |
 
 **When to use `/PACT:rePACT`:**
@@ -601,7 +613,7 @@ Monitor for blocker/algedonic signals via:
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
-On signal detected: Follow Signal Task Handling in CLAUDE.md.
+On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
@@ -637,7 +649,7 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 3. **`TaskUpdate`**: Feature task status = "completed" (all phases done, all work committed)
 4. **Run `/PACT:peer-review`** to create PR and get multi-agent review
 5. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
-6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time?
+6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time? The secretary gathers calibration metrics during HANDOFF processing and will ask you for a brief difficulty assessment. Respond with whether actual difficulty was higher, lower, or about the same as predicted, and which dimensions surprised you.
 7. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
    ```
    TaskCreate(subject="secretary: process pending HANDOFFs (post-review)",
