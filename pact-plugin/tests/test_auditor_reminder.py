@@ -8,7 +8,6 @@ when a coder is spawned without an auditor present on the team.
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -232,7 +231,7 @@ class TestMain:
         captured = capsys.readouterr()
         assert captured.out.strip() == ""
 
-    def test_invalid_json_stdin(self, capsys):
+    def test_invalid_json_stdin(self):
         """Exits 0 on invalid JSON stdin."""
         import io
         with patch("sys.stdin", io.StringIO("not json")), \

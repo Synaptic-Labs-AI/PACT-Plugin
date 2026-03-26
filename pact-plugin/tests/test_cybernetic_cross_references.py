@@ -59,7 +59,6 @@ class TestVarietyThresholdConsistency:
 
     def test_compact_range_in_protocol(self, variety_content):
         """Protocol specifies 4-6 -> comPACT."""
-        from shared.variety_scorer import COMPACT_MAX, MIN_SCORE
         assert "4-6" in variety_content
         assert "comPACT" in variety_content
 
