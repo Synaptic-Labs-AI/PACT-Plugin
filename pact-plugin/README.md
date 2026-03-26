@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.13.2
+> **Version**: 3.13.3
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -12,6 +12,18 @@ Turn a single Claude Code session into a managed team of specialist AI agents th
 /plugin marketplace add ProfSynapse/PACT-prompt
 /plugin install PACT@pact-marketplace
 cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+```
+
+Then add `~/.claude/teams` to your `additionalDirectories` in `~/.claude/settings.json` to prevent permission prompts when PACT agents coordinate via team files:
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "~/.claude/teams"
+    ]
+  }
+}
 ```
 
 Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/ProfSynapse/PACT-prompt#enabling-agent-teams).

@@ -21,6 +21,21 @@ Resume-aware team detection (main() integration):
 main() integration:
 13. check_paused_state non-None result appears in additionalContext output
 
+check_additional_directories():
+14. Returns None when ~/.claude/teams is present (absolute path)
+15. Returns None when ~/.claude/teams is present (tilde path)
+16. Returns tip message when setting is missing from additionalDirectories
+17. Returns tip message when additionalDirectories is empty
+18. Returns None when settings.json does not exist (fail-open)
+19. Returns None when settings.json contains malformed JSON (fail-open)
+20. Returns tip when permissions key is missing (empty additionalDirectories)
+21. Returns None when additionalDirectories is not a list (fail-open)
+22. Returns None when Path.home() raises (fail-open)
+23. Ignores non-string entries in additionalDirectories without crashing
+24. main() integration: tip appears in systemMessage when setting is missing
+25. main() integration: no tip when setting is present
+26. main() integration: tip skipped on context reset (compact and clear sources)
+
 Note: restore_last_session() and check_resumption_context() are tested
 in test_session_resume.py (canonical location).
 """
@@ -663,3 +678,278 @@ class TestCompactSummaryCleanup:
         assert still_exists, (
             "compact-summary.txt should be preserved for source='compact'"
         )
+
+
+class TestCheckAdditionalDirectories:
+    """Tests for check_additional_directories() — ~/.claude/teams tip.
+
+    The function reads ~/.claude/settings.json and checks if ~/.claude/teams
+    (or its absolute equivalent) is listed in permissions.additionalDirectories.
+    Returns a tip message if missing, None if present. Fail-open on all errors.
+    """
+
+    def _write_settings(self, tmp_path, settings_data):
+        """Helper: write settings.json under tmp_path/.claude/."""
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        settings_file = settings_dir / "settings.json"
+        settings_file.write_text(json.dumps(settings_data), encoding="utf-8")
+        return settings_file
+
+    def test_returns_none_when_absolute_path_present(self, monkeypatch, tmp_path):
+        """Should return None when absolute path to teams dir is in additionalDirectories."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        teams_abs = str(tmp_path / ".claude" / "teams")
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": [teams_abs]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_returns_none_when_tilde_path_present(self, monkeypatch, tmp_path):
+        """Should return None when ~/.claude/teams (tilde form) is in additionalDirectories."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": ["~/.claude/teams"]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_returns_tip_when_setting_missing(self, monkeypatch, tmp_path):
+        """Should return tip message when teams dir is not in additionalDirectories."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": ["/some/other/path"]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is not None
+        assert "additionalDirectories" in result
+        assert "~/.claude/teams" in result
+
+    def test_returns_tip_when_additional_directories_empty(self, monkeypatch, tmp_path):
+        """Should return tip when additionalDirectories is an empty list."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": []}
+        })
+
+        result = check_additional_directories()
+
+        assert result is not None
+        assert "~/.claude/teams" in result
+
+    def test_returns_none_when_settings_file_missing(self, monkeypatch, tmp_path):
+        """Should return None (fail-open) when settings.json does not exist."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Do NOT create settings.json
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_returns_none_on_malformed_json(self, monkeypatch, tmp_path):
+        """Should return None (fail-open) when settings.json is malformed."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text("{invalid json!!!", encoding="utf-8")
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_returns_tip_when_permissions_key_missing(self, monkeypatch, tmp_path):
+        """Should return tip when permissions key is missing (empty additionalDirectories)."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {"env": {"FOO": "bar"}})
+
+        result = check_additional_directories()
+
+        # permissions missing → .get("permissions", {}).get("additionalDirectories", [])
+        # returns [] → no matching entry → tip message returned
+        assert result is not None
+        assert "~/.claude/teams" in result
+
+    def test_returns_none_when_additional_dirs_not_list(self, monkeypatch, tmp_path):
+        """Should return None (fail-open) when additionalDirectories is not a list."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": "not-a-list"}
+        })
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_returns_none_when_path_home_raises(self, monkeypatch):
+        """Should return None (fail-open) when Path.home() raises an exception."""
+        from session_init import check_additional_directories
+
+        def home_that_raises():
+            raise RuntimeError("Simulated home dir error")
+
+        monkeypatch.setattr(Path, "home", home_that_raises)
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_ignores_non_string_entries(self, monkeypatch, tmp_path):
+        """Should skip non-string entries in additionalDirectories without crashing."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        teams_abs = str(tmp_path / ".claude" / "teams")
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": [42, None, teams_abs]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is None  # Found the valid path after skipping non-strings
+
+
+class TestCheckAdditionalDirectoriesMainIntegration:
+    """Integration tests: check_additional_directories wiring in session_init.main()."""
+
+    def test_tip_appears_in_system_message_when_missing(self, monkeypatch, tmp_path):
+        """Tip should appear in systemMessage when teams dir not configured."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Create settings.json WITHOUT ~/.claude/teams in additionalDirectories
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"permissions": {"additionalDirectories": []}}),
+            encoding="utf-8",
+        )
+
+        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        system_msg = output.get("systemMessage", "")
+        assert "additionalDirectories" in system_msg
+        assert "~/.claude/teams" in system_msg
+
+    def test_no_tip_when_setting_present(self, monkeypatch, tmp_path):
+        """No tip should appear when teams dir is already configured."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Create settings.json WITH ~/.claude/teams in additionalDirectories
+        teams_abs = str(tmp_path / ".claude" / "teams")
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"permissions": {"additionalDirectories": [teams_abs]}}),
+            encoding="utf-8",
+        )
+
+        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        # systemMessage should not contain the tip (or should be absent entirely)
+        system_msg = output.get("systemMessage", "")
+        assert "PACT tip" not in system_msg
+
+    @pytest.mark.parametrize("source", ["compact", "clear"])
+    def test_tip_skipped_on_context_reset(self, monkeypatch, tmp_path, source):
+        """Tip should NOT be checked on compact/clear sources (context resets)."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Create settings.json WITHOUT ~/.claude/teams — tip would fire on startup
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"permissions": {"additionalDirectories": []}}),
+            encoding="utf-8",
+        )
+
+        # Create team config so compact path doesn't hit the anomalous branch
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": source,
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        system_msg = output.get("systemMessage", "")
+        assert "PACT tip" not in system_msg

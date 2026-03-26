@@ -5,6 +5,7 @@ Summary: SessionStart hook that initializes PACT environment.
 Used by: Claude Code settings.json SessionStart hook
 
 Performs:
+0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
 2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
 3. Ensures project CLAUDE.md exists with memory sections
@@ -82,6 +83,49 @@ def check_pinned_staleness():
     return _staleness_check(claude_md_path=path)
 
 
+def check_additional_directories() -> str | None:
+    """
+    Check if ~/.claude/teams is in additionalDirectories in settings.json.
+
+    Returns a tip message if the setting is missing, or None if already present.
+    Fail-open: returns None on any error (file missing, malformed JSON, etc.).
+    """
+    try:
+        settings_path = Path.home() / ".claude" / "settings.json"
+        if not settings_path.exists():
+            return None  # No settings file — nothing to check
+
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        additional_dirs = settings.get("permissions", {}).get(
+            "additionalDirectories", []
+        )
+        if not isinstance(additional_dirs, list):
+            return None  # Unexpected type — fail-open
+
+        # Normalize the target path for comparison
+        target = Path.home() / ".claude" / "teams"
+
+        for entry in additional_dirs:
+            if not isinstance(entry, str):
+                continue
+            # Expand ~ using Path.home() (not expanduser which bypasses monkeypatch)
+            if entry.startswith("~/"):
+                expanded = (Path.home() / entry[2:]).resolve()
+            else:
+                expanded = Path(entry).resolve()
+            if expanded == target.resolve():
+                return None  # Already configured
+
+        return (
+            "PACT tip: Add `~/.claude/teams` to `additionalDirectories` in your "
+            "~/.claude/settings.json to avoid permission prompts for team file "
+            "operations."
+        )
+    except Exception:
+        return None  # Fail-open: never block session start
+
+
 def generate_team_name(input_data: dict[str, Any]) -> str:
     """
     Generate a session-unique PACT team name.
@@ -111,6 +155,7 @@ def main():
     Main entry point for the SessionStart hook.
 
     Performs PACT environment initialization:
+    0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
     1. Creates plugin symlinks for @reference resolution
     2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
     3. Ensures project CLAUDE.md exists with memory sections
@@ -146,6 +191,13 @@ def main():
                 COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
+
+        # 0. Check if ~/.claude/teams is in additionalDirectories (one-time tip)
+        # Only check on fresh startup — resumed/compacted sessions already had the check
+        if not is_context_reset:
+            teams_tip = check_additional_directories()
+            if teams_tip:
+                system_messages.append(teams_tip)
 
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session

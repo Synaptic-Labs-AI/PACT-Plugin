@@ -8,7 +8,9 @@ The pact-auditor agent provides independent quality observation during the CODE 
 
 ### Dispatch Conditions
 
-The auditor is dispatched alongside coders by default. To skip, the orchestrator must state: "Auditor skipped: [justification]".
+The auditor is dispatched alongside coders by default. To skip, the orchestrator outputs on its own line:
+
+> **Auditor skipped**: [justification]
 
 **Dispatch is mandatory when**:
 - Variety score >= 7 (Medium or higher)

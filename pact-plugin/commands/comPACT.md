@@ -205,7 +205,11 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 ## Auditor Dispatch
 
-An auditor is dispatched alongside coders unless explicitly skipped. To skip, state: "Auditor skipped: [justification]". See the [Concurrent Audit Protocol](../protocols/pact-audit.md) for full details.
+An auditor is dispatched alongside coders unless explicitly skipped. To skip, output on its own line so the decision is visible to the user:
+
+> **Auditor skipped**: [justification]
+
+See the [Concurrent Audit Protocol](../protocols/pact-audit.md) for full details.
 
 **Dispatch is mandatory when**:
 - Variety score >= 7 (Medium or higher)
