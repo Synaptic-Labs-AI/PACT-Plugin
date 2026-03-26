@@ -25,13 +25,16 @@ check_additional_directories():
 14. Returns None when ~/.claude/teams is present (absolute path)
 15. Returns None when ~/.claude/teams is present (tilde path)
 16. Returns tip message when setting is missing from additionalDirectories
-17. Returns None when settings.json does not exist (fail-open)
-18. Returns None when settings.json contains malformed JSON (fail-open)
-19. Returns None when permissions key is missing (fail-open)
-20. Returns None when additionalDirectories is not a list (fail-open)
-21. Returns None when Path.home() raises (fail-open)
-22. main() integration: tip appears in systemMessage when setting is missing
-23. main() integration: no tip when setting is present
+17. Returns tip message when additionalDirectories is empty
+18. Returns None when settings.json does not exist (fail-open)
+19. Returns None when settings.json contains malformed JSON (fail-open)
+20. Returns tip when permissions key is missing (empty additionalDirectories)
+21. Returns None when additionalDirectories is not a list (fail-open)
+22. Returns None when Path.home() raises (fail-open)
+23. Ignores non-string entries in additionalDirectories without crashing
+24. main() integration: tip appears in systemMessage when setting is missing
+25. main() integration: no tip when setting is present
+26. main() integration: tip skipped on context reset (compact and clear sources)
 
 Note: restore_last_session() and check_resumption_context() are tested
 in test_session_resume.py (canonical location).
@@ -773,7 +776,7 @@ class TestCheckAdditionalDirectories:
 
         assert result is None
 
-    def test_returns_none_when_permissions_key_missing(self, monkeypatch, tmp_path):
+    def test_returns_tip_when_permissions_key_missing(self, monkeypatch, tmp_path):
         """Should return tip when permissions key is missing (empty additionalDirectories)."""
         from session_init import check_additional_directories
 
@@ -906,7 +909,8 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         system_msg = output.get("systemMessage", "")
         assert "PACT tip" not in system_msg
 
-    def test_tip_skipped_on_context_reset(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("source", ["compact", "clear"])
+    def test_tip_skipped_on_context_reset(self, monkeypatch, tmp_path, source):
         """Tip should NOT be checked on compact/clear sources (context resets)."""
         from session_init import main
 
@@ -929,7 +933,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
 
         stdin_data = json.dumps({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
-            "source": "compact",
+            "source": source,
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
