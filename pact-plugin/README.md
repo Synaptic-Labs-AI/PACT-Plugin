@@ -14,6 +14,18 @@ Turn a single Claude Code session into a managed team of specialist AI agents th
 cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
+Then add `~/.claude/teams` to your `additionalDirectories` in `~/.claude/settings.json` to prevent permission prompts when PACT agents coordinate via team files:
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "~/.claude/teams"
+    ]
+  }
+}
+```
+
 Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/ProfSynapse/PACT-prompt#enabling-agent-teams).
 
 ## What You Get

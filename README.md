@@ -39,7 +39,20 @@ PACT turns one AI into a coordinated dev team. Instead of a single Claude guessi
 cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
-**3. Restart Claude Code and go**
+**3. Allow team file access** (prevents permission prompts during agent coordination)
+
+Add to your `~/.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "~/.claude/teams"
+    ]
+  }
+}
+```
+
+**4. Restart Claude Code and go**
 ```
 /PACT:orchestrate Build user authentication with JWT
 ```
@@ -226,11 +239,18 @@ Add the following to your `settings.json` (global `~/.claude/settings.json` or p
 {
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "additionalDirectories": [
+      "~/.claude/teams"
+    ]
   }
 }
 ```
 
-Without this setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
+The `env` setting enables Agent Teams. The `permissions.additionalDirectories` entry allows agents to access team coordination files in `~/.claude/teams/` without permission prompts.
+
+Without the `env` setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
 
 > **Note:** Agent Teams have [known limitations](https://code.claude.com/docs/en/agent-teams#limitations) around session resumption, task coordination, and shutdown behavior. See the Claude Code docs for details.
 
@@ -267,7 +287,8 @@ Help me install the PACT plugin for Claude Code:
 3. Enable auto-updates via /plugin → Marketplaces → pact-marketplace → Enable auto-update
 4. Set up the orchestrator by appending PACT's CLAUDE.md to my existing ~/.claude/CLAUDE.md
    (or create it if I don't have one)
-5. Tell me to restart Claude Code
+5. Add ~/.claude/teams to additionalDirectories in my settings.json
+6. Tell me to restart Claude Code
 ```
 
 ### Option B: Manual Installation
@@ -300,7 +321,23 @@ cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 cat ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md >> ~/.claude/CLAUDE.md
 ```
 
-**Step 5: Restart Claude Code**
+**Step 5: Allow team file access**
+
+PACT agents create coordination files in `~/.claude/teams/`. Add this directory to `additionalDirectories` in your `~/.claude/settings.json` to prevent permission prompts:
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "~/.claude/teams"
+    ]
+  }
+}
+```
+
+> **Note:** Merge this with any existing keys in your `settings.json` — don't replace the whole file.
+
+**Step 6: Restart Claude Code**
 ```bash
 exit
 claude
