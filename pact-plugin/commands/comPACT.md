@@ -207,14 +207,13 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 An auditor is dispatched alongside coders unless explicitly skipped. To skip, state: "Auditor skipped: [justification]". See the [Concurrent Audit Protocol](../protocols/pact-audit.md) for full details.
 
-**Dispatch is the default when**:
-- Variety score >= 7 or security-sensitive code
-- 3+ parallel coders (coordination complexity warrants observation)
+**Dispatch is mandatory when**:
+- Variety score >= 7 (Medium or higher)
+- 3+ coders running in parallel (coordination complexity warrants observation)
+- Task touches security-sensitive code (auth, crypto, user input handling)
+- Domain has prior history of architecture drift (from pact-memory calibration data)
 
-**Valid skip reasons**:
-- Single coder on familiar pattern
-- Variety reassessed below 7 with no security sensitivity
-- User requested skip
+**Valid skip reasons**: Single coder on familiar pattern, variety reassessed below 7, user requested skip.
 
 When dispatching an auditor, create its task with `metadata: {"completion_type": "signal"}` so the completion gate accepts `audit_summary` instead of standard HANDOFF.
 
