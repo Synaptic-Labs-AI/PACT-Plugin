@@ -508,9 +508,9 @@ Spawn multiple coders in parallel (multiple `Task` calls in one response). Inclu
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
-**Dispatch auditor** (concurrent with coders, when conditions are met):
+**Dispatch auditor** (concurrent with coders — dispatch cannot be skipped without justification):
 
-Deploy the pact-auditor as a CODE-phase teammate when ANY of: variety >= 7, 3+ coders running in parallel, task touches security-sensitive code, or domain has prior architecture drift history. Skip when: single coder on a Low variety (4-6) task with no security sensitivity.
+An auditor is dispatched alongside coders unless explicitly skipped. To skip, state: "Auditor skipped: [justification]". Valid skip reasons: single coder on familiar pattern, variety reassessed below 7, user requested skip. When variety >= 7, 3+ coders run in parallel, code is security-sensitive, or domain has prior architecture drift — auditor dispatch is mandatory.
 
 1. `TaskCreate(subject="auditor: concurrent quality observation", metadata={"completion_type": "signal"})`
    - Include: architecture doc path, plan path, coder task IDs and scope boundaries

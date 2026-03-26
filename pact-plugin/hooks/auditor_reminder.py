@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/auditor_reminder.py
-Summary: PostToolUse hook on Task tool that reminds the orchestrator to consider
-         dispatching a pact-auditor when a coder is spawned without one present.
+Summary: PostToolUse hook on Task tool that reminds the orchestrator to dispatch
+         a pact-auditor (should be dispatched by default unless skipped with justification) when a coder is spawned without one present.
 Used by: hooks.json PostToolUse hook (matcher: Task)
 
 Checks whether the dispatched agent is a coder type and, if so, whether the
 team already has an auditor member. If no auditor is present, emits a
-systemMessage reminder referencing the pact-audit.md dispatch conditions.
+systemMessage reminder that auditor dispatch is the default and requires
+explicit justification to skip.
 
 This is a non-blocking reminder (always exits 0), not a gate.
 
@@ -84,10 +85,10 @@ def check_auditor_needed(tool_input: dict, teams_dir: str | None = None) -> str 
 
     return (
         "\U0001f50e Coder dispatched without a concurrent auditor.\n"
-        "Deploy pact-auditor if ANY of these apply:\n"
-        "  1. Variety score \u2265 7\n"
-        "  2. 3+ parallel coders\n"
-        "  3. Security-sensitive code\n"
+        "Auditor dispatch is the default — to skip, state: "
+        '"Auditor skipped: [justification]".\n'
+        "Valid skip reasons: single coder on familiar pattern, "
+        "variety reassessed below 7, user requested skip.\n"
         "See pact-audit.md for full dispatch protocol."
     )
 

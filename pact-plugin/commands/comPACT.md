@@ -205,13 +205,17 @@ For agent stall detection and recovery, see [Agent Stall Detection](orchestrate.
 
 ## Auditor Dispatch
 
-When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](../protocols/pact-audit.md):
-- Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
-- 3+ parallel coders → dispatch auditor (coordination complexity warrants observation)
-- 2 coders on Low variety task → skip auditor
-- Single coder on Low variety task → skip auditor
+An auditor is dispatched alongside coders unless explicitly skipped. To skip, state: "Auditor skipped: [justification]". See the [Concurrent Audit Protocol](../protocols/pact-audit.md) for full details.
 
-If dispatching an auditor, create its task with `metadata: {"completion_type": "signal"}` so the completion gate accepts `audit_summary` instead of standard HANDOFF.
+**Dispatch is mandatory when**:
+- Variety score >= 7 (Medium or higher)
+- 3+ coders running in parallel (coordination complexity warrants observation)
+- Task touches security-sensitive code (auth, crypto, user input handling)
+- Domain has prior history of architecture drift (from pact-memory calibration data)
+
+**Valid skip reasons**: Single coder on familiar pattern, variety reassessed below 7, user requested skip.
+
+When dispatching an auditor, create its task with `metadata: {"completion_type": "signal"}` so the completion gate accepts `audit_summary` instead of standard HANDOFF.
 
 ---
 

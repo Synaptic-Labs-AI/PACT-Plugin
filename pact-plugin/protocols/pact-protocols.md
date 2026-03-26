@@ -1035,10 +1035,15 @@ Invoke multiple specialists when:
 
 ### Auditor Dispatch
 
-When comPACT dispatches multiple specialists in parallel, consider attaching an auditor per the [Concurrent Audit Protocol](pact-audit.md):
-- Variety score >= 7 or security-sensitive code → dispatch auditor alongside coders
+An auditor is dispatched alongside coders unless explicitly skipped. To skip, state: "Auditor skipped: [justification]". See the [Concurrent Audit Protocol](pact-audit.md) for full details.
+
+**Dispatch is mandatory when**:
+- Variety score >= 7 (Medium or higher)
 - 3+ coders running in parallel (coordination complexity warrants observation)
-- Single coder or 2 coders on a Low variety (4-6) task → skip auditor
+- Task touches security-sensitive code (auth, crypto, user input handling)
+- Domain has prior history of architecture drift (from pact-memory calibration data)
+
+**Valid skip reasons**: Single coder on familiar pattern, variety reassessed below 7, user requested skip.
 
 ### After Specialist Completes
 
@@ -1755,13 +1760,15 @@ The pact-auditor agent provides independent quality observation during the CODE 
 
 ### Dispatch Conditions
 
-Deploy the auditor as a CODE-phase teammate when ANY of:
+The auditor is dispatched alongside coders by default. To skip, the orchestrator must state: "Auditor skipped: [justification]".
+
+**Dispatch is mandatory when**:
 - Variety score >= 7 (Medium or higher)
 - 3+ coders running in parallel (coordination complexity warrants observation)
 - Task touches security-sensitive code (auth, crypto, user input handling)
 - Domain has prior history of architecture drift (from pact-memory calibration data)
 
-**Skip when**: Single coder or 2 coders on a Low variety (4-6) task with no security sensitivity.
+**Valid skip reasons**: Single coder on familiar pattern, variety reassessed below 7, user requested skip.
 
 ### Hybrid Observation Model
 
