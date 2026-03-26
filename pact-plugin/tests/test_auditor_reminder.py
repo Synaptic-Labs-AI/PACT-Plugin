@@ -137,6 +137,10 @@ class TestCheckAuditorNeeded:
         assert result is not None
         assert "pact-audit.md" in result
         assert "dispatch protocol" in result
+        # Opt-out framing: message must convey dispatch-by-default semantics
+        assert "default" in result, "Reminder must state dispatch is the default"
+        assert "skip" in result.lower(), "Reminder must mention how to skip"
+        assert "justification" in result.lower(), "Reminder must require justification to skip"
 
     def test_coder_with_auditor_suppressed(self, teams_dir):
         """Returns None when auditor already present."""

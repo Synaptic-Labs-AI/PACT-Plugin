@@ -5,7 +5,7 @@ Tests cover:
 1. Audit protocol file exists with required content
 2. Variety thresholds match between variety_scorer.py and pact-variety.md
 3. S4 checkpoints has 4 questions
-4. Auditor dispatch thresholds consistent across pact-audit.md and orchestrate.md
+4. Auditor dispatch thresholds and opt-out framing consistent across all dispatch files
 5. CalibrationRecord fields consistent across protocol and architecture doc
 6. Learning II threshold=5 consistent across protocol and code
 7. Audit protocol referenced in pact-protocols.md SSOT
@@ -124,7 +124,16 @@ class TestS4CheckpointQuestions:
 
 
 class TestAuditorDispatchConsistency:
-    """Verify auditor dispatch conditions match between protocol and command."""
+    """Verify auditor dispatch conditions match across all files with dispatch sections."""
+
+    # All files that define auditor dispatch conditions
+    DISPATCH_FILES = {
+        "pact-audit.md": PROTOCOLS_DIR / "pact-audit.md",
+        "orchestrate.md": COMMANDS_DIR / "orchestrate.md",
+        "comPACT.md": COMMANDS_DIR / "comPACT.md",
+        "pact-workflows.md": PROTOCOLS_DIR / "pact-workflows.md",
+        "pact-protocols.md": PROTOCOLS_DIR / "pact-protocols.md",
+    }
 
     @pytest.fixture
     def audit_content(self):
@@ -133,6 +142,14 @@ class TestAuditorDispatchConsistency:
     @pytest.fixture
     def orchestrate_content(self):
         return (COMMANDS_DIR / "orchestrate.md").read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def dispatch_contents(self):
+        """Load all files that contain auditor dispatch sections."""
+        return {
+            name: path.read_text(encoding="utf-8")
+            for name, path in self.DISPATCH_FILES.items()
+        }
 
     def test_both_specify_variety_7(self, audit_content, orchestrate_content):
         """Both files reference variety >= 7 as dispatch condition."""
@@ -150,6 +167,24 @@ class TestAuditorDispatchConsistency:
     def test_orchestrate_references_audit_protocol(self, orchestrate_content):
         """orchestrate.md should reference pact-audit.md."""
         assert "pact-audit.md" in orchestrate_content
+
+    # --- Opt-out framing consistency across all dispatch files ---
+
+    @pytest.mark.parametrize("filename", sorted(DISPATCH_FILES.keys()))
+    def test_all_files_use_opt_out_skip_framing(self, dispatch_contents, filename):
+        """All auditor dispatch files use opt-out 'skip' framing."""
+        content = dispatch_contents[filename].lower()
+        assert "skip" in content, (
+            f"{filename} missing 'skip' — auditor dispatch must use opt-out framing"
+        )
+
+    @pytest.mark.parametrize("filename", sorted(DISPATCH_FILES.keys()))
+    def test_all_files_mention_justification(self, dispatch_contents, filename):
+        """All auditor dispatch files require justification to skip."""
+        content = dispatch_contents[filename].lower()
+        assert "justification" in content, (
+            f"{filename} missing 'justification' — skip must require justification"
+        )
 
 
 # =============================================================================
