@@ -2,7 +2,7 @@
 """
 Location: pact-plugin/hooks/auditor_reminder.py
 Summary: PostToolUse hook on Task tool that reminds the orchestrator to dispatch
-         a pact-auditor (opt-out default) when a coder is spawned without one present.
+         a pact-auditor (should be dispatched by default unless skipped with justification) when a coder is spawned without one present.
 Used by: hooks.json PostToolUse hook (matcher: Task)
 
 Checks whether the dispatched agent is a coder type and, if so, whether the

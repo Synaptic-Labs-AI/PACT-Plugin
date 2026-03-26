@@ -508,7 +508,7 @@ Spawn multiple coders in parallel (multiple `Task` calls in one response). Inclu
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
-**Dispatch auditor** (concurrent with coders — opt-out default):
+**Dispatch auditor** (concurrent with coders — dispatch cannot be skipped without justification):
 
 An auditor is dispatched alongside coders unless explicitly skipped. To skip, state: "Auditor skipped: [justification]". Valid skip reasons: single coder on familiar pattern, variety reassessed below 7, user requested skip. When variety >= 7, 3+ coders run in parallel, code is security-sensitive, or domain has prior architecture drift — auditor dispatch is mandatory.
 
