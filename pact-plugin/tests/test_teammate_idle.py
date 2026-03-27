@@ -814,6 +814,7 @@ class TestMainEdgeCases:
         captured = capsys.readouterr()
         if captured.out.strip():
             output = json.loads(captured.out)
-            msg = output.get("systemMessage", "")
-            assert "ACTION REQUIRED" in msg
-            assert "shutdown_request" in msg
+            if "suppressOutput" not in output:
+                msg = output.get("systemMessage", "")
+                assert "ACTION REQUIRED" in msg
+                assert "shutdown_request" in msg

@@ -229,7 +229,7 @@ class TestMain:
             main()
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out.strip() == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_invalid_json_stdin(self):
         """Exits 0 on invalid JSON stdin."""

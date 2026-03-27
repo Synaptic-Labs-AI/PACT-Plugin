@@ -527,7 +527,7 @@ class TestMain:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_no_output_for_chat_only_session(self, tmp_path, capsys):
         """Long transcript but no Edit/Write -> no reminder, exit 0."""
@@ -547,7 +547,7 @@ class TestMain:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_uses_lowercased_team_name(self, tmp_path, capsys):
         """Team name from env is lowercased for path lookup."""
@@ -631,7 +631,7 @@ class TestMain:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_no_guard_file_when_no_reminder(self, tmp_path, capsys):
         """When reminder doesn't fire (chat session), no guard file is created."""
@@ -762,7 +762,7 @@ class TestMainIntegrationBothPaths:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_adhoc_save_message_content(self, tmp_path, capsys):
         """Verify adhoc_save message contains actionable content."""
@@ -852,7 +852,7 @@ class TestMainIntegrationBothPaths:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
 
 class TestMainUncompletedTasks:
@@ -983,4 +983,4 @@ class TestMainUncompletedTasks:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}

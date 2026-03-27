@@ -176,7 +176,8 @@ class TestPreambleInMainOutput:
                 with pytest.raises(SystemExit):
                     main()
 
-            assert captured_stdout.getvalue() == ""
+            # Bare exit path: suppressOutput to prevent false "hook error"
+            assert json.loads(captured_stdout.getvalue().strip()) == {"suppressOutput": True}
 
 
 # ---------------------------------------------------------------------------

@@ -152,7 +152,7 @@ class TestMainLastAssistantMessage:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         # Good handoff => no warnings printed
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_falls_back_to_transcript_when_no_last_assistant_message(self, capsys):
         """When last_assistant_message is absent, should fall back to
@@ -170,7 +170,7 @@ class TestMainLastAssistantMessage:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_falls_back_to_transcript_when_last_assistant_message_empty(self, capsys):
         """When last_assistant_message is empty string, should fall back to
@@ -189,7 +189,7 @@ class TestMainLastAssistantMessage:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_warns_on_missing_handoff_from_last_assistant_message(self, capsys):
         """When last_assistant_message has poor handoff, should emit warning."""
@@ -233,7 +233,7 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_exits_0_on_invalid_json(self):
         from validate_handoff import main
@@ -258,7 +258,7 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_exits_0_with_no_agent_id(self, capsys):
         from validate_handoff import main
@@ -273,7 +273,7 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
 
 # =============================================================================
@@ -301,7 +301,7 @@ class TestLastAssistantMessagePreference:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""  # No warning = used good handoff from last_assistant_message
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}  # No warning = used good handoff from last_assistant_message
 
     def test_last_assistant_message_none_falls_back(self, capsys):
         """When last_assistant_message is explicitly None, falls back to transcript."""
@@ -319,7 +319,7 @@ class TestLastAssistantMessagePreference:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""  # Fallback to transcript succeeded
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}  # Fallback to transcript succeeded
 
     def test_both_fields_missing_exits_cleanly(self, capsys):
         """When both fields are missing, transcript is empty string, exits 0."""
@@ -335,7 +335,7 @@ class TestLastAssistantMessagePreference:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""  # Short transcript (< 100 chars) skips validation
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}  # Short transcript (< 100 chars) skips validation
 
 
 class TestValidateHandoffEdgeCases:
@@ -718,7 +718,7 @@ class TestMainLosslessWarnings:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_main_no_lossless_warning_for_signal_completion(self, capsys):
         """main() should not emit lossless warnings for signal-type completions."""
@@ -735,4 +735,4 @@ class TestMainLosslessWarnings:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
