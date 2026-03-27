@@ -31,6 +31,9 @@ from shared.error_output import hook_error_json
 
 from shared.task_utils import get_task_list
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def get_project_slug() -> str:
     """Derive project slug from environment."""
@@ -234,6 +237,7 @@ def main():
             project_slug=project_slug,
         )
 
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:

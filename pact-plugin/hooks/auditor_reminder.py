@@ -22,6 +22,9 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 # Coder agent types that warrant an auditor check.
 # pact-n8n is excluded: it produces JSON workflow configs, not source code;
 # auditor observation is less applicable.
@@ -98,6 +101,7 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         tool_input = input_data.get("tool_input", {})
@@ -105,6 +109,8 @@ def main():
 
         if reminder:
             print(json.dumps({"systemMessage": reminder}))
+        else:
+            print(_SUPPRESS_OUTPUT)
 
         sys.exit(0)
 

@@ -28,6 +28,9 @@ REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration"
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def validate_task_handoff(
     task_subject: str,
@@ -235,6 +238,7 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     task_id = input_data.get("task_id", "")
@@ -271,6 +275,7 @@ def main():
     # This is the LAST action before exit: every breadcrumb = fully complete task.
     append_pending_handoff(task_id, teammate_name, team_name)
 
+    print(_SUPPRESS_OUTPUT)
     sys.exit(0)
 
 

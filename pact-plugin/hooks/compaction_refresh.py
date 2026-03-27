@@ -25,6 +25,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 # Add hooks directory to path for refresh and shared package imports
 _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
@@ -231,6 +234,7 @@ def main():
         # Only act on post-compaction sessions
         if source != "compact":
             # Not a post-compaction session, no action needed
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         session_id = os.environ.get("CLAUDE_SESSION_ID", "unknown")
@@ -267,6 +271,7 @@ def main():
                 sys.exit(0)
 
             # Tasks exist but nothing in_progress - no active workflow
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # ---------------------------------------------------------------------
@@ -290,6 +295,7 @@ def main():
 
         if not checkpoint:
             # No checkpoint file, nothing to recover
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Validate checkpoint
@@ -307,6 +313,7 @@ def main():
         workflow_name = checkpoint.get("workflow", {}).get("name", "none")
         if workflow_name == "none":
             # No active workflow at compaction time
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Build and inject refresh instructions from checkpoint

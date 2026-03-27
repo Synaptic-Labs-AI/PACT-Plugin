@@ -17,6 +17,9 @@ import sys
 import os
 from pathlib import Path
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def get_peer_context(
     agent_type: str,
@@ -76,6 +79,7 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     agent_type = input_data.get("agent_type", "")
@@ -95,6 +99,8 @@ def main():
             }
         }
         print(json.dumps(output))
+    else:
+        print(_SUPPRESS_OUTPUT)
 
     sys.exit(0)
 

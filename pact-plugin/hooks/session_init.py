@@ -71,6 +71,9 @@ from shared.session_resume import (
     check_paused_state,
 )
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def check_pinned_staleness():
     """
@@ -352,6 +355,8 @@ def main():
 
         if output:
             print(json.dumps(output))
+        else:
+            print(_SUPPRESS_OUTPUT)
 
         sys.exit(0)
 

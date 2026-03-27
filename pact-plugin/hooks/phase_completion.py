@@ -30,6 +30,9 @@ from shared.error_output import hook_error_json
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import get_task_list
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 # Indicators that CODE phase work was performed (for transcript fallback).
 # Note: pact-security-engineer and pact-qa-engineer are Review phase agents,
@@ -264,6 +267,8 @@ def main():
                 "systemMessage": " | ".join(messages)
             }
             print(json.dumps(output))
+        else:
+            print(_SUPPRESS_OUTPUT)
 
         sys.exit(0)
 
