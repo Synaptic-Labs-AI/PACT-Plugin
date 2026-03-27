@@ -799,7 +799,8 @@ class TestMainEdgeCases:
         tasks = [make_task(status="completed", owner="coder-a")]
 
         # Pre-set count to 4 (will become 5 = force threshold)
-        idle_dir = tmp_path / "teams" / "pact-test"
+        # Path must include .claude to match hook's Path.home() / ".claude" / "teams" / ...
+        idle_dir = tmp_path / ".claude" / "teams" / "pact-test"
         idle_dir.mkdir(parents=True)
         write_idle_counts(str(idle_dir / "idle_counts.json"), {"coder-a": 4})
 
@@ -814,7 +815,6 @@ class TestMainEdgeCases:
         captured = capsys.readouterr()
         if captured.out.strip():
             output = json.loads(captured.out)
-            if "suppressOutput" not in output:
-                msg = output.get("systemMessage", "")
-                assert "ACTION REQUIRED" in msg
-                assert "shutdown_request" in msg
+            msg = output.get("systemMessage", "")
+            assert "ACTION REQUIRED" in msg
+            assert "shutdown_request" in msg

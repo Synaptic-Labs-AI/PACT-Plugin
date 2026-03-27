@@ -858,6 +858,70 @@ class TestCompactionRefreshSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
+    def test_tasks_exist_but_none_in_progress_suppress(self, capsys):
+        """Tasks exist but none in_progress outputs suppressOutput."""
+        from compaction_refresh import main
+
+        input_data = json.dumps({"source": "compact"})
+        completed_tasks = [{"id": "1", "subject": "test", "status": "completed"}]
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("compaction_refresh.get_task_list", return_value=completed_tasks), \
+             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test"}, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_no_checkpoint_suppress(self, capsys, tmp_path):
+        """No checkpoint file outputs suppressOutput."""
+        from compaction_refresh import main
+
+        input_data = json.dumps({"source": "compact"})
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("compaction_refresh.get_task_list", return_value=[]), \
+             patch.dict(os.environ, {
+                 "CLAUDE_SESSION_ID": "test",
+                 "CLAUDE_PROJECT_DIR": "/test/project",
+             }, clear=False), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_workflow_none_suppress(self, capsys, tmp_path):
+        """Checkpoint with workflow 'none' outputs suppressOutput."""
+        from compaction_refresh import main
+
+        checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
+        checkpoint_dir.mkdir(parents=True)
+        checkpoint_path = checkpoint_dir / "-test-project.json"
+        checkpoint_path.write_text(json.dumps({
+            "version": "1.0",
+            "session_id": "test-session",
+            "workflow": {"name": "none"},
+            "extraction": {"confidence": 1.0},
+        }))
+
+        input_data = json.dumps({"source": "compact"})
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("compaction_refresh.get_task_list", return_value=[]), \
+             patch.dict(os.environ, {
+                 "CLAUDE_SESSION_ID": "test-session",
+                 "CLAUDE_PROJECT_DIR": "/test/project",
+             }, clear=False), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
     def test_error_path_uses_hook_error_json(self, capsys):
         """Exception path outputs hook_error_json, NOT suppressOutput."""
         from compaction_refresh import main
@@ -999,6 +1063,25 @@ class TestTeammateCompletionGateSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from teammate_completion_gate import main
+
+        input_data = json.dumps({"teammate_name": "coder", "team_name": "pact-test"})
+        with patch("teammate_completion_gate._scan_owned_tasks",
+                    side_effect=RuntimeError("boom")), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch.dict(os.environ,
+                        {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
+
 
 class TestTeammateIdleSuppressOutput:
     """teammate_idle.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
@@ -1044,6 +1127,57 @@ class TestTeammateIdleSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
+    def test_no_teammate_name_suppress(self, capsys):
+        """Missing teammate_name outputs suppressOutput."""
+        from teammate_idle import main
+
+        input_data = json.dumps({"teammate_name": ""})
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch("teammate_idle.get_task_list", return_value=[{"id": "1"}]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_no_messages_suppress(self, capsys, tmp_path):
+        """No stall or cleanup messages outputs suppressOutput."""
+        from teammate_idle import main
+
+        # Completed task with no stall and below idle threshold -> no messages
+        tasks = [{"id": "1", "subject": "test", "status": "completed", "owner": "other-agent"}]
+        input_data = json.dumps({"teammate_name": "coder"})
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from teammate_idle import main
+
+        input_data = json.dumps({"teammate_name": "coder"})
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch("teammate_idle.get_task_list",
+                   side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
+
 
 class TestValidateHandoffSuppressOutput:
     """validate_handoff.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
@@ -1072,6 +1206,20 @@ class TestValidateHandoffSuppressOutput:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from validate_handoff import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
 
 
 class TestPeerInjectSuppressOutput:
@@ -1122,6 +1270,20 @@ class TestPhaseCompletionSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from phase_completion import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
+
 
 class TestMemoryAdhocReminderSuppressOutput:
     """memory_adhoc_reminder.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
@@ -1152,6 +1314,20 @@ class TestMemoryAdhocReminderSuppressOutput:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from memory_adhoc_reminder import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
 
 
 class TestAuditorReminderSuppressOutput:
@@ -1184,3 +1360,249 @@ class TestAuditorReminderSuppressOutput:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from auditor_reminder import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
+
+
+class TestSessionInitSuppressOutput:
+    """session_init.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
+
+    def test_success_path_suppress(self, capsys, tmp_path):
+        """Normal session init with no messages outputs suppressOutput."""
+        from session_init import main
+
+        input_data = json.dumps({"source": "startup", "session_id": "test123"})
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("session_init.check_additional_directories", return_value=None), \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.generate_team_name", return_value="pact-test123"), \
+             patch("pathlib.Path.exists", return_value=False), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}, clear=False):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        # session_init always produces output (team instructions at minimum)
+        assert captured.out.strip()
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from session_init import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
+
+
+class TestFileSizeCheckSuppressOutput:
+    """file_size_check.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
+
+    def test_invalid_json_suppress(self, capsys):
+        """JSONDecodeError path outputs suppressOutput."""
+        from file_size_check import main
+
+        with patch("sys.stdin", io.StringIO("not json")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_non_edit_write_tool_suppress(self, capsys):
+        """Non-Edit/Write tool outputs suppressOutput."""
+        from file_size_check import main
+
+        input_data = json.dumps({"tool_name": "Read", "tool_input": {}})
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_below_threshold_suppress(self, capsys, tmp_path):
+        """File below threshold outputs suppressOutput."""
+        from file_size_check import main
+
+        # Create a small Python file
+        small_file = tmp_path / "small.py"
+        small_file.write_text("x = 1\n" * 10)
+
+        input_data = json.dumps({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(small_file)},
+        })
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from file_size_check import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
+
+
+class TestFileTrackerSuppressOutput:
+    """file_tracker.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
+
+    def test_no_team_name_suppress(self, capsys):
+        """Missing team name outputs suppressOutput."""
+        from file_tracker import main
+
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": ""}, clear=False), \
+             patch("sys.stdin", io.StringIO("{}")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_invalid_json_suppress(self, capsys):
+        """JSONDecodeError path outputs suppressOutput."""
+        from file_tracker import main
+
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+             patch("sys.stdin", io.StringIO("bad json")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_no_file_path_suppress(self, capsys):
+        """Missing file_path outputs suppressOutput."""
+        from file_tracker import main
+
+        input_data = json.dumps({"tool_input": {}})
+        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_no_conflict_suppress(self, capsys, tmp_path):
+        """No conflict (normal edit) outputs suppressOutput."""
+        from file_tracker import main
+
+        input_data = json.dumps({
+            "tool_input": {"file_path": "/tmp/test.py"},
+            "tool_name": "Edit",
+        })
+        with patch.dict(os.environ, {
+            "CLAUDE_CODE_TEAM_NAME": "pact-test",
+            "CLAUDE_CODE_AGENT_NAME": "coder",
+        }, clear=False), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+
+class TestTrackFilesSuppressOutput:
+    """track_files.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
+
+    def test_invalid_json_suppress(self, capsys):
+        """JSONDecodeError path outputs suppressOutput."""
+        from track_files import main
+
+        with patch("sys.stdin", io.StringIO("bad json")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_non_edit_write_tool_suppress(self, capsys):
+        """Non-Edit/Write tool outputs suppressOutput."""
+        from track_files import main
+
+        input_data = json.dumps({"tool_name": "Read", "tool_input": {}})
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_success_path_suppress(self, capsys, tmp_path):
+        """Normal tracking (Edit tool with file_path) outputs suppressOutput."""
+        from track_files import main
+
+        input_data = json.dumps({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/test.py"},
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("track_files.track_file"):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_error_path_uses_hook_error_json(self, capsys):
+        """Exception path outputs hook_error_json, NOT suppressOutput."""
+        from track_files import main
+
+        with patch("sys.stdin", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "systemMessage" in parsed
+        assert "suppressOutput" not in parsed
