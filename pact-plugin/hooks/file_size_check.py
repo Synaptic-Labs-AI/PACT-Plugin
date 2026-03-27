@@ -17,6 +17,8 @@ import sys
 
 from shared.error_output import hook_error_json
 
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 # Line count thresholds
 WARNING_THRESHOLD = 600  # Trigger guidance at this line count
 CRITICAL_THRESHOLD = 800  # More urgent guidance
@@ -92,6 +94,7 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         tool_name = input_data.get("tool_name", "")
@@ -99,27 +102,33 @@ def main():
 
         # Only process Edit and Write tools
         if tool_name not in ("Edit", "Write"):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         file_path = tool_input.get("file_path", "")
         if not file_path:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Skip excluded paths and non-source files
         if is_excluded_path(file_path):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         if not should_check_file(file_path):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Check if file exists and count lines
         if not os.path.isfile(file_path):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         line_count = count_lines(file_path)
 
         # Only output guidance if threshold exceeded
         if line_count < WARNING_THRESHOLD:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         output = {
