@@ -27,6 +27,9 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 MIN_TRANSCRIPT_LENGTH = 500
 
 REMINDER_UNCOMPLETED_TASKS = "uncompleted_tasks"
@@ -183,6 +186,7 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
@@ -190,19 +194,25 @@ def main():
 
         reminder_type = get_reminder_type(team_name, transcript)
         if not reminder_type:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Dynamic message for uncompleted tasks (needs task details)
+        printed = False
         if reminder_type == REMINDER_UNCOMPLETED_TASKS:
             uncompleted = find_uncompleted_tasks(team_name)
             if uncompleted:
                 _write_guard_file(team_name)
                 message = format_uncompleted_message(uncompleted)
                 print(json.dumps({"systemMessage": message}))
+                printed = True
         elif reminder_type in _MESSAGES:
             _write_guard_file(team_name)
             print(json.dumps({"systemMessage": _MESSAGES[reminder_type]}))
+            printed = True
 
+        if not printed:
+            print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:

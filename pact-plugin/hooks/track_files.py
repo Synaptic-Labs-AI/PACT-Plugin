@@ -19,6 +19,9 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 try:
     import fcntl
     HAS_FLOCK = True
@@ -176,6 +179,7 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         tool_name = input_data.get("tool_name", "")
@@ -183,6 +187,7 @@ def main():
 
         # Only track Edit and Write tools
         if tool_name not in ("Edit", "Write"):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Extract and track the file path
@@ -190,6 +195,7 @@ def main():
         if file_path:
             track_file(file_path, tool_name)
 
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:

@@ -39,6 +39,9 @@ from shared.error_output import hook_error_json
 from shared.task_utils import get_task_list
 
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 IDLE_PREAMBLE = "[System idle notification — no response needed] "
 
 IDLE_SUGGEST_THRESHOLD = 3
@@ -333,19 +336,23 @@ def main():
     try:
         team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
         if not team_name:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         teammate_name = input_data.get("teammate_name", "")
         if not teammate_name:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         tasks = get_task_list()
         if not tasks:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         idle_counts_path = str(
@@ -379,6 +386,8 @@ def main():
 
             output = {"systemMessage": IDLE_PREAMBLE + " | ".join(messages)}
             print(json.dumps(output))
+        else:
+            print(_SUPPRESS_OUTPUT)
 
         sys.exit(0)
 

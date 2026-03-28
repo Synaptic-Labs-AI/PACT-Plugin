@@ -318,8 +318,8 @@ class TestCompactionRefreshMain:
                 # Should exit 0 without refresh (not a compact session)
                 assert exc_info.value.code == 0
                 output = mock_stdout.getvalue()
-                # No output expected for non-compact sessions
-                assert output == ""
+                # Bare exit path: suppressOutput to prevent false "hook error"
+                assert json.loads(output.strip()) == {"suppressOutput": True}
 
     def test_main_no_checkpoint_file(self, tmp_path: Path):
         """Test handling when no checkpoint file exists."""

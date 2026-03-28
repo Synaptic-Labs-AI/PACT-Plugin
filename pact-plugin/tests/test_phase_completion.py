@@ -263,7 +263,7 @@ class TestMain:
                 main()
         assert exc.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_transcript_fallback_code_detected(self, capsys, tmp_path):
         from phase_completion import main
@@ -320,7 +320,7 @@ class TestMain:
                 main()
         assert exc.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""  # No reminders: test started, decision logs exist
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}  # No reminders: test started, decision logs exist
 
     def test_decision_log_mentioned_no_reminder(self, capsys, tmp_path):
         from phase_completion import main
@@ -338,7 +338,7 @@ class TestMain:
                 main()
         assert exc.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""  # No reminders: test started, decision log mentioned
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}  # No reminders: test started, decision log mentioned
 
     def test_no_code_phase_no_output(self, capsys):
         from phase_completion import main
@@ -352,7 +352,7 @@ class TestMain:
                 main()
         assert exc.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_invalid_json_input(self):
         from phase_completion import main

@@ -24,6 +24,9 @@ try:
 except ImportError:
     HAS_FLOCK = False
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def _normalize_path(file_path: str) -> str:
     """Normalize a file path for consistent comparison.
@@ -152,15 +155,18 @@ def get_environment_delta(
 def main():
     team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
     if not team_name:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     file_path = input_data.get("tool_input", {}).get("file_path", "")
     if not file_path:
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     agent_name = os.environ.get("CLAUDE_CODE_AGENT_NAME", "")
@@ -184,6 +190,10 @@ def main():
             }
         }
         print(json.dumps(output))
+    else:
+        # Unlike other hooks, this else-branch is new code (the original had
+        # no explicit no-conflict path — it fell through to bare sys.exit(0))
+        print(_SUPPRESS_OUTPUT)
 
     sys.exit(0)
 

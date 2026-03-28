@@ -24,6 +24,9 @@ import re
 
 from shared.error_output import hook_error_json
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 # Lossless fields — information that would be lost when agent context ends.
 # When a structured HANDOFF section is present, these must appear as subsections.
@@ -208,6 +211,7 @@ def main():
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
             # No input or invalid JSON - can't validate
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Prefer last_assistant_message (SDK v2.1.47+), fall back to transcript
@@ -216,6 +220,7 @@ def main():
 
         # Only validate PACT agents
         if not is_pact_agent(agent_id):
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         warnings = []
@@ -244,6 +249,8 @@ def main():
                 "systemMessage": " | ".join(warnings)
             }
             print(json.dumps(output))
+        else:
+            print(_SUPPRESS_OUTPUT)
 
         sys.exit(0)
 

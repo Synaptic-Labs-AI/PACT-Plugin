@@ -29,6 +29,9 @@ from pathlib import Path
 from shared.error_output import hook_error_json
 from shared.handoff_example import format_handoff_example
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
+_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
 
 def _scan_owned_tasks(
     teammate_name: str,
@@ -254,6 +257,7 @@ def main():
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         teammate_name = input_data.get("teammate_name", "")
@@ -263,6 +267,7 @@ def main():
         ).lower()
 
         if not teammate_name or not team_name:
+            print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
         # Single scan — partitions tasks into completable vs missing handoff
@@ -278,6 +283,7 @@ def main():
             print(format_missing_handoff_feedback(missing), file=sys.stderr)
             sys.exit(2)  # Block idle — agent needs to store HANDOFF first
 
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:

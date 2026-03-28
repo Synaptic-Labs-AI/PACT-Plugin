@@ -142,7 +142,7 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert capsys.readouterr().out == ""
+        assert json.loads(capsys.readouterr().out.strip()) == {"suppressOutput": True}
 
     def test_skips_excluded_paths(self, capsys):
         from file_size_check import main
@@ -151,7 +151,7 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert capsys.readouterr().out == ""
+        assert json.loads(capsys.readouterr().out.strip()) == {"suppressOutput": True}
 
     def test_skips_non_source_files(self, capsys):
         from file_size_check import main
@@ -160,7 +160,7 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert capsys.readouterr().out == ""
+        assert json.loads(capsys.readouterr().out.strip()) == {"suppressOutput": True}
 
     def test_skips_below_threshold(self, capsys, tmp_path):
         from file_size_check import main
@@ -171,7 +171,7 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert capsys.readouterr().out == ""
+        assert json.loads(capsys.readouterr().out.strip()) == {"suppressOutput": True}
 
     def test_outputs_warning_at_threshold(self, capsys, tmp_path):
         from file_size_check import main
@@ -206,7 +206,7 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert capsys.readouterr().out == ""
+        assert json.loads(capsys.readouterr().out.strip()) == {"suppressOutput": True}
 
     def test_handles_missing_file_path(self, capsys):
         from file_size_check import main
@@ -215,7 +215,7 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert capsys.readouterr().out == ""
+        assert json.loads(capsys.readouterr().out.strip()) == {"suppressOutput": True}
 
     def test_handles_invalid_json(self):
         from file_size_check import main

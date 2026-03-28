@@ -783,5 +783,5 @@ class TestTaskFirstIntegration:
             main()
 
         assert exc_info.value.code == 0
-        # No output expected when no active workflow
-        assert output.getvalue() == ""
+        # Bare exit path: suppressOutput to prevent false "hook error"
+        assert json.loads(output.getvalue().strip()) == {"suppressOutput": True}

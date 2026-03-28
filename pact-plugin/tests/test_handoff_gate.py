@@ -506,7 +506,7 @@ class TestMainEntryPoint:
         assert captured.out == ""
 
     def test_main_no_block_when_memory_saved(self, capsys):
-        """Integration: valid handoff + memory_saved=true -> exit 0, no stdout output."""
+        """Integration: valid handoff + memory_saved=true -> exit 0, suppressOutput."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -524,7 +524,7 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
         assert captured.err == ""
 
     def test_main_no_memory_block_when_handoff_blocked(self, capsys):
