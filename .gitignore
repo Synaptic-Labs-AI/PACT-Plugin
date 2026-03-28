@@ -17,3 +17,9 @@ __pycache__/
 .coverage
 CLAUDE.md
 .worktrees/
+
+# Node
+node_modules/
+dist/
+dist-server/
+*.tsbuildinfo
