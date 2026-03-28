@@ -110,14 +110,14 @@ Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HAN
 
 #### Memory Processing Triggers
 
-At these workflow boundaries, create a task for the secretary to process accumulated HANDOFFs:
-- After CODE phase completes → `TaskCreate` for secretary: "Process pending HANDOFFs"
-- At peer-review dispatch (parallel with reviewers) → **PRIMARY trigger**, fires unconditionally
-- After remediation completes → `TaskCreate` for secretary: "Update synthesis with remediation findings" (incremental delta, only if remediation occurred)
-- After comPACT specialist completes → `TaskCreate` for secretary
-- During wrap-up → Consolidation (Pass 2) with safety net for unprocessed HANDOFFs
+At these workflow boundaries, create a task for the secretary referencing the `pact-handoff-harvest` skill:
+- After CODE phase completes → Standard Harvest
+- At peer-review dispatch (parallel with reviewers) → Standard Harvest (**PRIMARY trigger**, fires unconditionally)
+- After remediation completes → "Update synthesis with remediation findings" (incremental delta, only if remediation occurred)
+- After comPACT specialist completes → Standard Harvest
+- During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
-These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via TaskList (primary source) and cross-references with the breadcrumb file for temporal ordering (supplementary).
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed.
 
 NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
