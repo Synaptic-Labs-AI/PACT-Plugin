@@ -1448,6 +1448,67 @@ class TestFileSizeCheckSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
+    def test_no_file_path_suppress(self, capsys):
+        """Missing file_path in tool_input outputs suppressOutput."""
+        from file_size_check import main
+
+        input_data = json.dumps({"tool_name": "Edit", "tool_input": {}})
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_excluded_path_suppress(self, capsys):
+        """File in excluded directory outputs suppressOutput."""
+        from file_size_check import main
+
+        input_data = json.dumps({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/project/node_modules/pkg/index.js"},
+        })
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_non_source_file_suppress(self, capsys):
+        """Non-source file extension outputs suppressOutput."""
+        from file_size_check import main
+
+        input_data = json.dumps({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/project/README.md"},
+        })
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
+    def test_file_doesnt_exist_suppress(self, capsys, tmp_path):
+        """Non-existent file outputs suppressOutput."""
+        from file_size_check import main
+
+        input_data = json.dumps({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(tmp_path / "nonexistent.py")},
+        })
+        with patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        _assert_suppress_output(captured.out)
+
     def test_below_threshold_suppress(self, capsys, tmp_path):
         """File below threshold outputs suppressOutput."""
         from file_size_check import main

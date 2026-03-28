@@ -24,6 +24,7 @@ try:
 except ImportError:
     HAS_FLOCK = False
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
@@ -190,6 +191,8 @@ def main():
         }
         print(json.dumps(output))
     else:
+        # Unlike other hooks, this else-branch is new code (the original had
+        # no explicit no-conflict path — it fell through to bare sys.exit(0))
         print(_SUPPRESS_OUTPUT)
 
     sys.exit(0)

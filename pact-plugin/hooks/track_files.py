@@ -19,6 +19,7 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 
+# Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 try:
