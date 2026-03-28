@@ -277,7 +277,7 @@ export interface HealthResponse {
 
 export interface ApiError {
   error: {
-    code: 'NOT_FOUND' | 'SCAN_ERROR' | 'SQLITE_ERROR' | 'INTERNAL';
+    code: 'NOT_FOUND' | 'SCAN_ERROR' | 'SQLITE_ERROR' | 'INTERNAL' | 'VALIDATION_ERROR';
     message: string;
     path?: string;
   };

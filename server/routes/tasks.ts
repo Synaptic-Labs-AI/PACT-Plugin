@@ -8,6 +8,7 @@
 import { Router } from 'express';
 import { cached } from '../lib/cache.js';
 import { CACHE_TTL } from '../config.js';
+import { isValidTeamName } from '../lib/validate-params.js';
 import { scanTeamTasks } from '../scanners/task-scanner.js';
 import type { TaskStatus } from '../lib/types.js';
 
@@ -17,6 +18,13 @@ const VALID_STATUSES = new Set<string>(['pending', 'in_progress', 'completed', '
 
 router.get('/teams/:teamName/tasks', async (req, res) => {
   const { teamName } = req.params;
+
+  if (!isValidTeamName(teamName)) {
+    res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid team name' },
+    });
+    return;
+  }
 
   try {
     let tasks = await cached(`tasks-${teamName}`, CACHE_TTL.tasks, () =>

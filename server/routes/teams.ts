@@ -8,6 +8,7 @@
 import { Router } from 'express';
 import { cached } from '../lib/cache.js';
 import { CACHE_TTL } from '../config.js';
+import { isValidTeamName } from '../lib/validate-params.js';
 import { scanTeams, scanTeam } from '../scanners/team-scanner.js';
 import { scanTeamTasks } from '../scanners/task-scanner.js';
 import { scanTeamInboxes } from '../scanners/inbox-scanner.js';
@@ -32,6 +33,13 @@ router.get('/teams', async (req, res) => {
 
 router.get('/teams/:teamName', async (req, res) => {
   const { teamName } = req.params;
+
+  if (!isValidTeamName(teamName)) {
+    res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid team name' },
+    });
+    return;
+  }
 
   try {
     const team = await cached(`team-${teamName}`, CACHE_TTL.teams, () => scanTeam(teamName));
