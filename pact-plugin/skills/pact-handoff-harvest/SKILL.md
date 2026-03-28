@@ -4,18 +4,19 @@ description: |
   HANDOFF discovery, review, save, and cleanup workflow for the PACT secretary.
   Use when: processing agent HANDOFFs after workflow phases, running session
   consolidation, or recovering orphaned breadcrumbs from prior sessions.
-  Triggers: harvest HANDOFFs, process HANDOFFs, consolidation, breadcrumb recovery.
+  Triggers: harvest HANDOFFs, process HANDOFFs, incremental, consolidation, breadcrumb recovery.
 ---
 
 # PACT Handoff Harvest
 
 This skill provides the complete workflow for discovering, reviewing, and saving agent HANDOFFs as institutional knowledge. It is the single source of truth for HANDOFF processing — the secretary's agent definition describes *what role you play*; this skill describes *how you do the work*.
 
-Two workflow variants:
+Three workflow variants:
 - **Standard Harvest** — discover, review, save, cleanup. Triggered by workflow commands (orchestrate, comPACT, peer-review) after phases complete.
+- **Incremental Harvest** — delta-only pass after remediation. Processes only new completions since last harvest.
 - **Consolidation Harvest** — safety-net + deep-clean pass. Triggered by wrap-up/pause at session end.
 
-Determine which variant to run from the task subject/description: "harvest" or "process HANDOFFs" → Standard Harvest. "consolidation" → Consolidation Harvest.
+Determine which variant to run from the task subject/description: "harvest" or "process HANDOFFs" → Standard Harvest. "incremental" or "remediation" → Incremental Harvest. "consolidation" → Consolidation Harvest.
 
 ---
 
@@ -131,6 +132,22 @@ After processing HANDOFFs, gather calibration metrics for the orchestrator's var
     summary="Calibration check: variety {X}")
   ```
 - On lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
+
+---
+
+## Incremental Harvest Workflow
+
+Triggered after remediation completes — processes only the delta since the last harvest pass. Fires only when remediation occurred and produced new completed tasks.
+
+1. **Check processed task tracking**: Read `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md` for already-processed task IDs
+2. **Read TaskList** for completed tasks not in the processed set — these are new completions from remediation
+3. **If no new completions**: Report "No new HANDOFFs since last harvest" and complete
+4. **Read new HANDOFFs** via `TaskGet(taskId).metadata.handoff`
+5. **Extract and save** using Steps 4-7 from Standard Harvest (extract knowledge, organizational state, dedup protocol, save)
+6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
+7. **Do NOT delete the breadcrumb file** — it may still be accumulating entries from ongoing work
+8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`)
+9. **Report delta summary** to lead — only report what changed in this incremental pass
 
 ---
 

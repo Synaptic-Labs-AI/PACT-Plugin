@@ -92,8 +92,8 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 After remediation fixes are verified, create an incremental update task for the secretary to process any new findings:
 
 ```
-TaskCreate(subject="secretary: update synthesis with remediation findings",
-  description="Remediation completed. Check for new completed tasks since your last review. Read TaskList for any completed tasks not yet processed. Update existing memories if remediation superseded prior decisions. Report summary.")
+TaskCreate(subject="secretary: incremental harvest (post-remediation)",
+  description="Run Incremental Harvest for team {team_name}. Follow the Incremental Harvest workflow in your pact-handoff-harvest skill. Report delta summary when done.")
 TaskUpdate(taskId, owner="secretary")
 ```
 

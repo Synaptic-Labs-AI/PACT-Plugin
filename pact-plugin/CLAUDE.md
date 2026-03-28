@@ -113,7 +113,7 @@ Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HAN
 At these workflow boundaries, create a task for the secretary referencing the `pact-handoff-harvest` skill:
 - After CODE phase completes → Standard Harvest
 - At peer-review dispatch (parallel with reviewers) → Standard Harvest (**PRIMARY trigger**, fires unconditionally)
-- After remediation completes → "Update synthesis with remediation findings" (incremental delta, only if remediation occurred)
+- After remediation completes → Incremental Harvest (delta only, only if remediation occurred)
 - After comPACT specialist completes → Standard Harvest
 - During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
