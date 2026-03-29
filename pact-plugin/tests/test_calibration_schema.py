@@ -149,8 +149,11 @@ class TestSchemaProtocolConsistency:
 # =============================================================================
 
 SECRETARY_AGENT = Path(__file__).parent.parent / "agents" / "pact-secretary.md"
+HANDOFF_HARVEST_SKILL = Path(__file__).parent.parent / "skills" / "pact-handoff-harvest" / "SKILL.md"
 
-# Fields the secretary must reference (exact snake_case or semantic equivalent)
+# Fields that must be referenced in the secretary's calibration workflow.
+# The calibration gathering step lives in the pact-handoff-harvest skill
+# (auto-loaded via frontmatter), not inline in the agent definition.
 _SECRETARY_FIELD_CHECKS = {
     "initial_variety_score": ["initial_variety_score"],
     "domain": ["domain"],
@@ -162,26 +165,43 @@ _SECRETARY_FIELD_CHECKS = {
 
 
 class TestSecretaryCalibrationCrossRef:
-    """Verify secretary's calibration gathering (step 13) references CalibrationRecord fields."""
+    """Verify secretary's calibration gathering references CalibrationRecord fields.
+
+    The calibration workflow lives in the pact-handoff-harvest skill (auto-loaded
+    by the secretary via frontmatter). The agent def references "calibration" at a
+    high level; the skill contains the detailed field references.
+    """
 
     @pytest.fixture
     def secretary_content(self):
         return SECRETARY_AGENT.read_text(encoding="utf-8")
 
-    def test_secretary_has_calibration_gathering_step(self, secretary_content):
-        """Secretary agent definition must include calibration gathering instructions."""
+    @pytest.fixture
+    def skill_content(self):
+        return HANDOFF_HARVEST_SKILL.read_text(encoding="utf-8")
+
+    def test_secretary_has_calibration_reference(self, secretary_content):
+        """Secretary agent definition must reference calibration."""
         assert "calibration" in secretary_content.lower()
-        assert "CalibrationRecord" in secretary_content
+
+    def test_secretary_loads_handoff_harvest_skill(self, secretary_content):
+        """Secretary must auto-load the pact-handoff-harvest skill via frontmatter."""
+        assert "pact-handoff-harvest" in secretary_content
+
+    def test_skill_has_calibration_gathering_step(self, skill_content):
+        """Handoff harvest skill must include calibration gathering instructions."""
+        assert "calibration" in skill_content.lower()
+        assert "CalibrationRecord" in skill_content
 
     @pytest.mark.parametrize(
         "field,search_terms",
         list(_SECRETARY_FIELD_CHECKS.items()),
         ids=list(_SECRETARY_FIELD_CHECKS.keys()),
     )
-    def test_secretary_references_calibration_field(self, secretary_content, field, search_terms):
-        """Each CalibrationRecord field must be referenced in secretary's calibration protocol."""
-        found = any(term in secretary_content for term in search_terms)
+    def test_skill_references_calibration_field(self, skill_content, field, search_terms):
+        """Each CalibrationRecord field must be referenced in the harvest skill's calibration protocol."""
+        found = any(term in skill_content for term in search_terms)
         assert found, (
-            f"CalibrationRecord field '{field}' not found in pact-secretary.md. "
+            f"CalibrationRecord field '{field}' not found in pact-handoff-harvest SKILL.md. "
             f"Searched for: {search_terms}"
         )

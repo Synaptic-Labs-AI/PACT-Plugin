@@ -92,8 +92,8 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 After remediation fixes are verified, create an incremental update task for the secretary to process any new findings:
 
 ```
-TaskCreate(subject="secretary: update synthesis with remediation findings",
-  description="Remediation completed. Check for new completed tasks since your last review. Read TaskList for any completed tasks not yet processed. Update existing memories if remediation superseded prior decisions. Report summary.")
+TaskCreate(subject="secretary: incremental harvest (post-remediation)",
+  description="Run Incremental Harvest for team {team_name}. Follow the Incremental Harvest workflow in your pact-handoff-harvest skill. Report delta summary when done.")
 TaskUpdate(taskId, owner="secretary")
 ```
 
@@ -149,8 +149,8 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
 **HANDOFF review** (dispatched parallel with reviewers — PRIMARY memory trigger):
 ```
-TaskCreate(subject="secretary: process pending HANDOFFs (primary trigger, pre-merge)",
-  description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done (use `python3 -c "from pathlib import Path; Path('...').unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts). Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
+TaskCreate(subject="secretary: harvest pending HANDOFFs (primary trigger, pre-merge)",
+  description="Harvest HANDOFFs for team {team_name}. Follow the Standard Harvest workflow in your pact-handoff-harvest skill. Report summary when done.")
 TaskUpdate(taskId, owner="secretary")
 ```
 

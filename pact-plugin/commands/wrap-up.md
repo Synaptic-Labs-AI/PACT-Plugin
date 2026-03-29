@@ -12,7 +12,7 @@ You are now entering the **Wrap-Up Phase**. Your goal is to ensure the workspace
 Create a consolidation task for the secretary:
 ```
 TaskCreate(subject="secretary: session consolidation (Pass 2)",
-  description="First: read TaskList for any completed tasks with unprocessed HANDOFFs, and check breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for remaining entries. Process any found. Then: review all memories saved during this session, consolidate related entries, prune superseded memories, sync Working Memory to CLAUDE.md, save orchestration retrospective as calibration data. Delete breadcrumb file when done (use `python3 -c "from pathlib import Path; Path('...').unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts). Report summary when done.")
+  description="Run Consolidation Harvest for team {team_name}. Follow the Consolidation Harvest workflow in your pact-handoff-harvest skill. Report summary when done.")
 TaskUpdate(taskId, owner="secretary")
 ```
 

@@ -532,8 +532,8 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **Process coder HANDOFFs** (non-blocking):
   ```
-  TaskCreate(subject="secretary: process pending HANDOFFs",
-    description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done (use `python3 -c "from pathlib import Path; Path('...').unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts). Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
+  TaskCreate(subject="secretary: harvest pending HANDOFFs",
+    description="Harvest HANDOFFs for team {team_name}. Follow the Standard Harvest workflow in your pact-handoff-harvest skill. Report summary when done.")
   TaskUpdate(taskId, owner="secretary")
   ```
   Do not block on completion — TEST phase proceeds in parallel.
@@ -656,8 +656,8 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 6. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time? The secretary gathers calibration metrics during HANDOFF processing and will ask you for a brief difficulty assessment. Respond with whether actual difficulty was higher, lower, or about the same as predicted, and which dimensions surprised you.
 7. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
    ```
-   TaskCreate(subject="secretary: process pending HANDOFFs (post-review)",
-     description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done (use `python3 -c "from pathlib import Path; Path('...').unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts). Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
+   TaskCreate(subject="secretary: harvest pending HANDOFFs (post-review)",
+     description="Harvest HANDOFFs for team {team_name}. Follow the Standard Harvest workflow in your pact-handoff-harvest skill. Report summary when done.")
    TaskUpdate(taskId, owner="secretary")
    ```
 8. **Mid-session consolidation** (multi-feature sessions only): If this is the second or subsequent feature completed in this session, create a consolidation task to merge cross-feature knowledge:

@@ -233,8 +233,8 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
-  TaskCreate(subject="secretary: process pending HANDOFFs",
-    description="Read TaskList for all completed tasks owned by agents. Cross-reference with breadcrumb file at ~/.claude/teams/{team_name}/completed_handoffs.jsonl for temporal ordering. Review each HANDOFF via TaskGet, extract institutional knowledge, save to pact-memory. Delete breadcrumb file when done (use `python3 -c "from pathlib import Path; Path('...').unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts). Report summary when done. If no completed agent tasks and no breadcrumb file, report 'no pending HANDOFFs' and complete.")
+  TaskCreate(subject="secretary: harvest pending HANDOFFs",
+    description="Harvest HANDOFFs for team {team_name}. Follow the Standard Harvest workflow in your pact-handoff-harvest skill. Report summary when done.")
   TaskUpdate(taskId, owner="secretary")
   ```
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
