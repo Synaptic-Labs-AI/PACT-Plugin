@@ -478,6 +478,8 @@ Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
 - comPACT specialists shut down when user chooses "Pause work for now"
 
+**Structured message constraint**: `shutdown_request` and other structured protocol messages (e.g., `plan_approval_request`) **cannot** be broadcast via `to: "*"` — broadcasts only support plain text. Always send structured messages individually to each teammate by name.
+
 ### Recommended Agent Prompting Structure
 
 Use this structure in the `prompt` field to ensure agents have adequate context:
