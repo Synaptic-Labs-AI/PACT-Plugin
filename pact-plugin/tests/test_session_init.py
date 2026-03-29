@@ -872,7 +872,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         assert "~/.claude/teams" in system_msg
 
     def test_no_tip_when_setting_present(self, monkeypatch, tmp_path):
-        """No tip should appear when teams dir is already configured."""
+        """No tip should appear when teams dir and allow rules are configured."""
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
@@ -880,11 +880,15 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITH ~/.claude/teams in additionalDirectories
+        # and the sentinel allow rule for PACT agent memory
         teams_abs = str(tmp_path / ".claude" / "teams")
         settings_dir = tmp_path / ".claude"
         settings_dir.mkdir(parents=True)
         (settings_dir / "settings.json").write_text(
-            json.dumps({"permissions": {"additionalDirectories": [teams_abs]}}),
+            json.dumps({"permissions": {
+                "additionalDirectories": [teams_abs],
+                "allow": ["Write(~/.claude/agent-memory/**)"],
+            }}),
             encoding="utf-8",
         )
 

@@ -14,13 +14,25 @@ Turn a single Claude Code session into a managed team of specialist AI agents th
 cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
-Then add `~/.claude/teams` to your `additionalDirectories` in `~/.claude/settings.json` to prevent permission prompts when PACT agents coordinate via team files:
+Then add `~/.claude/teams` to your `additionalDirectories` and PACT allow rules in `~/.claude/settings.json` to prevent permission prompts during agent operations:
 
 ```json
 {
   "permissions": {
     "additionalDirectories": [
       "~/.claude/teams"
+    ],
+    "allow": [
+      "Write(~/.claude/agent-memory/**)",
+      "Read(~/.claude/agent-memory/**)",
+      "Edit(~/.claude/agent-memory/**)",
+      "Bash(mkdir -p */.claude/agent-memory/*)",
+      "Write(~/.claude/pact-sessions/**)",
+      "Read(~/.claude/pact-sessions/**)",
+      "Bash(mkdir -p */.claude/pact-sessions/*)",
+      "Bash(rm -f */.claude/pact-sessions/*)",
+      "Write(~/.claude/pact-telegram/**)",
+      "Bash(mkdir -p */.claude/pact-telegram)"
     ]
   }
 }
