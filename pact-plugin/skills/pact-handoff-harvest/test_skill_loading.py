@@ -121,20 +121,47 @@ class TestSupportingSections:
 
 
 class TestKeywordRouting:
-    """Test that keyword routing covers all three workflow variants."""
+    """Test that keyword routing maps trigger keywords to correct workflow variants."""
+
+    @staticmethod
+    def _routing_lines(content):
+        """Extract lines from the keyword routing paragraph (near top of skill)."""
+        return [line for line in content.splitlines() if "→" in line]
 
     def test_routes_harvest_keyword(self, skill_content):
-        """Routing must map 'harvest' to Standard Harvest."""
-        assert "harvest" in skill_content.lower()
-        assert "Standard Harvest" in skill_content
+        """Routing must map 'harvest' to Standard Harvest on the same line."""
+        lines = self._routing_lines(skill_content)
+        assert any('"harvest"' in line and "Standard Harvest" in line for line in lines), (
+            "No routing line maps \'harvest\' to Standard Harvest"
+        )
 
     def test_routes_incremental_keyword(self, skill_content):
-        """Routing must map 'incremental' to Incremental Harvest."""
-        assert '"incremental"' in skill_content
+        """Routing must map 'incremental' to Incremental Harvest on the same line."""
+        lines = self._routing_lines(skill_content)
+        assert any('"incremental"' in line and "Incremental Harvest" in line for line in lines), (
+            "No routing line maps \'incremental\' to Incremental Harvest"
+        )
 
     def test_routes_consolidation_keyword(self, skill_content):
-        """Routing must map 'consolidation' to Consolidation Harvest."""
-        assert '"consolidation"' in skill_content
+        """Routing must map 'consolidation' to Consolidation Harvest on the same line."""
+        lines = self._routing_lines(skill_content)
+        assert any('"consolidation"' in line and "Consolidation Harvest" in line for line in lines), (
+            "No routing line maps \'consolidation\' to Consolidation Harvest"
+        )
+
+    def test_routes_process_handoffs_keyword(self, skill_content):
+        """Routing must map 'process HANDOFFs' to Standard Harvest on the same line."""
+        lines = self._routing_lines(skill_content)
+        assert any("process HANDOFF" in line and "Standard Harvest" in line for line in lines), (
+            "No routing line maps \'process HANDOFFs\' to Standard Harvest"
+        )
+
+    def test_routes_remediation_keyword(self, skill_content):
+        """Routing must map 'remediation' to Incremental Harvest on the same line."""
+        lines = self._routing_lines(skill_content)
+        assert any('"remediation"' in line and "Incremental Harvest" in line for line in lines), (
+            "No routing line maps \'remediation\' to Incremental Harvest"
+        )
 
 
 class TestSecretaryIntegration:

@@ -86,7 +86,7 @@ Save using the CLI with proper structure:
 
 ### Step 8: Update Processed Task Tracking
 
-Save the list of all processed task IDs to agent memory (overwrite, not append):
+Save the list of all processed task IDs to agent memory (overwrite, not append — this sets the baseline for subsequent incremental passes):
 
 File: `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md`
 ```markdown
@@ -174,7 +174,7 @@ Sync Working Memory to CLAUDE.md. The auto-sync mechanism handles individual sav
 
 ### Step 5: Save Orchestration Retrospective
 
-Save orchestration retrospective as calibration data (for Learning II). This captures the session-level view: overall workflow effectiveness, recurring patterns, and calibration for future variety scoring.
+Save orchestration retrospective as calibration data (see Standard Harvest Step 11 for CalibrationRecord schema). This captures the session-level view: overall workflow effectiveness, recurring patterns, and calibration for future variety scoring.
 
 ### Step 6: Report Summary
 
