@@ -41,28 +41,7 @@ cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 
 **3. Allow team file access** (prevents permission prompts during agent operations)
 
-Add to your `~/.claude/settings.json`:
-```json
-{
-  "permissions": {
-    "additionalDirectories": [
-      "~/.claude/teams"
-    ],
-    "allow": [
-      "Write(~/.claude/agent-memory/**)",
-      "Read(~/.claude/agent-memory/**)",
-      "Edit(~/.claude/agent-memory/**)",
-      "Bash(mkdir -p */.claude/agent-memory/*)",
-      "Write(~/.claude/pact-sessions/**)",
-      "Read(~/.claude/pact-sessions/**)",
-      "Bash(mkdir -p */.claude/pact-sessions/*)",
-      "Bash(rm -f */.claude/pact-sessions/*)",
-      "Write(~/.claude/pact-telegram/**)",
-      "Bash(mkdir -p */.claude/pact-telegram)"
-    ]
-  }
-}
-```
+Add team directory access and PACT permission allow rules to your `~/.claude/settings.json` — see [Enabling Agent Teams](#enabling-agent-teams) for the full settings block.
 
 **4. Restart Claude Code and go**
 ```
@@ -311,7 +290,8 @@ Help me install the PACT plugin for Claude Code:
 3. Enable auto-updates via /plugin → Marketplaces → pact-marketplace → Enable auto-update
 4. Set up the orchestrator by appending PACT's CLAUDE.md to my existing ~/.claude/CLAUDE.md
    (or create it if I don't have one)
-5. Add ~/.claude/teams to additionalDirectories and PACT allow rules to permissions.allow in my settings.json
+5. Configure my settings.json per the "Enabling Agent Teams" section of this README
+   (env, additionalDirectories, and permission allow rules)
 6. Tell me to restart Claude Code
 ```
 
@@ -347,31 +327,9 @@ cat ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md >> ~/.claude/CLAUD
 
 **Step 5: Allow team file access**
 
-PACT agents create coordination files in `~/.claude/teams/` and operate on paths under `~/.claude/`. Add team directory access and allow rules to your `~/.claude/settings.json` to prevent permission prompts:
+Add the Agent Teams environment variable, team directory access, and PACT permission allow rules to your `~/.claude/settings.json`. See [Enabling Agent Teams](#enabling-agent-teams) for the full settings block.
 
-```json
-{
-  "permissions": {
-    "additionalDirectories": [
-      "~/.claude/teams"
-    ],
-    "allow": [
-      "Write(~/.claude/agent-memory/**)",
-      "Read(~/.claude/agent-memory/**)",
-      "Edit(~/.claude/agent-memory/**)",
-      "Bash(mkdir -p */.claude/agent-memory/*)",
-      "Write(~/.claude/pact-sessions/**)",
-      "Read(~/.claude/pact-sessions/**)",
-      "Bash(mkdir -p */.claude/pact-sessions/*)",
-      "Bash(rm -f */.claude/pact-sessions/*)",
-      "Write(~/.claude/pact-telegram/**)",
-      "Bash(mkdir -p */.claude/pact-telegram)"
-    ]
-  }
-}
-```
-
-> **Note:** Merge this with any existing keys in your `settings.json` — don't replace the whole file.
+> **Note:** Merge with any existing keys in your `settings.json` — don't replace the whole file.
 
 **Step 6: Restart Claude Code**
 ```bash
