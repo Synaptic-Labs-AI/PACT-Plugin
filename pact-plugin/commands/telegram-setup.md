@@ -12,17 +12,13 @@ Walk the user through configuring the pact-telegram bridge. This is an interacti
 
 ## Step 1: Check Existing Configuration
 
-Check if `~/.claude/pact-telegram/.env` already exists:
+Check if `~/.claude/pact-telegram/.env` already exists using the Read tool on `~/.claude/pact-telegram/.env`.
 
-```bash
-test -f ~/.claude/pact-telegram/.env && echo "EXISTS" || echo "MISSING"
-```
-
-- If **EXISTS**: Tell the user "pact-telegram is already configured." Use AskUserQuestion to ask: "Would you like to (A) reconfigure from scratch, (B) test the existing setup, or (C) cancel?"
+- If **the file exists**: Tell the user "pact-telegram is already configured." Use AskUserQuestion to ask: "Would you like to (A) reconfigure from scratch, (B) test the existing setup, or (C) cancel?"
   - A: Continue to Step 2 (will overwrite existing config)
   - B: Skip to Step 9 (send test notification)
   - C: Stop -- tell user setup cancelled
-- If **MISSING**: Continue to Step 2.
+- If **the file does not exist**: Continue to Step 2.
 
 ## Step 2: Create a Telegram Bot
 
@@ -84,9 +80,9 @@ Create the config file with secure permissions:
 
 4. Verify the file is NOT inside a git repository:
    ```bash
-   git -C ~/.claude/pact-telegram rev-parse 2>/dev/null
+   git -C ~/.claude/pact-telegram rev-parse
    ```
-   If exit code is 0 (inside a git repo), warn: "Your pact-telegram config directory is inside a git repository. Credentials could be accidentally committed. Consider moving it or adding it to .gitignore."
+   If exit code is 0 (inside a git repo), warn: "Your pact-telegram config directory is inside a git repository. Credentials could be accidentally committed. Consider moving it or adding it to .gitignore." If exit code is non-zero, the directory is not a git repo — this is the expected case, proceed normally.
 
 ## Step 7: Install Python Dependencies
 
@@ -113,9 +109,9 @@ sys.exit(0 if ok else 1)
 
 1. First, check if the user has an old user-scope MCP registration from a previous setup:
    ```bash
-   claude mcp list 2>/dev/null | grep -q "pact-telegram" && echo "OLD_REGISTRATION" || echo "CLEAN"
+   claude mcp list
    ```
-   If **OLD_REGISTRATION**: Tell the user: "You have an old pact-telegram MCP registration from a previous setup. Remove it to avoid running duplicate servers:" and run `claude mcp remove pact-telegram`.
+   Check the output for any line containing "pact-telegram". If **found**: Tell the user: "You have an old pact-telegram MCP registration from a previous setup. Remove it to avoid running duplicate servers:" and run `claude mcp remove pact-telegram`. If **not found**: Continue (this is the expected case for fresh installs).
 
 2. Tell the user: "The pact-telegram MCP server is bundled with the PACT plugin. To enable it, run `/plugin`, find **PACT** in the Installed list, expand it, and toggle **pact-telegram MCP** on. You can toggle it off anytime from the same view."
 

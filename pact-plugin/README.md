@@ -26,17 +26,15 @@ Then add `~/.claude/teams` to your `additionalDirectories` and PACT allow rules 
       "Write(~/.claude/agent-memory/**)",
       "Read(~/.claude/agent-memory/**)",
       "Edit(~/.claude/agent-memory/**)",
-      "Bash(mkdir -p */.claude/agent-memory/*)",
       "Write(~/.claude/pact-sessions/**)",
       "Read(~/.claude/pact-sessions/**)",
-      "Bash(mkdir -p */.claude/pact-sessions/*)",
-      "Bash(rm -f */.claude/pact-sessions/*)",
-      "Write(~/.claude/pact-telegram/**)",
-      "Bash(mkdir -p */.claude/pact-telegram)"
+      "Write(~/.claude/pact-telegram/**)"
     ]
   }
 }
 ```
+
+> **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
 Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/ProfSynapse/PACT-prompt#enabling-agent-teams).
 
