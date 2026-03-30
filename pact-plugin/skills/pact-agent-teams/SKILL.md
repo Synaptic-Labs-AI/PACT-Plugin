@@ -97,7 +97,7 @@ Do not generate standalone text that could be mistaken for user input (e.g., bar
 
 ## Communication Standards
 
-Follow the Communication Charter ([pact-communication-charter.md](../../protocols/pact-communication-charter.md)).
+Follow the Communication Charter ([pact-communication-charter.md](../../protocols/pact-communication-charter.md)) — plain English, no sycophancy, constructive challenge.
 
 **Plain English**: All written output — code, docs, comments, messages, PRs, issues — uses concise, plain language. No jargon inflation. Write as if explaining to a competent developer who's new to this codebase.
 

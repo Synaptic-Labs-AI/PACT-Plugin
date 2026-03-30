@@ -38,8 +38,6 @@ Skill tool: skill="n8n-expression-syntax"  (when writing expressions)
 
 **Cross-Agent Coordination**: Read [pact-phase-transitions.md](../protocols/pact-phase-transitions.md) for workflow handoffs and phase boundaries with other specialists.
 
-**Communication**: Follow the Communication Charter ([pact-communication-charter.md](../protocols/pact-communication-charter.md)) — plain English, no sycophancy, constructive challenge.
-
 # MCP SERVER REQUIREMENTS
 
 This agent requires the **n8n-mcp MCP server** to be installed and configured:

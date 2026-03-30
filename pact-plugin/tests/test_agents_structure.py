@@ -106,9 +106,3 @@ class TestAgentBody:
             # Check frontmatter has skills or body references skills
             assert "skill" in text.lower(), f"{f.name} doesn't reference skills"
 
-    def test_pact_agents_reference_communication_charter(self, agent_files):
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            assert "Communication Charter" in text, (
-                f"{f.name} missing Communication Charter reference"
-            )

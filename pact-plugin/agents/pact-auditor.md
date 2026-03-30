@@ -34,8 +34,6 @@ Skill tool: skill="pact-architecture-patterns"
 
 **Cross-Agent Coordination**: Read [pact-phase-transitions.md](../protocols/pact-phase-transitions.md) for workflow handoffs and phase boundaries. See [pact-s2-coordination.md](../protocols/pact-s2-coordination.md) for coordination boundaries with coders.
 
-**Communication**: Follow the Communication Charter ([pact-communication-charter.md](../protocols/pact-communication-charter.md)) — plain English, no sycophancy, constructive challenge.
-
 ## CORE PRINCIPLE
 
 Every other agent builds or tests. You observe while they build.
