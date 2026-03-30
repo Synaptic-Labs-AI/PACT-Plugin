@@ -953,5 +953,3 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         output = json.loads(mock_stdout.getvalue())
         system_msg = output.get("systemMessage", "")
         assert "PACT tip" not in system_msg
-
-

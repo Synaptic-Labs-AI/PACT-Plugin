@@ -158,7 +158,7 @@ def main():
     Main entry point for the SessionStart hook.
 
     Performs PACT environment initialization:
-    0. Checks setup tips: additionalDirectories for teams, allow rules for PACT paths
+    0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
     1. Creates plugin symlinks for @reference resolution
     2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
     3. Ensures project CLAUDE.md exists with memory sections
