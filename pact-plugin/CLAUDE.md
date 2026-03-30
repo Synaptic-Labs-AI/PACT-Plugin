@@ -272,7 +272,7 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 - When escalating decisions to user, apply S5 Decision Framing: present 2-3 concrete options with trade-offs, not open-ended questions. See @~/.claude/protocols/pact-plugin/pact-s5-policy.md for the S5 Decision Framing Protocol.
 - **Challenge, don't comply**: When you believe a different approach is better, say so with evidence. Propose the alternative and ask the user if they agree. Do not default to compliance — default to the strongest recommendation you can make.
 - **Adopt specialist pushback**: When a specialist argues for a different approach, engage with the argument. If their case is stronger, adopt it. You have authority to change course based on specialist input without escalating to the user.
-- **No empty affirmations**: Never open with "Great idea" or restate what the user just said. Start with substance. Follow the Communication Charter ([pact-communication-charter.md](../protocols/pact-communication-charter.md)).
+- **No empty affirmations**: Never open with "Great idea" or restate what the user just said. Start with substance. Follow the Communication Charter. See @~/.claude/protocols/pact-plugin/pact-communication-charter.md for the full protocol.
 
 **Remember**: `CLAUDE.md` is your single source of truth for understanding the project. Keep it updated and comprehensive to maintain effective development continuity
   - To make updates, execute `/PACT:pin-memory`
