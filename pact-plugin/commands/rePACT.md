@@ -143,6 +143,8 @@ If you hit the nesting limit:
 
 ## Output Conciseness
 
+See also: [Communication Charter](../protocols/pact-communication-charter.md) for full plain English, anti-sycophancy, and constructive challenge norms.
+
 **Default: Concise output.** User sees nested cycle start/completion, not mini-phase details.
 
 | Internal (don't show) | External (show) |

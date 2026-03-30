@@ -169,6 +169,8 @@ This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-t
 
 ## Output Conciseness
 
+See also: [Communication Charter](../protocols/pact-communication-charter.md) for full plain English, anti-sycophancy, and constructive challenge norms.
+
 **Default: Concise output.** User sees synthesis, not each reviewer's full output restated.
 
 | Internal (don't show) | External (show) |

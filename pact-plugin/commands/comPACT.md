@@ -132,6 +132,8 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 ## Output Conciseness
 
+See also: [Communication Charter](../protocols/pact-communication-charter.md) for full plain English, anti-sycophancy, and constructive challenge norms.
+
 **Default: Concise output.** User sees delegation decisions, not coordination analysis.
 
 | Internal (don't show) | External (show) |

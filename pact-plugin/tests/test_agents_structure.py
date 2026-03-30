@@ -105,3 +105,4 @@ class TestAgentBody:
             text = f.read_text(encoding="utf-8")
             # Check frontmatter has skills or body references skills
             assert "skill" in text.lower(), f"{f.name} doesn't reference skills"
+

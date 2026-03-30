@@ -82,6 +82,8 @@ For algedonic signal handling (HALT/ALERT responses, algedonic vs imPACT distinc
 
 ## Output Conciseness
 
+See also: [Communication Charter](../protocols/pact-communication-charter.md) for full plain English, anti-sycophancy, and constructive challenge norms.
+
 **Default: Concise output.** The orchestrator's internal reasoning (variety analysis, dependency checking, execution strategy) runs internally. User sees only decisions and key context.
 
 | Internal (don't show) | External (show) |

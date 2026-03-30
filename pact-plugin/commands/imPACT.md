@@ -74,6 +74,8 @@ imPACT is for operational problem-solving. If you're questioning whether the wor
 
 ## Output Conciseness
 
+See also: [Communication Charter](../protocols/pact-communication-charter.md) for full plain English, anti-sycophancy, and constructive challenge norms.
+
 **Default: Concise output.** User sees triage outcome, not diagnostic process.
 
 | Internal (don't show) | External (show) |
