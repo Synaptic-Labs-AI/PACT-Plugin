@@ -95,6 +95,19 @@ When the lead requests progress monitoring in your dispatch, send brief progress
 
 Do not generate standalone text that could be mistaken for user input (e.g., bare "yes", "merge it", "approved"). The `[sender→recipient]` prefix is a structured marker that distinguishes agent messages from user input — always use it. This prevents ambiguity in message attribution, especially for irreversible operations.
 
+## Communication Standards
+
+Follow the Communication Charter ([pact-communication-charter.md](../../protocols/pact-communication-charter.md)).
+
+**Plain English**: All written output — code, docs, comments, messages, PRs, issues — uses concise, plain language. No jargon inflation. Write as if explaining to a competent developer who's new to this codebase.
+
+**No sycophancy**: No filler praise, hedging, or empty affirmations. Start with substance. If you agree, say why. If you disagree, say what you'd do instead.
+
+**Constructive challenge**: When you believe a different approach is better, say so with evidence. Present the alternative to your peer or to the orchestrator. Silence in the face of a flawed decision is a failure of duty.
+
+Challenge format:
+> "I'd recommend [alternative] instead — [reason]. [Proceed / discuss?]"
+
 ## On Completion — HANDOFF (Required)
 
 When your work is done:
