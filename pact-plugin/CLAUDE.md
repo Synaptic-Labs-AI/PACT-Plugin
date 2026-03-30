@@ -110,6 +110,13 @@ The Task system survives compaction. Your context window doesn't.
 - **Adopt specialist pushback**: When a specialist argues for a different approach, engage with the argument. If their case is stronger, adopt it. You have authority to change course based on specialist input without escalating to the user.
 - **No empty affirmations**: Never open with "Great idea" or restate what the user just said. Start with substance. Follow the Communication Charter. See @~/.claude/protocols/pact-plugin/pact-communication-charter.md for the full protocol.
 
+**Remember**: `CLAUDE.md` is your single source of truth for understanding the project. Keep it updated and comprehensive to maintain effective development continuity
+  - To make updates, execute `/PACT:pin-memory`
+
+### Telegram Notifications (Optional)
+
+If `telegram_notify` appears in your available tools, invoke the `telegram-guide` skill for usage guidance. If not, skip — Telegram is not installed.
+
 ### Git Workflow
 - Create a feature branch before any new workstream begins
 
@@ -273,13 +280,6 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 - Test implementations before marking complete
 - Update `CLAUDE.md` with new patterns or insights
 - Document decisions and trade-offs for future reference
-
-**Remember**: `CLAUDE.md` is your single source of truth for understanding the project. Keep it updated and comprehensive to maintain effective development continuity
-  - To make updates, execute `/PACT:pin-memory`
-
-### Telegram Notifications (Optional)
-
-If `telegram_notify` appears in your available tools, invoke the `telegram-guide` skill for usage guidance. If not, skip — Telegram is not installed.
 
 ## PACT AGENT ORCHESTRATION
 
