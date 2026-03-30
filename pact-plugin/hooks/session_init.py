@@ -5,7 +5,7 @@ Summary: SessionStart hook that initializes PACT environment.
 Used by: Claude Code settings.json SessionStart hook
 
 Performs:
-0. Checks setup tips: additionalDirectories for teams, allow rules for PACT paths
+0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
 2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
 3. Ensures project CLAUDE.md exists with memory sections
@@ -129,57 +129,6 @@ def check_additional_directories() -> str | None:
         return None  # Fail-open: never block session start
 
 
-def check_allow_rules() -> str | None:
-    """
-    Check if PACT permission allow rules are configured in settings.json.
-
-    Looks for a sentinel rule (Write(~/.claude/agent-memory/**)) in the
-    permissions.allow array. If missing, returns a tip with copy-paste-ready
-    JSON for the recommended allow rules. Returns None if already configured.
-    Fail-open: returns None on any error (file missing, malformed JSON, etc.).
-    """
-    try:
-        settings_path = Path.home() / ".claude" / "settings.json"
-        if not settings_path.exists():
-            return None  # No settings file — nothing to check
-
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-
-        allow_rules = settings.get("permissions", {}).get("allow", [])
-        if not isinstance(allow_rules, list):
-            return None  # Unexpected type — fail-open
-
-        # Check for sentinel rule indicating PACT allow rules are configured.
-        # Both tilde and absolute forms are accepted.
-        sentinel_tilde = "Write(~/.claude/agent-memory/**)"
-        home_str = str(Path.home())
-        sentinel_absolute = f"Write(//{home_str.lstrip('/')}/.claude/agent-memory/**)"
-
-        for rule in allow_rules:
-            if not isinstance(rule, str):
-                continue
-            if rule == sentinel_tilde or rule == sentinel_absolute:
-                return None  # Already configured
-
-        return (
-            "PACT tip: Add permission allow rules to reduce recurring prompts "
-            "for PACT agent operations. Add to `permissions.allow` in "
-            "~/.claude/settings.json: "
-            '["Write(~/.claude/agent-memory/**)", '
-            '"Read(~/.claude/agent-memory/**)", '
-            '"Edit(~/.claude/agent-memory/**)", '
-            '"Bash(mkdir -p */.claude/agent-memory/*)", '
-            '"Write(~/.claude/pact-sessions/**)", '
-            '"Read(~/.claude/pact-sessions/**)", '
-            '"Bash(mkdir -p */.claude/pact-sessions/*)", '
-            '"Bash(rm -f */.claude/pact-sessions/*)", '
-            '"Write(~/.claude/pact-telegram/**)", '
-            '"Bash(mkdir -p */.claude/pact-telegram)"]'
-        )
-    except Exception:
-        return None  # Fail-open: never block session start
-
-
 def generate_team_name(input_data: dict[str, Any]) -> str:
     """
     Generate a session-unique PACT team name.
@@ -246,16 +195,12 @@ def main():
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
 
-        # 0. Check setup tips (one-time, fresh startup only)
+        # 0. Check if ~/.claude/teams is in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check
         if not is_context_reset:
             teams_tip = check_additional_directories()
             if teams_tip:
                 system_messages.append(teams_tip)
-
-            allow_tip = check_allow_rules()
-            if allow_tip:
-                system_messages.append(allow_tip)
 
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session

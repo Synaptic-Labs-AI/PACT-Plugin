@@ -36,19 +36,6 @@ check_additional_directories():
 25. main() integration: no tip when setting is present
 26. main() integration: tip skipped on context reset (compact and clear sources)
 
-check_allow_rules():
-27. Returns None when sentinel rule present (tilde form)
-28. Returns None when sentinel rule present (absolute path form)
-29. Returns tip when allow array exists but sentinel missing
-30. Returns None when settings.json does not exist (fail-open)
-31. Returns None on malformed JSON (fail-open)
-32. Returns None when permissions.allow is not a list (fail-open)
-33. Returns None when permissions key is missing
-34. Returns tip when allow array is empty
-35. Tip string contains expected JSON snippet text
-36. Handles non-string items in allow array gracefully
-37. Returns None when Path.home() raises (fail-open)
-
 Note: restore_last_session() and check_resumption_context() are tested
 in test_session_resume.py (canonical location).
 """
@@ -885,7 +872,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         assert "~/.claude/teams" in system_msg
 
     def test_no_tip_when_setting_present(self, monkeypatch, tmp_path):
-        """No tip should appear when teams dir and allow rules are configured."""
+        """No tip should appear when teams dir is already configured."""
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
@@ -893,15 +880,11 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITH ~/.claude/teams in additionalDirectories
-        # and the sentinel allow rule for PACT agent memory
         teams_abs = str(tmp_path / ".claude" / "teams")
         settings_dir = tmp_path / ".claude"
         settings_dir.mkdir(parents=True)
         (settings_dir / "settings.json").write_text(
-            json.dumps({"permissions": {
-                "additionalDirectories": [teams_abs],
-                "allow": ["Write(~/.claude/agent-memory/**)"],
-            }}),
+            json.dumps({"permissions": {"additionalDirectories": [teams_abs]}}),
             encoding="utf-8",
         )
 
@@ -972,170 +955,3 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         assert "PACT tip" not in system_msg
 
 
-class TestCheckAllowRules:
-    """Tests for check_allow_rules() — PACT permission allow rules tip.
-
-    The function reads ~/.claude/settings.json and checks if a sentinel rule
-    (Write(~/.claude/agent-memory/**)) is present in permissions.allow.
-    Returns a tip message if missing, None if present. Fail-open on all errors.
-    """
-
-    def _write_settings(self, tmp_path, settings_data):
-        """Helper: write settings.json under tmp_path/.claude/."""
-        settings_dir = tmp_path / ".claude"
-        settings_dir.mkdir(parents=True, exist_ok=True)
-        settings_file = settings_dir / "settings.json"
-        settings_file.write_text(json.dumps(settings_data), encoding="utf-8")
-        return settings_file
-
-    def test_returns_none_when_sentinel_tilde_form_present(self, monkeypatch, tmp_path):
-        """Should return None when tilde-form sentinel rule is in allow array."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": ["Write(~/.claude/agent-memory/**)"]}
-        })
-
-        result = check_allow_rules()
-
-        assert result is None
-
-    def test_returns_none_when_sentinel_absolute_form_present(self, monkeypatch, tmp_path):
-        """Should return None when absolute-path sentinel rule is in allow array."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        home_str = str(tmp_path)
-        sentinel_abs = f"Write(//{home_str.lstrip('/')}/.claude/agent-memory/**)"
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": [sentinel_abs]}
-        })
-
-        result = check_allow_rules()
-
-        assert result is None
-
-    def test_returns_tip_when_sentinel_missing(self, monkeypatch, tmp_path):
-        """Should return tip message when allow array exists but sentinel is absent."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": ["Read(some/other/path)"]}
-        })
-
-        result = check_allow_rules()
-
-        assert result is not None
-        assert "PACT tip" in result
-        assert "permissions.allow" in result
-
-    def test_returns_none_when_settings_file_missing(self, monkeypatch, tmp_path):
-        """Should return None (fail-open) when settings.json does not exist."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        # Do NOT create settings.json
-
-        result = check_allow_rules()
-
-        assert result is None
-
-    def test_returns_none_on_malformed_json(self, monkeypatch, tmp_path):
-        """Should return None (fail-open) when settings.json is malformed."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        settings_dir = tmp_path / ".claude"
-        settings_dir.mkdir(parents=True)
-        (settings_dir / "settings.json").write_text("{invalid json!!!", encoding="utf-8")
-
-        result = check_allow_rules()
-
-        assert result is None
-
-    def test_returns_none_when_allow_not_list(self, monkeypatch, tmp_path):
-        """Should return None (fail-open) when permissions.allow is not a list."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": "not-a-list"}
-        })
-
-        result = check_allow_rules()
-
-        assert result is None
-
-    def test_returns_tip_when_permissions_key_missing(self, monkeypatch, tmp_path):
-        """Should return tip when permissions key is missing (empty allow default)."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {"env": {"FOO": "bar"}})
-
-        result = check_allow_rules()
-
-        # permissions missing → .get("permissions", {}).get("allow", [])
-        # returns [] → no matching sentinel → tip message returned
-        assert result is not None
-        assert "PACT tip" in result
-
-    def test_returns_tip_when_allow_array_empty(self, monkeypatch, tmp_path):
-        """Should return tip when allow array is empty."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": []}
-        })
-
-        result = check_allow_rules()
-
-        assert result is not None
-        assert "PACT tip" in result
-
-    def test_tip_contains_expected_json_snippet(self, monkeypatch, tmp_path):
-        """Tip string should contain the copy-paste-ready rule snippet."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": []}
-        })
-
-        result = check_allow_rules()
-
-        assert result is not None
-        # Verify key rules are present in the snippet
-        assert "Write(~/.claude/agent-memory/**)" in result
-        assert "Read(~/.claude/agent-memory/**)" in result
-        assert "Edit(~/.claude/agent-memory/**)" in result
-        assert "Write(~/.claude/pact-sessions/**)" in result
-
-    def test_ignores_non_string_entries(self, monkeypatch, tmp_path):
-        """Should skip non-string entries in allow array without crashing."""
-        from session_init import check_allow_rules
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        self._write_settings(tmp_path, {
-            "permissions": {"allow": [42, None, "Write(~/.claude/agent-memory/**)"]}
-        })
-
-        result = check_allow_rules()
-
-        assert result is None  # Found the sentinel after skipping non-strings
-
-    def test_returns_none_when_path_home_raises(self, monkeypatch):
-        """Should return None (fail-open) when Path.home() raises an exception."""
-        from session_init import check_allow_rules
-
-        def home_that_raises():
-            raise RuntimeError("Simulated home dir error")
-
-        monkeypatch.setattr(Path, "home", home_that_raises)
-
-        result = check_allow_rules()
-
-        assert result is None
