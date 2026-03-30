@@ -202,7 +202,7 @@ If task complexity differs significantly from what was delegated:
 
 ## Bash Commands in ~/.claude/ Paths
 
-When running Bash commands that touch `~/.claude/` paths, use simple standalone commands — one per Bash call. Do **not** add redirects (`2>/dev/null`), compound operators (`;`, `&&`, `||`), or pipe chains (`|`). Claude Code's permission allow rules use literal string matching against the full command, so compound syntax prevents rules from matching and causes unnecessary permission prompts.
+When running Bash commands that touch `~/.claude/` paths, use simple standalone commands — one per Bash call. Do **not** add redirects (`2>/dev/null`), compound operators (`;`, `&&`, `||`), pipe chains (`|`), or command substitution (`` `...` ``, `$(...)`). Claude Code's Bash permission patterns are fragile and may not match compound commands, causing unnecessary permission prompts.
 
 ## Before Completing
 

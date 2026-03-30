@@ -247,7 +247,9 @@ Add the following to your `settings.json` (global `~/.claude/settings.json` or p
 }
 ```
 
-The `env` setting enables Agent Teams. The `permissions.additionalDirectories` entry allows agents to access team coordination files in `~/.claude/teams/` without permission prompts. The `permissions.allow` rules prevent recurring prompts for agent memory, session state, and Telegram config file operations. Bash allow rules are intentionally omitted — per the [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings), "Bash permission patterns that try to constrain command arguments are fragile." When agents run `mkdir` or `rm` commands in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
+The `env` setting enables Agent Teams. The `permissions.additionalDirectories` entry allows agents to access team coordination files in `~/.claude/teams/` without permission prompts. The `permissions.allow` rules prevent recurring prompts for agent memory, session state, and Telegram config file operations.
+
+> **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
 Without the `env` setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
 
