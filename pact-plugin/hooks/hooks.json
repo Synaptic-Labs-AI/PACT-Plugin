@@ -179,6 +179,15 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/teachback_check.py\""
+          }
+        ]
+      },
+      {
         "matcher": "Task",
         "hooks": [
           {
