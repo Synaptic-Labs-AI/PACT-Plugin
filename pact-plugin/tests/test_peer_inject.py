@@ -4,13 +4,15 @@ Tests for peer_inject.py — SubagentStart hook that injects peer teammate
 list into newly spawned PACT agents.
 
 Tests cover:
-1. Injects peer names when team has multiple members
-2. Excludes the spawning agent from peer list
+1. Injects peer names when team has multiple members (+ teachback reminder)
+2. Excludes the spawning agent from peer list (+ teachback reminder)
 3. Returns None when no team config exists
-4. Returns "only active teammate" when alone
+4. Returns "only active teammate" when alone (+ teachback reminder)
 5. No-op when CLAUDE_CODE_TEAM_NAME not set
-6. main() entry point: stdin JSON parsing, exit codes, output format
+6. main() entry point: stdin JSON parsing, exit codes, output format,
+   exception propagation from get_peer_context
 7. Corrupted config.json returns None
+8. Teachback reminder: appended to all non-None results, content validation
 """
 import io
 import json
@@ -27,7 +29,7 @@ class TestPeerInject:
     """Tests for peer_inject.get_peer_context()."""
 
     def test_injects_peer_names(self, tmp_path):
-        from peer_inject import get_peer_context
+        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -49,9 +51,10 @@ class TestPeerInject:
         assert "frontend-coder" in result
         assert "database-engineer" in result
         assert "backend-coder" not in result
+        assert result.endswith(_TEACHBACK_REMINDER)
 
     def test_excludes_spawning_agent(self, tmp_path):
-        from peer_inject import get_peer_context
+        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -71,6 +74,7 @@ class TestPeerInject:
 
         assert "backend-coder" in result
         assert "architect" not in result
+        assert result.endswith(_TEACHBACK_REMINDER)
 
     def test_returns_none_when_no_team_config(self, tmp_path):
         from peer_inject import get_peer_context
@@ -84,7 +88,7 @@ class TestPeerInject:
         assert result is None
 
     def test_alone_message_when_only_member(self, tmp_path):
-        from peer_inject import get_peer_context
+        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -102,6 +106,7 @@ class TestPeerInject:
         )
 
         assert "only active teammate" in result.lower()
+        assert result.endswith(_TEACHBACK_REMINDER)
 
     def test_noop_when_no_team_name(self, tmp_path):
         from peer_inject import get_peer_context
@@ -279,3 +284,17 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+
+    def test_main_propagates_exception_from_get_peer_context(self):
+        """RuntimeError from get_peer_context propagates — peer_inject has no
+        outer except Exception handler (only catches JSONDecodeError on stdin).
+        This documents the current behavior: unhandled exceptions crash the hook."""
+        from peer_inject import main
+
+        input_data = json.dumps({"agent_type": "pact-backend-coder"})
+
+        with patch("peer_inject.get_peer_context", side_effect=RuntimeError("boom")), \
+             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(RuntimeError, match="boom"):
+                main()
