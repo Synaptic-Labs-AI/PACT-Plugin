@@ -21,6 +21,13 @@ from pathlib import Path
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
+_TEACHBACK_REMINDER = (
+    "\n\nTEACHBACK TIMING: Send your teachback via SendMessage BEFORE any "
+    "Edit/Write/Bash calls. This is step 4 of your On Start sequence. "
+    "If you haven't sent a teachback yet, do it now before any implementation work."
+)
+
+
 def get_peer_context(
     agent_type: str,
     team_name: str,
@@ -30,6 +37,9 @@ def get_peer_context(
     """
     Build peer context string for a newly spawned agent.
 
+    Includes a teachback timing reminder appended after the peer list
+    to mechanically reinforce the teachback-before-work protocol.
+
     Args:
         agent_type: The spawning agent's type (e.g., "pact-backend-coder")
         team_name: Current team name
@@ -37,7 +47,7 @@ def get_peer_context(
         teams_dir: Override for teams directory (for testing)
 
     Returns:
-        Context string with peer list, or None if no team context
+        Context string with peer list and teachback reminder, or None if no team context
     """
     if not team_name:
         return None
@@ -66,13 +76,15 @@ def get_peer_context(
         peers = [m["name"] for m in members if m.get("agentType") != agent_type]
 
     if not peers:
-        return "You are the only active teammate on this team."
+        peer_context = "You are the only active teammate on this team."
+    else:
+        peer_list = ", ".join(peers)
+        peer_context = (
+            f"Active teammates on your team: {peer_list}\n"
+            f"You can message them via SendMessage for shared artifacts or blocking questions."
+        )
 
-    peer_list = ", ".join(peers)
-    return (
-        f"Active teammates on your team: {peer_list}\n"
-        f"You can message them via SendMessage for shared artifacts or blocking questions."
-    )
+    return peer_context + _TEACHBACK_REMINDER
 
 
 def main():

@@ -17,10 +17,12 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
-3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES)
-4. **CHECK AGENT MEMORY**: Search your persistent memory directory (`~/.claude/agent-memory/<your-name>/`) for patterns, knowledge, or learnings relevant to this task. Incorporate findings into your teachback.
-5. **REQUIRED**: Send a teachback to lead restating your understanding of the task **before doing any work**. If upstream tasks are referenced, read them via `TaskGet` first. (See [Teachback](#teachback-conversation-verification) below)
-6. Begin work — not before step 5
+3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES). If upstream tasks are referenced, read them via `TaskGet`.
+4. **GATE — Send teachback**: Send a teachback to lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
+   - **DO NOT** call `Edit`, `Write`, or `Bash` before sending your teachback
+   - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
+   - Non-blocking: proceed immediately after sending — do not wait for the lead's reply
+5. Begin work — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
 
 > **Worktree Scope**: If you are working in a worktree, files that are gitignored (e.g., `CLAUDE.md`) do not exist there. Do not edit or create `CLAUDE.md` — the orchestrator manages it separately. If you need to reference `CLAUDE.md` content, it is auto-loaded into your context. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead of editing it directly.
 
@@ -43,7 +45,11 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 
 ## Teachback (Conversation Verification)
 
-**You MUST send a teachback message to the lead before doing any work.** Restate your understanding of the task. If upstream tasks are referenced, read them via `TaskGet` first. This is not optional — it verifies that your understanding matches what the lead intended.
+**Teachback is a gate, not a notification.** Nothing proceeds until your teachback is sent. After sending, proceed with work immediately — do not wait for the lead to confirm. "Non-blocking" means you don't wait for a response; it does NOT mean the teachback itself is optional or deferrable. Sending teachback is the action that unlocks your work.
+
+**Why ordering matters**: The purpose of teachback is to catch misunderstandings *before* you invest your context window in implementation. If you batch teachback with your handoff, any misunderstanding is discovered only after the work is complete — wasting the entire agent session. A teachback costs ~100-200 tokens. Redoing work from a misunderstanding costs the entire context.
+
+> **ORDERING RULE**: Send your teachback via `SendMessage` BEFORE calling `Edit`, `Write`, or `Bash` for implementation work. Reading files to understand the task (via `Read`, `Glob`, `Grep`) is permitted before teachback. The prohibition is on *implementation actions*, not *understanding actions*.
 
 **Format**:
 ```
@@ -55,7 +61,7 @@ SendMessage(type="message", recipient="lead",
 **Rules**:
 - Send teachback as your **first message** after reading your task description (and any upstream handoffs)
 - Keep it concise: 3-6 bullet points
-- **Non-blocking**: Proceed with work immediately after sending — don't wait for confirmation
+- After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
 - If the lead sends a correction, adjust your approach as soon as you see it
 
 **When**: Always — every task dispatch. Only exception: consultant questions (peer asks you something).

@@ -220,6 +220,41 @@ def check_unpaused_pr(
         pass  # Best-effort — never block session end
 
 
+def cleanup_teachback_markers(
+    project_slug: str,
+    sessions_dir: str | None = None,
+) -> None:
+    """
+    Remove teachback warning marker files from the session directory.
+
+    Marker files (teachback-warned-{agent}-{task_id}) accumulate during a session
+    and are no longer needed once the session ends. Cleanup is best-effort.
+
+    Args:
+        project_slug: Project identifier for the session directory
+        sessions_dir: Override for sessions base directory (for testing)
+    """
+    if not project_slug:
+        return
+
+    if sessions_dir is None:
+        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+
+    session_dir = Path(sessions_dir) / project_slug
+    if not session_dir.exists():
+        return
+
+    try:
+        for marker in session_dir.iterdir():
+            if marker.name.startswith("teachback-warned-"):
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass  # Best-effort cleanup
+    except OSError:
+        pass  # Can't iterate — skip cleanup
+
+
 def main():
     try:
         project_slug = get_project_slug()
@@ -236,6 +271,9 @@ def main():
             tasks=tasks,
             project_slug=project_slug,
         )
+
+        # Clean up teachback warning markers (no longer needed after session)
+        cleanup_teachback_markers(project_slug=project_slug)
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
