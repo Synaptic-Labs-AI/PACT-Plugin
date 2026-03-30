@@ -239,19 +239,17 @@ Add the following to your `settings.json` (global `~/.claude/settings.json` or p
       "Write(~/.claude/agent-memory/**)",
       "Read(~/.claude/agent-memory/**)",
       "Edit(~/.claude/agent-memory/**)",
-      "Bash(mkdir -p */.claude/agent-memory/*)",
       "Write(~/.claude/pact-sessions/**)",
       "Read(~/.claude/pact-sessions/**)",
-      "Bash(mkdir -p */.claude/pact-sessions/*)",
-      "Bash(rm -f */.claude/pact-sessions/*)",
-      "Write(~/.claude/pact-telegram/**)",
-      "Bash(mkdir -p */.claude/pact-telegram)"
+      "Write(~/.claude/pact-telegram/**)"
     ]
   }
 }
 ```
 
-The `env` setting enables Agent Teams. The `permissions.additionalDirectories` entry allows agents to access team coordination files in `~/.claude/teams/` without permission prompts. The `permissions.allow` rules prevent recurring prompts for agent memory, session state, and other PACT file operations.
+The `env` setting enables Agent Teams. The `permissions.additionalDirectories` entry allows agents to access team coordination files in `~/.claude/teams/` without permission prompts. The `permissions.allow` rules prevent recurring prompts for agent memory, session state, and Telegram config file operations.
+
+> **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
 Without the `env` setting, PACT commands like `/PACT:orchestrate` and `/PACT:comPACT` will fail to spawn specialist agents.
 
@@ -454,7 +452,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-marketplace/
 │           └── PACT/
-│               └── 3.13.7/     # Plugin version
+│               └── 3.13.8/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

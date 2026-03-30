@@ -200,6 +200,10 @@ If task complexity differs significantly from what was delegated:
 - "Simpler than expected" — Note in handoff; lead may simplify remaining work
 - "More complex than expected" — Escalate if scope change >20%, or note for lead
 
+## Bash Commands in ~/.claude/ Paths
+
+When running Bash commands that touch `~/.claude/` paths, use simple standalone commands — one per Bash call. Do **not** add redirects (`2>/dev/null`), compound operators (`;`, `&&`, `||`), pipe chains (`|`), or command substitution (`` `...` ``, `$(...)`). Claude Code's Bash permission patterns are fragile and may not match compound commands, causing unnecessary permission prompts.
+
 ## Before Completing
 
 Before returning your final output:
