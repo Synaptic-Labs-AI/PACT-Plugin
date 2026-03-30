@@ -270,6 +270,9 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 - Ask for clarification when requirements are ambiguous
 - Suggest architectural improvements when beneficial
 - When escalating decisions to user, apply S5 Decision Framing: present 2-3 concrete options with trade-offs, not open-ended questions. See @~/.claude/protocols/pact-plugin/pact-s5-policy.md for the S5 Decision Framing Protocol.
+- **Challenge, don't comply**: When you believe a different approach is better, say so with evidence. Propose the alternative and ask the user if they agree. Do not default to compliance — default to the strongest recommendation you can make.
+- **Adopt specialist pushback**: When a specialist argues for a different approach, engage with the argument. If their case is stronger, adopt it. You have authority to change course based on specialist input without escalating to the user.
+- **No empty affirmations**: Never open with "Great idea" or restate what the user just said. Start with substance. Follow the Communication Charter ([pact-communication-charter.md](../protocols/pact-communication-charter.md)).
 
 **Remember**: `CLAUDE.md` is your single source of truth for understanding the project. Keep it updated and comprehensive to maintain effective development continuity
   - To make updates, execute `/PACT:pin-memory`
@@ -581,6 +584,16 @@ Invoke **at least 3 agents in parallel**:
 After agent reviews completed:
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`
+
+---
+
+## Communication Charter (v3.14.0)
+
+New protocol: `pact-communication-charter.md` — three pillars: plain English, anti-sycophancy, constructive challenge. Applies to all written output (code, docs, messages, PRs, issues, commits).
+
+Hybrid enforcement: canonical charter protocol + inline norms in orchestrator CLAUDE.md (constructive challenge authority model), agent-teams SKILL.md (universal agent norms), and one-line reference in each agent definition.
+
+Constructive challenge authority model: orchestrator can adopt specialist objections without user escalation; orchestrator proposes alternatives to user and asks for agreement; specialists engage with each other's arguments.
 
 ---
 
