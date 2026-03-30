@@ -241,7 +241,13 @@ Add the following to your `settings.json` (global `~/.claude/settings.json` or p
       "Edit(~/.claude/agent-memory/**)",
       "Write(~/.claude/pact-sessions/**)",
       "Read(~/.claude/pact-sessions/**)",
-      "Write(~/.claude/pact-telegram/**)"
+      "Edit(~/.claude/pact-sessions/**)",
+      "Write(~/.claude/pact-memory/**)",
+      "Read(~/.claude/pact-memory/**)",
+      "Edit(~/.claude/pact-memory/**)",
+      "Write(~/.claude/pact-telegram/**)",
+      "Read(~/.claude/pact-telegram/**)",
+      "Edit(~/.claude/pact-telegram/**)"
     ]
   }
 }
@@ -452,7 +458,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-marketplace/
 │           └── PACT/
-│               └── 3.14.0/     # Plugin version
+│               └── 3.14.1/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
