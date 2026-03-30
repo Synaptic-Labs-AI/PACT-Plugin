@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.14.0
+> **Version**: 3.14.1
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -28,7 +28,13 @@ Then add `~/.claude/teams` to your `additionalDirectories` and PACT allow rules 
       "Edit(~/.claude/agent-memory/**)",
       "Write(~/.claude/pact-sessions/**)",
       "Read(~/.claude/pact-sessions/**)",
-      "Write(~/.claude/pact-telegram/**)"
+      "Edit(~/.claude/pact-sessions/**)",
+      "Write(~/.claude/pact-memory/**)",
+      "Read(~/.claude/pact-memory/**)",
+      "Edit(~/.claude/pact-memory/**)",
+      "Write(~/.claude/pact-telegram/**)",
+      "Read(~/.claude/pact-telegram/**)",
+      "Edit(~/.claude/pact-telegram/**)"
     ]
   }
 }
