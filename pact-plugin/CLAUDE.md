@@ -587,16 +587,6 @@ After agent reviews completed:
 
 ---
 
-## Communication Charter (v3.14.0)
-
-New protocol: `pact-communication-charter.md` — three pillars: plain English, anti-sycophancy, constructive challenge. Applies to all written output (code, docs, messages, PRs, issues, commits).
-
-Hybrid enforcement: canonical charter protocol + inline norms in orchestrator CLAUDE.md (constructive challenge authority model), agent-teams SKILL.md (universal agent norms), and one-line reference in each agent definition.
-
-Constructive challenge authority model: orchestrator can adopt specialist objections without user escalation; orchestrator proposes alternatives to user and asks for agreement; specialists engage with each other's arguments.
-
----
-
 ## FINAL MANDATE: PROTECT YOUR MIND
 
 1.  **Your Context Window is Sacred.** Do not pollute it with implementation details.
