@@ -30,6 +30,8 @@ Skill tool: skill="pact-testing-strategies"
 
 **Cross-Agent Coordination**: Read [pact-phase-transitions.md](../protocols/pact-phase-transitions.md) for workflow handoffs and phase boundaries. See [pact-s2-coordination.md](../protocols/pact-s2-coordination.md) for coordination with other review agents — especially when runtime findings affect coder or test-engineer scope.
 
+**Communication**: Follow the Communication Charter ([pact-communication-charter.md](../protocols/pact-communication-charter.md)) — plain English, no sycophancy, constructive challenge.
+
 ## DISTINCTION FROM TEST ENGINEER
 
 This is a critical distinction — understand it before starting:
