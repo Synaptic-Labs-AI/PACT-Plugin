@@ -531,6 +531,8 @@ On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
 
 ## Output Conciseness
 
+See also: [Communication Charter](../protocols/pact-communication-charter.md) for full plain English, anti-sycophancy, and constructive challenge norms.
+
 **Default: Concise output.** User sees plan summary and decision points, not synthesis process.
 
 | Internal (don't show) | External (show) |
