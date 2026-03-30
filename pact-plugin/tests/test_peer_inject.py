@@ -131,6 +131,97 @@ class TestPeerInject:
         assert result is None
 
 
+class TestTeachbackReminder:
+    """Tests for _TEACHBACK_REMINDER injection into peer context."""
+
+    def test_reminder_appended_when_peers_exist(self, tmp_path):
+        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+                {"name": "frontend-coder", "agentType": "pact-frontend-coder"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        result = get_peer_context(
+            agent_type="pact-backend-coder",
+            team_name="pact-test",
+            teams_dir=str(tmp_path / "teams")
+        )
+
+        assert result.endswith(_TEACHBACK_REMINDER)
+        assert "TEACHBACK TIMING" in result
+
+    def test_reminder_appended_when_alone(self, tmp_path):
+        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        result = get_peer_context(
+            agent_type="pact-backend-coder",
+            team_name="pact-test",
+            teams_dir=str(tmp_path / "teams")
+        )
+
+        assert "only active teammate" in result.lower()
+        assert result.endswith(_TEACHBACK_REMINDER)
+
+    def test_reminder_contains_key_instructions(self):
+        from peer_inject import _TEACHBACK_REMINDER
+
+        assert "SendMessage" in _TEACHBACK_REMINDER
+        assert "Edit/Write/Bash" in _TEACHBACK_REMINDER
+        assert "step 4" in _TEACHBACK_REMINDER
+
+    def test_reminder_not_present_when_no_team(self, tmp_path):
+        """When get_peer_context returns None, no reminder is attached."""
+        from peer_inject import get_peer_context
+
+        result = get_peer_context(
+            agent_type="pact-backend-coder",
+            team_name="",
+            teams_dir=str(tmp_path / "teams")
+        )
+
+        assert result is None
+
+    def test_agent_name_excludes_self_with_reminder(self, tmp_path):
+        """When using agent_name for filtering, self is excluded but reminder present."""
+        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "coder-1", "agentType": "pact-backend-coder"},
+                {"name": "coder-2", "agentType": "pact-backend-coder"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        result = get_peer_context(
+            agent_type="pact-backend-coder",
+            team_name="pact-test",
+            agent_name="coder-1",
+            teams_dir=str(tmp_path / "teams")
+        )
+
+        assert "coder-2" in result
+        assert "coder-1" not in result.split(_TEACHBACK_REMINDER)[0]
+        assert result.endswith(_TEACHBACK_REMINDER)
+
+
 class TestMainEntryPoint:
     """Tests for peer_inject.main() stdin/stdout/exit behavior."""
 
