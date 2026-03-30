@@ -92,7 +92,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 
 | Rule | Rationale |
 |------|-----------|
-| Prefer silence over noise | Most observation cycles should produce no output. Signal only when it matters |
+| Prefer silence over noise | Most observation cycles should produce no output. Signal only when it matters (observation silence — distinct from the Communication Charter's challenge norm, which requires voicing disagreement) |
 | Prefer file reading over messaging | Read the code first. Only message a coder when the code cannot answer your question |
 | One question per message to coders | Multiple questions dilute focus and distract from implementation |
 | Never direct coders | Report to orchestrator. The orchestrator decides whether to intervene |

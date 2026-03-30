@@ -108,6 +108,9 @@ Follow the Communication Charter ([pact-communication-charter.md](../../protocol
 Challenge format:
 > "I'd recommend [alternative] instead — [reason]. [Proceed / discuss?]"
 
+For consequence-level disagreements:
+> "Concern: [what will go wrong and why]. I'd suggest [alternative]. Flagging this in the HANDOFF regardless."
+
 ## On Completion — HANDOFF (Required)
 
 When your work is done:

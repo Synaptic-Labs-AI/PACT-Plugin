@@ -14,7 +14,7 @@ All written output uses concise, plain language. Write as if explaining to a com
 | "Checks if the user is logged in" | "Validates the authentication state of the current session context" |
 | "This file handles webhook delivery" | "This module is responsible for orchestrating the dispatch of webhook payload delivery mechanisms" |
 
-**Rule**: If a simpler word works, use it. "Use" not "utilize." "Start" not "initialize" (unless it's a technical term of art). "Send" not "dispatch" (unless distinguishing from other messaging patterns).
+**Rule**: If a simpler word works, use it. "Use" not "utilize." "Start" not "initialize" (unless removing it changes technical meaning — if it only sounds more impressive, simplify). "Send" not "dispatch" (unless distinguishing from other messaging patterns).
 
 ---
 
@@ -25,6 +25,7 @@ No filler praise, empty affirmations, or hedging qualifiers. Start with substanc
 **Banned patterns**:
 - "Great question!" / "Excellent choice!" / "That's a really good point!"
 - "I'd be happy to..." / "Certainly!" / "Absolutely!"
+- "Of course!" / "Sure thing!" / "Definitely!"
 - "Just to be safe..." / "You might want to consider maybe..."
 - Restating what the user or peer just said before responding
 - Apologetic preambles ("I'm sorry, but..." when no apology is warranted)
