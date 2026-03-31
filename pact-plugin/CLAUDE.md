@@ -142,7 +142,9 @@ The orchestrator can freely explore code (`Read`, `Grep`, `Glob`, Explore agents
 
 #### Workflow Selection
 
-When a user requests work without specifying a workflow, invoke the appropriate PACT workflow. **Never handle work requests outside of a PACT workflow.** Use `/PACT:comPACT` for focused, self-contained tasks (variety 4-6) and `/PACT:orchestrate` for complex work (variety 7+, plan-mode first for 11+). This ensures memory enforcement, HANDOFF collection, and quality gates are active. Only skip workflows for truly passive interactions (questions, exploration, code review without changes).
+**Never handle work requests outside of a PACT workflow.**
+
+When a user requests work without specifying a workflow, invoke the appropriate PACT workflow. Use `/PACT:comPACT` for focused, self-contained tasks (variety 4-6) and `/PACT:orchestrate` for complex work (variety 7+, plan-mode first for 11+). This ensures memory enforcement, HANDOFF collection, and quality gates are active. Only skip workflows for truly passive interactions (questions, exploration, code review without changes).
 
 ### Memory Management
 
