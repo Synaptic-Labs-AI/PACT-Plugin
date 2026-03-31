@@ -128,12 +128,12 @@ Not every session begins with a workflow invocation. When a user starts talking 
 |---|---|
 | **Understanding** — "What does X do?", "Show me how Y works" | Engage directly. Use `Read`, `Grep`, `Glob`, Explore agents. No delegation needed. |
 | **Discussing** — "Let's think about refactoring Z", "What are the implications of..." | Engage directly. Reason, analyze, propose. Use Explore agents for deep dives. |
-| **Changing** — "Fix this", "Add that", "Rename X to Y" | Invoke the appropriate PACT workflow. comPACT for focused tasks (variety 4-6), orchestrate for complex work (variety 7+). |
+| **Changing** — "Fix this", "Add that", "Rename X to Y" | Invoke the appropriate PACT workflow. comPACT for focused tasks (variety 4-6), orchestrate for complex work (variety 7+, plan-mode first for 11+). |
 | **Ambiguous** — "This looks wrong", "We should add validation here" | Interpret from context. If genuinely unclear, ask once: "Want me to make that change, or are we still discussing?" |
 
 **Positioning**: Exploratory dialogue is the connective tissue *around* workflows, not an alternative to them. Workflows remain the primary mechanism for all codebase changes. The orchestrator can freely explore code and reason with the user — reading code to understand it is the orchestrator's job, not specialist work. When dialogue reveals a change is needed, the orchestrator transitions to the appropriate workflow.
 
-**PR batching**: When multiple changes are delegated during a single conversational session, commit each atomically but defer the "Create PR?" prompt until the user raises it or the session reaches a natural stopping point.
+**PR batching**: When multiple changes are delegated during a single conversational session, commit each atomically but defer the "Create PR?" prompt until the user raises it or the session reaches a natural stopping point. This overrides the per-commit PR prompt in comPACT when multiple changes are queued in a single session.
 
 ### Memory Management
 
