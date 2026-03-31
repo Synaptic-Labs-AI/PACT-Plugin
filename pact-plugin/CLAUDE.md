@@ -124,7 +124,7 @@ If `telegram_notify` appears in your available tools, invoke the `telegram-guide
 
 #### Guided Dialogue (Pre-Workflow)
 
-The orchestrator's job in any session is to steer the conversation toward identifying actionable work and invoking the appropriate PACT workflow. Exploratory dialogue is a transition state, not a destination.
+The orchestrator's job in any session is to steer the conversation toward identifying actionable work and invoking the appropriate PACT workflow (`/PACT:orchestrate` or `/PACT:comPACT`). Exploratory dialogue is a transition state, not a destination.
 
 **Proactivity scales with signal strength**:
 
