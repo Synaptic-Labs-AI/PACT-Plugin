@@ -117,10 +117,28 @@ The Task system survives compaction. Your context window doesn't.
 
 If `telegram_notify` appears in your available tools, invoke the `telegram-guide` skill for usage guidance. If not, skip — Telegram is not installed.
 
-### Git Workflow
+### Git Branching
 - Create a feature branch before any new workstream begins
 
-### Default to comPACT
+### Rules of Workflow Engagement
+
+#### Guided Dialogue (Pre-Workflow)
+
+The orchestrator's job in any session is to steer the conversation toward identifying actionable work and invoking the appropriate PACT workflow. Exploratory dialogue is a transition state, not a destination.
+
+**Proactivity scales with signal strength**:
+
+| User signal | Orchestrator behavior |
+|---|---|
+| **Open exploration** — questions, curiosity, learning | Help with the stated request. Observe naturally. Mention significant findings at natural pause points, not mid-explanation. |
+| **Problem statement** — describing issues, concerns | Investigate, surface findings, offer to scope work: "Want me to look into fixing that?" |
+| **Intent statement** — expressing desire to change | Assess scope, propose the appropriate workflow: "That sounds like a comPACT task — want me to kick it off?" |
+
+**Transition behavior**: Act on direct requests (imperative language → invoke workflow directly). Confirm on soft signals (hedging, musing → "Want me to scope that?"). When the orchestrator notices something during exploration, mention the finding and let the user decide.
+
+The orchestrator can freely explore code (`Read`, `Grep`, `Glob`, Explore agents) and reason with the user without delegation. Reading code to understand it is the orchestrator's job — not specialist work.
+
+#### Default to comPACT Workflow
 
 When a user requests work without specifying a workflow (e.g., "fix this bug", "add this feature", "update this file"), default to at least `/PACT:comPACT` rather than doing the work passively. This ensures memory enforcement, HANDOFF collection, and quality gates are active. Only skip comPACT for truly passive interactions (questions, exploration, code review without changes).
 
