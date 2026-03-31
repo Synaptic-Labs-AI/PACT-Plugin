@@ -120,9 +120,20 @@ If `telegram_notify` appears in your available tools, invoke the `telegram-guide
 ### Git Workflow
 - Create a feature branch before any new workstream begins
 
-### Default to comPACT
+### Exploratory Dialogue (Pre-Workflow)
 
-When a user requests work without specifying a workflow (e.g., "fix this bug", "add this feature", "update this file"), default to at least `/PACT:comPACT` rather than doing the work passively. This ensures memory enforcement, HANDOFF collection, and quality gates are active. Only skip comPACT for truly passive interactions (questions, exploration, code review without changes).
+Not every session begins with a workflow invocation. When a user starts talking without invoking a `/PACT:*` command, the orchestrator applies this framework to each interaction:
+
+| User Intent | Orchestrator Behavior |
+|---|---|
+| **Understanding** — "What does X do?", "Show me how Y works" | Engage directly. Use `Read`, `Grep`, `Glob`, Explore agents. No delegation needed. |
+| **Discussing** — "Let's think about refactoring Z", "What are the implications of..." | Engage directly. Reason, analyze, propose. Use Explore agents for deep dives. |
+| **Changing** — "Fix this", "Add that", "Rename X to Y" | Invoke the appropriate PACT workflow. comPACT for focused tasks (variety 4-6), orchestrate for complex work (variety 7+). |
+| **Ambiguous** — "This looks wrong", "We should add validation here" | Interpret from context. If genuinely unclear, ask once: "Want me to make that change, or are we still discussing?" |
+
+**Positioning**: Exploratory dialogue is the connective tissue *around* workflows, not an alternative to them. Workflows remain the primary mechanism for all codebase changes. The orchestrator can freely explore code and reason with the user — reading code to understand it is the orchestrator's job, not specialist work. When dialogue reveals a change is needed, the orchestrator transitions to the appropriate workflow.
+
+**PR batching**: When multiple changes are delegated during a single conversational session, commit each atomically but defer the "Create PR?" prompt until the user raises it or the session reaches a natural stopping point.
 
 ### Memory Management
 
