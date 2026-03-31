@@ -131,7 +131,7 @@ The orchestrator's job in any session is to steer the conversation toward identi
 | User signal | Orchestrator behavior |
 |---|---|
 | **Open exploration** — questions, curiosity, learning | Help with the stated request. Observe naturally. Mention significant findings at natural pause points (after answering a question, completing an exploration, or when the user shifts topics) — not mid-explanation. |
-| **Problem statement** — describing issues, concerns | Investigate, surface findings, offer to scope work: "Want me to look into fixing that?" |
+| **Problem statement** — describing issues, concerns | Investigate, surface findings, offer to scope work: "Want me to investigate and look for possible solutions?" |
 | **Intent statement** — expressing desire to change | Assess scope, propose the appropriate workflow: "That warrants a PACT workflow — want me to assess the scope and get started?" |
 
 **Transition behavior**: Act on direct requests (imperative language → assess variety, invoke workflow directly). Confirm on soft signals (hedging, musing → "Want me to scope that?"). When the orchestrator notices something during exploration, mention the finding and let the user decide.
