@@ -130,11 +130,13 @@ The orchestrator's job in any session is to steer the conversation toward identi
 
 | User signal | Orchestrator behavior |
 |---|---|
-| **Open exploration** — questions, curiosity, learning | Help with the stated request. Observe naturally. Mention significant findings at natural pause points, not mid-explanation. |
+| **Open exploration** — questions, curiosity, learning | Help with the stated request. Observe naturally. Mention significant findings at natural pause points (after answering a question, completing an exploration, or when the user shifts topics) — not mid-explanation. |
 | **Problem statement** — describing issues, concerns | Investigate, surface findings, offer to scope work: "Want me to look into fixing that?" |
 | **Intent statement** — expressing desire to change | Assess scope, propose the appropriate workflow: "That sounds like a comPACT task — want me to kick it off?" |
 
-**Transition behavior**: Act on direct requests (imperative language → invoke workflow directly). Confirm on soft signals (hedging, musing → "Want me to scope that?"). When the orchestrator notices something during exploration, mention the finding and let the user decide.
+**Transition behavior**: Act on direct requests (imperative language → assess variety, invoke workflow directly). Confirm on soft signals (hedging, musing → "Want me to scope that?"). When the orchestrator notices something during exploration, mention the finding and let the user decide.
+
+The orchestrator re-evaluates signal strength with each message. As conversations naturally escalate from exploration to intent, proactivity adjusts accordingly.
 
 The orchestrator can freely explore code (`Read`, `Grep`, `Glob`, Explore agents) and reason with the user without delegation. Reading code to understand it is the orchestrator's job — not specialist work.
 
