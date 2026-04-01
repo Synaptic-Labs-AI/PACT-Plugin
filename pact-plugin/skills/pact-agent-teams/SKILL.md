@@ -21,6 +21,7 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 4. **GATE — Send teachback**: Send a teachback to lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
    - **DO NOT** call `Edit`, `Write`, or `Bash` before sending your teachback
    - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
+   - Create a signal task to wake the lead: `TaskCreate("Review teachback: {your-name} on #{taskId}", metadata={"type": "teachback_signal"})` then `TaskUpdate(signalTaskId, owner="lead")` — this generates a `task_assignment` event that reliably notifies the idle lead
    - Non-blocking: proceed immediately after sending — do not wait for the lead's reply
 5. Begin work — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
 
@@ -51,17 +52,29 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 
 > **ORDERING RULE**: Send your teachback via `SendMessage` BEFORE calling `Edit`, `Write`, or `Bash` for implementation work. Reading files to understand the task (via `Read`, `Glob`, `Grep`) is permitted before teachback. The prohibition is on *implementation actions*, not *understanding actions*.
 
-**Format**:
+**Format** (complete sequence):
 ```
+# Step 1: Send the teachback content
 SendMessage(type="message", recipient="lead",
   content="[{sender}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
   summary="Teachback: {1-line summary}")
+
+# Step 2: Record teachback in your task metadata
+TaskUpdate(taskId, metadata={"teachback_sent": true})
+
+# Step 3: Create signal task to wake the lead (supplementary — fail-open)
+TaskCreate("Review teachback: {your-name} on #{taskId}",
+  metadata={"type": "teachback_signal"})
+TaskUpdate(signalTaskId, owner="lead")
 ```
+
+> **Why the signal task?** `SendMessage` to an idle lead has intermittent delivery latency. Task assignment generates a system-level `task_assignment` event that reaches the lead reliably and immediately. The signal task is supplementary — if it fails, the SendMessage teachback still works. The lead marks signal tasks completed after processing.
 
 **Rules**:
 - Send teachback as your **first message** after reading your task description (and any upstream handoffs)
 - Keep it concise: 3-6 bullet points
 - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
+- Create a signal task to wake the lead: `TaskCreate("Review teachback: {your-name} on #{taskId}", metadata={"type": "teachback_signal"})` then `TaskUpdate(signalTaskId, owner="lead")`. This is fail-open — if TaskCreate fails, proceed anyway.
 - If the lead sends a correction, adjust your approach as soon as you see it
 
 **When**: Always — every task dispatch. Only exception: consultant questions (peer asks you something).
