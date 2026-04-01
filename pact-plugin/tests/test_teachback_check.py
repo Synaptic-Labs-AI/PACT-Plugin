@@ -116,6 +116,22 @@ class TestMarkerPath:
         # Path ends with /<empty>/teachback-warned-agent-1-1
         assert result.name == "teachback-warned-agent-1-1"
 
+    def test_empty_task_id_omits_suffix(self, tmp_path):
+        """Empty task_id should produce path without trailing dash or task_id.
+
+        This is the fallback path used when check_teachback_sent returns
+        (False, "") — i.e., the agent has no in_progress tasks at all.
+        """
+        from teachback_check import _get_marker_path
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/my-app"}):
+            result = _get_marker_path("backend-coder-1", "", sessions_dir=str(tmp_path))
+
+        assert result == tmp_path / "my-app" / "teachback-warned-backend-coder-1"
+        assert result.name == "teachback-warned-backend-coder-1"
+        # No trailing dash — empty task_id should not append "-"
+        assert not result.name.endswith("-")
+
 
 class TestMarkWarned:
     """Tests for _mark_warned() and _was_already_warned() — per-task markers."""
@@ -1253,6 +1269,39 @@ class TestAllMatchEdgeCases:
         assert confirmed is False
         assert task_id == "3"
 
+    def test_multiple_unconfirmed_returns_first_sorted(self, tmp_path):
+        """When 2+ in_progress tasks both lack teachback_sent, should return
+        the first unconfirmed task_id in sorted order.
+
+        Exercises the branch at line 183 where first_unconfirmed_task_id is
+        already set from a prior iteration — the second unconfirmed task is
+        encountered but does not overwrite the first.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        _write_task(task_dir, "5.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        _write_task(task_dir, "15.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        _write_task(task_dir, "25.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        confirmed, task_id = check_teachback_sent("coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        # sorted() ensures deterministic order: 15.json, 25.json, 5.json
+        # (lexicographic: "15" < "25" < "5"), so first unconfirmed is "15"
+        assert task_id == "15"
+
     def test_three_tasks_all_confirmed_passes(self, tmp_path):
         """Three in_progress tasks, all with teachback → confirmed."""
         from teachback_check import check_teachback_sent
@@ -1603,4 +1652,28 @@ class TestHooksJsonRegistration:
         assert teachback_idx < size_idx, (
             f"teachback_check.py (index {teachback_idx}) should come before "
             f"file_size_check.py (index {size_idx})"
+        )
+
+    def test_teachback_check_registered_in_bash_matcher(self):
+        """teachback_check.py should also be registered under PostToolUse Bash.
+
+        The hook fires on Edit|Write AND Bash to catch agents using shell
+        commands for implementation work before sending a teachback.
+        """
+        hooks_path = Path(__file__).parent.parent / "hooks" / "hooks.json"
+        hooks_data = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+        post_tool_use = hooks_data.get("hooks", {}).get("PostToolUse", [])
+
+        bash_entry = next(
+            (e for e in post_tool_use if e.get("matcher") == "Bash"), None
+        )
+        assert bash_entry is not None, "No Bash matcher in PostToolUse"
+
+        commands = [h.get("command", "") for h in bash_entry.get("hooks", [])]
+        teachback_commands = [c for c in commands if "teachback_check.py" in c]
+
+        assert len(teachback_commands) == 1, (
+            f"Expected exactly 1 teachback_check.py in Bash hooks, "
+            f"found {len(teachback_commands)}"
         )
