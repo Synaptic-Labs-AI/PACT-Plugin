@@ -380,6 +380,12 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 4. Present to user and await resolution
 5. On resolution: mark signal task `completed` (unblocks downstream)
 
+When a teammate sends a **teachback signal** (task with `metadata.type == "teachback_signal"`):
+1. The `task_assignment` event wakes you — process the corresponding `SendMessage` teachback from the teammate's inbox
+2. Mark the signal task `completed`: `TaskUpdate(signalTaskId, status="completed")`
+
+These are lightweight wake notifications, not work items — they don't need blocking or scope amplification.
+
 ### What Is "Application Code"?
 
 The delegation rule applies to **application code**. Here's what that means:

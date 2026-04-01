@@ -69,10 +69,6 @@ signalTaskId = TaskCreate("Review teachback: {your-name} on #{taskId}",
 TaskUpdate(signalTaskId, owner="lead")
 ```
 
-> **Why the signal task?** `SendMessage` to an idle lead has intermittent delivery latency. Task assignment generates a system-level `task_assignment` event that reaches the lead reliably and immediately. The signal task is supplementary — if it fails, the SendMessage teachback still works.
-
-> **Lead-side processing**: When the lead receives a `task_assignment` notification for a task with `metadata.type == "teachback_signal"`, process the corresponding `SendMessage` teachback from the teammate's inbox, then mark the signal task completed: `TaskUpdate(signalTaskId, status="completed")`.
-
 **Rules**:
 - Send teachback as your **first message** after reading your task description (and any upstream handoffs)
 - Keep it concise: 3-6 bullet points
