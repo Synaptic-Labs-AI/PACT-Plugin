@@ -301,7 +301,13 @@ class TestCheckTeachbackSent:
         assert confirmed is False
         assert task_id == ""
 
-    def test_scans_multiple_tasks_finds_one_with_teachback(self, tmp_path):
+    def test_scans_multiple_tasks_one_without_teachback_warns(self, tmp_path):
+        """When one of two in_progress tasks lacks teachback, should warn.
+
+        This is the core fix for bug #331: the old code short-circuited on ANY
+        task with teachback_sent=True. The fixed code requires ALL in_progress
+        tasks to have teachback_sent=True.
+        """
         from teachback_check import check_teachback_sent
 
         task_dir = tmp_path / "pact-test"
@@ -319,8 +325,55 @@ class TestCheckTeachbackSent:
         })
 
         confirmed, task_id = check_teachback_sent("backend-coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        assert task_id == "1"
+
+    def test_all_in_progress_tasks_have_teachback_confirms(self, tmp_path):
+        """When ALL in_progress tasks have teachback_sent, should confirm."""
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        _write_task(task_dir, "1.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        _write_task(task_dir, "2.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+
+        confirmed, task_id = check_teachback_sent("backend-coder-1", "pact-test", str(tmp_path))
         assert confirmed is True
         assert task_id == ""
+
+    def test_agent_reuse_old_task_teachback_new_task_without_warns(self, tmp_path):
+        """Agent reuse scenario: old task has teachback, new task does not.
+
+        This is the primary bug vector for #331: when an agent is reused via
+        SendMessage, the old task retains teachback_sent=True but the new task
+        has not yet sent a teachback. The check must warn for the new task.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        # Old task (lower ID) — agent already sent teachback
+        _write_task(task_dir, "10.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        # New task (higher ID) — no teachback yet
+        _write_task(task_dir, "20.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        confirmed, task_id = check_teachback_sent("backend-coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        assert task_id == "20"
 
     def test_fails_open_on_missing_task_dir(self, tmp_path):
         """No task directory → fail open (True, "")."""
@@ -895,6 +948,41 @@ class TestEndToEnd:
             )
             assert warn is False
             assert task_id == ""
+
+    def test_agent_reuse_warns_for_new_task(self, tmp_path):
+        """Full agent reuse scenario: old task has teachback, new task added
+        without teachback → should_warn returns True for the new task.
+
+        This is the end-to-end test for bug #331. The agent was previously
+        working on task 10 (teachback sent), then reassigned to task 20
+        (no teachback yet). Both tasks are still in_progress.
+        """
+        from teachback_check import should_warn
+
+        task_dir = tmp_path / "tasks" / "pact-test"
+        sessions_dir = str(tmp_path / "sessions")
+
+        # Old task — agent already sent teachback for this one
+        _write_task(task_dir, "10.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        # New task — no teachback yet
+        _write_task(task_dir, "20.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            warn, task_id = should_warn(
+                "backend-coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is True
+            assert task_id == "20"
 
     def test_warning_message_content(self):
         """Verify the warning message contains expected instructions."""
