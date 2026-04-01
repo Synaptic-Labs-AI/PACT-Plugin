@@ -31,8 +31,14 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 2. Agent reads upstream handoff via `TaskGet(#5)`
 3. Agent sends teachback to lead via `SendMessage`:
    "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
+   a. Agent records teachback: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
+   b. Agent creates signal task (supplementary, fail-open):
+      `signalTaskId = TaskCreate("Review teachback: {your-name} on #{taskId}", metadata={"type": "teachback_signal"})`
+      `TaskUpdate(signalTaskId, owner="lead")`
 4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
+5. Orchestrator receives `task_assignment` event for the signal task → processes the `SendMessage` teachback
+   a. If misunderstanding spotted, orchestrator sends correction via `SendMessage`
+   b. Orchestrator marks signal task completed: `TaskUpdate(signalTaskId, status="completed")`
 ```
 
 #### Why Non-Blocking
