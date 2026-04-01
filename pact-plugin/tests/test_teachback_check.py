@@ -116,6 +116,22 @@ class TestMarkerPath:
         # Path ends with /<empty>/teachback-warned-agent-1-1
         assert result.name == "teachback-warned-agent-1-1"
 
+    def test_empty_task_id_omits_suffix(self, tmp_path):
+        """Empty task_id should produce path without trailing dash or task_id.
+
+        This is the fallback path used when check_teachback_sent returns
+        (False, "") — i.e., the agent has no in_progress tasks at all.
+        """
+        from teachback_check import _get_marker_path
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/my-app"}):
+            result = _get_marker_path("backend-coder-1", "", sessions_dir=str(tmp_path))
+
+        assert result == tmp_path / "my-app" / "teachback-warned-backend-coder-1"
+        assert result.name == "teachback-warned-backend-coder-1"
+        # No trailing dash — empty task_id should not append "-"
+        assert not result.name.endswith("-")
+
 
 class TestMarkWarned:
     """Tests for _mark_warned() and _was_already_warned() — per-task markers."""
@@ -301,7 +317,13 @@ class TestCheckTeachbackSent:
         assert confirmed is False
         assert task_id == ""
 
-    def test_scans_multiple_tasks_finds_one_with_teachback(self, tmp_path):
+    def test_scans_multiple_tasks_one_without_teachback_warns(self, tmp_path):
+        """When one of two in_progress tasks lacks teachback, should warn.
+
+        This is the core fix for bug #331: the old code short-circuited on ANY
+        task with teachback_sent=True. The fixed code requires ALL in_progress
+        tasks to have teachback_sent=True.
+        """
         from teachback_check import check_teachback_sent
 
         task_dir = tmp_path / "pact-test"
@@ -319,8 +341,55 @@ class TestCheckTeachbackSent:
         })
 
         confirmed, task_id = check_teachback_sent("backend-coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        assert task_id == "1"
+
+    def test_all_in_progress_tasks_have_teachback_confirms(self, tmp_path):
+        """When ALL in_progress tasks have teachback_sent, should confirm."""
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        _write_task(task_dir, "1.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        _write_task(task_dir, "2.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+
+        confirmed, task_id = check_teachback_sent("backend-coder-1", "pact-test", str(tmp_path))
         assert confirmed is True
         assert task_id == ""
+
+    def test_agent_reuse_old_task_teachback_new_task_without_warns(self, tmp_path):
+        """Agent reuse scenario: old task has teachback, new task does not.
+
+        This is the primary bug vector for #331: when an agent is reused via
+        SendMessage, the old task retains teachback_sent=True but the new task
+        has not yet sent a teachback. The check must warn for the new task.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        # Old task (lower ID) — agent already sent teachback
+        _write_task(task_dir, "10.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        # New task (higher ID) — no teachback yet
+        _write_task(task_dir, "20.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        confirmed, task_id = check_teachback_sent("backend-coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        assert task_id == "20"
 
     def test_fails_open_on_missing_task_dir(self, tmp_path):
         """No task directory → fail open (True, "")."""
@@ -896,6 +965,41 @@ class TestEndToEnd:
             assert warn is False
             assert task_id == ""
 
+    def test_agent_reuse_warns_for_new_task(self, tmp_path):
+        """Full agent reuse scenario: old task has teachback, new task added
+        without teachback → should_warn returns True for the new task.
+
+        This is the end-to-end test for bug #331. The agent was previously
+        working on task 10 (teachback sent), then reassigned to task 20
+        (no teachback yet). Both tasks are still in_progress.
+        """
+        from teachback_check import should_warn
+
+        task_dir = tmp_path / "tasks" / "pact-test"
+        sessions_dir = str(tmp_path / "sessions")
+
+        # Old task — agent already sent teachback for this one
+        _write_task(task_dir, "10.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        # New task — no teachback yet
+        _write_task(task_dir, "20.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            warn, task_id = should_warn(
+                "backend-coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is True
+            assert task_id == "20"
+
     def test_warning_message_content(self):
         """Verify the warning message contains expected instructions."""
         from teachback_check import _WARNING_MESSAGE
@@ -1123,6 +1227,349 @@ class TestConcurrentMarkerAccess:
 
 
 # =============================================================================
+# Edge case tests for bug #331 fix (ANY→ALL semantics)
+# =============================================================================
+
+class TestAllMatchEdgeCases:
+    """Tests targeting edge cases of the ALL-match semantics introduced by the
+    bug #331 fix. These complement the coder's tests by exercising:
+    - Three or more concurrent tasks
+    - Race condition simulation (old task disappears mid-lifecycle)
+    - Reviewer-to-fixer reuse scenario
+    - Empty task_id propagation through should_warn
+    - Complex multi-agent mixed ownership
+    """
+
+    def test_three_tasks_one_missing_teachback_warns(self, tmp_path):
+        """Three in_progress tasks, two with teachback, one without → warns.
+
+        Validates ALL-match semantics generalize beyond 2 tasks. The scanner
+        must check every in_progress task, not just the first two.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        _write_task(task_dir, "1.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        _write_task(task_dir, "2.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        _write_task(task_dir, "3.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        confirmed, task_id = check_teachback_sent("coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        assert task_id == "3"
+
+    def test_multiple_unconfirmed_returns_first_sorted(self, tmp_path):
+        """When 2+ in_progress tasks both lack teachback_sent, should return
+        the first unconfirmed task_id in sorted order.
+
+        Exercises the branch at line 183 where first_unconfirmed_task_id is
+        already set from a prior iteration — the second unconfirmed task is
+        encountered but does not overwrite the first.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        _write_task(task_dir, "5.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        _write_task(task_dir, "15.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        _write_task(task_dir, "25.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        confirmed, task_id = check_teachback_sent("coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        # sorted() ensures deterministic order: 15.json, 25.json, 5.json
+        # (lexicographic: "15" < "25" < "5"), so first unconfirmed is "15"
+        assert task_id == "15"
+
+    def test_three_tasks_all_confirmed_passes(self, tmp_path):
+        """Three in_progress tasks, all with teachback → confirmed."""
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        for i in range(1, 4):
+            _write_task(task_dir, f"{i}.json", {
+                "owner": "coder-1",
+                "status": "in_progress",
+                "metadata": {"teachback_sent": True},
+            })
+
+        confirmed, task_id = check_teachback_sent("coder-1", "pact-test", str(tmp_path))
+        assert confirmed is True
+        assert task_id == ""
+
+    def test_race_condition_old_task_completed_before_scan(self, tmp_path):
+        """Simulates edge case 5: old task transitions to completed, leaving
+        only the new task (without teachback) visible to the scanner.
+
+        This is the benign race condition from the prep doc. The hook reads a
+        point-in-time snapshot, so if the lead marks the old task completed
+        before the scan reaches it, only the new task is visible.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        # Old task already completed by the time the hook runs
+        _write_task(task_dir, "10.json", {
+            "owner": "coder-1",
+            "status": "completed",
+            "metadata": {"teachback_sent": True},
+        })
+        # New task — no teachback yet
+        _write_task(task_dir, "20.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        confirmed, task_id = check_teachback_sent("coder-1", "pact-test", str(tmp_path))
+        assert confirmed is False
+        assert task_id == "20"
+
+    def test_reviewer_to_fixer_reuse_scenario(self, tmp_path):
+        """Reviewer-to-fixer reuse: agent's review task (with teachback) is
+        still in_progress when a fix task is assigned via SendMessage.
+
+        Per CLAUDE.md line 462, the orchestrator reuses reviewers as fixers.
+        The review task has teachback_sent=True; the fix task does not.
+        The fix must enforce teachback on the new task.
+        """
+        from teachback_check import should_warn
+
+        task_dir = tmp_path / "tasks" / "pact-test"
+        sessions_dir = str(tmp_path / "sessions")
+
+        # Review task — teachback sent during review phase
+        _write_task(task_dir, "15.json", {
+            "owner": "architect",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+            "subject": "Review PR #42",
+        })
+        # Fix task — newly assigned, no teachback yet
+        _write_task(task_dir, "25.json", {
+            "owner": "architect",
+            "status": "in_progress",
+            "metadata": {},
+            "subject": "Fix review findings from PR #42",
+        })
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            warn, task_id = should_warn(
+                "architect", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is True
+            assert task_id == "25"
+
+    def test_self_claim_followup_both_in_progress(self, tmp_path):
+        """Self-claim follow-up: agent claims task B before lead marks task A
+        completed. Both are in_progress. Task A has teachback; task B does not.
+
+        Per prep doc scenario 1, there's a timing window where both tasks
+        coexist as in_progress.
+        """
+        from teachback_check import should_warn
+
+        task_dir = tmp_path / "tasks" / "pact-test"
+        sessions_dir = str(tmp_path / "sessions")
+
+        # Task A — agent already sent teachback, about to be completed
+        _write_task(task_dir, "5.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        # Task B — self-claimed, no teachback yet
+        _write_task(task_dir, "6.json", {
+            "owner": "backend-coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            warn, task_id = should_warn(
+                "backend-coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is True
+            assert task_id == "6"
+
+    def test_no_in_progress_tasks_should_warn_with_empty_task_id(self, tmp_path):
+        """When check_teachback_sent returns (False, ""), should_warn proceeds
+        to the marker check with empty task_id. Verify no crash and that the
+        marker path with empty task_id doesn't cause issues.
+        """
+        from teachback_check import should_warn
+
+        task_dir = tmp_path / "tasks" / "pact-test"
+        sessions_dir = str(tmp_path / "sessions")
+        # Only completed tasks — no in_progress for this agent
+        _write_task(task_dir, "1.json", {
+            "owner": "backend-coder-1",
+            "status": "completed",
+            "metadata": {"teachback_sent": True},
+        })
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            warn, task_id = should_warn(
+                "backend-coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            # check_teachback_sent returns (False, "") for no in_progress tasks
+            # should_warn checks confirmed=False, then checks marker for empty task_id
+            # No marker exists, so it should warn with empty task_id
+            assert warn is True
+            assert task_id == ""
+
+    def test_complex_multi_agent_mixed_ownership(self, tmp_path):
+        """Multiple agents with interleaved tasks in the same directory.
+
+        Verifies that the scanner correctly filters by owner and only
+        evaluates the target agent's in_progress tasks.
+        """
+        from teachback_check import check_teachback_sent
+
+        task_dir = tmp_path / "pact-test"
+        # Agent A's tasks
+        _write_task(task_dir, "1.json", {
+            "owner": "coder-A",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        _write_task(task_dir, "4.json", {
+            "owner": "coder-A",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        # Agent B's tasks — one without teachback
+        _write_task(task_dir, "2.json", {
+            "owner": "coder-B",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        _write_task(task_dir, "5.json", {
+            "owner": "coder-B",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        # Agent C — completed task (should not affect anyone)
+        _write_task(task_dir, "3.json", {
+            "owner": "coder-C",
+            "status": "completed",
+            "metadata": {"teachback_sent": True},
+        })
+
+        # Agent A: all confirmed
+        confirmed_a, tid_a = check_teachback_sent("coder-A", "pact-test", str(tmp_path))
+        assert confirmed_a is True
+        assert tid_a == ""
+
+        # Agent B: one task missing teachback
+        confirmed_b, tid_b = check_teachback_sent("coder-B", "pact-test", str(tmp_path))
+        assert confirmed_b is False
+        assert tid_b == "5"
+
+        # Agent C: no in_progress tasks
+        confirmed_c, tid_c = check_teachback_sent("coder-C", "pact-test", str(tmp_path))
+        assert confirmed_c is False
+        assert tid_c == ""
+
+    def test_agent_reuse_full_lifecycle_e2e(self, tmp_path):
+        """End-to-end lifecycle test for the complete agent reuse scenario:
+
+        1. Agent starts task A → warned (no teachback)
+        2. Agent sends teachback for task A → no longer warned
+        3. Agent is reused for task B (both in_progress) → warned for task B
+        4. Agent sends teachback for task B → no longer warned
+        """
+        from teachback_check import should_warn, _mark_warned
+
+        task_dir = tmp_path / "tasks" / "pact-test"
+        sessions_dir = str(tmp_path / "sessions")
+
+        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            # Step 1: Agent starts task A — no teachback
+            _write_task(task_dir, "10.json", {
+                "owner": "coder-1",
+                "status": "in_progress",
+                "metadata": {},
+            })
+            warn, tid = should_warn(
+                "coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is True
+            assert tid == "10"
+            _mark_warned("coder-1", tid, sessions_dir=sessions_dir)
+
+            # Step 2: Agent sends teachback (metadata updated)
+            _write_task(task_dir, "10.json", {
+                "owner": "coder-1",
+                "status": "in_progress",
+                "metadata": {"teachback_sent": True},
+            })
+            warn, tid = should_warn(
+                "coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is False
+
+            # Step 3: Agent reused — new task B added, both in_progress
+            _write_task(task_dir, "20.json", {
+                "owner": "coder-1",
+                "status": "in_progress",
+                "metadata": {},
+            })
+            warn, tid = should_warn(
+                "coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is True
+            assert tid == "20"
+            _mark_warned("coder-1", tid, sessions_dir=sessions_dir)
+
+            # Step 4: Agent sends teachback for task B
+            _write_task(task_dir, "20.json", {
+                "owner": "coder-1",
+                "status": "in_progress",
+                "metadata": {"teachback_sent": True},
+            })
+            warn, tid = should_warn(
+                "coder-1", "pact-test",
+                tasks_base_dir=str(tmp_path / "tasks"),
+                sessions_dir=sessions_dir,
+            )
+            assert warn is False
+
+
+# =============================================================================
 # Structural: hooks.json registration
 # =============================================================================
 
@@ -1205,4 +1652,28 @@ class TestHooksJsonRegistration:
         assert teachback_idx < size_idx, (
             f"teachback_check.py (index {teachback_idx}) should come before "
             f"file_size_check.py (index {size_idx})"
+        )
+
+    def test_teachback_check_registered_in_bash_matcher(self):
+        """teachback_check.py should also be registered under PostToolUse Bash.
+
+        The hook fires on Edit|Write AND Bash to catch agents using shell
+        commands for implementation work before sending a teachback.
+        """
+        hooks_path = Path(__file__).parent.parent / "hooks" / "hooks.json"
+        hooks_data = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+        post_tool_use = hooks_data.get("hooks", {}).get("PostToolUse", [])
+
+        bash_entry = next(
+            (e for e in post_tool_use if e.get("matcher") == "Bash"), None
+        )
+        assert bash_entry is not None, "No Bash matcher in PostToolUse"
+
+        commands = [h.get("command", "") for h in bash_entry.get("hooks", [])]
+        teachback_commands = [c for c in commands if "teachback_check.py" in c]
+
+        assert len(teachback_commands) == 1, (
+            f"Expected exactly 1 teachback_check.py in Bash hooks, "
+            f"found {len(teachback_commands)}"
         )

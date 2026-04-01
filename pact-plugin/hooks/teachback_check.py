@@ -119,8 +119,9 @@ def _mark_warned(
 # - task_scanner.scan_all_tasks() scans ALL team directories (needed by compaction
 #   hooks that operate across the full task tree). This hook only needs the current
 #   team's tasks — narrower scope, fewer I/O operations.
-# - Returns (bool, task_id) tuple with short-circuit on first match, vs task_scanner
-#   which collects all tasks into a list for analysis.
+# - Returns (bool, task_id) tuple after scanning ALL matching tasks (sorted for
+#   deterministic iteration order), vs task_scanner which collects all tasks
+#   into a list for analysis.
 # - Needs per-file task_id (filename stem) for per-task marker support.
 def check_teachback_sent(
     agent_name: str,
@@ -128,10 +129,13 @@ def check_teachback_sent(
     tasks_base_dir: str | None = None,
 ) -> tuple[bool, str]:
     """
-    Check if the agent has set teachback_sent in any of their in_progress tasks.
+    Check if ALL in_progress tasks for the agent have teachback_sent set.
 
     Scans the team's task directory for tasks owned by this agent that are
-    in_progress and have metadata.teachback_sent == true.
+    in_progress. Returns confirmed only when every such task has
+    metadata.teachback_sent == true. This prevents a stale teachback on an
+    older task from satisfying the check for a newer task (e.g., after agent
+    reuse via SendMessage).
 
     Args:
         agent_name: The agent's unique name (e.g., "backend-coder-1")
@@ -140,7 +144,7 @@ def check_teachback_sent(
 
     Returns:
         Tuple of (confirmed, task_id):
-        - (True, "") if teachback confirmed or on fail-open error
+        - (True, "") if ALL in_progress tasks have teachback, or on fail-open error
         - (False, task_id) if an in_progress task needs teachback warning
         The task_id is the file basename (without .json) of the first
         unconfirmed in_progress task, used for per-task marker files.
@@ -156,8 +160,9 @@ def check_teachback_sent(
         return (True, "")  # No task directory — fail open
 
     first_unconfirmed_task_id = ""
+    found_any_in_progress = False
     try:
-        for task_file in task_dir.iterdir():
+        for task_file in sorted(task_dir.iterdir()):
             if not task_file.name.endswith(".json"):
                 continue
 
@@ -171,17 +176,25 @@ def check_teachback_sent(
             if data.get("status") != "in_progress":
                 continue
 
+            found_any_in_progress = True
             metadata = data.get("metadata") or {}
-            if metadata.get("teachback_sent") is True:
-                return (True, "")
-
-            # Track first unconfirmed task for per-task marker
-            if not first_unconfirmed_task_id:
-                first_unconfirmed_task_id = task_file.stem
+            if metadata.get("teachback_sent") is not True:
+                # Track first unconfirmed task for per-task marker
+                if not first_unconfirmed_task_id:
+                    first_unconfirmed_task_id = task_file.stem
     except OSError:
         return (True, "")  # Can't scan — fail open
 
-    return (False, first_unconfirmed_task_id)
+    # If any in_progress task lacks teachback, warn for that task
+    if first_unconfirmed_task_id:
+        return (False, first_unconfirmed_task_id)
+
+    # All in_progress tasks have teachback confirmed
+    if found_any_in_progress:
+        return (True, "")
+
+    # No in_progress tasks found for this agent
+    return (False, "")
 
 
 def should_warn(
@@ -196,7 +209,7 @@ def should_warn(
     Returns (True, task_id) if:
     1. Agent is not exempt (secretary, auditor)
     2. Agent has not been warned already for this task (per-task marker)
-    3. No in_progress task has teachback_sent metadata
+    3. Any in_progress task lacks teachback_sent metadata
 
     Args:
         agent_name: The agent's unique name
