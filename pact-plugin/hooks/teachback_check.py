@@ -119,8 +119,9 @@ def _mark_warned(
 # - task_scanner.scan_all_tasks() scans ALL team directories (needed by compaction
 #   hooks that operate across the full task tree). This hook only needs the current
 #   team's tasks — narrower scope, fewer I/O operations.
-# - Returns (bool, task_id) tuple after scanning ALL matching tasks, vs task_scanner
-#   which collects all tasks into a list for analysis.
+# - Returns (bool, task_id) tuple after scanning ALL matching tasks (sorted for
+#   deterministic iteration order), vs task_scanner which collects all tasks
+#   into a list for analysis.
 # - Needs per-file task_id (filename stem) for per-task marker support.
 def check_teachback_sent(
     agent_name: str,
@@ -161,7 +162,7 @@ def check_teachback_sent(
     first_unconfirmed_task_id = ""
     found_any_in_progress = False
     try:
-        for task_file in task_dir.iterdir():
+        for task_file in sorted(task_dir.iterdir()):
             if not task_file.name.endswith(".json"):
                 continue
 
