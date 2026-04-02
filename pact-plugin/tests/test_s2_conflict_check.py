@@ -227,7 +227,13 @@ class TestExtractAgentName:
 
 
 class TestDiscoverWorktreePath:
-    """Tests for _discover_worktree_path subprocess handling."""
+    """Tests for _discover_worktree_path (now imported from shared.s2_state)."""
+
+    def test_returns_env_var_when_set(self):
+        from s2_conflict_check import _discover_worktree_path
+
+        with patch.dict(os.environ, {"PACT_WORKTREE_ROOT": "/my/worktree"}):
+            assert _discover_worktree_path() == "/my/worktree"
 
     def test_returns_git_toplevel(self):
         from s2_conflict_check import _discover_worktree_path
@@ -236,7 +242,8 @@ class TestDiscoverWorktreePath:
         mock_result.returncode = 0
         mock_result.stdout = "/my/worktree\n"
 
-        with patch("subprocess.run", return_value=mock_result):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("shared.s2_state.subprocess.run", return_value=mock_result):
             assert _discover_worktree_path() == "/my/worktree"
 
     def test_returns_none_on_non_zero_exit(self):
@@ -245,20 +252,23 @@ class TestDiscoverWorktreePath:
         mock_result = MagicMock()
         mock_result.returncode = 128
 
-        with patch("subprocess.run", return_value=mock_result):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("shared.s2_state.subprocess.run", return_value=mock_result):
             assert _discover_worktree_path() is None
 
     def test_returns_none_on_timeout(self):
         from s2_conflict_check import _discover_worktree_path
 
         import subprocess
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("shared.s2_state.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)):
             assert _discover_worktree_path() is None
 
     def test_returns_none_on_file_not_found(self):
         from s2_conflict_check import _discover_worktree_path
 
-        with patch("subprocess.run", side_effect=FileNotFoundError("git")):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("shared.s2_state.subprocess.run", side_effect=FileNotFoundError("git")):
             assert _discover_worktree_path() is None
 
 

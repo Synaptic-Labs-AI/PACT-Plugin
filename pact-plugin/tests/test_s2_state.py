@@ -5,7 +5,7 @@ Tests for shared/s2_state.py — Atomic read/write/update primitives for
 Tests cover:
 1. S2 state schema validation (default state structure)
 2. Read/write round-trip (all field combinations)
-3. Graceful degradation (missing file, corrupted file, empty file)
+3. Graceful degradation (missing file, corrupted file, empty file, non-dict JSON)
 4. Concurrent writes via threading (3-5 threads)
 5. Atomic rename safety (temp file cleanup on failure)
 6. resolve_convention (last-per-key semantics)
@@ -13,6 +13,10 @@ Tests cover:
 8. file_in_scope (matching, non-matching, edge cases)
 9. write_s2_state timestamp auto-population
 10. update_s2_state with missing file (creates from default)
+11. _normalize_scope (trailing-slash normalization for safe prefix matching)
+12. _discover_worktree_path (env var caching + git fallback)
+13. _update_without_flock (non-POSIX fallback path)
+14. Write failure cleanup (temp file cleanup, original file preservation)
 """
 import json
 import os
@@ -299,16 +303,17 @@ class TestGracefulDegradation:
         from shared.s2_state import read_s2_state
 
         state_file.write_text('"just a string"')
-        # read_s2_state returns whatever json.loads returns — a string is valid JSON
+        # Non-dict JSON is rejected — read_s2_state only accepts dict
         result = read_s2_state(str(worktree))
-        assert result == "just a string"
+        assert result is None
 
     def test_read_array_json(self, worktree, state_file):
         from shared.s2_state import read_s2_state
 
         state_file.write_text('[1, 2, 3]')
+        # Non-dict JSON is rejected — read_s2_state only accepts dict
         result = read_s2_state(str(worktree))
-        assert result == [1, 2, 3]
+        assert result is None
 
     def test_write_returns_false_on_permission_error(self, worktree):
         from shared.s2_state import write_s2_state
@@ -407,7 +412,12 @@ class TestUpdateS2State:
 
 
 class TestConcurrentWrites:
-    """Verify concurrent writes don't corrupt the state file."""
+    """Verify concurrent writes don't corrupt the state file.
+
+    Threading tests verify crash-safety (no corruption/partial writes),
+    not serialization. Cross-process flock is the actual coordination
+    mechanism and cannot be tested via threading.
+    """
 
     def test_concurrent_updates_all_succeed(self, worktree):
         """Multiple threads updating different keys should all succeed."""
@@ -733,3 +743,227 @@ class TestPathHelpers:
 
         result = _now_iso()
         assert "+" in result or "Z" in result  # Has timezone info
+
+
+# =============================================================================
+# _normalize_scope (M1 fix)
+# =============================================================================
+
+
+class TestNormalizeScope:
+    """Ensure scope paths are normalized with trailing slash."""
+
+    def test_adds_trailing_slash(self):
+        from shared.s2_state import _normalize_scope
+
+        assert _normalize_scope("src/server") == "src/server/"
+
+    def test_preserves_existing_trailing_slash(self):
+        from shared.s2_state import _normalize_scope
+
+        assert _normalize_scope("src/server/") == "src/server/"
+
+    def test_empty_string_unchanged(self):
+        from shared.s2_state import _normalize_scope
+
+        assert _normalize_scope("") == ""
+
+    def test_file_in_scope_rejects_false_prefix_match(self):
+        """'src/server' scope must NOT match 'src/server_backup/foo.py'."""
+        from shared.s2_state import file_in_scope
+
+        # Without normalization this would return True
+        assert file_in_scope("src/server_backup/foo.py", ["src/server"]) is False
+
+    def test_check_boundary_overlap_rejects_false_prefix(self):
+        """Scopes without trailing slash must not falsely overlap."""
+        from shared.s2_state import check_boundary_overlap
+
+        boundaries = {
+            "agent-a": {"owns": ["src/server"], "reads": []},
+            "agent-b": {"owns": ["src/server_backup"], "reads": []},
+        }
+        assert check_boundary_overlap(boundaries) == []
+
+
+# =============================================================================
+# _discover_worktree_path (M2 + F1)
+# =============================================================================
+
+
+class TestDiscoverWorktreePath:
+    """Shared worktree discovery with env var caching."""
+
+    def test_uses_env_var_when_set(self):
+        from shared.s2_state import _discover_worktree_path
+
+        with patch.dict(os.environ, {"PACT_WORKTREE_ROOT": "/test/worktree"}):
+            assert _discover_worktree_path() == "/test/worktree"
+
+    def test_falls_back_to_git_when_env_unset(self):
+        from shared.s2_state import _discover_worktree_path
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("shared.s2_state.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                mock_run.return_value.stdout = "/some/repo\n"
+                result = _discover_worktree_path()
+                assert result == "/some/repo"
+                mock_run.assert_called_once()
+
+    def test_returns_none_when_not_in_git_repo(self):
+        from shared.s2_state import _discover_worktree_path
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("shared.s2_state.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 128
+                assert _discover_worktree_path() is None
+
+    def test_returns_none_on_subprocess_timeout(self):
+        from shared.s2_state import _discover_worktree_path
+        import subprocess as sp
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("shared.s2_state.subprocess.run", side_effect=sp.TimeoutExpired("git", 5)):
+                assert _discover_worktree_path() is None
+
+
+# =============================================================================
+# Non-POSIX Fallback (F3)
+# =============================================================================
+
+
+class TestUpdateWithoutFlock:
+    """Exercise the _update_without_flock path by patching HAS_FLOCK = False.
+
+    Threading tests verify crash-safety (no corruption/partial writes),
+    not serialization. Cross-process flock is the actual coordination
+    mechanism and cannot be tested via threading.
+    """
+
+    def test_basic_update_without_flock(self, worktree):
+        from shared.s2_state import write_s2_state, update_s2_state, read_s2_state
+
+        initial = _make_state()
+        write_s2_state(str(worktree), initial)
+
+        with patch("shared.s2_state.HAS_FLOCK", False):
+            def add_boundary(state):
+                state["boundaries"]["test-agent"] = {"owns": ["src/"], "reads": []}
+                return state
+
+            assert update_s2_state(str(worktree), add_boundary) is True
+
+        result = read_s2_state(str(worktree))
+        assert "test-agent" in result["boundaries"]
+
+    def test_concurrent_updates_without_flock(self, worktree):
+        from shared.s2_state import write_s2_state, update_s2_state, read_s2_state
+
+        initial = _make_state()
+        write_s2_state(str(worktree), initial)
+
+        errors = []
+        num_threads = 3
+
+        def update_worker(thread_id):
+            try:
+                with patch("shared.s2_state.HAS_FLOCK", False):
+                    def add_convention(state):
+                        state["conventions"].append({
+                            "key": f"conv-{thread_id}",
+                            "value": f"val-{thread_id}",
+                            "established_by": f"agent-{thread_id}",
+                            "established_at": "2026-04-01T00:00:00+00:00",
+                        })
+                        return state
+
+                    result = update_s2_state(str(worktree), add_convention)
+                    if not result:
+                        errors.append(f"Thread {thread_id} failed")
+            except Exception as e:
+                errors.append(f"Thread {thread_id}: {e}")
+
+        threads = [
+            threading.Thread(target=update_worker, args=(i,))
+            for i in range(num_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Thread errors: {errors}"
+
+        # File should be valid JSON after concurrent no-flock writes
+        result = read_s2_state(str(worktree))
+        assert result is not None
+        assert isinstance(result, dict)
+
+    def test_graceful_degradation_without_flock(self, worktree):
+        """Non-POSIX fallback still works when starting from empty state."""
+        from shared.s2_state import update_s2_state, read_s2_state
+
+        with patch("shared.s2_state.HAS_FLOCK", False):
+            def set_team(state):
+                state["session_team"] = "pact-noflock"
+                return state
+
+            assert update_s2_state(str(worktree), set_team) is True
+
+        result = read_s2_state(str(worktree))
+        assert result is not None
+        assert result["session_team"] == "pact-noflock"
+
+
+# =============================================================================
+# Write Failure Cleanup (F4)
+# =============================================================================
+
+
+class TestWriteFailureCleanup:
+    """Verify temp files are cleaned up on write failures."""
+
+    def test_write_cleans_temp_on_os_error(self, worktree):
+        from shared.s2_state import write_s2_state
+
+        with patch("shared.s2_state.os.fdopen", side_effect=OSError("disk full")):
+            result = write_s2_state(str(worktree), _make_state())
+            assert result is False
+
+        # No temp files left behind in .pact/
+        pact_dir = worktree / ".pact"
+        tmp_files = list(pact_dir.glob("s2-state-*.tmp"))
+        assert tmp_files == [], f"Temp files not cleaned up: {tmp_files}"
+
+    def test_update_cleans_temp_on_os_error(self, worktree):
+        from shared.s2_state import write_s2_state, update_s2_state
+
+        # Seed initial state so update has something to read
+        write_s2_state(str(worktree), _make_state())
+
+        with patch("shared.s2_state.os.fdopen", side_effect=OSError("disk full")):
+            result = update_s2_state(str(worktree), lambda s: s)
+            assert result is False
+
+        # No temp files left behind in .pact/
+        pact_dir = worktree / ".pact"
+        tmp_files = list(pact_dir.glob("s2-state-*.tmp"))
+        assert tmp_files == [], f"Temp files not cleaned up: {tmp_files}"
+
+    def test_write_failure_preserves_original_file(self, worktree):
+        from shared.s2_state import write_s2_state, read_s2_state
+
+        # Write initial state
+        initial = _make_state(session_team="original")
+        write_s2_state(str(worktree), initial)
+
+        # Force write failure during rename
+        with patch("shared.s2_state.os.rename", side_effect=OSError("rename failed")):
+            result = write_s2_state(str(worktree), _make_state(session_team="new"))
+            assert result is False
+
+        # Original file should be intact
+        result = read_s2_state(str(worktree))
+        assert result is not None
+        assert result["session_team"] == "original"
