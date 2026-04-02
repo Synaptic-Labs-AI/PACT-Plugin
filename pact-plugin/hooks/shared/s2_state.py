@@ -5,8 +5,10 @@ Summary: Atomic read/write/update primitives for .pact/s2-state.json, the shared
 Used by: orchestrate.md and comPACT.md (seeding), SKILL.md (agent self-coordination),
          s2_conflict_check.py (Phase B), s2_drift_check.py (Phase C).
 
-Concurrency model: fcntl.flock (advisory exclusive lock) + atomic rename for writes.
-Follows the proven pattern from file_tracker.py and track_files.py.
+Concurrency model: fcntl.flock on a SEPARATE sentinel lock file (.pact/s2-state.lock)
++ atomic rename for writes. The lock file is never replaced, so all writers contend
+on the same inode — unlike locking the data file directly, which breaks when
+os.rename replaces the inode. Atomic rename ensures readers never see partial writes.
 """
 
 import json
@@ -38,12 +40,24 @@ _DEFAULT_STATE = {
 }
 
 S2_STATE_FILENAME = "s2-state.json"
+S2_LOCK_FILENAME = "s2-state.lock"
 S2_DIR_NAME = ".pact"
 
 
 def _s2_state_path(worktree_path: str) -> Path:
     """Return the path to s2-state.json within a worktree."""
     return Path(worktree_path) / S2_DIR_NAME / S2_STATE_FILENAME
+
+
+def _s2_lock_path(worktree_path: str) -> Path:
+    """Return the path to the sentinel lock file (.pact/s2-state.lock).
+
+    This file is used exclusively for flock serialization and is never
+    replaced or renamed. All writers contend on the same inode, avoiding
+    the inode-mismatch problem that occurs when locking a file that gets
+    atomically replaced via os.rename.
+    """
+    return Path(worktree_path) / S2_DIR_NAME / S2_LOCK_FILENAME
 
 
 def _now_iso() -> str:
@@ -81,10 +95,12 @@ def read_s2_state(worktree_path: str) -> dict | None:
 def write_s2_state(worktree_path: str, state: dict) -> bool:
     """Write a complete S2 state to .pact/s2-state.json atomically.
 
-    Uses fcntl.flock for advisory locking and atomic rename to prevent
-    readers from seeing partially-written files. The temp file is created
-    in the same directory (.pact/) to guarantee same-filesystem rename
-    atomicity on POSIX.
+    Intended for single-writer initial seed (orchestrator only). Does NOT
+    acquire a lock — use update_s2_state() for concurrent read-modify-write.
+
+    Uses atomic rename (temp file + os.rename) to prevent readers from
+    seeing partially-written files. The temp file is created in the same
+    directory (.pact/) to guarantee same-filesystem rename atomicity on POSIX.
 
     Returns True on success, False on failure. Failures are logged to
     stderr but never raise — hooks must not crash.
@@ -152,18 +168,30 @@ def _update_with_flock(
     pact_dir: Path,
     updater: "callable[[dict], dict]",
 ) -> bool:
-    """Update with fcntl.flock — single lock for the read-modify-write cycle."""
-    # Open with a+ to create if missing, then lock
-    with open(state_path, "a+") as lock_file:
+    """Update with fcntl.flock on a sentinel lock file + atomic rename.
+
+    The lock is acquired on a SEPARATE sentinel file (.pact/s2-state.lock)
+    that is never replaced. This avoids the inode-mismatch problem: if we
+    locked the data file and then os.rename'd over it, the next writer would
+    open the new inode and get a lock on a different file — defeating
+    serialization. The sentinel file's inode is stable, so all writers
+    contend on the same lock.
+    """
+    lock_path = pact_dir / S2_LOCK_FILENAME
+
+    # Open sentinel lock file with a+ to create if missing
+    with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            # Read current state
-            lock_file.seek(0)
-            content = lock_file.read()
-            try:
-                state = json.loads(content) if content.strip() else dict(_DEFAULT_STATE)
-            except json.JSONDecodeError:
-                state = dict(_DEFAULT_STATE)
+            # Read current state from the data file (not the lock file)
+            state = dict(_DEFAULT_STATE)
+            if state_path.exists():
+                try:
+                    content = state_path.read_text(encoding="utf-8")
+                    if content.strip():
+                        state = json.loads(content)
+                except (json.JSONDecodeError, IOError):
+                    pass
 
             # Apply update
             state = updater(state)
