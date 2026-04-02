@@ -23,6 +23,12 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
    - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
    - Non-blocking: proceed immediately after sending — do not wait for the lead's reply
 5. Begin work — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
+6. **Read S2 coordination state** — If your task mentions a worktree path, check for `<worktree>/.pact/s2-state.json`. If it exists:
+   - Check your scope boundaries under `boundaries.{your-name}` — `owns` lists directories you may modify, `reads` lists directories you may read but not write
+   - Check established conventions under `conventions` — follow them (last entry per `key` wins)
+   - Check `scope_claims` — avoid modifying files already claimed by other agents
+   - Check `drift_alerts` — if any affect your scope, re-read those files for recent changes
+   - If the file doesn't exist or is unreadable, proceed normally — S2 state is supplementary, not required
 
 > **Worktree Scope**: If you are working in a worktree, files that are gitignored (e.g., `CLAUDE.md`) do not exist there. Do not edit or create `CLAUDE.md` — the orchestrator manages it separately. If you need to reference `CLAUDE.md` content, it is auto-loaded into your context. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead of editing it directly.
 
@@ -230,7 +236,18 @@ When running Bash commands that touch `~/.claude/` paths, use simple standalone 
 
 Before returning your final output:
 
-1. **Save Domain Learnings to Agent Memory**: Save knowledge that future instances of your specialist type would benefit from:
+1. **Update S2 coordination state** — If `<worktree>/.pact/s2-state.json` exists:
+   - If you established new conventions (naming patterns, error handling style, code structure), append entries to `conventions`:
+     ```json
+     {"key": "naming", "value": "camelCase for functions", "established_by": "{your-name}", "established_at": "{ISO 8601}"}
+     ```
+   - Update `scope_claims` with files you actually modified:
+     ```json
+     {"files_modified": ["/abs/path/to/file1.ts", "/abs/path/to/file2.ts"], "claimed_at": "{ISO 8601}"}
+     ```
+   - Read the file, update the relevant sections, write it back. If the file is missing or unreadable, skip — this is supplementary.
+
+2. **Save Domain Learnings to Agent Memory**: Save knowledge that future instances of your specialist type would benefit from:
    - File locations and codepaths discovered
    - Framework conventions and patterns observed
    - Debugging tricks and workarounds found
@@ -246,7 +263,7 @@ Before returning your final output:
 
    If you're working without an assigned task (no HANDOFF will be collected), message the secretary directly to save significant decisions or non-obvious discoveries: `SendMessage(to="secretary", message="[{your-name}→secretary] Save: {what you learned and why it matters}", summary="Save request: {topic}")`
 
-2. **Confirm Memory Saved**: After saving domain learnings, set `memory_saved: true` in your task metadata:
+3. **Confirm Memory Saved**: After saving domain learnings, set `memory_saved: true` in your task metadata:
    ```
    TaskUpdate(taskId, metadata={"memory_saved": true})
    ```
