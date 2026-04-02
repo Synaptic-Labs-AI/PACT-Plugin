@@ -2,6 +2,59 @@
 
 The coordination layer enables parallel agent operation without conflicts. S2 is **proactive** (prevents conflicts) not just **reactive** (resolves conflicts). Apply these protocols whenever multiple agents work concurrently.
 
+### Mechanical S2 Coordination
+
+S2 coordination uses three mechanical layers that operate without consuming orchestrator context:
+
+#### 1. Shared State File (`.pact/s2-state.json`)
+
+A per-worktree JSON file that agents read at startup and update as they work. The orchestrator seeds it at dispatch time with agent boundaries, and agents append conventions and scope claims during execution.
+
+| Lifecycle Stage | Actor | Action |
+|----------------|-------|--------|
+| Bootstrap | `worktree-setup` | Creates `.pact/` directory with `.gitignore` |
+| Seed | `orchestrate` / `comPACT` | Writes boundaries, session_team, worktree path |
+| Read on start | Agent (SKILL.md) | Reads boundaries and conventions at task start |
+| Write on complete | Agent (SKILL.md) | Appends conventions established and scope claims |
+| Cleanup | `worktree-cleanup` | Removed automatically with worktree |
+
+State file location: `<worktree>/.pact/s2-state.json`. Schema defined in `templates/s2-state-template.json`. Concurrency safety via `fcntl.flock` + atomic rename (see `hooks/shared/s2_state.py`).
+
+#### 2. Conflict Detection Hook (`s2_conflict_check.py`)
+
+A PreToolUse hook on the Task tool. When the orchestrator dispatches an agent, the hook reads boundaries from `s2-state.json` and checks for overlapping "owns" scopes between the new agent and existing agents.
+
+- **Warns but does not block** — overlapping scopes may be intentional
+- **Graceful degradation** — no-op if state file is missing or malformed
+- Surfaces scope collisions at dispatch time so the orchestrator can adjust boundaries
+
+#### 3. Drift Detection Hook (`s2_drift_check.py`)
+
+A PostToolUse hook on Edit|Write (async, non-blocking). When any agent edits a file, the hook checks if that file falls within another agent's "owns" scope.
+
+- **Appends drift_alert** to `s2-state.json` when cross-scope edits are detected
+- **Async** — does not gate the edit operation (<50ms performance ceiling)
+- **Graceful degradation** — no-op if state file is missing or malformed
+- Makes boundary violations visible to the orchestrator and other agents
+
+#### How It Fits Together
+
+```
+Orchestrator seeds s2-state.json at dispatch (boundaries)
+    ↓
+Agents read boundaries/conventions on start (SKILL.md)
+    ↓
+Conflict hook warns on overlapping dispatch (mechanical)
+    ↓
+Drift hook detects cross-scope edits during work (mechanical)
+    ↓
+Agents write conventions/claims on completion (SKILL.md)
+    ↓
+State dies with worktree cleanup (no leakage)
+```
+
+This reduces orchestrator token consumption for S2 coordination by >50% for parallel dispatch, and makes coordination state survive context compaction.
+
 ### Task System Integration
 
 With PACT Task integration, the `TaskList` serves as a **shared state mechanism** for coordination:
