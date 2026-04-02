@@ -30,7 +30,7 @@ Before creating anything, check if a worktree already exists for this branch.
 git worktree list
 ```
 
-- If a worktree for the target branch already exists, **reuse it**. Report: "Reusing existing worktree at {path}" and skip to Step 4.
+- If a worktree for the target branch already exists, **reuse it**. Ensure `.pact/` exists (Step 4), then report: "Reusing existing worktree at {path}" and skip to Step 5.
   - If the worktree appears in the list but is marked **prunable**, run `git worktree prune` first and proceed to create a new one.
 - If the branch exists but has no worktree, ask the user: "Branch `{branch}` already exists. Check out existing branch, or create a new branch name?"
 
@@ -60,7 +60,19 @@ Where `{branch}` is the feature branch name (e.g., `feature-auth` or `feature-au
 - Branch already exists: Ask user whether to check out the existing branch (`git worktree add "$REPO_ROOT/.worktrees/{branch}" {branch}` without `-b`)
 - Disk/permissions error: Surface git's error message and offer fallback to working in the main repo directory
 
-### Step 4: Report
+### Step 4: Bootstrap `.pact/` Directory
+
+Create the `.pact/` coordination directory. This houses transient S2 coordination state (scope boundaries, conventions, drift alerts) that agents use for self-coordination.
+
+```bash
+WORKTREE_PATH="$REPO_ROOT/.worktrees/{branch}"
+mkdir -p "$WORKTREE_PATH/.pact"
+echo '*' > "$WORKTREE_PATH/.pact/.gitignore"
+```
+
+The `.gitignore` containing `*` ensures `.pact/` contents never leak into version control. The directory is cleaned up automatically when the worktree is removed.
+
+### Step 5: Report
 
 Output the result:
 
