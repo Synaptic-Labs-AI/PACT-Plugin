@@ -11,6 +11,7 @@ This package provides shared utilities for hooks:
 - session_resume: Session info, snapshot restore, resumption context
 - merge_guard_common: Shared constants and cleanup for merge guard hooks
 - error_output: Standardized JSON error output for hook exception handlers
+- s2_state: Atomic read/write/update for .pact/s2-state.json (S2 coordination state)
 """
 
 from .task_utils import (
@@ -35,6 +36,14 @@ from .merge_guard_common import (
 )
 from .error_output import hook_error_json
 from .constants import PACT_AGENTS
+from .s2_state import (
+    read_s2_state,
+    write_s2_state,
+    update_s2_state,
+    resolve_convention,
+    check_boundary_overlap,
+    file_in_scope,
+)
 
 __all__ = [
     "get_task_list",
@@ -54,4 +63,10 @@ __all__ = [
     "cleanup_consumed_tokens",
     "hook_error_json",
     "PACT_AGENTS",
+    "read_s2_state",
+    "write_s2_state",
+    "update_s2_state",
+    "resolve_convention",
+    "check_boundary_overlap",
+    "file_in_scope",
 ]

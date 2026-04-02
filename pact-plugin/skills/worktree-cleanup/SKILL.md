@@ -112,6 +112,7 @@ Cleaned up worktree for {branch}
 | Worktree has uncommitted changes | Surface git error, offer commit/stash or force options |
 | Branch not fully merged | Surface git error, offer merge or force-delete options |
 | Worktree directory already gone | Run `git worktree prune` to clean up stale refs, then delete branch |
+| `.pact/` coordination directory exists | Cleaned up automatically with the worktree — no separate action needed |
 | Currently inside the target worktree | Navigate to main repo root before removal |
 | No worktrees exist | Report "No worktrees found" |
 | Multiple worktrees for related branches | List all, let user choose which to remove |
