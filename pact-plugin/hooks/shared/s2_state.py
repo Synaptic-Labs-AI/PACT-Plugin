@@ -13,16 +13,22 @@ os.rename replaces the inode. Atomic rename ensures readers never see partial wr
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 try:
     import fcntl
     HAS_FLOCK = True
 except ImportError:
     HAS_FLOCK = False
+
+
+# Maximum number of drift alerts to retain (oldest trimmed on overflow)
+_MAX_DRIFT_ALERTS = 50
 
 
 # Default empty state matching the v1 schema
@@ -42,6 +48,31 @@ _DEFAULT_STATE = {
 S2_STATE_FILENAME = "s2-state.json"
 S2_LOCK_FILENAME = "s2-state.lock"
 S2_DIR_NAME = ".pact"
+
+
+def _discover_worktree_path() -> str | None:
+    """Discover the worktree root path.
+
+    Checks the PACT_WORKTREE_ROOT env var first to avoid a subprocess call
+    (~5ms savings per invocation). Falls back to git rev-parse --show-toplevel.
+    Returns None if not in a git repository or on error.
+    """
+    env_root = os.environ.get("PACT_WORKTREE_ROOT")
+    if env_root:
+        return env_root
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
 
 
 def _s2_state_path(worktree_path: str) -> Path:
@@ -75,9 +106,13 @@ def _ensure_pact_dir(worktree_path: str) -> Path:
 def read_s2_state(worktree_path: str) -> dict | None:
     """Read S2 state from .pact/s2-state.json.
 
-    Returns the parsed state dict, or None if the file doesn't exist
-    or is unreadable (graceful degradation — callers fall back to
-    current behavior when S2 state is unavailable).
+    Returns the parsed state dict, or None if the file doesn't exist,
+    is unreadable, or contains non-dict JSON (graceful degradation —
+    callers fall back to current behavior when S2 state is unavailable).
+
+    No lock is acquired: atomic rename on write ensures readers never
+    see partial content — they get the old file or the new file, never
+    a half-written one.
     """
     state_path = _s2_state_path(worktree_path)
     if not state_path.exists():
@@ -87,7 +122,14 @@ def read_s2_state(worktree_path: str) -> dict | None:
         content = state_path.read_text(encoding="utf-8")
         if not content.strip():
             return None
-        return json.loads(content)
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            print(
+                f"Warning: S2 state is not a dict (got {type(data).__name__}), ignoring",
+                file=sys.stderr,
+            )
+            return None
+        return data
     except (json.JSONDecodeError, IOError, OSError):
         return None
 
@@ -95,8 +137,10 @@ def read_s2_state(worktree_path: str) -> dict | None:
 def write_s2_state(worktree_path: str, state: dict) -> bool:
     """Write a complete S2 state to .pact/s2-state.json atomically.
 
-    Intended for single-writer initial seed (orchestrator only). Does NOT
-    acquire a lock — use update_s2_state() for concurrent read-modify-write.
+    Intended for single-writer initial seed (orchestrator creates the file
+    before any agents are dispatched). Does NOT acquire a lock — for
+    concurrent read-modify-write after agents are running, use
+    update_s2_state() instead.
 
     Uses atomic rename (temp file + os.rename) to prevent readers from
     seeing partially-written files. The temp file is created in the same
@@ -138,7 +182,7 @@ def write_s2_state(worktree_path: str, state: dict) -> bool:
 
 def update_s2_state(
     worktree_path: str,
-    updater: "callable[[dict], dict]",
+    updater: Callable[[dict], dict],
 ) -> bool:
     """Read-lock-modify-write-unlock S2 state atomically.
 
@@ -166,7 +210,7 @@ def update_s2_state(
 def _update_with_flock(
     state_path: Path,
     pact_dir: Path,
-    updater: "callable[[dict], dict]",
+    updater: Callable[[dict], dict],
 ) -> bool:
     """Update with fcntl.flock on a sentinel lock file + atomic rename.
 
@@ -220,7 +264,7 @@ def _update_with_flock(
 def _update_without_flock(
     state_path: Path,
     pact_dir: Path,
-    updater: "callable[[dict], dict]",
+    updater: Callable[[dict], dict],
 ) -> bool:
     """Fallback update without file locking (non-POSIX systems)."""
     # Read
@@ -272,6 +316,18 @@ def resolve_convention(conventions: list, key: str) -> str | None:
     return result
 
 
+def _normalize_scope(path: str) -> str:
+    """Ensure a scope path ends with '/' for safe prefix matching.
+
+    Without trailing-slash normalization, 'src/server' would match
+    'src/server_backup/foo.py' via bare startswith(). Appending '/'
+    ensures only true subdirectory relationships match.
+    """
+    if path and not path.endswith("/"):
+        return path + "/"
+    return path
+
+
 def check_boundary_overlap(boundaries: dict) -> list[dict]:
     """Check all boundary pairs for overlapping 'owns' scopes.
 
@@ -286,8 +342,8 @@ def check_boundary_overlap(boundaries: dict) -> list[dict]:
 
     for i, agent_a in enumerate(agents):
         for agent_b in agents[i + 1:]:
-            owns_a = set(boundaries[agent_a].get("owns", []))
-            owns_b = set(boundaries[agent_b].get("owns", []))
+            owns_a = {_normalize_scope(p) for p in boundaries[agent_a].get("owns", [])}
+            owns_b = {_normalize_scope(p) for p in boundaries[agent_b].get("owns", [])}
 
             # Check if any owned path is a prefix of the other or identical
             shared = set()
@@ -309,10 +365,11 @@ def check_boundary_overlap(boundaries: dict) -> list[dict]:
 def file_in_scope(file_path: str, scope_paths: list[str]) -> bool:
     """Check if a file path falls within any of the given scope paths.
 
-    Scope paths are directory prefixes ending with '/'. A file is in scope
-    if its path starts with any scope path.
+    Scope paths are directory prefixes. Paths are normalized to end with '/'
+    before matching to prevent false positives (e.g., 'src/server' matching
+    'src/server_backup/foo.py').
     """
     for scope_path in scope_paths:
-        if file_path.startswith(scope_path):
+        if file_path.startswith(_normalize_scope(scope_path)):
             return True
     return False

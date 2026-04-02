@@ -22,7 +22,6 @@ Output: JSON with systemMessage warning if overlap detected, suppressOutput othe
 
 import json
 import os
-import subprocess
 import sys
 import time
 
@@ -32,29 +31,9 @@ if _hooks_dir not in sys.path:
     sys.path.insert(0, _hooks_dir)
 
 from shared.error_output import hook_error_json
-from shared.s2_state import read_s2_state, check_boundary_overlap
+from shared.s2_state import read_s2_state, check_boundary_overlap, _discover_worktree_path
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-
-def _discover_worktree_path() -> str | None:
-    """Discover the worktree root path.
-
-    Uses git rev-parse --show-toplevel as the discovery mechanism.
-    Returns None if not in a git repository or on error.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-    return None
 
 
 def _extract_agent_name(tool_input: dict) -> str | None:
