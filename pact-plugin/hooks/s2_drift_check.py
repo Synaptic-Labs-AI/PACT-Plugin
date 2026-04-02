@@ -61,10 +61,10 @@ def _discover_worktree_path() -> str | None:
 def _get_current_agent() -> str:
     """Get the current agent's name from the environment.
 
-    Claude Code sets CLAUDE_AGENT_NAME for teammate agents.
+    Claude Code sets CLAUDE_CODE_AGENT_NAME for teammate agents.
     Falls back to 'unknown' if not available.
     """
-    return os.environ.get("CLAUDE_AGENT_NAME", "unknown")
+    return os.environ.get("CLAUDE_CODE_AGENT_NAME", "unknown")
 
 
 def _make_relative_path(file_path: str, worktree_path: str) -> str:
