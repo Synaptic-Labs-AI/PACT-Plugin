@@ -485,9 +485,41 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Output**: Silent if no conflicts; only mention if conflicts found (e.g., `S2 check: types.ts shared — backend writes, frontend reads`).
 
-**Include in prompts for concurrent specialists**: "You are working concurrently with other specialists. Your scope is [files]. Do not modify files outside your scope."
+#### Seed S2 State File
 
-**Persist `s2_boundaries` and `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}, "established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
+**Before dispatching agents**, write S2 coordination state to `<worktree>/.pact/s2-state.json`. This replaces injecting boundary details into each agent's prompt — agents read the file directly at startup via the agent-teams skill.
+
+Write the file using this JSON structure:
+
+```json
+{
+  "version": 1,
+  "session_team": "{team_name}",
+  "worktree": "{worktree_path}",
+  "created_at": "{ISO 8601 timestamp}",
+  "last_updated": "{ISO 8601 timestamp}",
+  "created_by": "orchestrate",
+  "boundaries": {
+    "{agent-name}": {
+      "owns": ["{directory-prefix}/"],
+      "reads": ["{directory-prefix}/"]
+    }
+  },
+  "conventions": [],
+  "scope_claims": {},
+  "drift_alerts": []
+}
+```
+
+**Rules**:
+- Directory prefixes in `boundaries.*.owns` and `boundaries.*.reads` MUST end with `/`
+- Use `Bash` to write the file (e.g., `cat > <worktree>/.pact/s2-state.json << 'EOF'`)
+- The `.pact/` directory should already exist from worktree setup; create it if not: `mkdir -p <worktree>/.pact`
+- **Still persist to task metadata**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {...}})` for compaction recovery
+
+**Include in agent task descriptions**: Reference the S2 state file instead of embedding boundary details:
+- "S2 coordination state is at `<worktree>/.pact/s2-state.json`. Read it at startup per the agent-teams skill."
+- Still include worktree path: "You are working in a git worktree at [worktree_path]."
 
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
 

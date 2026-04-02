@@ -120,11 +120,36 @@ Before invoking multiple specialists concurrently, perform this coordination che
 
 3. **Set boundaries**
    - Clearly state which sub-task handles which files/components
-   - Include this in each specialist's prompt
 
-4. **Environment drift** — When dispatching subsequent agents after earlier ones complete, check `file-edits.json` for modified files and include deltas in prompts (see [pact-s2-coordination.md](../protocols/pact-s2-coordination.md#environment-drift-detection))
+4. **Seed S2 state file** — Write boundaries to `<worktree>/.pact/s2-state.json` before dispatch. Agents read this file at startup instead of receiving boundary details in their prompts.
 
-5. **Persist `s2_boundaries` and `established_conventions`** — `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {...}, "established_conventions": {...}})`
+   ```json
+   {
+     "version": 1,
+     "session_team": "{team_name}",
+     "worktree": "{worktree_path}",
+     "created_at": "{ISO 8601 timestamp}",
+     "last_updated": "{ISO 8601 timestamp}",
+     "created_by": "comPACT",
+     "boundaries": {
+       "{agent-name}": {
+         "owns": ["{directory-prefix}/"],
+         "reads": ["{directory-prefix}/"]
+       }
+     },
+     "conventions": [],
+     "scope_claims": {},
+     "drift_alerts": []
+   }
+   ```
+
+   Use `Bash` to write the file (e.g., `cat > <worktree>/.pact/s2-state.json << 'EOF'`). The `.pact/` directory should already exist from worktree setup; create it if not: `mkdir -p <worktree>/.pact`.
+
+   Include in agent task descriptions: "S2 coordination state is at `<worktree>/.pact/s2-state.json`. Read it at startup per the agent-teams skill."
+
+5. **Environment drift** — When dispatching subsequent agents after earlier ones complete, check `file-edits.json` for modified files and include deltas in prompts (see [pact-s2-coordination.md](../protocols/pact-s2-coordination.md#environment-drift-detection))
+
+6. **Persist to task metadata** — `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {...}, "established_conventions": {...}})` for compaction recovery
 
 **If conflicts cannot be resolved**: Sequence the work instead of dispatching concurrently.
 
