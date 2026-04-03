@@ -380,10 +380,12 @@ class TestMainEntryPoint:
         assert call_args.kwargs["project_slug"] == "my-project"
 
     def test_main_call_ordering(self):
-        """main() must call write_session_snapshot -> check_unpaused_pr in order.
+        """main() must call functions in correct order:
+        write_session_snapshot -> check_unpaused_pr -> cleanup_teachback_markers
+        -> cleanup_old_sessions.
 
         Ordering is critical: snapshot creates the file, check_unpaused_pr
-        appends to it.
+        appends to it. Cleanup runs last.
         """
         from session_end import main
 
@@ -397,13 +399,19 @@ class TestMainEntryPoint:
              patch("session_end.write_session_snapshot",
                    side_effect=lambda **kw: call_order.append("write_session_snapshot")), \
              patch("session_end.check_unpaused_pr",
-                   side_effect=lambda **kw: call_order.append("check_unpaused_pr")):
+                   side_effect=lambda **kw: call_order.append("check_unpaused_pr")), \
+             patch("session_end.cleanup_teachback_markers",
+                   side_effect=lambda **kw: call_order.append("cleanup_teachback_markers")), \
+             patch("session_end.cleanup_old_sessions",
+                   side_effect=lambda **kw: call_order.append("cleanup_old_sessions")):
             with pytest.raises(SystemExit):
                 main()
 
         assert call_order == [
             "write_session_snapshot",
             "check_unpaused_pr",
+            "cleanup_teachback_markers",
+            "cleanup_old_sessions",
         ]
 
 
@@ -866,4 +874,247 @@ class TestSessionEndFilePermissions:
         file_mode = stat.S_IMODE(snapshot.stat().st_mode)
         assert file_mode == 0o600, (
             f"Snapshot file should have mode 0o600 after append, got {oct(file_mode)}"
+        )
+
+
+# =============================================================================
+# cleanup_teachback_markers() Tests
+# =============================================================================
+
+class TestCleanupTeachbackMarkers:
+    """Tests for session_end.cleanup_teachback_markers() — session-scoped cleanup."""
+
+    def _create_markers(self, directory, names):
+        """Helper: create teachback marker files in a directory."""
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (directory / name).touch()
+
+    def test_cleans_session_scoped_markers(self, tmp_path):
+        """Should remove teachback-warned-* files from session_dir."""
+        from session_end import cleanup_teachback_markers
+
+        session_dir = tmp_path / "my-project" / "abc-123"
+        self._create_markers(session_dir, [
+            "teachback-warned-coder-1-42",
+            "teachback-warned-coder-2-7",
+        ])
+
+        cleanup_teachback_markers(
+            project_slug="my-project",
+            session_dir=str(session_dir),
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not list(session_dir.glob("teachback-warned-*"))
+
+    def test_cleans_legacy_slug_level_markers(self, tmp_path):
+        """Should sweep orphaned teachback markers at slug level (migration)."""
+        from session_end import cleanup_teachback_markers
+
+        slug_dir = tmp_path / "my-project"
+        self._create_markers(slug_dir, [
+            "teachback-warned-old-agent-1",
+        ])
+
+        cleanup_teachback_markers(
+            project_slug="my-project",
+            session_dir=None,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not list(slug_dir.glob("teachback-warned-*"))
+
+    def test_preserves_non_marker_files(self, tmp_path):
+        """Should not delete non-marker files (last-session.md, paused-state.json)."""
+        from session_end import cleanup_teachback_markers
+
+        slug_dir = tmp_path / "my-project"
+        slug_dir.mkdir(parents=True)
+        (slug_dir / "last-session.md").write_text("# Session")
+        (slug_dir / "paused-state.json").write_text("{}")
+        self._create_markers(slug_dir, ["teachback-warned-agent-1"])
+
+        cleanup_teachback_markers(
+            project_slug="my-project",
+            session_dir=None,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert (slug_dir / "last-session.md").exists()
+        assert (slug_dir / "paused-state.json").exists()
+        assert not (slug_dir / "teachback-warned-agent-1").exists()
+
+    def test_skips_when_no_project_slug(self, tmp_path):
+        from session_end import cleanup_teachback_markers
+
+        # Should not raise
+        cleanup_teachback_markers(
+            project_slug="",
+            session_dir=None,
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_handles_missing_directories(self, tmp_path):
+        from session_end import cleanup_teachback_markers
+
+        # Should not raise even if directories don't exist
+        cleanup_teachback_markers(
+            project_slug="nonexistent",
+            session_dir=str(tmp_path / "missing" / "session"),
+            sessions_dir=str(tmp_path),
+        )
+
+
+# =============================================================================
+# cleanup_old_sessions() Tests
+# =============================================================================
+
+class TestCleanupOldSessions:
+    """Tests for session_end.cleanup_old_sessions() — stale session directory removal."""
+
+    def _create_session_dir(self, slug_dir, session_id, age_days=0):
+        """Helper: create a session directory with controlled mtime."""
+        import time as _time
+        session_dir = slug_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        # Write a file so the directory has content
+        (session_dir / "pact-session-context.json").write_text("{}")
+        if age_days > 0:
+            old_time = _time.time() - (age_days * 86400)
+            import os as _os
+            _os.utime(str(session_dir), (old_time, old_time))
+        return session_dir
+
+    def test_removes_old_session_directories(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        old_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        self._create_session_dir(slug_dir, old_id, age_days=10)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        assert (slug_dir / current_id).exists()
+        assert not (slug_dir / old_id).exists()
+
+    def test_skips_current_session(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        self._create_session_dir(slug_dir, current_id, age_days=30)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        # Current session must survive even if older than threshold
+        assert (slug_dir / current_id).exists()
+
+    def test_skips_non_uuid_directories(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        slug_dir.mkdir(parents=True)
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Create a non-UUID directory
+        non_uuid_dir = slug_dir / "not-a-uuid"
+        non_uuid_dir.mkdir()
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        assert non_uuid_dir.exists()
+
+    def test_skips_files_at_slug_level(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        slug_dir.mkdir(parents=True)
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        # Create slug-level files
+        (slug_dir / "last-session.md").write_text("# Session")
+        (slug_dir / "paused-state.json").write_text("{}")
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        assert (slug_dir / "last-session.md").exists()
+        assert (slug_dir / "paused-state.json").exists()
+
+    def test_keeps_recent_sessions(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        recent_id = "22222222-3333-4444-5555-666666666666"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        self._create_session_dir(slug_dir, recent_id, age_days=3)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        assert (slug_dir / recent_id).exists()
+
+    def test_handles_missing_slug_directory(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        # Should not raise
+        cleanup_old_sessions(
+            project_slug="nonexistent",
+            current_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+    def test_skips_when_no_project_slug(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        # Should not raise
+        cleanup_old_sessions(
+            project_slug="",
+            current_session_id="abc",
+            sessions_dir=str(tmp_path),
+        )
+
+    def test_skips_when_no_current_session_id(self, tmp_path):
+        from session_end import cleanup_old_sessions
+
+        # Should not raise
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id="",
+            sessions_dir=str(tmp_path),
         )
