@@ -307,23 +307,21 @@ def main():
     pact_context.init(input_data)
     task_id = input_data.get("task_id", "")
     task_subject = input_data.get("task_subject", "")
-    teammate_name = input_data.get("teammate_name")
     team_name = (input_data.get("team_name") or get_team_name()).lower()
 
-    # Fallback: if platform didn't provide teammate_name (e.g., orchestrator
-    # completed the task on behalf of an agent), read from the task file's
-    # owner field so validation and breadcrumb writing still fire.
-    if not teammate_name:
-        teammate_name = read_task_owner(task_id, team_name)
+    # Read task file once — used for both owner resolution and metadata.
+    task_data = _read_task_json(task_id, team_name)
 
-    # Still no teammate_name after fallback → genuine non-agent completion.
-    # Exit early: no validation, no breadcrumb needed.
+    # Owner field (set during dispatch) is the authoritative teammate identity.
+    # Platform-provided teammate_name is fallback for tasks without an owner.
+    teammate_name = task_data.get("owner") or input_data.get("teammate_name")
+
+    # No teammate after both sources → genuine non-agent completion.
     if not teammate_name:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    # TaskCompleted input doesn't include metadata — read from task file
-    task_metadata = read_task_metadata(task_id, team_name)
+    task_metadata = task_data.get("metadata", {})
 
     error = validate_task_handoff(
         task_subject=task_subject,

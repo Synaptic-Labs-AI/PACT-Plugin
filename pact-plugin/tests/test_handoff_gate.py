@@ -501,8 +501,8 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -519,7 +519,7 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={}), \
+        with patch("handoff_gate._read_task_json", return_value={}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -545,7 +545,7 @@ class TestMainEntryPoint:
             "task_subject": "Feature: auth",
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={}), \
+        with patch("handoff_gate._read_task_json", return_value={}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -563,7 +563,8 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={"handoff": VALID_HANDOFF}), \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -587,8 +588,8 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -609,7 +610,7 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={}), \
+        with patch("handoff_gate._read_task_json", return_value={}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -632,45 +633,44 @@ class TestMainEntryPoint:
             # No team_name in input
         })
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        with patch("handoff_gate.read_task_metadata", return_value=metadata) as mock_read, \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data) as mock_read, \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        # Verify read_task_metadata was called with context file team name
-        # get_team_name() already returns lowercased, .lower() in source is a no-op
+        # Verify _read_task_json was called with context file team name
         mock_read.assert_called_once_with("1", "pact-from-context")
 
-    def test_main_falls_back_to_task_owner_when_no_teammate_name(self, capsys):
-        """When platform omits teammate_name, fall back to task file's owner field."""
+    def test_main_uses_task_owner_as_primary_teammate(self, capsys):
+        """Task file owner is primary; platform teammate_name is ignored when owner exists."""
         from handoff_gate import main
 
         input_data = json.dumps({
             "task_id": "1",
             "task_subject": "CODE: auth",
-            # No teammate_name — simulates orchestrator completing on behalf of agent
+            "teammate_name": "platform-name",
             "team_name": "pact-test"
         })
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
-             patch("handoff_gate.read_task_owner", return_value="backend-coder") as mock_owner, \
+        task_data = {
+            "owner": "task-owner",
+            "metadata": {"handoff": VALID_HANDOFF, "memory_saved": True},
+        }
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
              patch("handoff_gate.append_pending_handoff") as mock_append, \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        # Verify owner fallback was called
-        mock_owner.assert_called_once_with("1", "pact-test")
-        # Verify breadcrumb used the fallback teammate_name
+        # Breadcrumb uses task owner, not platform teammate_name
         mock_append.assert_called_once()
-        assert mock_append.call_args[0][1] == "backend-coder"
+        assert mock_append.call_args[0][1] == "task-owner"
 
-    def test_main_no_fallback_when_teammate_name_present(self, capsys):
-        """When teammate_name is provided, read_task_owner is NOT called."""
+    def test_main_falls_back_to_platform_teammate_when_no_owner(self, capsys):
+        """No owner in task file -> platform teammate_name used as fallback."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -680,18 +680,20 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
-             patch("handoff_gate.read_task_owner") as mock_owner, \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_pending_handoff") as mock_append, \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        mock_owner.assert_not_called()
+        # Breadcrumb uses platform teammate_name as fallback
+        mock_append.assert_called_once()
+        assert mock_append.call_args[0][1] == "backend-coder"
 
-    def test_main_bypasses_when_no_teammate_and_no_owner(self):
-        """No teammate_name + no owner in task file → bypass (non-agent task)."""
+    def test_main_bypasses_when_no_owner_and_no_teammate(self):
+        """No owner + no teammate_name → genuine non-agent task, exit 0."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -700,8 +702,7 @@ class TestMainEntryPoint:
             "team_name": "pact-test"
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={}), \
-             patch("handoff_gate.read_task_owner", return_value=None), \
+        with patch("handoff_gate._read_task_json", return_value={}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1553,7 +1554,7 @@ class TestEnrichedCascadeIntegration:
         from handoff_gate import main
 
         teams_dir = make_teams_dir(tmp_path)
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
 
         for _ in range(3):
             input_data = json.dumps({
@@ -1562,7 +1563,7 @@ class TestEnrichedCascadeIntegration:
                 "teammate_name": "backend-coder",
                 "team_name": "pact-test"
             })
-            with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+            with patch("handoff_gate._read_task_json", return_value=task_data), \
                  patch("handoff_gate.Path.home", return_value=tmp_path), \
                  patch("sys.stdin", io.StringIO(input_data)):
                 with pytest.raises(SystemExit) as exc_info:
@@ -1596,10 +1597,10 @@ class TestEnrichedCascadeIntegration:
                 "integration": [],
                 "open_questions": [],
             }
-            metadata = {"handoff": handoff, "memory_saved": True}
+            task_data = {"metadata": {"handoff": handoff, "memory_saved": True}}
             input_data = json.dumps({**task_info, "team_name": "pact-test"})
 
-            with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+            with patch("handoff_gate._read_task_json", return_value=task_data), \
                  patch("handoff_gate.Path.home", return_value=tmp_path), \
                  patch("sys.stdin", io.StringIO(input_data)):
                 with pytest.raises(SystemExit) as exc_info:
@@ -1700,8 +1701,8 @@ class TestMainBreadcrumbIntegration:
             "team_name": "pact-test"
         })
 
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
              patch("handoff_gate.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -1731,7 +1732,7 @@ class TestMainBreadcrumbIntegration:
             "team_name": "pact-test"
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={}), \
+        with patch("handoff_gate._read_task_json", return_value={}), \
              patch("handoff_gate.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -1752,8 +1753,8 @@ class TestMainBreadcrumbIntegration:
             "team_name": "pact-test"
         })
 
-        metadata = {"handoff": VALID_HANDOFF}  # no memory_saved
-        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+        task_data = {"metadata": {"handoff": VALID_HANDOFF}}  # no memory_saved
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
              patch("handoff_gate.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -1763,7 +1764,7 @@ class TestMainBreadcrumbIntegration:
         assert not breadcrumb_path(teams_dir).exists()
 
     def test_no_breadcrumb_for_non_agent_tasks(self, tmp_path):
-        """P1: No teammate_name -> exit 0, no breadcrumb file."""
+        """P1: No owner + no teammate_name -> exit 0, no breadcrumb file."""
         from handoff_gate import main
 
         teams_dir = make_teams_dir(tmp_path)
@@ -1774,7 +1775,7 @@ class TestMainBreadcrumbIntegration:
             # No teammate_name
         })
 
-        with patch("handoff_gate.read_task_metadata", return_value={}), \
+        with patch("handoff_gate._read_task_json", return_value={}), \
              patch("handoff_gate.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
@@ -1849,7 +1850,7 @@ class TestDedupCascadeScenario:
         from handoff_gate import main
 
         teams_dir = make_teams_dir(tmp_path)
-        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
 
         for _ in range(3):  # Simulate 3 cascade firings
             input_data = json.dumps({
@@ -1858,7 +1859,7 @@ class TestDedupCascadeScenario:
                 "teammate_name": "backend-coder",
                 "team_name": "pact-test"
             })
-            with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+            with patch("handoff_gate._read_task_json", return_value=task_data), \
                  patch("handoff_gate.Path.home", return_value=tmp_path), \
                  patch("sys.stdin", io.StringIO(input_data)):
                 with pytest.raises(SystemExit) as exc_info:
