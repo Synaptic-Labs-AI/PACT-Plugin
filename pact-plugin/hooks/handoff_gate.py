@@ -197,7 +197,7 @@ def append_pending_handoff(
     0o600 permissions for concurrent safety and security.
 
     When task_metadata is provided, the entry is enriched with the full HANDOFF
-    content and task_subject. This makes the breadcrumb GC-proof — the secretary
+    content and task_subject. This makes the breadcrumb garbage collection (GC)-proof — the secretary
     can read HANDOFFs directly from the breadcrumb without needing TaskGet (which
     fails for GC'd tasks). Old-format entries (without handoff) remain valid;
     the secretary falls back to TaskGet for those.
