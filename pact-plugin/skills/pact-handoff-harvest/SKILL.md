@@ -31,7 +31,7 @@ When reviewing multiple HANDOFFs, read ALL of them (using the Step 3 priority ca
 You have two complementary sources for finding completed agent tasks:
 
 1. **TaskList** (primary): Read TaskList for all completed tasks owned by agents. This is authoritative — it reflects the current state of every task regardless of hook behavior.
-2. **Breadcrumb file** (supplementary + GC-proof): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. Each line contains at minimum `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Enriched entries (written by handoff_gate v3.16+) also include `"handoff": {...}` and `"task_subject": "..."` inline — these are **garbage collection (GC)-proof** and should be preferred over TaskGet when available. Provides temporal ordering and serves as a cross-reference. May not exist (already processed or hooks didn't fire). **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
+2. **Breadcrumb file** (supplementary + GC-proof): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. Each line contains at minimum `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Enriched entries also include `"handoff": {...}` and `"task_subject": "..."` inline — these are **garbage collection (GC)-proof** and should be preferred over TaskGet when available. Provides temporal ordering and serves as a cross-reference. May not exist (already processed or hooks didn't fire). **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
 
 If neither TaskList has completed agent tasks nor the breadcrumb file exists, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
 
@@ -44,7 +44,7 @@ Read your processed task list from agent memory (`~/.claude/agent-memory/pact-se
 For each discovered task, read the HANDOFF using this priority order:
 
 1. **Breadcrumb inline** (preferred, GC-proof): If the breadcrumb entry has a `handoff` key, use it directly — this content was captured at completion time and survives platform task GC.
-2. **TaskGet fallback** (legacy): If the breadcrumb entry has only `task_id` (old format, pre-v3.16), fall back to `TaskGet(taskId).metadata.handoff`. This may fail for GC'd tasks.
+2. **TaskGet fallback** (legacy): If the breadcrumb entry has only `task_id` (old format, no `handoff` key), fall back to `TaskGet(taskId).metadata.handoff`. This may fail for GC'd tasks.
 3. **Report gap**: If both sources fail (old-format breadcrumb + GC'd task), report the gap to lead — note the task_id, teammate_name, and timestamp from the breadcrumb so the lead has context.
 
 Read all HANDOFFs before proceeding to extraction. When logging or reporting, note the source (breadcrumb vs TaskGet) to help track migration progress from old-format to enriched breadcrumbs.
