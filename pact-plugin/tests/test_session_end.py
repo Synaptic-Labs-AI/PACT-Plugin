@@ -965,6 +965,47 @@ class TestCleanupTeachbackMarkers:
             sessions_dir=str(tmp_path),
         )
 
+    def test_continues_when_single_unlink_fails(self, tmp_path):
+        """If one marker file can't be deleted, sweep should continue to others.
+
+        Exercises the inner `except OSError: pass` in _sweep_teachback_markers()
+        (session_end.py ~line 275). A read-only marker should not prevent
+        cleanup of subsequent markers in the same directory.
+        """
+        from session_end import _sweep_teachback_markers
+
+        directory = tmp_path / "session-dir"
+        directory.mkdir()
+
+        # Create three marker files
+        marker_a = directory / "teachback-warned-agent-a-1"
+        marker_b = directory / "teachback-warned-agent-b-2"
+        marker_c = directory / "teachback-warned-agent-c-3"
+        marker_a.touch()
+        marker_b.touch()
+        marker_c.touch()
+
+        # Make marker_b read-only so unlink() raises PermissionError (OSError)
+        marker_b.chmod(0o444)
+        # Also make the parent dir read-only to prevent unlink on that file
+        # (on some systems, unlink requires write permission on parent dir)
+        # Instead, mock unlink for just that file to guarantee the OSError
+        original_unlink = Path.unlink
+
+        def selective_unlink(self_path, *args, **kwargs):
+            if self_path.name == "teachback-warned-agent-b-2":
+                raise OSError("Permission denied (simulated)")
+            return original_unlink(self_path, *args, **kwargs)
+
+        from unittest.mock import patch
+        with patch.object(Path, "unlink", selective_unlink):
+            _sweep_teachback_markers(directory)
+
+        # marker_a and marker_c should be deleted; marker_b should survive
+        assert not marker_a.exists(), "marker_a should have been deleted"
+        assert marker_b.exists(), "marker_b should survive (unlink failed)"
+        assert not marker_c.exists(), "marker_c should have been deleted"
+
 
 # =============================================================================
 # cleanup_old_sessions() Tests

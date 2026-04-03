@@ -91,7 +91,8 @@ def _get_marker_path(
         return Path(session_dir) / marker_name
 
     # Fallback: no session context available — use bare pact-sessions root.
-    # Markers here are orphaned but harmless; cleanup sweeps handle them.
+    # Markers here are orphaned; cleanup sweeps only cover slug-level and
+    # session-scoped dirs, so root-level markers persist until manual removal.
     return Path.home() / ".claude" / "pact-sessions" / marker_name
 
 

@@ -1826,12 +1826,11 @@ class TestGetSessionDirAdversarial:
         """Trailing slash in project_dir should not affect slug extraction."""
         from shared.pact_context import get_session_dir
 
-        # Path("foo/bar/").name returns "bar" in Python — verify
+        # Path("foo/bar/").name returns "bar" in Python — trailing slash is stripped
         pact_context(session_id="abc", project_dir="/Users/dev/my-app/")
 
         result = get_session_dir()
-        # Path("my-app/").name == "my-app" — trailing slash is handled
-        assert "my-app" in result or result == ""  # depends on Path behavior
+        assert result.endswith("pact-sessions/my-app/abc")
 
     def test_returns_string_not_path(self, pact_context):
         """get_session_dir() should return a str, not a Path object."""

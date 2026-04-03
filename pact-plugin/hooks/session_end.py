@@ -19,10 +19,10 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
+import os
 import re
 import shutil
 import sys
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,10 +179,10 @@ def check_unpaused_pr(
     if sessions_dir is None:
         sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
 
-    session_dir = Path(sessions_dir) / project_slug
+    slug_dir = Path(sessions_dir) / project_slug
 
     # If paused-state.json exists, consolidation already happened — no warning
-    if (session_dir / "paused-state.json").exists():
+    if (slug_dir / "paused-state.json").exists():
         return
 
     # Scan task metadata for open PR indicators
@@ -209,7 +209,7 @@ def check_unpaused_pr(
         return
 
     # Append warning to existing snapshot
-    snapshot_file = session_dir / "last-session.md"
+    snapshot_file = slug_dir / "last-session.md"
     if not snapshot_file.exists():
         return
 

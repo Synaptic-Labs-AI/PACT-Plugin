@@ -38,6 +38,17 @@ _EMPTY_CONTEXT = {
 }
 
 
+def _build_session_path(slug: str, session_id: str) -> Path:
+    """Build the session-scoped directory path.
+
+    Canonical path: ~/.claude/pact-sessions/{slug}/{session_id}/
+
+    Used by init(), get_session_dir(), and write_context() to avoid
+    duplicating path construction logic.
+    """
+    return Path.home() / ".claude" / "pact-sessions" / slug / session_id
+
+
 def _get_context_file_path() -> Path | None:
     """Return the session-scoped context file path, or None if init() not called.
 
@@ -84,8 +95,7 @@ def init(input_data: dict) -> None:
     if session_id and project_dir:
         slug = Path(project_dir).name
         _context_path = (
-            Path.home() / ".claude" / "pact-sessions"
-            / slug / session_id / "pact-session-context.json"
+            _build_session_path(slug, session_id) / "pact-session-context.json"
         )
         # Clear cache so subsequent reads use the new path
         _cache = None
@@ -165,9 +175,7 @@ def get_session_dir() -> str:
     if not session_id or not project_dir:
         return ""
     slug = Path(project_dir).name
-    return str(
-        Path.home() / ".claude" / "pact-sessions" / slug / session_id
-    )
+    return str(_build_session_path(slug, session_id))
 
 
 def resolve_agent_name(
@@ -311,8 +319,7 @@ def write_context(
     elif session_id and project_dir:
         slug = Path(project_dir).name
         target = (
-            Path.home() / ".claude" / "pact-sessions"
-            / slug / session_id / "pact-session-context.json"
+            _build_session_path(slug, session_id) / "pact-session-context.json"
         )
     else:
         # Cannot compute session-scoped path — skip writing.
