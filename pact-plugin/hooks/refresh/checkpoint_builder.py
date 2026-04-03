@@ -174,7 +174,8 @@ def get_encoded_project_path(transcript_path: str) -> str:
         projects_idx = parts.index("projects")
         return parts[projects_idx + 1]
     except (ValueError, IndexError):
-        # Fall back to deriving from project dir
+        # Direct env var read: Claude Code folder encoding, not session context
+        # (see pact_context.py for session context)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         if project_dir:
             return project_dir.replace("/", "-")

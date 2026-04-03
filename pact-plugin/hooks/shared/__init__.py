@@ -46,7 +46,6 @@ from .pact_context import (
     get_project_dir,
     resolve_agent_name,
     write_context,
-    init as pact_context_init,
 )
 
 __all__ = [
@@ -73,5 +72,4 @@ __all__ = [
     "get_project_dir",
     "resolve_agent_name",
     "write_context",
-    "pact_context_init",
 ]

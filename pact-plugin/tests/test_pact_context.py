@@ -44,71 +44,70 @@ write_context():
 --- Extended Coverage (Test Engineer) ---
 
 get_pact_context() edge cases:
-26. Returns empty strings when file is read-protected
+26. Returns empty strings when file is read-protected (+ logs to stderr)
 27. Returns empty strings when JSON is a non-dict type (e.g., list)
 28. Coerces non-string values to strings
 29. Caches error result (no repeated file reads on error)
-30. Logs to stderr on file read error
-31. Returns empty strings for empty JSON object
+30. Returns empty strings for empty JSON object
 
 get_team_name() edge cases:
-32. Does not transform other accessors (only team_name lowercased)
+31. Does not transform other accessors (only team_name lowercased)
 
 resolve_agent_name() edge cases:
-33. Skips empty string agent_name (falsy)
-34. Falls back when agent_id present but no team_name available
-35. Handles corrupt team config JSON gracefully
-36. Uses default team_name from context file when not provided
-37. Handles agent_id without agent_type (no fallback after failed lookup)
-38. Prefers agent_name over agent_id even when both present
+32. Skips empty string agent_name (falsy)
+33. Falls back when agent_id present but no team_name available
+34. Handles corrupt team config JSON gracefully
+35. Uses default team_name from context file when not provided
+36. Handles agent_id without agent_type (no fallback after failed lookup)
+37. Prefers agent_name over agent_id even when both present
 
 write_context() edge cases:
-39. Writes valid ISO 8601 timestamp in started_at
-40. Cleans up temp file on write failure
+38. Writes valid ISO 8601 timestamp in started_at
+39. Cleans up temp file on write failure
 
 Integration:
-41. write_context → get_pact_context round-trip
-42. write_context → get_team_name/get_session_id/get_project_dir round-trip
+40. write_context → get_pact_context round-trip
+41. write_context → get_team_name/get_session_id/get_project_dir round-trip
 
 Category C fallback (memory scripts — shared pact_session module):
-43. get_session_id_from_context_file returns session_id from session-scoped context file
-44. get_session_id_from_context_file returns empty string when file missing
-44b. get_session_id_from_context_file returns empty string with no args
-45. get_session_id_from_context_file returns empty string on invalid JSON
-46. _detect_session_id returns None without context (no env fallback)
-47. _get_embedding_attempted_path falls back to 'unknown' without context
+42. get_session_id_from_context_file returns session_id from session-scoped context file
+43. get_session_id_from_context_file returns empty string when file missing
+43b. get_session_id_from_context_file returns empty string with no args
+44. get_session_id_from_context_file returns empty string on invalid JSON
+45. _detect_session_id returns None without context (no env fallback)
+46. _get_embedding_attempted_path falls back to 'unknown' without context
 
 init():
-49. Second init() call is a no-op (idempotency guard)
-50. Missing session_id leaves _context_path as None (readers return empty context)
-50b. session_id present but CLAUDE_PROJECT_DIR absent leaves _context_path as None
+47. Second init() call is a no-op (idempotency guard)
+48. Missing session_id leaves _context_path as None (readers return empty context)
+48b. session_id present but CLAUDE_PROJECT_DIR absent leaves _context_path as None
 
 Additional write_context():
-51. Overwrites existing file
-52. No temp files left on success
+49. Overwrites existing file
+50. No temp files left on success
 
 Additional resolve_agent_name():
-53. agent_id found in config skips agent_type check
-54. member with missing name field returns empty string
+51. agent_id found in config skips agent_type check
+52. member with missing name field returns empty string
 
 Additional Category C:
-55. memory_api imports get_session_id_from_context_file from pact_session
-56. memory_init imports get_session_id_from_context_file from pact_session
-57. _get_embedding_attempted_path falls back to "unknown" when no context file
+53. memory_api imports get_session_id_from_context_file from pact_session
+54. memory_init imports get_session_id_from_context_file from pact_session
+55. _get_embedding_attempted_path falls back to "unknown" when no context file
 
 Additional write_context():
-59. Creates deeply nested parent directories
+56. Creates deeply nested parent directories
 
 Concurrent:
-60. Concurrent writes produce valid JSON
+57. Concurrent writes produce valid JSON
 
 Uninitialized accessors:
-60b. get_pact_context() returns _EMPTY_CONTEXT when _context_path is None
-60c. write_context() computes session-scoped path when _context_path is None
+57b. get_pact_context() returns _EMPTY_CONTEXT when _context_path is None
+57c. write_context() computes session-scoped path when _context_path is None
 
 Migration completeness (AST-based scanner — os.environ.get, os.getenv, os.environ[]):
-61-63. No hook runtime code reads phantom env vars (parametrized x3)
-64. No skill script runtime code reads phantom env vars (parametrized x3)
+58-60. No hook runtime code reads phantom env vars (parametrized x3)
+61-63. No skill script runtime code reads phantom env vars (parametrized x3)
 
 --- Fresh Review Tests ---
 
@@ -125,6 +124,12 @@ pact_session.py path:
 
 init()-before-reader ordering guard:
 69. (parametrized) Every hook that calls a pact_context reader calls init() first
+70. session_end.py: init() before get_project_slug() (indirect get_project_dir() call)
+73. teachback_check.py: init() before should_warn() (indirect _get_project_slug() → get_project_dir())
+
+Library module init() contract:
+71. task_utils.get_task_list() works when init() was called by a prior hook
+72. checkpoint_builder.get_session_id() works when init() was called by a prior hook
 """
 
 import json
@@ -1473,6 +1478,7 @@ class TestInitBeforeReaderOrdering:
         ("merge_guard_post.py", {"get_session_id"}),
         ("teammate_idle.py", {"get_team_name"}),
         ("teammate_completion_gate.py", {"get_team_name"}),
+        ("phase_completion.py", {"get_project_dir"}),
     ]
 
     @pytest.mark.parametrize(
@@ -1527,3 +1533,184 @@ class TestInitBeforeReaderOrdering:
                 f"{hook_file}: {reader_name}() at line {reader_line} "
                 f"appears before pact_context.init() at line {init_line}"
             )
+
+    def test_session_end_init_before_indirect_reader(self):
+        """session_end.py: init() must appear before get_project_slug() (which calls get_project_dir()).
+
+        session_end.py calls get_project_dir() indirectly through its
+        get_project_slug() wrapper. The parametrized test above only catches
+        direct reader calls, so this test verifies the indirect case.
+        """
+        import ast
+
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+        source = (hooks_dir / "session_end.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # Verify get_project_slug() calls get_project_dir()
+        slug_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "get_project_slug":
+                slug_func = node
+                break
+        assert slug_func is not None, "session_end.py has no get_project_slug() function"
+
+        calls_get_project_dir = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "get_project_dir"
+            for n in ast.walk(slug_func)
+        )
+        assert calls_get_project_dir, (
+            "session_end.py: get_project_slug() does not call get_project_dir()"
+        )
+
+        # Verify init() appears before get_project_slug() in main()
+        main_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "main":
+                main_func = node
+                break
+        assert main_func is not None, "session_end.py has no main() function"
+
+        init_line = None
+        slug_line = None
+        for node in ast.walk(main_func):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "init"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "pact_context"):
+                if init_line is None:
+                    init_line = node.lineno
+            if isinstance(func, ast.Name) and func.id == "get_project_slug":
+                if slug_line is None:
+                    slug_line = node.lineno
+
+        assert init_line is not None, (
+            "session_end.py: main() never calls pact_context.init()"
+        )
+        assert slug_line is not None, (
+            "session_end.py: main() never calls get_project_slug()"
+        )
+        assert init_line < slug_line, (
+            f"session_end.py: get_project_slug() at line {slug_line} "
+            f"appears before pact_context.init() at line {init_line}"
+        )
+
+    def test_teachback_check_init_before_indirect_reader(self):
+        """teachback_check.py: init() must appear before should_warn() (which calls _get_project_slug() → get_project_dir()).
+
+        teachback_check.py calls get_project_dir() indirectly through
+        _get_project_slug(), which is called from should_warn(). The
+        parametrized test covers the direct readers (get_team_name,
+        resolve_agent_name), so this test verifies the indirect case.
+        """
+        import ast
+
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+        source = (hooks_dir / "teachback_check.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # Verify _get_project_slug() calls get_project_dir()
+        slug_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_get_project_slug":
+                slug_func = node
+                break
+        assert slug_func is not None, "teachback_check.py has no _get_project_slug() function"
+
+        calls_get_project_dir = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "get_project_dir"
+            for n in ast.walk(slug_func)
+        )
+        assert calls_get_project_dir, (
+            "teachback_check.py: _get_project_slug() does not call get_project_dir()"
+        )
+
+        # Verify init() appears before should_warn() in main()
+        main_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "main":
+                main_func = node
+                break
+        assert main_func is not None, "teachback_check.py has no main() function"
+
+        init_line = None
+        warn_line = None
+        for node in ast.walk(main_func):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "init"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "pact_context"):
+                if init_line is None:
+                    init_line = node.lineno
+            if isinstance(func, ast.Name) and func.id == "should_warn":
+                if warn_line is None:
+                    warn_line = node.lineno
+
+        assert init_line is not None, (
+            "teachback_check.py: main() never calls pact_context.init()"
+        )
+        assert warn_line is not None, (
+            "teachback_check.py: main() never calls should_warn()"
+        )
+        assert init_line < warn_line, (
+            f"teachback_check.py: should_warn() at line {warn_line} "
+            f"appears before pact_context.init() at line {init_line}"
+        )
+
+
+class TestLibraryModuleInitContract:
+    """Verify library modules that call pact_context readers work when init() was called first.
+
+    task_utils.py and checkpoint_builder.py call pact_context readers (get_session_id)
+    without calling init() themselves — they rely on the calling hook to have initialized
+    the module. These tests verify the transitive contract works correctly.
+    """
+
+    def test_task_utils_get_task_list_after_init(self, pact_context, monkeypatch, tmp_path):
+        """task_utils.get_task_list() should read session_id via get_session_id() after init()."""
+        from shared.task_utils import get_task_list
+
+        session_id = "contract-test-session"
+        pact_context(session_id=session_id)
+
+        # Create a task file at the expected path so get_task_list finds it
+        tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+        tasks_dir.mkdir(parents=True)
+        task_file = tasks_dir / "1.json"
+        task_file.write_text(json.dumps({
+            "id": "1",
+            "subject": "test task",
+            "status": "pending",
+        }), encoding="utf-8")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Ensure CLAUDE_CODE_TASK_LIST_ID doesn't override
+        monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
+
+        result = get_task_list()
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["subject"] == "test task"
+
+    def test_checkpoint_builder_session_id_dependency_after_init(self, pact_context):
+        """checkpoint_builder depends on shared.pact_context.get_session_id after init().
+
+        checkpoint_builder.py imports get_session_id as _pact_get_session_id and
+        wraps it: `_pact_get_session_id() or "unknown"`. This test verifies the
+        underlying dependency returns the correct value when init() was called
+        by a prior hook. (checkpoint_builder can't be imported directly in tests
+        due to relative imports from the refresh package.)
+        """
+        from shared.pact_context import get_session_id
+
+        pact_context(session_id="builder-session-xyz")
+
+        result = get_session_id()
+
+        assert result == "builder-session-xyz"
