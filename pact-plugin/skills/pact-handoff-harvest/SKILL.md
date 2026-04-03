@@ -30,7 +30,7 @@ When reviewing multiple HANDOFFs, read ALL of them (prefer breadcrumb inline con
 
 You have two complementary sources for finding completed agent tasks:
 
-1. **Breadcrumb file** (primary): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. This is the **primary source** for both discovery and HANDOFF content. Each line contains at minimum `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Enriched entries also include `"handoff": {...}` and `"task_subject": "..."` inline — these are **garbage collection (GC)-proof** and survive platform task file cleanup. **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
+1. **Breadcrumb file** (primary): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. This is the **primary source** for both discovery and HANDOFF content. Each line contains at minimum `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Enriched entries also include `"handoff": {...}` and `"task_subject": "..."` inline — these are **garbage-collection-proof** and survive platform task file cleanup. **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
 2. **`TaskList`** (supplementary): Read `TaskList` for completed tasks owned by agents. Useful as a cross-reference and for catching tasks where the breadcrumb hook didn't fire. Note: the platform garbage-collects older task files during long sessions, so `TaskList` may be incomplete — tasks that completed early in the session may no longer appear.
 
 If neither the breadcrumb file exists nor `TaskList` has completed agent tasks, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
@@ -43,9 +43,9 @@ Read your processed task list from agent memory (`~/.claude/agent-memory/pact-se
 
 For each discovered task, read the HANDOFF using this priority order:
 
-1. **Breadcrumb inline** (preferred, GC-proof): If the breadcrumb entry has a `handoff` key, use it directly — this content was captured at completion time and survives platform task GC.
-2. **`TaskGet` fallback** (legacy): If the breadcrumb entry has only `task_id` (old format, no `handoff` key), fall back to `TaskGet(taskId).metadata.handoff`. This may fail for GC'd tasks — the platform deletes older task files during long sessions.
-3. **Report gap**: If both sources fail (old-format breadcrumb + GC'd task), report the gap to lead — note the task_id, teammate_name, and timestamp from the breadcrumb so the lead has context.
+1. **Breadcrumb inline** (preferred, garbage-collection-proof): If the breadcrumb entry has a `handoff` key, use it directly — this content was captured at completion time and survives platform task garbage collection.
+2. **`TaskGet` fallback** (legacy): If the breadcrumb entry has only `task_id` (old format, no `handoff` key), fall back to `TaskGet(taskId).metadata.handoff`. This may fail for garbage-collected tasks — the platform deletes older task files during long sessions.
+3. **Report gap**: If both sources fail (old-format breadcrumb + garbage-collected task), report the gap to lead — note the task_id, teammate_name, and timestamp from the breadcrumb so the lead has context.
 
 Read all HANDOFFs before proceeding to extraction.
 
@@ -273,6 +273,6 @@ This is the Layer 4 fallback for breadcrumbs left behind by sessions that ended 
 
 1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session-id}/pact-session-context.json`, or the team name provided in your dispatch prompt) — that team's breadcrumbs are active, not orphaned.
 2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
-3. Attempt to process them — enriched entries (with `handoff` key) can be read directly; for old-format entries, try `TaskGet` (may fail for GC'd tasks — extract what's available from breadcrumb metadata)
+3. Attempt to process them — enriched entries (with `handoff` key) can be read directly; for old-format entries, try `TaskGet` (may fail for garbage-collected tasks — extract what's available from breadcrumb metadata)
 4. Delete the breadcrumb file after processing (use `python3 -c "from pathlib import Path; Path(...).unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts)
 5. Report summary of recovered knowledge (or gaps where `TaskGet` failed)
