@@ -447,6 +447,47 @@ class TestReadTaskMetadata:
         assert "handoff" in result
 
 
+class TestReadTaskOwner:
+    """Tests for handoff_gate.read_task_owner()."""
+
+    def test_returns_owner_from_task_file(self, tmp_path):
+        from handoff_gate import read_task_owner
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        task_data = {"subject": "test", "owner": "backend-coder", "metadata": {}}
+        (team_dir / "42.json").write_text(json.dumps(task_data))
+
+        result = read_task_owner("42", "pact-test", tasks_base_dir=str(tmp_path))
+
+        assert result == "backend-coder"
+
+    def test_returns_none_when_no_owner(self, tmp_path):
+        from handoff_gate import read_task_owner
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        task_data = {"subject": "test", "metadata": {}}
+        (team_dir / "42.json").write_text(json.dumps(task_data))
+
+        result = read_task_owner("42", "pact-test", tasks_base_dir=str(tmp_path))
+
+        assert result is None
+
+    def test_returns_none_for_missing_task(self, tmp_path):
+        from handoff_gate import read_task_owner
+
+        result = read_task_owner("999", "pact-test", tasks_base_dir=str(tmp_path))
+
+        assert result is None
+
+    def test_returns_none_for_empty_task_id(self):
+        from handoff_gate import read_task_owner
+
+        result = read_task_owner("", "pact-test")
+        assert result is None
+
+
 class TestMainEntryPoint:
     """Tests for handoff_gate.main() stdin/stdout/exit behavior."""
 
@@ -601,6 +642,71 @@ class TestMainEntryPoint:
         # Verify read_task_metadata was called with context file team name
         # get_team_name() already returns lowercased, .lower() in source is a no-op
         mock_read.assert_called_once_with("1", "pact-from-context")
+
+    def test_main_falls_back_to_task_owner_when_no_teammate_name(self, capsys):
+        """When platform omits teammate_name, fall back to task file's owner field."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            # No teammate_name — simulates orchestrator completing on behalf of agent
+            "team_name": "pact-test"
+        })
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("handoff_gate.read_task_owner", return_value="backend-coder") as mock_owner, \
+             patch("handoff_gate.append_pending_handoff") as mock_append, \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # Verify owner fallback was called
+        mock_owner.assert_called_once_with("1", "pact-test")
+        # Verify breadcrumb used the fallback teammate_name
+        mock_append.assert_called_once()
+        assert mock_append.call_args[0][1] == "backend-coder"
+
+    def test_main_no_fallback_when_teammate_name_present(self, capsys):
+        """When teammate_name is provided, read_task_owner is NOT called."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test"
+        })
+
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+        with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+             patch("handoff_gate.read_task_owner") as mock_owner, \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_owner.assert_not_called()
+
+    def test_main_bypasses_when_no_teammate_and_no_owner(self):
+        """No teammate_name + no owner in task file → bypass (non-agent task)."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "1",
+            "task_subject": "Feature: auth",
+            "team_name": "pact-test"
+        })
+
+        with patch("handoff_gate.read_task_metadata", return_value={}), \
+             patch("handoff_gate.read_task_owner", return_value=None), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
 
 
 class TestAppendPendingHandoff:

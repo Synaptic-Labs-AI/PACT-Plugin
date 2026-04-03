@@ -138,9 +138,12 @@ def check_memory_saved(
     )
 
 
-def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
+def _read_task_json(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
     """
-    Read task metadata from the task file.
+    Read the raw task JSON from disk.
+
+    Shared logic for read_task_metadata() and read_task_owner(). Locates the
+    task file in the team directory first, then falls back to the base directory.
 
     Args:
         task_id: Task identifier
@@ -148,7 +151,7 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
         tasks_base_dir: Override for tasks base directory (for testing)
 
     Returns:
-        Task metadata dict, or empty dict if not found
+        Full task dict from the JSON file, or empty dict if not found
     """
     if not task_id:
         return {}
@@ -173,12 +176,44 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
         task_file = task_dir / f"{task_id}.json"
         if task_file.exists():
             try:
-                data = json.loads(task_file.read_text(encoding="utf-8"))
-                return data.get("metadata", {})
+                return json.loads(task_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, IOError):
                 return {}
 
     return {}
+
+
+def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
+    """
+    Read task metadata from the task file.
+
+    Args:
+        task_id: Task identifier
+        team_name: Team name for scoped task lookup
+        tasks_base_dir: Override for tasks base directory (for testing)
+
+    Returns:
+        Task metadata dict, or empty dict if not found
+    """
+    return _read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
+
+
+def read_task_owner(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> str | None:
+    """
+    Read the task owner from the task file.
+
+    Used as a fallback when the platform doesn't provide teammate_name in hook
+    input (e.g., orchestrator marks a task completed on behalf of an agent).
+
+    Args:
+        task_id: Task identifier
+        team_name: Team name for scoped task lookup
+        tasks_base_dir: Override for tasks base directory (for testing)
+
+    Returns:
+        Owner string if present, None otherwise
+    """
+    return _read_task_json(task_id, team_name, tasks_base_dir).get("owner")
 
 
 def append_pending_handoff(
@@ -274,6 +309,18 @@ def main():
     task_subject = input_data.get("task_subject", "")
     teammate_name = input_data.get("teammate_name")
     team_name = (input_data.get("team_name") or get_team_name()).lower()
+
+    # Fallback: if platform didn't provide teammate_name (e.g., orchestrator
+    # completed the task on behalf of an agent), read from the task file's
+    # owner field so validation and breadcrumb writing still fire.
+    if not teammate_name:
+        teammate_name = read_task_owner(task_id, team_name)
+
+    # Still no teammate_name after fallback → genuine non-agent completion.
+    # Exit early: no validation, no breadcrumb needed.
+    if not teammate_name:
+        print(_SUPPRESS_OUTPUT)
+        sys.exit(0)
 
     # TaskCompleted input doesn't include metadata — read from task file
     task_metadata = read_task_metadata(task_id, team_name)
