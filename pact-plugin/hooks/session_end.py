@@ -2,23 +2,28 @@
 """
 Location: pact-plugin/hooks/session_end.py
 Summary: SessionEnd hook that captures a last-session snapshot for cross-session
-         continuity.
+         continuity and performs session directory cleanup.
 Used by: hooks.json SessionEnd hook
 
 Actions:
 1. Write last-session snapshot to ~/.claude/pact-sessions/{slug}/last-session.md
 2. Detect open PRs that were not paused (append warning to snapshot)
+3. Clean up teachback warning markers (session-scoped + legacy slug-level)
+4. Clean up stale session directories older than 7 days
 
-Purely observational — no destructive operations. Cannot block session termination.
+Purely observational — no destructive operations on project files. Session
+directory cleanup is best-effort and never blocks session termination.
 
 Input: JSON from stdin with session context
 Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
-import re
-import sys
 import os
+import re
+import shutil
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,7 +34,7 @@ if str(_hooks_dir) not in sys.path:
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_project_dir
+from shared.pact_context import get_project_dir, get_session_dir, get_session_id
 
 from shared.task_utils import get_task_list
 
@@ -174,10 +179,10 @@ def check_unpaused_pr(
     if sessions_dir is None:
         sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
 
-    session_dir = Path(sessions_dir) / project_slug
+    slug_dir = Path(sessions_dir) / project_slug
 
     # If paused-state.json exists, consolidation already happened — no warning
-    if (session_dir / "paused-state.json").exists():
+    if (slug_dir / "paused-state.json").exists():
         return
 
     # Scan task metadata for open PR indicators
@@ -204,7 +209,7 @@ def check_unpaused_pr(
         return
 
     # Append warning to existing snapshot
-    snapshot_file = session_dir / "last-session.md"
+    snapshot_file = slug_dir / "last-session.md"
     if not snapshot_file.exists():
         return
 
@@ -224,6 +229,7 @@ def check_unpaused_pr(
 
 def cleanup_teachback_markers(
     project_slug: str,
+    session_dir: str | None = None,
     sessions_dir: str | None = None,
 ) -> None:
     """
@@ -232,8 +238,14 @@ def cleanup_teachback_markers(
     Marker files (teachback-warned-{agent}-{task_id}) accumulate during a session
     and are no longer needed once the session ends. Cleanup is best-effort.
 
+    Cleans two locations:
+    1. Session-scoped dir: {slug}/{session_id}/teachback-warned-* (current format)
+    2. Slug-level dir: {slug}/teachback-warned-* (legacy migration sweep)
+
     Args:
         project_slug: Project identifier for the session directory
+        session_dir: The session-scoped directory path (from get_session_dir()).
+            When provided, markers are cleaned from this directory.
         sessions_dir: Override for sessions base directory (for testing)
     """
     if not project_slug:
@@ -242,19 +254,83 @@ def cleanup_teachback_markers(
     if sessions_dir is None:
         sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
 
-    session_dir = Path(sessions_dir) / project_slug
-    if not session_dir.exists():
-        return
+    # Clean session-scoped markers (current format)
+    if session_dir:
+        _sweep_teachback_markers(Path(session_dir))
 
+    # Migration sweep: clean orphaned slug-level markers (pre-#345 format)
+    slug_dir = Path(sessions_dir) / project_slug
+    _sweep_teachback_markers(slug_dir)
+
+
+def _sweep_teachback_markers(directory: Path) -> None:
+    """Remove all teachback-warned-* files in a directory. Best-effort."""
+    if not directory.exists():
+        return
     try:
-        for marker in session_dir.iterdir():
+        for marker in directory.iterdir():
             if marker.name.startswith("teachback-warned-"):
                 try:
                     marker.unlink()
                 except OSError:
-                    pass  # Best-effort cleanup
+                    pass
     except OSError:
-        pass  # Can't iterate — skip cleanup
+        pass
+
+
+# Regex for validating UUID-format directory names (session IDs)
+_UUID_PATTERN = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+)
+
+# Default threshold for stale session directory cleanup
+_SESSION_MAX_AGE_DAYS = 7
+
+
+def cleanup_old_sessions(
+    project_slug: str,
+    current_session_id: str,
+    sessions_dir: str | None = None,
+    max_age_days: int = _SESSION_MAX_AGE_DAYS,
+) -> None:
+    """
+    Remove session directories older than max_age_days.
+
+    Best-effort cleanup — never raises. Skips the current session's
+    directory and any entry that doesn't look like a UUID directory.
+
+    Args:
+        project_slug: Project identifier (basename of project_dir)
+        current_session_id: Current session's UUID (never deleted)
+        sessions_dir: Override for base directory (testing)
+        max_age_days: Threshold in days (default: 7)
+    """
+    if not project_slug or not current_session_id:
+        return
+
+    if sessions_dir is None:
+        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+
+    slug_dir = Path(sessions_dir) / project_slug
+    if not slug_dir.exists():
+        return
+
+    try:
+        for entry in slug_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            if not _UUID_PATTERN.match(entry.name):
+                continue
+            if entry.name == current_session_id:
+                continue
+            try:
+                age_days = (time.time() - entry.stat().st_mtime) / 86400
+                if age_days > max_age_days:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 def main():
@@ -266,6 +342,8 @@ def main():
 
         pact_context.init(input_data)
         project_slug = get_project_slug()
+        session_dir = get_session_dir()
+        current_session_id = get_session_id()
 
         # Write last-session snapshot from task states for cross-session continuity
         tasks = get_task_list()
@@ -281,7 +359,16 @@ def main():
         )
 
         # Clean up teachback warning markers (no longer needed after session)
-        cleanup_teachback_markers(project_slug=project_slug)
+        cleanup_teachback_markers(
+            project_slug=project_slug,
+            session_dir=session_dir,
+        )
+
+        # Clean up stale session directories (older than 7 days)
+        cleanup_old_sessions(
+            project_slug=project_slug,
+            current_session_id=current_session_id,
+        )
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)

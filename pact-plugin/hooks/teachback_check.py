@@ -30,7 +30,7 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_project_dir, get_team_name, resolve_agent_name
+from shared.pact_context import get_session_dir, get_team_name, resolve_agent_name
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -55,14 +55,6 @@ _WARNING_MESSAGE = (
 )
 
 
-def _get_project_slug() -> str:
-    """Derive project slug from session context (basename of project_dir)."""
-    project_dir = get_project_dir()
-    if project_dir:
-        return Path(project_dir).name
-    return ""
-
-
 def _get_marker_path(
     agent_name: str,
     task_id: str = "",
@@ -72,24 +64,36 @@ def _get_marker_path(
     Build the path for the one-shot warning marker file.
 
     Per-task markers ensure warnings re-fire when an agent is reassigned to a
-    new task within the same session.
+    new task within the same session. Markers are session-scoped so parallel
+    sessions on the same project don't interfere.
 
-    Path: ~/.claude/pact-sessions/{slug}/teachback-warned-{agent_name}-{task_id}
-    Fallback (no task_id): ~/.claude/pact-sessions/{slug}/teachback-warned-{agent_name}
+    Path: ~/.claude/pact-sessions/{slug}/{session_id}/teachback-warned-{agent_name}-{task_id}
+    Fallback (no task_id): .../{session_id}/teachback-warned-{agent_name}
 
     Args:
         agent_name: The agent's unique name
         task_id: The task ID (file basename without .json extension)
-        sessions_dir: Override for sessions base directory (for testing)
+        sessions_dir: Override for session directory (for testing). When
+            provided, used directly as the parent directory for markers
+            (no slug/session_id appended).
 
     Returns:
         Path object for the marker file
     """
-    slug = _get_project_slug()
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
     suffix = f"-{task_id}" if task_id else ""
-    return Path(sessions_dir) / slug / f"teachback-warned-{agent_name}{suffix}"
+    marker_name = f"teachback-warned-{agent_name}{suffix}"
+
+    if sessions_dir is not None:
+        return Path(sessions_dir) / marker_name
+
+    session_dir = get_session_dir()
+    if session_dir:
+        return Path(session_dir) / marker_name
+
+    # Fallback: no session context available — use bare pact-sessions root.
+    # Markers here are orphaned; cleanup sweeps only cover slug-level and
+    # session-scoped dirs, so root-level markers persist until manual removal.
+    return Path.home() / ".claude" / "pact-sessions" / marker_name
 
 
 def _was_already_warned(
