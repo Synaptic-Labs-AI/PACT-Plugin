@@ -22,12 +22,13 @@ Output: stderr feedback on block (exit 2), nothing on allow (exit 0)
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
 from shared.error_output import hook_error_json
 from shared.handoff_example import format_handoff_example
+import shared.pact_context as pact_context
+from shared.pact_context import get_team_name
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -260,10 +261,11 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        pact_context.init(input_data)
         teammate_name = input_data.get("teammate_name", "")
         team_name = (
             input_data.get("team_name")
-            or os.environ.get("CLAUDE_CODE_TEAM_NAME", "")
+            or get_team_name()
         ).lower()
 
         if not teammate_name or not team_name:

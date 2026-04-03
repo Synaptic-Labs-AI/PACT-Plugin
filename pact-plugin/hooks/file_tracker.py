@@ -18,6 +18,9 @@ import sys
 import time
 from pathlib import Path
 
+import shared.pact_context as pact_context
+from shared.pact_context import get_team_name, resolve_agent_name
+
 try:
     import fcntl
     HAS_FLOCK = True
@@ -153,14 +156,15 @@ def get_environment_delta(
 
 
 def main():
-    team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
-    if not team_name:
-        print(_SUPPRESS_OUTPUT)
-        sys.exit(0)
-
     try:
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError:
+        print(_SUPPRESS_OUTPUT)
+        sys.exit(0)
+
+    pact_context.init(input_data)
+    team_name = get_team_name()
+    if not team_name:
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
@@ -169,7 +173,7 @@ def main():
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    agent_name = os.environ.get("CLAUDE_CODE_AGENT_NAME", "")
+    agent_name = resolve_agent_name(input_data)
     tool_name = input_data.get("tool_name", "")
 
     tracking_path = str(

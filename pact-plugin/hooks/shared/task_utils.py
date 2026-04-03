@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from shared.pact_context import get_session_id
+
 
 def get_task_list() -> list[dict[str, Any]] | None:
     """
@@ -33,7 +35,7 @@ def get_task_list() -> list[dict[str, Any]] | None:
     Returns:
         List of task dicts, or None if tasks unavailable
     """
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+    session_id = get_session_id()
     # Also check for multi-session task list ID
     task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", session_id)
 

@@ -39,6 +39,8 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
+from shared.pact_context import get_session_id
 
 from refresh.constants import CHECKPOINT_MAX_AGE_DAYS
 from refresh.checkpoint_builder import (
@@ -136,8 +138,9 @@ def main():
         except json.JSONDecodeError:
             input_data = {}
 
+        pact_context.init(input_data)
         transcript_path = input_data.get("transcript_path", "")
-        session_id = os.environ.get("CLAUDE_SESSION_ID", "unknown")
+        session_id = get_session_id() or "unknown"
 
         # Extract encoded project path
         encoded_path = get_encoded_project_path(transcript_path)

@@ -9,7 +9,7 @@ Provides three layers:
 2. Constants: SYSTEM_TASK_PREFIXES for filtering system tasks from feature tasks
 3. Analysis: analyze_task_state() detects feature task, phase, and variety score
 
-Unlike task_utils.get_task_list() which is session-scoped (uses CLAUDE_SESSION_ID),
+Unlike task_utils.get_task_list() which is session-scoped (uses pact_context session ID),
 these scanners read ALL team directories — needed by compaction hooks that operate
 across the full task tree.
 

@@ -19,7 +19,6 @@ Output: JSON with systemMessage (stall alert or shutdown suggestion)
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -35,7 +34,8 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
-
+import shared.pact_context as pact_context
+from shared.pact_context import get_team_name
 from shared.task_utils import get_task_list
 
 
@@ -334,14 +334,15 @@ def reset_idle_count(teammate_name: str, idle_counts_path: str) -> None:
 
 def main():
     try:
-        team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
-        if not team_name:
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-
         try:
             input_data = json.load(sys.stdin)
         except json.JSONDecodeError:
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
+        pact_context.init(input_data)
+        team_name = get_team_name()
+        if not team_name:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 

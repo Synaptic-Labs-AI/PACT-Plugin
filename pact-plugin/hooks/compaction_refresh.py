@@ -20,7 +20,6 @@ Fallback checkpoint location: ~/.claude/pact-refresh/{encoded-path}.json
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -42,6 +41,8 @@ from refresh.checkpoint_builder import (
 )
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
+from shared.pact_context import get_session_id
 
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import (
@@ -229,6 +230,7 @@ def main():
         except json.JSONDecodeError:
             input_data = {}
 
+        pact_context.init(input_data)
         source = input_data.get("source", "")
 
         # Only act on post-compaction sessions
@@ -237,7 +239,7 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        session_id = os.environ.get("CLAUDE_SESSION_ID", "unknown")
+        session_id = get_session_id() or "unknown"
 
         # ---------------------------------------------------------------------
         # Primary: Try TaskList first (Tasks survive compaction)

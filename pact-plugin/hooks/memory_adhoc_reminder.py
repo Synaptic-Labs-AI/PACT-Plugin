@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
+from shared.pact_context import get_team_name
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -189,7 +191,8 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
+        pact_context.init(input_data)
+        team_name = get_team_name()
         transcript = input_data.get("transcript", "")
 
         reminder_type = get_reminder_type(team_name, transcript)

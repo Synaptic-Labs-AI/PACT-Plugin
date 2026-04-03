@@ -12,12 +12,13 @@ Output: None (writes to tracking file for later memory association)
 """
 
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
+from shared.pact_context import get_session_id
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -39,8 +40,12 @@ def ensure_tracking_dir():
 
 
 def get_session_tracking_file() -> Path:
-    """Get the tracking file for the current session."""
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "unknown")
+    """Get the tracking file for the current session.
+
+    Requires pact_context.init() to have been called so get_session_id()
+    reads from the correct session-scoped context file.
+    """
+    session_id = get_session_id() or "unknown"
     return TRACKING_DIR / f"{session_id}.json"
 
 
@@ -50,7 +55,7 @@ def load_tracked_files() -> dict:
     Uses shared (LOCK_SH) file locking on platforms that support fcntl
     to prevent reading while another process is mid-write.
     """
-    default = {"files": [], "session_id": os.environ.get("CLAUDE_SESSION_ID", "unknown")}
+    default = {"files": [], "session_id": get_session_id() or "unknown"}
     tracking_file = get_session_tracking_file()
     if not tracking_file.exists():
         return default
@@ -146,7 +151,7 @@ def track_file(file_path: str, tool_name: str):
 
     ensure_tracking_dir()
     tracking_file = get_session_tracking_file()
-    default = {"files": [], "session_id": os.environ.get("CLAUDE_SESSION_ID", "unknown")}
+    default = {"files": [], "session_id": get_session_id() or "unknown"}
 
     if HAS_FLOCK:
         try:
@@ -182,6 +187,7 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        pact_context.init(input_data)
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {})
 

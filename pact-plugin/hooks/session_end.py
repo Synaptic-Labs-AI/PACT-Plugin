@@ -28,6 +28,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
 
 from shared.task_utils import get_task_list
 
@@ -257,6 +258,12 @@ def cleanup_teachback_markers(
 
 def main():
     try:
+        try:
+            input_data = json.load(sys.stdin)
+        except json.JSONDecodeError:
+            input_data = {}
+
+        pact_context.init(input_data)
         project_slug = get_project_slug()
 
         # Write last-session snapshot from task states for cross-session continuity
