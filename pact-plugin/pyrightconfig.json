@@ -1,0 +1,3 @@
+{
+  "extraPaths": ["hooks/", "skills/pact-memory/scripts/"]
+}
