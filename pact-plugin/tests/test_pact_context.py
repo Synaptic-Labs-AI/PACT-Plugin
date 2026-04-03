@@ -102,7 +102,11 @@ Additional write_context():
 Concurrent:
 60. Concurrent writes produce valid JSON
 
-Migration completeness (AST-based scanner):
+Uninitialized accessors:
+60b. get_pact_context() returns _EMPTY_CONTEXT when _context_path is None
+60c. write_context() computes session-scoped path when _context_path is None
+
+Migration completeness (AST-based scanner — os.environ.get, os.getenv, os.environ[]):
 61-63. No hook runtime code reads phantom env vars (parametrized x3)
 64. No skill script runtime code reads phantom env vars (parametrized x3)
 
@@ -1156,6 +1160,54 @@ class TestConcurrentWriteContext:
         assert tmp_files == [], f"Leftover temp files: {tmp_files}"
 
 
+class TestUninitializedAccessors:
+    """Verify accessor behavior when init() has not been called."""
+
+    def test_get_pact_context_returns_empty_when_context_path_none(self, monkeypatch):
+        """get_pact_context() should return _EMPTY_CONTEXT when _context_path is None."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        result = ctx_module.get_pact_context()
+
+        assert result == ctx_module._EMPTY_CONTEXT
+        assert result["team_name"] == ""
+        assert result["session_id"] == ""
+        assert result["project_dir"] == ""
+        assert result["started_at"] == ""
+
+    def test_write_context_computes_path_when_context_path_none(self, monkeypatch, tmp_path):
+        """write_context() should compute session-scoped path from args when _context_path is None."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        ctx_module.write_context(
+            team_name="pact-test",
+            session_id="sess-123",
+            project_dir="/my/project",
+        )
+
+        # Path should be: {home}/.claude/pact-sessions/{slug}/{session_id}/pact-session-context.json
+        expected_path = (
+            tmp_path / ".claude" / "pact-sessions"
+            / "project" / "sess-123" / "pact-session-context.json"
+        )
+        assert expected_path.exists()
+
+        data = json.loads(expected_path.read_text(encoding="utf-8"))
+        assert data["team_name"] == "pact-test"
+        assert data["session_id"] == "sess-123"
+        assert data["project_dir"] == "/my/project"
+
+        # Module state should now point to the computed path
+        assert ctx_module._context_path == expected_path
+
+
 class TestInitOrdering:
     """Verify get_team_name() behavior before and after init()."""
 
@@ -1296,10 +1348,10 @@ class TestPactSessionPath:
 class TestMigrationCompleteness:
     """Verify no hook or skill runtime code references the replaced env vars.
 
-    Uses AST-based scanning to find os.environ.get() / os.environ[] calls
-    with phantom env var names as the first argument. This is more reliable
-    than string matching because it ignores comments, docstrings, and
-    string literals that aren't used as env var lookups.
+    Uses AST-based scanning to find os.environ.get() / os.getenv() /
+    os.environ[] calls with phantom env var names as the first argument.
+    This is more reliable than string matching because it ignores comments,
+    docstrings, and string literals that aren't used as env var lookups.
     """
 
     # Phantom env var names that should not appear in any runtime env lookup
@@ -1311,10 +1363,11 @@ class TestMigrationCompleteness:
 
     @staticmethod
     def _find_env_var_references(source: str, env_var: str) -> list[int]:
-        """Find line numbers where os.environ.get(env_var) or os.environ[env_var] appears.
+        """Find line numbers where os.environ.get/os.getenv/os.environ[] appears.
 
         Scans AST for:
         - os.environ.get("ENV_VAR", ...) — Call node with Attribute func
+        - os.getenv("ENV_VAR", ...) — Call node with Attribute func
         - os.environ["ENV_VAR"] — Subscript node with string slice
 
         Returns list of line numbers with violations.
@@ -1338,6 +1391,18 @@ class TestMigrationCompleteness:
                         and func.value.attr == "environ"
                         and isinstance(func.value.value, ast.Name)
                         and func.value.value.id == "os"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == env_var):
+                    violations.append(node.lineno)
+
+            # Match os.getenv("ENV_VAR", ...)
+            if isinstance(node, ast.Call):
+                func = node.func
+                if (isinstance(func, ast.Attribute)
+                        and func.attr == "getenv"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "os"
                         and node.args
                         and isinstance(node.args[0], ast.Constant)
                         and node.args[0].value == env_var):

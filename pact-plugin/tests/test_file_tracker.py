@@ -212,17 +212,17 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_on_valid_edit(self, tmp_path, pact_context):
+    def test_main_exits_0_on_valid_edit(self):
         from file_tracker import main
-
-        pact_context(team_name="pact-test")
 
         input_data = json.dumps({
             "tool_input": {"file_path": "src/auth.ts"},
             "tool_name": "Edit",
         })
 
-        with patch("file_tracker.resolve_agent_name", return_value="backend-coder"), \
+        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+             patch("file_tracker.pact_context.init"), \
+             patch("file_tracker.resolve_agent_name", return_value="backend-coder"), \
              patch("file_tracker.check_conflict", return_value=None), \
              patch("file_tracker.track_edit"), \
              patch("sys.stdin", io.StringIO(input_data)):
@@ -231,10 +231,8 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_on_invalid_json(self, pact_context):
+    def test_main_exits_0_on_invalid_json(self):
         from file_tracker import main
-
-        pact_context(team_name="pact-test")
 
         with patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
@@ -242,23 +240,21 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_when_no_file_path(self, pact_context):
+    def test_main_exits_0_when_no_file_path(self):
         from file_tracker import main
-
-        pact_context(team_name="pact-test")
 
         input_data = json.dumps({"tool_input": {}})
 
-        with patch("sys.stdin", io.StringIO(input_data)):
+        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+             patch("file_tracker.pact_context.init"), \
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_outputs_warning_on_conflict(self, capsys, pact_context):
+    def test_main_outputs_warning_on_conflict(self, capsys):
         from file_tracker import main
-
-        pact_context(team_name="pact-test")
 
         input_data = json.dumps({
             "tool_input": {"file_path": "src/auth.ts"},
@@ -266,7 +262,9 @@ class TestMainEntryPoint:
         })
 
         conflict_msg = "File conflict: src/auth.ts was also edited by backend-coder."
-        with patch("file_tracker.resolve_agent_name", return_value="frontend-coder"), \
+        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+             patch("file_tracker.pact_context.init"), \
+             patch("file_tracker.resolve_agent_name", return_value="frontend-coder"), \
              patch("file_tracker.check_conflict", return_value=conflict_msg), \
              patch("file_tracker.track_edit"), \
              patch("sys.stdin", io.StringIO(input_data)):

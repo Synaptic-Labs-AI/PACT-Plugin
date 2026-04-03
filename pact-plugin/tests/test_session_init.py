@@ -71,11 +71,9 @@ class TestGenerateTeamName:
 
         assert result == "pact-abcdef12"
 
-    def test_random_fallback_when_no_session_id_in_input(self, monkeypatch):
+    def test_random_fallback_when_no_session_id_in_input(self):
         """No session_id in input_data should produce random hex suffix."""
         from session_init import generate_team_name
-
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         result = generate_team_name({})
 
@@ -84,11 +82,9 @@ class TestGenerateTeamName:
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix)
 
-    def test_random_fallback_when_session_id_key_missing(self, monkeypatch):
+    def test_random_fallback_when_session_id_key_missing(self):
         """Absent session_id key in input_data should produce random hex suffix."""
         from session_init import generate_team_name
-
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         result = generate_team_name({"other_key": "value"})
 
@@ -97,11 +93,9 @@ class TestGenerateTeamName:
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix)
 
-    def test_random_fallback_when_no_session_id_anywhere(self, monkeypatch):
+    def test_random_fallback_when_no_session_id_anywhere(self):
         """Should generate random hex suffix when neither source provides session_id."""
         from session_init import generate_team_name
-
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         result = generate_team_name({})
 
@@ -110,11 +104,9 @@ class TestGenerateTeamName:
         assert len(suffix) == 8
         assert re.fullmatch(r"[a-f0-9]{8}", suffix), f"Expected hex suffix, got: {suffix}"
 
-    def test_random_fallback_produces_different_values(self, monkeypatch):
+    def test_random_fallback_produces_different_values(self):
         """Random fallback should produce different names across calls (probabilistic)."""
         from session_init import generate_team_name
-
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         results = {generate_team_name({}) for _ in range(10)}
 
@@ -128,11 +120,9 @@ class TestGenerateTeamName:
 
         assert result == "pact-abc"
 
-    def test_empty_session_id_falls_back_to_random(self, monkeypatch):
+    def test_empty_session_id_falls_back_to_random(self):
         """Empty string session_id should be treated as falsy, falling back to random hex."""
         from session_init import generate_team_name
-
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         result = generate_team_name({"session_id": ""})
 
@@ -157,11 +147,9 @@ class TestGenerateTeamName:
 
         assert result == "pact-a1b2c3d4"
 
-    def test_none_session_id_falls_to_random(self, monkeypatch):
+    def test_none_session_id_falls_to_random(self):
         """None session_id in input_data should fall back to random."""
         from session_init import generate_team_name
-
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         result = generate_team_name({"session_id": None})
 
@@ -195,7 +183,6 @@ class TestTeamResumeDetection:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         if stdin_data is None:
@@ -241,7 +228,6 @@ class TestTeamResumeDetection:
     def test_oserror_falls_back_to_team_create(self, monkeypatch, tmp_path):
         """When filesystem check raises OSError, should fall back to TeamCreate."""
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         # Make Path.home() raise OSError indirectly by patching Path.exists
         original_exists = Path.exists
@@ -307,7 +293,6 @@ class TestSourceAwareness:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         if team_exists:
@@ -496,7 +481,6 @@ class TestSourceAwareness:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # stdin_data without "source" key
@@ -556,7 +540,6 @@ class TestMainPausedStateIntegration:
         paused_msg = "Paused work detected: PR #42 (feat/login) — awaiting merge."
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         # Provide valid JSON on stdin with a session_id
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
@@ -586,7 +569,6 @@ class TestMainPausedStateIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
 
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
@@ -619,7 +601,6 @@ class TestCompactSummaryCleanup:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create compact-summary.txt
@@ -832,7 +813,6 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITHOUT ~/.claude/teams in additionalDirectories
@@ -869,7 +849,6 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITH ~/.claude/teams in additionalDirectories
@@ -908,7 +887,6 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITHOUT ~/.claude/teams — tip would fire on startup
@@ -960,7 +938,6 @@ class TestWriteContextIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -993,7 +970,6 @@ class TestWriteContextIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # No session_id in stdin
@@ -1021,7 +997,6 @@ class TestWriteContextIntegration:
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({

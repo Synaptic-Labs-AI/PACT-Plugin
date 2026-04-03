@@ -30,7 +30,7 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name, resolve_agent_name
+from shared.pact_context import get_project_dir, get_team_name, resolve_agent_name
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -56,8 +56,8 @@ _WARNING_MESSAGE = (
 
 
 def _get_project_slug() -> str:
-    """Derive project slug from CLAUDE_PROJECT_DIR (basename)."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    """Derive project slug from session context (basename of project_dir)."""
+    project_dir = get_project_dir()
     if project_dir:
         return Path(project_dir).name
     return ""

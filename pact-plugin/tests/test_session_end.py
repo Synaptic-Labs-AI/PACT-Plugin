@@ -51,18 +51,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
 class TestGetProjectSlug:
-    """Tests for session_end.get_project_slug()."""
+    """Tests for session_end.get_project_slug() — reads via get_project_dir()."""
 
-    def test_returns_basename_from_env(self):
+    def test_returns_basename_from_project_dir(self):
         from session_end import get_project_slug
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}):
+        with patch("session_end.get_project_dir", return_value="/Users/mj/Sites/my-project"):
             assert get_project_slug() == "my-project"
 
-    def test_returns_empty_when_no_env(self):
+    def test_returns_empty_when_no_project_dir(self):
         from session_end import get_project_slug
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch("session_end.get_project_dir", return_value=""):
             assert get_project_slug() == ""
 
 
@@ -364,13 +364,10 @@ class TestMainEntryPoint:
     def test_main_calls_write_snapshot_with_tasks(self):
         from session_end import main
 
-        env = {
-            "CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project",
-        }
-
         mock_tasks = [{"id": "1", "subject": "test", "status": "completed", "metadata": {}}]
 
-        with patch.dict("os.environ", env, clear=True), \
+        with patch("session_end.pact_context.init"), \
+             patch("session_end.get_project_dir", return_value="/Users/mj/Sites/my-project"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=mock_tasks), \
              patch("session_end.write_session_snapshot") as mock_snapshot:
@@ -631,9 +628,8 @@ class TestCheckUnpausedPr:
         """main() should call check_unpaused_pr after write_session_snapshot."""
         from session_end import main
 
-        env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
-
-        with patch.dict("os.environ", env, clear=True), \
+        with patch("session_end.pact_context.init"), \
+             patch("session_end.get_project_dir", return_value="/Users/mj/Sites/my-project"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot"), \
@@ -804,7 +800,6 @@ class TestSessionEndFilePermissions:
 
     def test_write_snapshot_creates_directory_with_700(self, tmp_path):
         """write_session_snapshot() should create project dir with mode 0o700."""
-        import os
         import stat
         from session_end import write_session_snapshot
 
@@ -822,7 +817,6 @@ class TestSessionEndFilePermissions:
 
     def test_write_snapshot_creates_file_with_600(self, tmp_path):
         """write_session_snapshot() should set snapshot file to mode 0o600."""
-        import os
         import stat
         from session_end import write_session_snapshot
 
@@ -840,7 +834,6 @@ class TestSessionEndFilePermissions:
 
     def test_check_unpaused_pr_reapplies_600_after_append(self, tmp_path):
         """check_unpaused_pr() should re-apply 0o600 after appending warning."""
-        import os
         import stat
         from session_end import check_unpaused_pr
 
