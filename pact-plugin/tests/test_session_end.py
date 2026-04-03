@@ -1118,3 +1118,359 @@ class TestCleanupOldSessions:
             current_session_id="",
             sessions_dir=str(tmp_path),
         )
+
+
+# =============================================================================
+# cleanup_old_sessions() — Adversarial/Boundary Cases (Test Engineer)
+# =============================================================================
+
+class TestCleanupOldSessionsBoundary:
+    """Boundary and adversarial tests for cleanup_old_sessions()."""
+
+    def _create_session_dir(self, slug_dir, session_id, age_days=0):
+        """Helper: create a session directory with controlled mtime."""
+        import os as _os
+        import time as _time
+        session_dir = slug_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text("{}")
+        if age_days > 0:
+            old_time = _time.time() - (age_days * 86400)
+            _os.utime(str(session_dir), (old_time, old_time))
+        return session_dir
+
+    def test_exactly_at_boundary_not_deleted(self, tmp_path):
+        """Directory at 6.9 days age should NOT be deleted.
+
+        The code uses `age_days > max_age_days` (strictly greater than).
+        We use 6.9 days (safely under 7) to avoid flakiness from time
+        elapsing between utime() and the stat() call inside cleanup.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        boundary_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        boundary_dir = slug_dir / boundary_id
+        boundary_dir.mkdir(parents=True, exist_ok=True)
+        (boundary_dir / "context.json").write_text("{}")
+        # Set to 6.9 days — safely under threshold
+        under_time = _time.time() - (6.9 * 86400)
+        _os.utime(str(boundary_dir), (under_time, under_time))
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        # Under threshold — should survive
+        assert boundary_dir.exists()
+
+    def test_just_over_boundary_deleted(self, tmp_path):
+        """Directory at 7.01 days should be deleted (strictly greater than)."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        old_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        old_dir = slug_dir / old_id
+        old_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "context.json").write_text("{}")
+        over_time = _time.time() - (7.01 * 86400)
+        _os.utime(str(old_dir), (over_time, over_time))
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+
+        assert not old_dir.exists()
+
+    def test_multiple_old_dirs_all_cleaned(self, tmp_path):
+        """Multiple stale session dirs should all be removed in a single sweep."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        old_ids = [
+            "11111111-2222-3333-4444-555555555555",
+            "22222222-3333-4444-5555-666666666666",
+            "33333333-4444-5555-6666-777777777777",
+        ]
+        for oid in old_ids:
+            self._create_session_dir(slug_dir, oid, age_days=14)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        for oid in old_ids:
+            assert not (slug_dir / oid).exists()
+        assert (slug_dir / current_id).exists()
+
+    def test_non_empty_old_dir_still_removed(self, tmp_path):
+        """Old session dirs with files inside should be fully removed (shutil.rmtree)."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        old_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        # Create dir WITHOUT age_days first — write files, THEN set mtime
+        old_dir = slug_dir / old_id
+        old_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "pact-session-context.json").write_text("{}")
+        (old_dir / "teachback-warned-coder-1-42").touch()
+        (old_dir / "some-other-artifact.json").write_text("{}")
+        # Set mtime AFTER all writes (writing updates dir mtime on Unix)
+        old_time = _time.time() - (10 * 86400)
+        _os.utime(str(old_dir), (old_time, old_time))
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not old_dir.exists()
+
+    def test_uuid_format_validation_rejects_partial_uuid(self, tmp_path):
+        """Partial UUIDs (too short, wrong format) should not be cleaned up."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        # These look UUID-ish but don't match the full pattern
+        partial = slug_dir / "aaaaaaaa-bbbb-cccc-dddd"
+        partial.mkdir(parents=True)
+        old_time = _time.time() - (30 * 86400)
+        _os.utime(str(partial), (old_time, old_time))
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Partial UUID should survive — regex doesn't match
+        assert partial.exists()
+
+    def test_uuid_regex_rejects_uppercase(self, tmp_path):
+        """UUID regex should only match lowercase hex characters [0-9a-f].
+
+        On case-sensitive filesystems, uppercase UUIDs would be separate
+        directories. The regex explicitly requires lowercase. This test
+        verifies the regex behavior by checking the pattern directly.
+        """
+        import re
+        from session_end import _UUID_PATTERN
+
+        # Lowercase should match
+        assert _UUID_PATTERN.match("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        # Uppercase should NOT match
+        assert not _UUID_PATTERN.match("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+        # Mixed case should NOT match
+        assert not _UUID_PATTERN.match("Aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+    def test_custom_max_age_days(self, tmp_path):
+        """Custom max_age_days parameter should be respected."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        target_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id, age_days=0)
+        self._create_session_dir(slug_dir, target_id, age_days=4)
+
+        # With default 7-day threshold, 4-day-old dir should survive
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=7,
+        )
+        assert (slug_dir / target_id).exists()
+
+        # With 3-day threshold, 4-day-old dir should be cleaned
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+            max_age_days=3,
+        )
+        assert not (slug_dir / target_id).exists()
+
+
+# =============================================================================
+# Cleanup Migration Scenario — Combined Session + Slug Level (Test Engineer)
+# =============================================================================
+
+class TestCleanupMigrationScenario:
+    """Test the migration scenario where both legacy (slug-level) and new
+    (session-scoped) markers coexist.
+
+    After upgrading to #345, existing projects may have orphaned teachback
+    markers at the slug level from previous sessions. The cleanup should
+    remove both levels without interfering with non-marker files.
+    """
+
+    def test_both_levels_cleaned_simultaneously(self, tmp_path):
+        """Both session-scoped and legacy markers should be cleaned in one call."""
+        from session_end import cleanup_teachback_markers
+
+        slug_dir = tmp_path / "my-project"
+        slug_dir.mkdir(parents=True)
+        session_dir = slug_dir / "abc-123-session"
+        session_dir.mkdir()
+
+        # Legacy (slug-level) marker
+        (slug_dir / "teachback-warned-old-coder").touch()
+        # Session-scoped marker
+        (session_dir / "teachback-warned-new-coder-42").touch()
+        # Non-marker file at slug level
+        (slug_dir / "last-session.md").write_text("# Session")
+
+        cleanup_teachback_markers(
+            project_slug="my-project",
+            session_dir=str(session_dir),
+            sessions_dir=str(tmp_path),
+        )
+
+        # Both markers cleaned
+        assert not (slug_dir / "teachback-warned-old-coder").exists()
+        assert not (session_dir / "teachback-warned-new-coder-42").exists()
+        # Non-marker preserved
+        assert (slug_dir / "last-session.md").exists()
+
+    def test_session_dir_markers_not_affected_by_slug_sweep(self, tmp_path):
+        """Slug-level sweep should not descend into session directories.
+
+        _sweep_teachback_markers() uses iterdir() (not recursive glob), so
+        markers in subdirectories are only cleaned if session_dir is explicitly
+        provided.
+        """
+        from session_end import cleanup_teachback_markers
+
+        slug_dir = tmp_path / "my-project"
+        session_dir = slug_dir / "session-abc"
+        session_dir.mkdir(parents=True)
+
+        (session_dir / "teachback-warned-coder-1").touch()
+
+        # Only slug-level sweep (session_dir=None)
+        cleanup_teachback_markers(
+            project_slug="my-project",
+            session_dir=None,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Session-dir markers should survive because slug sweep doesn't recurse
+        assert (session_dir / "teachback-warned-coder-1").exists()
+
+    def test_empty_session_dir_survives_cleanup(self, tmp_path):
+        """Session directory itself should not be removed by marker cleanup."""
+        from session_end import cleanup_teachback_markers
+
+        slug_dir = tmp_path / "my-project"
+        session_dir = slug_dir / "session-abc"
+        session_dir.mkdir(parents=True)
+
+        cleanup_teachback_markers(
+            project_slug="my-project",
+            session_dir=str(session_dir),
+            sessions_dir=str(tmp_path),
+        )
+
+        # Directory itself should survive
+        assert session_dir.exists()
+
+
+# =============================================================================
+# main() Integration — Full SessionEnd Flow (Test Engineer)
+# =============================================================================
+
+class TestMainIntegrationCleanup:
+    """Integration tests for main() exercising cleanup functions with session context.
+
+    Verifies that main() correctly chains pact_context.init() -> get_session_dir()
+    -> cleanup_teachback_markers() -> cleanup_old_sessions() using the session
+    context from stdin.
+    """
+
+    def test_main_calls_cleanup_teachback_markers(self):
+        """main() should call cleanup_teachback_markers with session context."""
+        from unittest.mock import patch, MagicMock
+        import io
+
+        input_data = json.dumps({"session_id": "test-session"})
+
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("session_end.pact_context") as mock_ctx, \
+             patch("session_end.get_project_dir", return_value="/test/proj"), \
+             patch("session_end.get_session_dir", return_value="/tmp/session"), \
+             patch("session_end.get_session_id", return_value="test-session"), \
+             patch("session_end.get_task_list", return_value=[]), \
+             patch("session_end.write_session_snapshot"), \
+             patch("session_end.check_unpaused_pr"), \
+             patch("session_end.cleanup_teachback_markers") as mock_cleanup, \
+             patch("session_end.cleanup_old_sessions"), \
+             pytest.raises(SystemExit):
+            mock_ctx.init = MagicMock()
+            from session_end import main
+            main()
+
+        mock_cleanup.assert_called_once_with(
+            project_slug="proj",
+            session_dir="/tmp/session",
+        )
+
+    def test_main_calls_cleanup_old_sessions(self):
+        """main() should call cleanup_old_sessions with session context."""
+        from unittest.mock import patch, MagicMock
+        import io
+
+        input_data = json.dumps({"session_id": "test-session"})
+
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("session_end.pact_context") as mock_ctx, \
+             patch("session_end.get_project_dir", return_value="/test/proj"), \
+             patch("session_end.get_session_dir", return_value="/tmp/session"), \
+             patch("session_end.get_session_id", return_value="test-session"), \
+             patch("session_end.get_task_list", return_value=[]), \
+             patch("session_end.write_session_snapshot"), \
+             patch("session_end.check_unpaused_pr"), \
+             patch("session_end.cleanup_teachback_markers"), \
+             patch("session_end.cleanup_old_sessions") as mock_cleanup, \
+             pytest.raises(SystemExit):
+            mock_ctx.init = MagicMock()
+            from session_end import main
+            main()
+
+        mock_cleanup.assert_called_once_with(
+            project_slug="proj",
+            current_session_id="test-session",
+        )

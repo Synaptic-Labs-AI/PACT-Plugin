@@ -935,3 +935,55 @@ class TestCheckPausedStateTTL:
 
         assert result is not None
         assert "Paused work detected" in result
+
+
+# =============================================================================
+# VALID_PAUSED_STATE Relative Date Robustness (Test Engineer)
+# =============================================================================
+
+class TestPausedStateFixtureRobustness:
+    """Verify the dynamic date fixture doesn't introduce time-bombs.
+
+    The VALID_PAUSED_STATE fixture was changed from a hardcoded date
+    (2026-03-18) to a relative date (now - 1 day). This class verifies
+    the dynamic date stays within the 14-day TTL window used by
+    check_paused_state() and won't cause flaky tests.
+    """
+
+    def test_recent_paused_at_within_ttl_window(self):
+        """_RECENT_PAUSED_AT should be within the 14-day TTL window."""
+        paused = datetime.strptime(_RECENT_PAUSED_AT, "%Y-%m-%dT%H:%M:%SZ")
+        paused = paused.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+
+        age = now - paused
+        # Should be approximately 1 day old, well within 14-day TTL
+        assert age.days <= 2, f"Fixture date is {age.days} days old, should be ~1"
+        assert age.days >= 0, f"Fixture date is in the future: {_RECENT_PAUSED_AT}"
+
+    def test_valid_paused_state_is_not_stale(self):
+        """VALID_PAUSED_STATE's paused_at should not trigger TTL cleanup."""
+        paused = datetime.strptime(
+            VALID_PAUSED_STATE["paused_at"], "%Y-%m-%dT%H:%M:%SZ"
+        )
+        paused = paused.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+
+        age_days = (now - paused).days
+        # TTL is 14 days — fixture must be younger
+        assert age_days < 14, (
+            f"VALID_PAUSED_STATE.paused_at is {age_days} days old "
+            f"(TTL=14 days). The relative date fixture should prevent this."
+        )
+
+    def test_paused_at_format_is_valid_iso(self):
+        """paused_at should be valid ISO 8601 format."""
+        # This should not raise
+        paused = datetime.strptime(_RECENT_PAUSED_AT, "%Y-%m-%dT%H:%M:%SZ")
+        assert paused is not None
+
+    def test_fixture_produces_utc_timestamp(self):
+        """Dynamic date should be in UTC (matching the production format)."""
+        assert _RECENT_PAUSED_AT.endswith("Z"), (
+            f"Expected UTC 'Z' suffix, got: {_RECENT_PAUSED_AT}"
+        )

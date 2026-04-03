@@ -1618,3 +1618,201 @@ class TestHooksJsonRegistration:
             f"Expected exactly 1 teachback_check.py in Bash hooks, "
             f"found {len(teachback_commands)}"
         )
+
+
+# =============================================================================
+# Parallel Session Marker Isolation — CORE FIX (Test Engineer)
+# =============================================================================
+
+class TestParallelSessionMarkerIsolation:
+    """Verify that two concurrent sessions produce markers in isolated directories.
+
+    This is the primary behavioral change of issue #345 — the whole reason
+    for session-scoping. Before this fix, two sessions on the same project
+    would share the same marker directory, causing one session's "already warned"
+    state to suppress warnings in the other session.
+
+    These tests exercise the full marker lifecycle through _get_marker_path(),
+    _mark_warned(), and _was_already_warned() with different session contexts.
+    """
+
+    def test_markers_in_different_session_dirs_dont_interfere(self, tmp_path):
+        """Markers in session A should not affect marker checks in session B.
+
+        This is the CORE fix: previously, marking agent warned in session A
+        would suppress the warning in session B because they shared a directory.
+        """
+        from teachback_check import _mark_warned, _was_already_warned
+
+        session_a_dir = tmp_path / "session-a"
+        session_b_dir = tmp_path / "session-b"
+        session_a_dir.mkdir()
+        session_b_dir.mkdir()
+
+        # Mark warned in session A
+        _mark_warned("backend-coder", "42", sessions_dir=str(session_a_dir))
+
+        # Session A should be warned
+        assert _was_already_warned("backend-coder", "42", sessions_dir=str(session_a_dir))
+        # Session B should NOT be warned — different directory
+        assert not _was_already_warned("backend-coder", "42", sessions_dir=str(session_b_dir))
+
+    def test_same_agent_different_sessions_get_independent_markers(self, tmp_path):
+        """Same agent name in two sessions should get separate marker files."""
+        from teachback_check import _get_marker_path
+
+        session_a = tmp_path / "session-aaa"
+        session_b = tmp_path / "session-bbb"
+
+        path_a = _get_marker_path("coder-1", "10", sessions_dir=str(session_a))
+        path_b = _get_marker_path("coder-1", "10", sessions_dir=str(session_b))
+
+        assert path_a != path_b
+        assert path_a.parent == session_a
+        assert path_b.parent == session_b
+        # Same filename
+        assert path_a.name == path_b.name
+
+    def test_should_warn_uses_session_scoped_markers(self, tmp_path):
+        """should_warn() should respect session-scoped markers.
+
+        When called with sessions_dir pointing to session A's directory,
+        a marker created for session B should have no effect.
+        """
+        from teachback_check import should_warn, _mark_warned
+
+        task_dir = tmp_path / "tasks" / "test-team"
+        task_dir.mkdir(parents=True)
+        (task_dir / "1.json").write_text(json.dumps({
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        }))
+
+        session_a = tmp_path / "session-a"
+        session_b = tmp_path / "session-b"
+        session_a.mkdir()
+        session_b.mkdir()
+
+        # Mark warned in session A
+        _mark_warned("coder-1", "1", sessions_dir=str(session_a))
+
+        # Session A: should NOT warn (already warned)
+        warn_a, _ = should_warn(
+            "coder-1", "test-team",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=str(session_a),
+        )
+        assert not warn_a
+
+        # Session B: SHOULD warn (independent session)
+        warn_b, task_id = should_warn(
+            "coder-1", "test-team",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=str(session_b),
+        )
+        assert warn_b
+        assert task_id == "1"
+
+    def test_end_to_end_two_sessions_full_lifecycle(self, tmp_path):
+        """Full E2E: Two sessions, same project, same agent — markers isolated.
+
+        Simulates the real scenario:
+        1. Session A starts, agent writes code, gets warned, marker created
+        2. Session B starts simultaneously, same agent writes code
+        3. Session B should get its own warning (not suppressed by session A)
+        4. Session B gets warned, its marker is created
+        5. Both sessions now have their own markers
+        """
+        from teachback_check import should_warn, _mark_warned, _was_already_warned
+
+        # Shared task directory (both sessions see the same tasks)
+        task_dir = tmp_path / "tasks" / "pact-test"
+        task_dir.mkdir(parents=True)
+        (task_dir / "10.json").write_text(json.dumps({
+            "owner": "backend-coder",
+            "status": "in_progress",
+            "metadata": {},
+        }))
+
+        session_a = tmp_path / "sessions" / "my-proj" / "session-aaa"
+        session_b = tmp_path / "sessions" / "my-proj" / "session-bbb"
+
+        # Step 1: Session A — agent hasn't sent teachback
+        warn_a, tid_a = should_warn(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=str(session_a),
+        )
+        assert warn_a
+        assert tid_a == "10"
+
+        # Step 2: Session A — mark warned
+        _mark_warned("backend-coder", "10", sessions_dir=str(session_a))
+        assert _was_already_warned("backend-coder", "10", sessions_dir=str(session_a))
+
+        # Step 3: Session B — should still warn (independent)
+        warn_b, tid_b = should_warn(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=str(session_b),
+        )
+        assert warn_b
+        assert tid_b == "10"
+
+        # Step 4: Session B — mark warned
+        _mark_warned("backend-coder", "10", sessions_dir=str(session_b))
+        assert _was_already_warned("backend-coder", "10", sessions_dir=str(session_b))
+
+        # Step 5: Verify full isolation
+        assert _was_already_warned("backend-coder", "10", sessions_dir=str(session_a))
+        assert _was_already_warned("backend-coder", "10", sessions_dir=str(session_b))
+        # Each directory has exactly one marker
+        assert len(list(session_a.glob("teachback-warned-*"))) == 1
+        assert len(list(session_b.glob("teachback-warned-*"))) == 1
+
+
+# =============================================================================
+# _get_marker_path() — Session Dir Integration (Test Engineer)
+# =============================================================================
+
+class TestMarkerPathSessionDirIntegration:
+    """Tests for _get_marker_path() using get_session_dir() (no override).
+
+    These complement TestMarkerPath which uses sessions_dir override. Here
+    we test the production path where get_session_dir() is called.
+    """
+
+    def test_production_path_includes_slug_and_session_id(self):
+        """Without sessions_dir, marker path should include slug/session_id."""
+        from teachback_check import _get_marker_path
+
+        mock_dir = "/home/user/.claude/pact-sessions/my-project/abc-123-def"
+        with patch("teachback_check.get_session_dir", return_value=mock_dir):
+            result = _get_marker_path("coder-1", "42")
+
+        assert str(result) == f"{mock_dir}/teachback-warned-coder-1-42"
+
+    def test_production_path_empty_session_dir_falls_back(self):
+        """When get_session_dir() returns '', falls back to pact-sessions root."""
+        from teachback_check import _get_marker_path
+
+        with patch("teachback_check.get_session_dir", return_value=""):
+            result = _get_marker_path("coder-1", "42")
+
+        # Fallback path: ~/.claude/pact-sessions/teachback-warned-coder-1-42
+        assert "pact-sessions" in str(result)
+        assert result.name == "teachback-warned-coder-1-42"
+        # Should NOT be under a slug/session_id subdirectory
+        assert result.parent.name == "pact-sessions"
+
+    def test_sessions_dir_override_takes_precedence(self, tmp_path):
+        """When sessions_dir is provided, get_session_dir() should not be called."""
+        from teachback_check import _get_marker_path
+
+        with patch("teachback_check.get_session_dir") as mock_get:
+            result = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
+
+        # get_session_dir should not have been called
+        mock_get.assert_not_called()
+        assert result.parent == tmp_path

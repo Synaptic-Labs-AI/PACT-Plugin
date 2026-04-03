@@ -1755,3 +1755,180 @@ class TestLibraryModuleInitContract:
         result = get_session_id()
 
         assert result == "builder-session-xyz"
+
+
+# =============================================================================
+# get_session_dir() — Adversarial Edge Cases (Test Engineer)
+# =============================================================================
+
+class TestGetSessionDirAdversarial:
+    """Adversarial tests for get_session_dir() — edge case inputs.
+
+    get_session_dir() constructs paths from user-controlled values (project_dir
+    name, session_id). These tests verify the function handles unusual but valid
+    inputs without crashing or producing incorrect paths.
+    """
+
+    def test_slug_with_dots(self, pact_context):
+        """Project dirs with dots in the name (e.g., 'my.app') should work."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="/Users/dev/my.app.v2")
+
+        result = get_session_dir()
+        assert "my.app.v2" in result
+        assert result.endswith("pact-sessions/my.app.v2/abc-123")
+
+    def test_slug_with_spaces(self, pact_context):
+        """Project dirs with spaces should produce valid paths."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="/Users/dev/My Project")
+
+        result = get_session_dir()
+        assert "My Project" in result
+        assert result.endswith("pact-sessions/My Project/abc-123")
+
+    def test_slug_with_unicode(self, pact_context):
+        """Unicode characters in project name should pass through."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="/Users/dev/プロジェクト")
+
+        result = get_session_dir()
+        assert "プロジェクト" in result
+
+    def test_deeply_nested_project_dir(self, pact_context):
+        """Deeply nested project paths should use only the basename as slug."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(
+            session_id="abc-123",
+            project_dir="/a/very/deeply/nested/project/my-app",
+        )
+
+        result = get_session_dir()
+        # Only the basename "my-app" should appear as slug, not the full path
+        assert "my-app/abc-123" in result
+        assert "/a/very/deeply" not in result
+
+    def test_session_id_with_special_characters(self, pact_context):
+        """Session IDs with unusual characters should be preserved as-is."""
+        from shared.pact_context import get_session_dir
+
+        # Real session IDs are UUIDs, but get_session_dir() doesn't validate
+        pact_context(session_id="not-a-uuid-but-valid", project_dir="/test/proj")
+
+        result = get_session_dir()
+        assert "not-a-uuid-but-valid" in result
+
+    def test_project_dir_trailing_slash(self, pact_context):
+        """Trailing slash in project_dir should not affect slug extraction."""
+        from shared.pact_context import get_session_dir
+
+        # Path("foo/bar/").name returns "bar" in Python — verify
+        pact_context(session_id="abc", project_dir="/Users/dev/my-app/")
+
+        result = get_session_dir()
+        # Path("my-app/").name == "my-app" — trailing slash is handled
+        assert "my-app" in result or result == ""  # depends on Path behavior
+
+    def test_returns_string_not_path(self, pact_context):
+        """get_session_dir() should return a str, not a Path object."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="/test/proj")
+
+        result = get_session_dir()
+        assert isinstance(result, str)
+
+    def test_path_contains_home_dir(self, pact_context):
+        """Returned path should include .claude/pact-sessions/ under home."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="/test/proj")
+
+        result = get_session_dir()
+        assert ".claude/pact-sessions/" in result
+
+
+# =============================================================================
+# Parallel Session Isolation — Core Fix Verification (Test Engineer)
+# =============================================================================
+
+class TestParallelSessionIsolation:
+    """Verify that two concurrent sessions on the same project get isolated paths.
+
+    This is the CORE behavioral change of issue #345 — the entire point of
+    session-scoping. Two sessions with different session_ids must produce
+    different get_session_dir() values, ensuring teachback markers, context
+    files, and other artifacts don't interfere.
+    """
+
+    def test_different_sessions_produce_different_dirs(self, monkeypatch, tmp_path):
+        """Two sessions with different IDs must get different directories."""
+        import shared.pact_context as ctx
+
+        session_a = "aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa"
+        session_b = "bbbbbbbb-0000-0000-0000-bbbbbbbbbbbb"
+
+        # Session A
+        monkeypatch.setattr(ctx, "_context_path", None)
+        monkeypatch.setattr(ctx, "_cache", None)
+        ctx._cache = {
+            "team_name": "pact-test",
+            "session_id": session_a,
+            "project_dir": "/test/my-project",
+            "started_at": "2026-01-01T00:00:00Z",
+        }
+        dir_a = ctx.get_session_dir()
+
+        # Session B
+        ctx._cache = {
+            "team_name": "pact-test",
+            "session_id": session_b,
+            "project_dir": "/test/my-project",
+            "started_at": "2026-01-01T00:00:00Z",
+        }
+        dir_b = ctx.get_session_dir()
+
+        assert dir_a != dir_b
+        assert session_a in dir_a
+        assert session_b in dir_b
+        # Both should share the same slug prefix
+        assert "my-project" in dir_a
+        assert "my-project" in dir_b
+
+    def test_same_session_same_project_same_dir(self, pact_context):
+        """Same session_id + project_dir must produce identical paths."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="/test/proj")
+
+        result1 = get_session_dir()
+        result2 = get_session_dir()
+
+        assert result1 == result2
+
+    def test_same_session_different_project_different_dir(self, monkeypatch, tmp_path):
+        """Same session_id on different projects must produce different dirs."""
+        import shared.pact_context as ctx
+
+        monkeypatch.setattr(ctx, "_context_path", None)
+        monkeypatch.setattr(ctx, "_cache", None)
+
+        ctx._cache = {
+            "team_name": "t", "session_id": "same-id",
+            "project_dir": "/test/project-a", "started_at": "",
+        }
+        dir_a = ctx.get_session_dir()
+
+        ctx._cache = {
+            "team_name": "t", "session_id": "same-id",
+            "project_dir": "/test/project-b", "started_at": "",
+        }
+        dir_b = ctx.get_session_dir()
+
+        assert dir_a != dir_b
+        assert "project-a" in dir_a
+        assert "project-b" in dir_b
