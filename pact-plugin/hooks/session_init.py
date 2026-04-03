@@ -60,6 +60,7 @@ from staleness import (  # noqa: F401
 
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
+from shared.pact_context import write_context
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -134,9 +135,8 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     Generate a session-unique PACT team name.
 
     Uses the first 8 characters of the session_id from the SessionStart hook
-    input (or CLAUDE_SESSION_ID env var) to create a unique team name like
-    "pact-0001639f". Falls back to a random 8-character hex suffix if neither
-    source provides a session_id.
+    stdin JSON to create a unique team name like "pact-0001639f". Falls back
+    to a random 8-character hex suffix if session_id is not in stdin.
 
     Args:
         input_data: Parsed JSON from stdin (SessionStart hook input)
@@ -145,7 +145,7 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
         Team name string like "pact-0001639f"
     """
     raw_id = input_data.get("session_id")
-    session_id = str(raw_id) if raw_id else os.environ.get("CLAUDE_SESSION_ID", "")
+    session_id = str(raw_id) if raw_id else ""
     if session_id:
         suffix = session_id[:8]
     else:
@@ -308,9 +308,16 @@ def main():
                 f'Check TaskList for recovery context.'
             ))
 
-        # 5b. Write session resume info to project CLAUDE.md
+        # 5a. Write session context file for all subsequent hooks
         raw_id = input_data.get("session_id")
-        session_id = str(raw_id) if raw_id else os.environ.get("CLAUDE_SESSION_ID", "")
+        session_id = str(raw_id) if raw_id else ""
+        try:
+            write_context(team_name, session_id, project_dir)
+        except Exception as e:
+            # Fail-open: context file is best-effort; hooks fall back to empty strings
+            print(f"session_init: could not write context file: {e}", file=sys.stderr)
+
+        # 5b. Write session resume info to project CLAUDE.md
         if session_id:
             session_msg = update_session_info(session_id, team_name)
             if session_msg:
