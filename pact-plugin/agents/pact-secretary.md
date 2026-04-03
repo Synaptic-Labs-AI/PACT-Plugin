@@ -10,7 +10,7 @@ description: |
   <example>
   Context: Workflow completed and HANDOFFs need to be reviewed and saved as institutional memory.
   user: "Review HANDOFFs for tasks #3, #5, #7 and save institutional knowledge"
-  assistant: "The secretary reads each HANDOFF via TaskGet, extracts institutional knowledge, deduplicates against existing memories, and saves to pact-memory."
+  assistant: "The secretary reads each HANDOFF from the breadcrumb file (preferred) or via `TaskGet` (fallback), extracts institutional knowledge, deduplicates against existing memories, and saves to pact-memory."
   <commentary>HANDOFF review is the primary write path — the lead sends completed task IDs and the secretary reviews, deduplicates, and saves them.</commentary>
   </example>
 
@@ -187,7 +187,7 @@ If no patterns found: "No calibration data or known patterns for this domain."
 | Single missing HANDOFF | Normal message to lead: "No HANDOFF metadata for task #N. Skipping." Continue with remaining. |
 | Partial/malformed HANDOFF | Save what's available, note gaps in summary. |
 | Multiple missing (>50% of workflow) | ALERT QUALITY to lead: "Most HANDOFFs missing. Possible systemic issue." |
-| TaskGet fails | Normal message to lead with task ID and error. Continue with remaining. |
+| `TaskGet` fails | Expected for old-format breadcrumb entries in long sessions (garbage-collected tasks). Use breadcrumb inline content when available. Report gap only if both sources fail. |
 | Specialist query about unknown topic | Respond with "No memories found for this query. Proceeding without historical context is fine." |
 
 # WORKING MEMORY SYNC
