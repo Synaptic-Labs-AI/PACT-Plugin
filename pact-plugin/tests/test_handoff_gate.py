@@ -549,8 +549,9 @@ class TestMainEntryPoint:
         assert captured.out == ""
         assert "handoff" in captured.err.lower()
 
-    def test_main_uses_env_var_for_team_name(self):
-        """team_name falls back to CLAUDE_CODE_TEAM_NAME env var when absent from input."""
+    def test_main_uses_context_file_for_team_name(self, pact_context):
+        """team_name falls back to pact context file when absent from input."""
+        pact_context(team_name="pact-from-context")
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -561,16 +562,15 @@ class TestMainEntryPoint:
         })
 
         metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
-        env = {**os.environ, "CLAUDE_CODE_TEAM_NAME": "PACT-FROM-ENV"}
         with patch("handoff_gate.read_task_metadata", return_value=metadata) as mock_read, \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        # Verify read_task_metadata was called with lowercased env var team name
-        mock_read.assert_called_once_with("1", "pact-from-env")
+        # Verify read_task_metadata was called with context file team name
+        # get_team_name() already returns lowercased, .lower() in source is a no-op
+        mock_read.assert_called_once_with("1", "pact-from-context")
 
 
 class TestAppendPendingHandoff:

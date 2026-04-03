@@ -14,7 +14,7 @@ Markers are per-task (teachback-warned-{agent}-{task_id}) so warnings re-fire
 when an agent is reassigned to a new task within the same session.
 
 Exemptions: secretary (custom On Start flow), auditor (observation only).
-Non-PACT agents and the orchestrator (no CLAUDE_CODE_AGENT_NAME) are skipped.
+Non-PACT agents and the orchestrator (no agent identity resolvable) are skipped.
 
 Exit codes:
     0 — always (non-blocking; this is a warning layer, not a gate)
@@ -29,6 +29,8 @@ import sys
 from pathlib import Path
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
+from shared.pact_context import get_project_dir, get_team_name, resolve_agent_name
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -54,8 +56,8 @@ _WARNING_MESSAGE = (
 
 
 def _get_project_slug() -> str:
-    """Derive project slug from CLAUDE_PROJECT_DIR (basename)."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    """Derive project slug from session context (basename of project_dir)."""
+    project_dir = get_project_dir()
     if project_dir:
         return Path(project_dir).name
     return ""
@@ -242,21 +244,23 @@ def should_warn(
 
 def main():
     try:
-        # PostToolUse hooks require agent context to be meaningful.
-        # If no agent name, this is the orchestrator or a non-PACT context.
-        agent_name = os.environ.get("CLAUDE_CODE_AGENT_NAME", "")
-        if not agent_name:
+        try:
+            input_data = json.load(sys.stdin)
+        except json.JSONDecodeError:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
+        pact_context.init(input_data)
+        team_name = get_team_name()
         if not team_name:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        try:
-            json.load(sys.stdin)
-        except json.JSONDecodeError:
+        # PostToolUse hooks require agent context to be meaningful.
+        # If no agent name, this is the orchestrator or a non-PACT context.
+        # resolve_agent_name needs parsed stdin, so it must come after json.load.
+        agent_name = resolve_agent_name(input_data)
+        if not agent_name:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 

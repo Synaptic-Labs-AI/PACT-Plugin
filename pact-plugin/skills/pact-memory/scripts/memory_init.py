@@ -20,7 +20,6 @@ Thread-safety: Uses threading.Lock for the session-scoped initialization flag.
 """
 
 import logging
-import os
 import struct
 import subprocess
 import sys
@@ -202,9 +201,16 @@ def maybe_migrate_embeddings() -> dict:
         return result
 
 
+# Dual import: relative (when loaded as package) vs absolute (when tests add scripts/ to sys.path)
+try:
+    from .pact_session import get_session_id_from_context_file
+except ImportError:
+    from pact_session import get_session_id_from_context_file
+
+
 def _get_embedding_attempted_path() -> Path:
     """Get path to session-scoped embedding attempt marker file."""
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "unknown")
+    session_id = get_session_id_from_context_file() or "unknown"
     return Path("/tmp") / f"pact_embedding_attempted_{session_id}"
 
 

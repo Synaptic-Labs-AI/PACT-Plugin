@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 # =============================================================================
 
 @pytest.fixture
-def mock_tasks_dir(tmp_path: Path, monkeypatch):
+def mock_tasks_dir(tmp_path: Path, monkeypatch, pact_context):
     """
     Create mock ~/.claude/tasks/{sessionId}/ structure.
 
@@ -38,7 +38,7 @@ def mock_tasks_dir(tmp_path: Path, monkeypatch):
     session_id = "test-session-123"
     tasks_dir = tmp_path / ".claude" / "tasks" / session_id
     tasks_dir.mkdir(parents=True)
-    monkeypatch.setenv("CLAUDE_SESSION_ID", session_id)
+    pact_context(session_id=session_id)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     # Patch Path.home() to return our temp directory
@@ -152,12 +152,12 @@ class TestGetTaskList:
 
         assert result is None
 
-    def test_returns_none_for_missing_directory(self, tmp_path, monkeypatch):
+    def test_returns_none_for_missing_directory(self, tmp_path, monkeypatch, pact_context):
         """Test returns None when tasks directory doesn't exist."""
         from shared.task_utils import get_task_list
 
         session_id = "nonexistent-session"
-        monkeypatch.setenv("CLAUDE_SESSION_ID", session_id)
+        pact_context(session_id=session_id)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         result = get_task_list()
@@ -180,12 +180,12 @@ class TestGetTaskList:
         assert len(result) == 1
         assert result[0]["subject"] == "Valid task"
 
-    def test_returns_none_when_session_id_not_set(self, tmp_path, monkeypatch):
-        """Test returns None when CLAUDE_SESSION_ID is not set."""
+    def test_returns_none_when_session_id_not_set(self, tmp_path, monkeypatch, pact_context):
+        """Test returns None when session ID is not available."""
         from shared.task_utils import get_task_list
 
-        # Clear session ID environment variable
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        # Set up pact_context with empty session_id
+        pact_context(session_id="")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -193,7 +193,7 @@ class TestGetTaskList:
 
         assert result is None
 
-    def test_uses_task_list_id_when_provided(self, tmp_path, monkeypatch, make_task):
+    def test_uses_task_list_id_when_provided(self, tmp_path, monkeypatch, make_task, pact_context):
         """Test uses CLAUDE_CODE_TASK_LIST_ID when available."""
         from shared.task_utils import get_task_list
 
@@ -201,7 +201,7 @@ class TestGetTaskList:
         session_id = "session-abc"
         task_list_id = "shared-task-list-xyz"
 
-        monkeypatch.setenv("CLAUDE_SESSION_ID", session_id)
+        pact_context(session_id=session_id)
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", task_list_id)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 

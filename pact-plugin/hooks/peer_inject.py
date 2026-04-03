@@ -14,8 +14,10 @@ Output: JSON with hookSpecificOutput.additionalContext
 
 import json
 import sys
-import os
 from pathlib import Path
+
+import shared.pact_context as pact_context
+from shared.pact_context import get_team_name
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -94,9 +96,10 @@ def main():
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
+    pact_context.init(input_data)
     agent_type = input_data.get("agent_type", "")
     agent_name = input_data.get("agent_name", "") or input_data.get("agent_id", "")
-    team_name = os.environ.get("CLAUDE_CODE_TEAM_NAME", "").lower()
+    team_name = get_team_name()
 
     context = get_peer_context(
         agent_type=agent_type,

@@ -228,8 +228,10 @@ class TestBuildRefreshMessage:
 class TestCompactionRefreshMain:
     """Integration tests for the main() function."""
 
-    def test_main_with_active_workflow(self, tmp_path: Path, sample_checkpoint):
+    def test_main_with_active_workflow(self, tmp_path: Path, sample_checkpoint, pact_context):
         """Test full refresh flow with active workflow."""
+        pact_context(session_id="test-session-123")
+
         # Create checkpoint file
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)
@@ -240,7 +242,6 @@ class TestCompactionRefreshMain:
 
         with patch("sys.stdin", StringIO(input_data)), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test-session-123",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -260,8 +261,10 @@ class TestCompactionRefreshMain:
         assert "[POST-COMPACTION CHECKPOINT]" in refresh_msg
         assert "peer-review" in refresh_msg
 
-    def test_main_with_no_workflow(self, tmp_path: Path):
+    def test_main_with_no_workflow(self, tmp_path: Path, pact_context):
         """Test flow when checkpoint has no active workflow."""
+        pact_context(session_id="test-session")
+
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)
         checkpoint_path = checkpoint_dir / "-test-project.json"
@@ -276,7 +279,6 @@ class TestCompactionRefreshMain:
 
         with patch("sys.stdin", StringIO(input_data)), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test-session",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -291,8 +293,10 @@ class TestCompactionRefreshMain:
                 # Should exit 0 without output (no refresh needed)
                 assert exc_info.value.code == 0
 
-    def test_main_non_compact_source(self, tmp_path: Path, sample_checkpoint):
+    def test_main_non_compact_source(self, tmp_path: Path, sample_checkpoint, pact_context):
         """Test that non-compact sessions are ignored."""
+        pact_context(session_id="test-session-123")
+
         # Create checkpoint that would trigger refresh
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)
@@ -304,7 +308,6 @@ class TestCompactionRefreshMain:
 
         with patch("sys.stdin", StringIO(input_data)), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test-session-123",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -321,13 +324,14 @@ class TestCompactionRefreshMain:
                 # Bare exit path: suppressOutput to prevent false "hook error"
                 assert json.loads(output.strip()) == {"suppressOutput": True}
 
-    def test_main_no_checkpoint_file(self, tmp_path: Path):
+    def test_main_no_checkpoint_file(self, tmp_path: Path, pact_context):
         """Test handling when no checkpoint file exists."""
+        pact_context(session_id="test-session")
+
         input_data = json.dumps({"source": "compact"})
 
         with patch("sys.stdin", StringIO(input_data)), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test-session",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -341,8 +345,10 @@ class TestCompactionRefreshMain:
                 # Should exit 0 without error
                 assert exc_info.value.code == 0
 
-    def test_main_mismatched_session_id(self, tmp_path: Path, sample_checkpoint):
+    def test_main_mismatched_session_id(self, tmp_path: Path, sample_checkpoint, pact_context):
         """Test handling when session ID doesn't match."""
+        pact_context(session_id="different-session")
+
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)
         checkpoint_path = checkpoint_dir / "-test-project.json"
@@ -353,7 +359,6 @@ class TestCompactionRefreshMain:
         # Session ID doesn't match checkpoint
         with patch("sys.stdin", StringIO(input_data)), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "different-session",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -369,15 +374,17 @@ class TestCompactionRefreshMain:
         result = json.loads(output)
         assert "validation failed" in result["hookSpecificOutput"]["additionalContext"]
 
-    def test_main_missing_project_dir(self, tmp_path: Path, sample_checkpoint):
+    def test_main_missing_project_dir(self, tmp_path: Path, sample_checkpoint, pact_context):
         """Test handling when CLAUDE_PROJECT_DIR not set."""
+        pact_context(session_id="test-session")
+
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)
 
         input_data = json.dumps({"source": "compact"})
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}, clear=True), \
+             patch.dict(os.environ, {}, clear=True), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             # Ensure CLAUDE_PROJECT_DIR is not set
@@ -425,8 +432,10 @@ class TestCompactionRefreshMain:
 class TestEndToEndRefresh:
     """End-to-end tests simulating full compaction-refresh cycle."""
 
-    def test_precompact_to_sessionstart_flow(self, tmp_path: Path):
+    def test_precompact_to_sessionstart_flow(self, tmp_path: Path, pact_context):
         """Test complete flow from PreCompact to SessionStart."""
+        pact_context(session_id="test-session-e2e")
+
         # Step 1: Simulate PreCompact writing checkpoint
         from helpers import create_peer_review_transcript
 
@@ -452,7 +461,6 @@ class TestEndToEndRefresh:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session-e2e"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -475,7 +483,6 @@ class TestEndToEndRefresh:
 
         with patch("sys.stdin", StringIO(sessionstart_input)), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test-session-e2e",  # Same session
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -496,8 +503,10 @@ class TestEndToEndRefresh:
         assert "peer-review" in refresh_msg
         assert "recommendations" in refresh_msg or "pr-99" in refresh_msg
 
-    def test_terminated_workflow_no_refresh(self, tmp_path: Path):
+    def test_terminated_workflow_no_refresh(self, tmp_path: Path, pact_context):
         """Test that terminated workflow doesn't trigger refresh."""
+        pact_context(session_id="test-session")
+
         from helpers import create_terminated_workflow_transcript
 
         transcript_content = create_terminated_workflow_transcript()
@@ -516,7 +525,6 @@ class TestEndToEndRefresh:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -583,8 +591,11 @@ class TestExceptionHandlingPaths:
 
             assert exc_info.value.code == 0
 
-    def test_main_handles_missing_session_id(self, tmp_path: Path, sample_checkpoint):
-        """Test handling when CLAUDE_SESSION_ID is missing."""
+    def test_main_handles_missing_session_id(self, tmp_path: Path, sample_checkpoint, pact_context):
+        """Test handling when session ID is missing (no context file)."""
+        # Don't call pact_context() — simulate missing context file
+        # The pact_context fixture already clears the cache at setup
+
         # Create checkpoint file
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)

@@ -245,6 +245,7 @@ class TestSessionEndErrorOutput:
 
         env = {"CLAUDE_PROJECT_DIR": "/tmp/test-project"}
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
@@ -260,6 +261,7 @@ class TestSessionEndErrorOutput:
 
         env = {"CLAUDE_PROJECT_DIR": "/tmp/test-project"}
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
@@ -335,8 +337,7 @@ class TestTeammateIdleErrorOutput:
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ,
-                        {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+             patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("teammate_idle.get_task_list",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
@@ -355,8 +356,7 @@ class TestTeammateIdleErrorOutput:
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ,
-                        {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+             patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("teammate_idle.get_task_list",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
@@ -438,9 +438,7 @@ class TestTeammateCompletionGateErrorOutput:
 
         with patch("teammate_completion_gate._scan_owned_tasks",
                     side_effect=RuntimeError("test error")), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ,
-                        {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -459,9 +457,7 @@ class TestTeammateCompletionGateErrorOutput:
 
         with patch("teammate_completion_gate._scan_owned_tasks",
                     side_effect=RuntimeError("boom")), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ,
-                        {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit):
                 main()
 
@@ -866,7 +862,7 @@ class TestCompactionRefreshSuppressOutput:
         completed_tasks = [{"id": "1", "subject": "test", "status": "completed"}]
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("compaction_refresh.get_task_list", return_value=completed_tasks), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test"}, clear=False):
+             patch("compaction_refresh.get_session_id", return_value="test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -881,8 +877,8 @@ class TestCompactionRefreshSuppressOutput:
         input_data = json.dumps({"source": "compact"})
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("compaction_refresh.get_task_list", return_value=[]), \
+             patch("compaction_refresh.get_session_id", return_value="test"), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }, clear=False), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -910,8 +906,8 @@ class TestCompactionRefreshSuppressOutput:
         input_data = json.dumps({"source": "compact"})
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("compaction_refresh.get_task_list", return_value=[]), \
+             patch("compaction_refresh.get_session_id", return_value="test-session"), \
              patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "test-session",
                  "CLAUDE_PROJECT_DIR": "/test/project",
              }, clear=False), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -946,7 +942,6 @@ class TestSessionEndSuppressOutput:
 
         env = {
             "CLAUDE_PROJECT_DIR": str(tmp_path),
-            "CLAUDE_CODE_TEAM_NAME": "",
         }
         with patch("sys.stdin", io.StringIO("{}")), \
              patch.dict(os.environ, env, clear=False), \
@@ -1040,7 +1035,7 @@ class TestTeammateCompletionGateSuppressOutput:
         from teammate_completion_gate import main
 
         with patch("sys.stdin", io.StringIO(json.dumps({}))), \
-             patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": ""}, clear=False):
+             patch("teammate_completion_gate.get_team_name", return_value=""):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -1054,7 +1049,6 @@ class TestTeammateCompletionGateSuppressOutput:
 
         input_data = json.dumps({"teammate_name": "coder", "team_name": "pact-test"})
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
              patch("teammate_completion_gate._scan_owned_tasks", return_value=([], [])):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1070,9 +1064,7 @@ class TestTeammateCompletionGateSuppressOutput:
         input_data = json.dumps({"teammate_name": "coder", "team_name": "pact-test"})
         with patch("teammate_completion_gate._scan_owned_tasks",
                     side_effect=RuntimeError("boom")), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ,
-                        {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -1090,7 +1082,7 @@ class TestTeammateIdleSuppressOutput:
         """Missing team name outputs suppressOutput."""
         from teammate_idle import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": ""}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1103,7 +1095,7 @@ class TestTeammateIdleSuppressOutput:
         """JSONDecodeError path outputs suppressOutput."""
         from teammate_idle import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO("bad json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1117,7 +1109,7 @@ class TestTeammateIdleSuppressOutput:
         from teammate_idle import main
 
         input_data = json.dumps({"teammate_name": "coder"})
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("teammate_idle.get_task_list", return_value=[]):
             with pytest.raises(SystemExit) as exc_info:
@@ -1132,7 +1124,7 @@ class TestTeammateIdleSuppressOutput:
         from teammate_idle import main
 
         input_data = json.dumps({"teammate_name": ""})
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("teammate_idle.get_task_list", return_value=[{"id": "1"}]):
             with pytest.raises(SystemExit) as exc_info:
@@ -1149,7 +1141,7 @@ class TestTeammateIdleSuppressOutput:
         # Completed task with no stall and below idle threshold -> no messages
         tasks = [{"id": "1", "subject": "test", "status": "completed", "owner": "other-agent"}]
         input_data = json.dumps({"teammate_name": "coder"})
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("teammate_idle.get_task_list", return_value=tasks), \
              patch("pathlib.Path.home", return_value=tmp_path):
@@ -1165,7 +1157,7 @@ class TestTeammateIdleSuppressOutput:
         from teammate_idle import main
 
         input_data = json.dumps({"teammate_name": "coder"})
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("teammate_idle.get_task_list",
                    side_effect=RuntimeError("boom")):
@@ -1243,7 +1235,7 @@ class TestPeerInjectSuppressOutput:
 
         input_data = json.dumps({"agent_type": "pact-test"})
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": ""}, clear=False):
+             patch("teammate_completion_gate.get_team_name", return_value=""):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -1306,7 +1298,7 @@ class TestMemoryAdhocReminderSuppressOutput:
 
         input_data = json.dumps({"transcript": "short"})
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"), \
              patch("memory_adhoc_reminder.get_reminder_type", return_value=None):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1551,7 +1543,7 @@ class TestFileTrackerSuppressOutput:
         """Missing team name outputs suppressOutput."""
         from file_tracker import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": ""}, clear=False), \
+        with patch("file_tracker.get_team_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1564,7 +1556,7 @@ class TestFileTrackerSuppressOutput:
         """JSONDecodeError path outputs suppressOutput."""
         from file_tracker import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+        with patch("file_tracker.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO("bad json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1578,7 +1570,7 @@ class TestFileTrackerSuppressOutput:
         from file_tracker import main
 
         input_data = json.dumps({"tool_input": {}})
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False), \
+        with patch("file_tracker.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1595,10 +1587,8 @@ class TestFileTrackerSuppressOutput:
             "tool_input": {"file_path": "/tmp/test.py"},
             "tool_name": "Edit",
         })
-        with patch.dict(os.environ, {
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-            "CLAUDE_CODE_AGENT_NAME": "coder",
-        }, clear=False), \
+        with patch("file_tracker.get_team_name", return_value="pact-test"), \
+             patch("file_tracker.resolve_agent_name", return_value="coder"), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("pathlib.Path.home", return_value=tmp_path):
             with pytest.raises(SystemExit) as exc_info:

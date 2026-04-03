@@ -29,6 +29,9 @@ import sys
 import time
 from pathlib import Path
 
+import shared.pact_context as pact_context
+from shared.pact_context import get_session_id
+
 # Shared constants and cleanup — single source of truth for both hooks
 sys.path.insert(0, str(Path(__file__).parent))
 from shared.merge_guard_common import (
@@ -368,9 +371,9 @@ def is_dangerous_command(command: str) -> bool:
 def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[None, None]:
     """Find a valid (unexpired) authorization token for the current session.
 
-    Also cleans up any expired token files. If CLAUDE_SESSION_ID is set, only
-    tokens from the current session are accepted. If not set, any valid token
-    is accepted (graceful degradation).
+    Also cleans up any expired token files. If a session ID is available
+    (via pact_context), only tokens from the current session are accepted.
+    If not available, any valid token is accepted (graceful degradation).
 
     Args:
         token_dir: Override token directory (for testing)
@@ -382,7 +385,7 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     if token_dir is None:
         token_dir = TOKEN_DIR
 
-    current_session = os.environ.get("CLAUDE_SESSION_ID", "")
+    current_session = get_session_id()
 
     now = time.time()
     valid_token = None
@@ -603,6 +606,7 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
         command = tool_input.get("command", "")
 

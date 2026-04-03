@@ -4454,7 +4454,7 @@ class TestOperationScoping:
 
 
 # =============================================================================
-# Session scoping (CLAUDE_SESSION_ID)
+# Session scoping (pact_context session_id)
 # =============================================================================
 
 
@@ -4462,10 +4462,10 @@ class TestSessionScoping:
     """Tests for session-scoped token isolation."""
 
     def test_token_includes_session_id(self, tmp_path):
-        """Token file includes session_id when env var is set."""
+        """Token file includes session_id when session context is set."""
         from merge_guard_post import write_token
 
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+        with patch("merge_guard_post.get_session_id", return_value="session-abc"):
             result = write_token({"test": True}, token_dir=tmp_path)
 
         with open(result) as f:
@@ -4473,12 +4473,10 @@ class TestSessionScoping:
         assert data["session_id"] == "session-abc"
 
     def test_token_omits_session_id_when_not_set(self, tmp_path):
-        """Token file omits session_id when env var is not set."""
+        """Token file omits session_id when session context is not available."""
         from merge_guard_post import write_token
 
-        with patch.dict(os.environ, {}, clear=True):
-            # Ensure CLAUDE_SESSION_ID is not in environment
-            os.environ.pop("CLAUDE_SESSION_ID", None)
+        with patch("merge_guard_post.get_session_id", return_value=""):
             result = write_token({"test": True}, token_dir=tmp_path)
 
         with open(result) as f:
@@ -4498,7 +4496,7 @@ class TestSessionScoping:
         }
         (tmp_path / "merge-authorized-11111").write_text(json.dumps(token_data))
 
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+        with patch("merge_guard_pre.get_session_id", return_value="session-abc"):
             result, path = find_valid_token(token_dir=tmp_path)
         assert result is not None
 
@@ -4515,14 +4513,14 @@ class TestSessionScoping:
         }
         (tmp_path / "merge-authorized-22222").write_text(json.dumps(token_data))
 
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+        with patch("merge_guard_pre.get_session_id", return_value="session-abc"):
             result, path = find_valid_token(token_dir=tmp_path)
         assert result is None
         # Token NOT cleaned up — it may be valid for its own session
         assert (tmp_path / "merge-authorized-22222").exists()
 
     def test_no_session_id_accepts_any_token(self, tmp_path):
-        """When env has no session ID, any valid token is accepted."""
+        """When no session ID is available, any valid token is accepted."""
         from merge_guard_pre import find_valid_token
 
         now = time.time()
@@ -4534,8 +4532,7 @@ class TestSessionScoping:
         }
         (tmp_path / "merge-authorized-33333").write_text(json.dumps(token_data))
 
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("CLAUDE_SESSION_ID", None)
+        with patch("merge_guard_pre.get_session_id", return_value=""):
             result, path = find_valid_token(token_dir=tmp_path)
         assert result is not None
 
@@ -4551,7 +4548,7 @@ class TestSessionScoping:
         }
         (tmp_path / "merge-authorized-44444").write_text(json.dumps(token_data))
 
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "session-abc"}):
+        with patch("merge_guard_pre.get_session_id", return_value="session-abc"):
             result, path = find_valid_token(token_dir=tmp_path)
         assert result is not None
 
@@ -5244,7 +5241,7 @@ class TestSchemaFixEndToEnd:
         assert exc_info.value.code == 2  # Blocked
 
     def test_session_scoped_token_from_schema(self, tmp_path):
-        """Token includes session_id when CLAUDE_SESSION_ID is set."""
+        """Token includes session_id when session context is available."""
         from merge_guard_post import main as post_main
 
         post_input = json.dumps({
@@ -5258,7 +5255,7 @@ class TestSchemaFixEndToEnd:
 
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
              patch("sys.stdin", io.StringIO(post_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session-123"}):
+             patch("merge_guard_post.get_session_id", return_value="test-session-123"):
             with pytest.raises(SystemExit):
                 post_main()
 

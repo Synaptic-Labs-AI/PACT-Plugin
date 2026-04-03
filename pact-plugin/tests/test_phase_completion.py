@@ -11,7 +11,6 @@ Tests cover:
 """
 import io
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -239,7 +238,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=tasks),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}),
+            patch("phase_completion.get_project_dir", return_value=str(tmp_path)),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()
@@ -257,7 +256,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=tasks),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "."}),
+            patch("phase_completion.get_project_dir", return_value="."),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()
@@ -271,7 +270,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=None),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}),
+            patch("phase_completion.get_project_dir", return_value=str(tmp_path)),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()
@@ -290,7 +289,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=None),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}),
+            patch("phase_completion.get_project_dir", return_value=str(tmp_path)),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()
@@ -314,7 +313,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=tasks),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}),
+            patch("phase_completion.get_project_dir", return_value=str(tmp_path)),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()
@@ -332,7 +331,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=tasks),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}),
+            patch("phase_completion.get_project_dir", return_value=str(tmp_path)),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()
@@ -346,7 +345,7 @@ class TestMain:
         with (
             patch("sys.stdin", io.StringIO(json.dumps(input_data))),
             patch("phase_completion.get_task_list", return_value=None),
-            patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "."}),
+            patch("phase_completion.get_project_dir", return_value="."),
         ):
             with pytest.raises(SystemExit) as exc:
                 main()

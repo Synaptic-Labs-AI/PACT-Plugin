@@ -7,7 +7,7 @@ Tests cover:
 2. Task call with team_name and team doesn't exist -> block (exit 2)
 3. Task call without team_name -> allow (always, no check needed)
 4. Non-Task tool call -> allow (hook shouldn't even fire, but graceful no-op)
-5. Missing CLAUDE_CODE_TEAM_NAME env var -> allow (no team context)
+5. Missing team context -> allow (no team name available)
 6. main() entry point: stdin JSON parsing, exit codes, output format
 """
 import io

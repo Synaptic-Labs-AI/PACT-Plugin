@@ -16,7 +16,6 @@ Output: JSON with `systemMessage` for reminders if needed
 
 import json
 import sys
-import os
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +25,8 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+import shared.pact_context as pact_context
+from shared.pact_context import get_project_dir
 
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import get_task_list
@@ -211,7 +212,8 @@ def main():
         except json.JSONDecodeError:
             input_data = {}
 
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", ".")
+        pact_context.init(input_data)
+        project_dir = get_project_dir() or "."
         transcript = input_data.get("transcript", "")
 
         messages = []

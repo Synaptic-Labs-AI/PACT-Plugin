@@ -48,30 +48,24 @@ def _write_task(task_dir: Path, filename: str, data: dict) -> Path:
 # =============================================================================
 
 class TestGetProjectSlug:
-    """Tests for _get_project_slug() env var derivation."""
+    """Tests for _get_project_slug() — reads project_dir via get_project_dir()."""
 
     def test_extracts_basename_from_project_dir(self):
         from teachback_check import _get_project_slug
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/Users/dev/projects/my-app"}):
+        with patch("teachback_check.get_project_dir", return_value="/Users/dev/projects/my-app"):
             assert _get_project_slug() == "my-app"
 
-    def test_returns_empty_when_env_not_set(self):
+    def test_returns_empty_when_project_dir_not_set(self):
         from teachback_check import _get_project_slug
 
-        with patch.dict("os.environ", {}, clear=True):
-            assert _get_project_slug() == ""
-
-    def test_returns_empty_when_env_is_empty_string(self):
-        from teachback_check import _get_project_slug
-
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": ""}):
+        with patch("teachback_check.get_project_dir", return_value=""):
             assert _get_project_slug() == ""
 
     def test_handles_root_path(self):
         from teachback_check import _get_project_slug
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/"}):
+        with patch("teachback_check.get_project_dir", return_value="/"):
             # Path("/").name returns "" on most systems
             result = _get_project_slug()
             assert isinstance(result, str)
@@ -79,7 +73,7 @@ class TestGetProjectSlug:
     def test_handles_nested_path(self):
         from teachback_check import _get_project_slug
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/a/b/c/deep-project"}):
+        with patch("teachback_check.get_project_dir", return_value="/a/b/c/deep-project"):
             assert _get_project_slug() == "deep-project"
 
 
@@ -93,7 +87,7 @@ class TestMarkerPath:
     def test_builds_correct_path_with_task_id(self, tmp_path):
         from teachback_check import _get_marker_path
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/my-app"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/my-app"):
             result = _get_marker_path("backend-coder-1", "42", sessions_dir=str(tmp_path))
 
         assert result == tmp_path / "my-app" / "teachback-warned-backend-coder-1-42"
@@ -101,7 +95,7 @@ class TestMarkerPath:
     def test_uses_project_slug(self, tmp_path):
         from teachback_check import _get_marker_path
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/PACT-prompt"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/PACT-prompt"):
             result = _get_marker_path("test-engineer", "7", sessions_dir=str(tmp_path))
 
         assert "PACT-prompt" in str(result)
@@ -110,7 +104,7 @@ class TestMarkerPath:
     def test_empty_slug_when_no_project_dir(self, tmp_path):
         from teachback_check import _get_marker_path
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch("teachback_check.get_project_dir", return_value=""):
             result = _get_marker_path("agent-1", "1", sessions_dir=str(tmp_path))
 
         # Path ends with /<empty>/teachback-warned-agent-1-1
@@ -124,7 +118,7 @@ class TestMarkerPath:
         """
         from teachback_check import _get_marker_path
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/my-app"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/my-app"):
             result = _get_marker_path("backend-coder-1", "", sessions_dir=str(tmp_path))
 
         assert result == tmp_path / "my-app" / "teachback-warned-backend-coder-1"
@@ -139,7 +133,7 @@ class TestMarkWarned:
     def test_mark_creates_file(self, tmp_path):
         from teachback_check import _mark_warned, _was_already_warned
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             assert not _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
             _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
             assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
@@ -148,7 +142,7 @@ class TestMarkWarned:
         from teachback_check import _mark_warned
 
         sessions_dir = str(tmp_path / "nonexistent" / "deep" / "path")
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "42", sessions_dir=sessions_dir)
 
         # Verify the directory structure was created
@@ -158,7 +152,7 @@ class TestMarkWarned:
     def test_mark_uses_secure_permissions(self, tmp_path):
         from teachback_check import _mark_warned, _get_marker_path
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
             marker = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
 
@@ -169,7 +163,7 @@ class TestMarkWarned:
     def test_mark_idempotent(self, tmp_path):
         from teachback_check import _mark_warned, _was_already_warned
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
             _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))  # Should not error
             assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
@@ -177,7 +171,7 @@ class TestMarkWarned:
     def test_different_agents_have_separate_markers(self, tmp_path):
         from teachback_check import _mark_warned, _was_already_warned
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
 
             assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
@@ -193,7 +187,7 @@ class TestMarkWarned:
         readonly_dir.chmod(0o444)
 
         try:
-            with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+            with patch("teachback_check.get_project_dir", return_value="/projects/test"):
                 # Should not raise — the OSError is caught internally
                 _mark_warned("coder-1", "42", sessions_dir=str(readonly_dir / "sub"))
         finally:
@@ -539,7 +533,7 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -559,7 +553,7 @@ class TestShouldWarn:
             "metadata": {"teachback_sent": True},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -579,7 +573,7 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("backend-coder-1", "1", sessions_dir=sessions_dir)
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
@@ -606,7 +600,7 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 agent_name, "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -627,7 +621,7 @@ class TestShouldWarn:
 
         sessions_dir = str(tmp_path / "sessions")
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 agent_name, "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -647,7 +641,7 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -676,10 +670,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_when_agent_name_empty(self, capsys):
+    def test_suppress_output_when_agent_name_empty(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {"CLAUDE_CODE_AGENT_NAME": ""}), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -688,12 +684,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_when_no_team_name(self, capsys):
+    def test_suppress_output_when_no_team_name(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-        }), patch("sys.stdin", io.StringIO("{}")):
+        # pact_context not called → get_team_name() returns ""
+
+        with patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -701,13 +697,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_when_team_name_empty(self, capsys):
+    def test_suppress_output_when_team_name_empty(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "",
-        }), patch("sys.stdin", io.StringIO("{}")):
+        pact_context(team_name="")
+
+        with patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -715,13 +710,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_on_invalid_json_stdin(self, capsys):
+    def test_suppress_output_on_invalid_json_stdin(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), patch("sys.stdin", io.StringIO("not valid json")):
+        pact_context(team_name="pact-test")
+
+        with patch("sys.stdin", io.StringIO("not valid json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -729,13 +723,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_emits_warning_when_should_warn_true(self, capsys):
+    def test_emits_warning_when_should_warn_true(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(True, "1")), \
              patch("teachback_check._mark_warned") as mock_mark:
@@ -748,13 +741,12 @@ class TestMainEntryPoint:
         assert "TEACHBACK REMINDER" in output["systemMessage"]
         mock_mark.assert_called_once_with("backend-coder-1", "1")
 
-    def test_suppress_output_when_should_warn_false(self, capsys):
+    def test_suppress_output_when_should_warn_false(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(False, "")):
             with pytest.raises(SystemExit) as exc_info:
@@ -764,14 +756,13 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_team_name_lowercased(self, capsys):
-        """CLAUDE_CODE_TEAM_NAME should be lowercased before passing to should_warn."""
+    def test_team_name_lowercased(self, capsys, pact_context):
+        """get_team_name() returns lowercased value for should_warn."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "PACT-TEST",
-        }), \
+        pact_context(team_name="PACT-TEST")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(False, "")) as mock_warn:
             with pytest.raises(SystemExit) as exc_info:
@@ -780,14 +771,13 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 0
         mock_warn.assert_called_once_with("backend-coder-1", "pact-test")
 
-    def test_always_exits_0(self, capsys):
+    def test_always_exits_0(self, capsys, pact_context):
         """Hook should always exit 0 — it's a warning layer, not a gate."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(True, "1")), \
              patch("teachback_check._mark_warned"):
@@ -804,14 +794,13 @@ class TestMainEntryPoint:
 class TestExceptionHandler:
     """Tests for the outer exception handler — fail open with hook_error_json."""
 
-    def test_fail_open_on_unexpected_error(self, capsys):
+    def test_fail_open_on_unexpected_error(self, capsys, pact_context):
         """Any unhandled exception should produce hook_error_json and exit 0."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit) as exc_info:
@@ -824,14 +813,13 @@ class TestExceptionHandler:
         assert "teachback_check" in output["systemMessage"]
         assert "boom" in captured.err
 
-    def test_error_and_suppress_mutually_exclusive(self, capsys):
+    def test_error_and_suppress_mutually_exclusive(self, capsys, pact_context):
         """Error path should emit systemMessage, NOT suppressOutput."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
@@ -849,10 +837,12 @@ class TestExceptionHandler:
 class TestSuppressOutput:
     """Verify all bare exit paths emit suppressOutput, not empty stdout."""
 
-    def test_no_agent_name_emits_suppress(self, capsys):
+    def test_no_agent_name_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {}, clear=True), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit):
                 main()
@@ -860,38 +850,36 @@ class TestSuppressOutput:
         output = json.loads(capsys.readouterr().out.strip())
         assert output.get("suppressOutput") is True
 
-    def test_no_team_name_emits_suppress(self, capsys):
+    def test_no_team_name_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "coder-1",
-        }), patch("sys.stdin", io.StringIO("{}")):
+        # pact_context not called → get_team_name() returns ""
+
+        with patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit):
                 main()
 
         output = json.loads(capsys.readouterr().out.strip())
         assert output.get("suppressOutput") is True
 
-    def test_invalid_json_emits_suppress(self, capsys):
+    def test_invalid_json_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), patch("sys.stdin", io.StringIO("not json")):
+        pact_context(team_name="pact-test")
+
+        with patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit):
                 main()
 
         output = json.loads(capsys.readouterr().out.strip())
         assert output.get("suppressOutput") is True
 
-    def test_should_warn_false_emits_suppress(self, capsys):
+    def test_should_warn_false_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(False, "")):
             with pytest.raises(SystemExit):
@@ -920,7 +908,7 @@ class TestEndToEnd:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             # First call: should warn
             warn1, tid1 = should_warn(
                 "backend-coder-1", "pact-test",
@@ -956,7 +944,7 @@ class TestEndToEnd:
             "metadata": {"teachback_sent": True},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -991,7 +979,7 @@ class TestEndToEnd:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -1037,7 +1025,7 @@ class TestPerTaskMarkerIsolation:
 
         sessions_dir = str(tmp_path)
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "10", sessions_dir)
 
             assert _was_already_warned("coder-1", "10", sessions_dir)
@@ -1049,7 +1037,7 @@ class TestPerTaskMarkerIsolation:
 
         sessions_dir = str(tmp_path)
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "10", sessions_dir)
             _mark_warned("coder-1", "20", sessions_dir)
 
@@ -1085,7 +1073,7 @@ class TestPerTaskMarkerIsolation:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             # First call for task A: should warn
             warn_a, tid_a = should_warn(
                 "coder-1", "pact-test",
@@ -1132,7 +1120,7 @@ class TestPerTaskMarkerIsolation:
         """Verify the marker filename contains both agent name and task ID."""
         from teachback_check import _get_marker_path
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             path = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
 
         assert path.name == "teachback-warned-coder-1-42"
@@ -1143,7 +1131,7 @@ class TestPerTaskMarkerIsolation:
 
         sessions_dir = str(tmp_path)
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             _mark_warned("coder-1", "42", sessions_dir)
 
             assert _was_already_warned("coder-1", "42", sessions_dir)
@@ -1165,7 +1153,7 @@ class TestConcurrentMarkerAccess:
         sessions_dir = str(tmp_path)
         num_writers = 10
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_writers) as pool:
                 futures = [
                     pool.submit(_mark_warned, "coder-1", "42", sessions_dir)
@@ -1186,7 +1174,7 @@ class TestConcurrentMarkerAccess:
         sessions_dir = str(tmp_path)
         agent_task_pairs = [(f"coder-{i}", str(i)) for i in range(10)]
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
                 futures = [
                     pool.submit(_mark_warned, name, tid, sessions_dir)
@@ -1212,7 +1200,7 @@ class TestConcurrentMarkerAccess:
         def read_marker():
             return _was_already_warned("coder-1", "42", sessions_dir)
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
                 futures = []
                 for _ in range(5):
@@ -1374,7 +1362,7 @@ class TestAllMatchEdgeCases:
             "subject": "Fix review findings from PR #42",
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "architect", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -1408,7 +1396,7 @@ class TestAllMatchEdgeCases:
             "metadata": {},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -1433,7 +1421,7 @@ class TestAllMatchEdgeCases:
             "metadata": {"teachback_sent": True},
         })
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             warn, task_id = should_warn(
                 "backend-coder-1", "pact-test",
                 tasks_base_dir=str(tmp_path / "tasks"),
@@ -1511,7 +1499,7 @@ class TestAllMatchEdgeCases:
         task_dir = tmp_path / "tasks" / "pact-test"
         sessions_dir = str(tmp_path / "sessions")
 
-        with patch.dict("os.environ", {"CLAUDE_PROJECT_DIR": "/projects/test"}):
+        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
             # Step 1: Agent starts task A — no teachback
             _write_task(task_dir, "10.json", {
                 "owner": "coder-1",

@@ -450,11 +450,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -474,11 +473,10 @@ class TestMain:
         (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -517,11 +515,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": "hello"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -537,11 +534,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": CHAT_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -550,7 +546,7 @@ class TestMain:
         assert json.loads(captured.out.strip()) == {"suppressOutput": True}
 
     def test_uses_lowercased_team_name(self, tmp_path, capsys):
-        """Team name from env is lowercased for path lookup."""
+        """Team name is already lowercased by get_team_name()."""
         from memory_adhoc_reminder import main
 
         # Create dir with lowercase name
@@ -558,11 +554,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "PACT-UPPER"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-upper"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -579,11 +574,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -599,11 +593,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -621,11 +614,10 @@ class TestMain:
         (teams_dir / ".adhoc_reminded").write_text("")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -641,11 +633,10 @@ class TestMain:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": CHAT_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -727,11 +718,10 @@ class TestMainIntegrationBothPaths:
         (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
 
         input_data = json.dumps({"transcript": "short"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -752,11 +742,10 @@ class TestMainIntegrationBothPaths:
         (teams_dir / ".adhoc_reminded").write_text("")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -772,11 +761,10 @@ class TestMainIntegrationBothPaths:
         teams_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -798,11 +786,10 @@ class TestMainIntegrationBothPaths:
         (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -824,11 +811,10 @@ class TestMainIntegrationBothPaths:
         (teams_dir / "completed_handoffs.jsonl").write_text("")
 
         input_data = json.dumps({"transcript": "short"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -837,16 +823,15 @@ class TestMainIntegrationBothPaths:
         output = json.loads(captured.out)
         assert "Unprocessed HANDOFFs" in output["systemMessage"]
 
-    def test_no_team_name_env_var_no_crash(self, tmp_path, capsys):
-        """Missing CLAUDE_CODE_TEAM_NAME env var → no reminder, no crash."""
+    def test_no_team_name_no_crash(self, tmp_path, capsys):
+        """Missing team name → no reminder, no crash."""
         from memory_adhoc_reminder import main
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {}  # No CLAUDE_CODE_TEAM_NAME
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=True):
+             patch("memory_adhoc_reminder.get_team_name", return_value=""):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -869,11 +854,10 @@ class TestMainUncompletedTasks:
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Fix API")
 
         input_data = json.dumps({"transcript": "short"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -896,11 +880,10 @@ class TestMainUncompletedTasks:
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Fix API")
 
         input_data = json.dumps({"transcript": "short"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -919,11 +902,10 @@ class TestMainUncompletedTasks:
         _write_task(tasks_dir, "6", "in_progress", owner="frontend", subject="Update UI")
 
         input_data = json.dumps({"transcript": "short"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -946,11 +928,10 @@ class TestMainUncompletedTasks:
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -973,11 +954,10 @@ class TestMainUncompletedTasks:
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 

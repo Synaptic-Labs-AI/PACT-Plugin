@@ -265,7 +265,7 @@ For direct save requests from the lead outside of workflow HANDOFF review (ad-ho
 
 This is the Layer 4 fallback for breadcrumbs left behind by sessions that ended without wrap-up or where Layer 2 triggers were missed.
 
-1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available via the `CLAUDE_CODE_TEAM_NAME` environment variable or the team name provided in your dispatch prompt) — that team's breadcrumbs are active, not orphaned.
+1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session-id}/pact-session-context.json`, or the team name provided in your dispatch prompt) — that team's breadcrumbs are active, not orphaned.
 2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
 3. Attempt to process them (TaskGet may fail for old tasks — extract what's available from breadcrumb metadata)
 4. Delete the breadcrumb file after processing (use `python3 -c "from pathlib import Path; Path(...).unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts)

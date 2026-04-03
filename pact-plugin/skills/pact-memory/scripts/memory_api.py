@@ -76,6 +76,11 @@ from .working_memory import (
     _parse_working_memory_section,
 )
 from .memory_init import ensure_memory_ready
+# Dual import: relative (when loaded as package) vs absolute (when tests add scripts/ to sys.path)
+try:
+    from .pact_session import get_session_id_from_context_file
+except ImportError:
+    from pact_session import get_session_id_from_context_file
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -145,7 +150,7 @@ class PACTMemory:
             project_id: Project identifier. If not provided, auto-detected using
                         (in order): CLAUDE_PROJECT_DIR env var, git repo root,
                         or current working directory basename.
-            session_id: Session identifier. Auto-detected from CLAUDE_SESSION_ID if not provided.
+            session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
         """
         self._project_id = project_id or self._detect_project_id()
@@ -215,8 +220,8 @@ class PACTMemory:
 
     @staticmethod
     def _detect_session_id() -> Optional[str]:
-        """Detect session ID from environment."""
-        return os.environ.get("CLAUDE_SESSION_ID")
+        """Detect session ID from PACT context file."""
+        return get_session_id_from_context_file() or None
 
     @property
     def project_id(self) -> Optional[str]:

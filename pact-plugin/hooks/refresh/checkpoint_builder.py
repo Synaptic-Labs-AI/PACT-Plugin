@@ -14,6 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Add hooks directory to path for shared package imports
+_hooks_dir = Path(__file__).parent.parent
+if str(_hooks_dir) not in sys.path:
+    sys.path.insert(0, str(_hooks_dir))
+
+from shared.pact_context import get_session_id as _pact_get_session_id
+
 from .workflow_detector import WorkflowInfo
 from .step_extractor import StepInfo
 from .constants import (
@@ -139,12 +146,12 @@ def get_checkpoint_path(encoded_path: str) -> Path:
 
 def get_session_id() -> str:
     """
-    Get the current Claude session ID from environment.
+    Get the current Claude session ID from the PACT context file.
 
     Returns:
         Session ID string or "unknown" if not available
     """
-    return os.environ.get("CLAUDE_SESSION_ID", "unknown")
+    return _pact_get_session_id() or "unknown"
 
 
 def get_encoded_project_path(transcript_path: str) -> str:
@@ -167,11 +174,10 @@ def get_encoded_project_path(transcript_path: str) -> str:
         projects_idx = parts.index("projects")
         return parts[projects_idx + 1]
     except (ValueError, IndexError):
-        # Fall back to deriving from project dir
+        # Direct env var read: Claude Code folder encoding, not session context
+        # (see pact_context.py for session context)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         if project_dir:
-            # Convert /Users/mj/Sites/project to -Users-mj-Sites-project
-            # Keep the leading dash to match Claude Code's folder naming convention
             return project_dir.replace("/", "-")
         return "unknown-project"
 

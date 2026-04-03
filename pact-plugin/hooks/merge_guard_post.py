@@ -23,6 +23,9 @@ import sys
 import time
 from pathlib import Path
 
+import shared.pact_context as pact_context
+from shared.pact_context import get_session_id
+
 # Shared constants and cleanup — single source of truth for both hooks
 sys.path.insert(0, str(Path(__file__).parent))
 from shared.error_output import hook_error_json
@@ -135,7 +138,7 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
     timestamp = int(now)
 
     # Include session ID for cross-session scoping (graceful degradation)
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+    session_id = get_session_id()
 
     token_data = {
         "created_at": now,
@@ -191,6 +194,7 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
         tool_output = input_data.get("tool_output", {})
 

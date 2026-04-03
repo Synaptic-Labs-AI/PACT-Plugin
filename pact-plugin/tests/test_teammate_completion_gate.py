@@ -554,11 +554,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -579,11 +576,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -607,11 +601,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -635,11 +626,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -661,11 +649,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -689,11 +674,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -716,11 +698,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -731,26 +710,22 @@ class TestMain:
         from teammate_completion_gate import main
 
         input_data = json.dumps({"team_name": "pact-test"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_allows_when_no_team_name(self, tmp_path):
-        """P1: Missing team_name (env and input) → exit 0."""
+    def test_allows_when_no_team_name(self, tmp_path, pact_context):
+        """P1: Missing team_name (context file and input) → exit 0."""
+        pact_context(team_name="")  # No team_name available
         from teammate_completion_gate import main
 
         input_data = json.dumps({"teammate_name": "backend-coder"})
-        env = {}
 
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=True):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -774,11 +749,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -798,11 +770,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -812,21 +781,19 @@ class TestMain:
         assert "#8" in captured.err
         assert "2 tasks" in captured.err
 
-    def test_team_name_from_env_fallback(self, tmp_path, capsys):
-        """P1: team_name not in input but in env var → works correctly."""
+    def test_team_name_from_context_fallback(self, tmp_path, capsys, pact_context):
+        """P1: team_name not in input but in context file → works correctly."""
+        pact_context(team_name="pact-test")
         from teammate_completion_gate import main
 
         task_dir = self._make_task_dir(tmp_path)
         _make_task_file(task_dir, "5", "backend-coder", "in_progress",
                         {"handoff": VALID_HANDOFF})
 
-        # No team_name in input
+        # No team_name in input — falls back to pact context file
         input_data = json.dumps({"teammate_name": "backend-coder"})
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -849,11 +816,8 @@ class TestMain:
             "teammate_name": "backend-coder",
             "team_name": "pact-test",
         })
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-
         with patch("teammate_completion_gate.Path.home", return_value=tmp_path), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, env, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -872,8 +836,7 @@ class TestMain:
 
         with patch("teammate_completion_gate._scan_owned_tasks",
                     side_effect=RuntimeError("unexpected")), \
-             patch("sys.stdin", io.StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=False):
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 

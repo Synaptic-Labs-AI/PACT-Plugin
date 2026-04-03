@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from shared.handoff_example import format_handoff_example
+import shared.pact_context as pact_context
+from shared.pact_context import get_team_name
 
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
@@ -241,10 +243,11 @@ def main():
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
+    pact_context.init(input_data)
     task_id = input_data.get("task_id", "")
     task_subject = input_data.get("task_subject", "")
     teammate_name = input_data.get("teammate_name")
-    team_name = (input_data.get("team_name") or os.environ.get("CLAUDE_CODE_TEAM_NAME", "")).lower()
+    team_name = (input_data.get("team_name") or get_team_name()).lower()
 
     # TaskCompleted input doesn't include metadata — read from task file
     task_metadata = read_task_metadata(task_id, team_name)
