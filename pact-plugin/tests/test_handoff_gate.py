@@ -26,6 +26,17 @@ Tests cover:
 20. Dedup: large file (50+ entries) still deduplicates correctly
 21. Dedup: truncated JSON entries handled gracefully
 22. Integration: cascade via main() — sequential completions produce unique breadcrumbs
+23. Enriched: handoff=None vs handoff={} both produce no enrichment
+24. Enriched: task_subject special characters survive JSON roundtrip
+25. Enriched: very long task_subject (1KB+) in entry
+26. Enriched: handoff with nested structures (dicts in lists) roundtrip
+27. Enriched: fail-open on OSError during enriched write
+28. Enriched: concurrent writes with 2KB+ enriched payloads
+29. Enriched: dedup with mixed enriched entries in large file (50+)
+30. Enriched: enriched cascade via main() — sequential enriched completions unique
+31. Enriched: enriched lifecycle — create with inline HANDOFF, consume, delete
+32. Enriched: task_subject present when metadata truthy but handoff falsy (edge case)
+33. Enriched: file permissions preserved for enriched entries
 """
 import threading
 import json
@@ -1012,6 +1023,509 @@ class TestEnrichedBreadcrumb:
         assert entries[1]["task_subject"] == "CODE: frontend"
         # Entry 3: legacy
         assert "handoff" not in entries[2]
+
+    def test_handoff_none_value_no_enrichment(self, tmp_path):
+        """Edge: metadata has handoff=None -> no handoff key in entry."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"handoff": None, "memory_saved": True},
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "handoff" not in entry
+        # task_subject IS included because metadata is truthy (has memory_saved key)
+        assert entry["task_subject"] == "CODE: auth"
+
+    def test_handoff_empty_dict_no_enrichment(self, tmp_path):
+        """Edge: metadata has handoff={} (empty dict, falsy) -> no handoff key."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"handoff": {}, "memory_saved": True},
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "handoff" not in entry
+        assert entry["task_subject"] == "CODE: auth"
+
+    def test_handoff_empty_list_no_enrichment(self, tmp_path):
+        """Edge: metadata has handoff=[] (empty list, falsy) -> no handoff key."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"handoff": [], "memory_saved": True},
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "handoff" not in entry
+
+    def test_task_subject_special_characters_roundtrip(self, tmp_path):
+        """task_subject with quotes, newlines, unicode survives JSON roundtrip."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        special_subject = 'CODE: "auth" with\nnewline & emoji \u2603 and backslash \\\\'
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject=special_subject,
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert entry["task_subject"] == special_subject
+        assert entry["handoff"] == VALID_HANDOFF
+
+    def test_very_long_task_subject(self, tmp_path):
+        """Very long task_subject (1KB+) doesn't corrupt JSONL."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        long_subject = "CODE: " + "x" * 1200
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject=long_subject,
+            )
+            # Append a second entry to verify no corruption
+            append_pending_handoff(
+                "43", "frontend-coder", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="CODE: small",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 2
+        entry1 = json.loads(lines[0])
+        entry2 = json.loads(lines[1])
+        assert entry1["task_subject"] == long_subject
+        assert entry2["task_subject"] == "CODE: small"
+
+    def test_handoff_with_nested_structures_roundtrip(self, tmp_path):
+        """HANDOFF with deeply nested structures (dicts in lists in dicts) roundtrips."""
+        from handoff_gate import append_pending_handoff
+
+        nested_handoff = {
+            "produced": ["src/auth.ts"],
+            "decisions": [
+                {"choice": "JWT", "rationale": "stateless", "alternatives": ["sessions", "cookies"]}
+            ],
+            "uncertainty": [
+                {"level": "HIGH", "description": "Token refresh", "details": {"timeout": 300, "retry": True}}
+            ],
+            "integration": ["UserService"],
+            "open_questions": [],
+            "reasoning_chain": "A because B -> C",
+        }
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"handoff": nested_handoff},
+                task_subject="CODE: nested",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert entry["handoff"] == nested_handoff
+
+    def test_enriched_fail_open_on_write_os_error(self, tmp_path):
+        """OSError during enriched write -> silent failure (no exception raised)."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": VALID_HANDOFF}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path), \
+             patch("os.open", side_effect=OSError("disk full")):
+            # Should not raise — fail-open behavior
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        assert not filepath.exists()
+
+    def test_enriched_file_permissions_0o600(self, tmp_path):
+        """Enriched entries maintain 0o600 file permissions."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": VALID_HANDOFF}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        perms = oct(filepath.stat().st_mode & 0o777)
+        assert perms == oct(0o600), f"Expected 0o600, got {perms}"
+
+    def test_task_subject_included_when_metadata_truthy_but_handoff_falsy(self, tmp_path):
+        """Explicit edge case per coder's LOW uncertainty flag: task_subject is
+        included whenever metadata is truthy, even if handoff key is absent/falsy."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        # Case 1: metadata has unrelated keys, no handoff
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"skipped": False},
+                task_subject="PREPARE: research",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "handoff" not in entry
+        assert entry["task_subject"] == "PREPARE: research"
+
+    def test_task_subject_not_included_when_metadata_is_none(self, tmp_path):
+        """When metadata is None, task_subject is NOT included even if non-empty."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=None,
+                task_subject="CODE: should not appear",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "task_subject" not in entry
+        assert "handoff" not in entry
+
+
+class TestEnrichedConcurrency:
+    """Concurrent writes with enriched (2KB+) payloads under POSIX atomic append."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_concurrent_enriched_writes_no_corruption(self, tmp_path):
+        """Multiple threads writing enriched 2KB+ entries — no data corruption."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        errors = []
+
+        large_handoff = {
+            "produced": [f"src/file_{i}.ts" for i in range(50)],
+            "decisions": [f"Decision {i}: " + "x" * 40 for i in range(20)],
+            "uncertainty": [{"level": "HIGH", "description": "y" * 100}],
+            "integration": [f"Service{i}" for i in range(10)],
+            "open_questions": [f"Question {i}?" for i in range(5)],
+        }
+        assert len(json.dumps(large_handoff)) > 2000
+
+        def append_enriched(task_id):
+            try:
+                with patch("handoff_gate.Path.home", return_value=tmp_path):
+                    append_pending_handoff(
+                        str(task_id), f"agent-{task_id}", "pact-test",
+                        task_metadata={"handoff": large_handoff},
+                        task_subject=f"CODE: task-{task_id}",
+                    )
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=append_enriched, args=(i,)) for i in range(15)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Unexpected errors: {errors}"
+
+        filepath = self._breadcrumb_path(teams_dir)
+        content = filepath.read_text()
+        lines = [l for l in content.strip().split("\n") if l.strip()]
+
+        # Every line must be valid JSON with enriched content
+        task_ids = set()
+        for line in lines:
+            entry = json.loads(line)
+            task_ids.add(entry["task_id"])
+            assert entry["handoff"] == large_handoff
+            assert "task_subject" in entry
+
+        assert task_ids == {str(i) for i in range(15)}
+
+    def test_concurrent_enriched_same_task_id_no_corruption(self, tmp_path):
+        """Multiple threads writing same enriched task_id — no corruption."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        def append_enriched():
+            with patch("handoff_gate.Path.home", return_value=tmp_path):
+                append_pending_handoff(
+                    "42", "backend-coder", "pact-test",
+                    task_metadata={"handoff": VALID_HANDOFF},
+                    task_subject="CODE: auth",
+                )
+
+        threads = [threading.Thread(target=append_enriched) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+
+        # Each line must be valid JSON (no corruption)
+        for line in lines:
+            entry = json.loads(line)
+            assert entry["task_id"] == "42"
+            assert entry["handoff"] == VALID_HANDOFF
+
+        # Best-effort dedup under TOCTOU; structural soundness is the key assertion
+        assert len(lines) >= 1
+
+
+class TestEnrichedDedupLargeFile:
+    """Dedup with mixed enriched entries in large files."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_dedup_50_enriched_entries(self, tmp_path):
+        """Dedup scan works correctly with 50 enriched (larger) entries."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        # Pre-populate with 50 enriched entries
+        entries = []
+        for i in range(50):
+            entries.append(json.dumps({
+                "task_id": str(i),
+                "teammate_name": f"agent-{i}",
+                "timestamp": "2026-04-03T00:00:00Z",
+                "handoff": VALID_HANDOFF,
+                "task_subject": f"CODE: task-{i}",
+            }))
+        filepath.write_text("\n".join(entries) + "\n")
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            # Duplicate — should be skipped
+            append_pending_handoff(
+                "25", "agent-25", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="CODE: task-25",
+            )
+            # New entry — should be appended
+            append_pending_handoff(
+                "50", "agent-50", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="CODE: task-50",
+            )
+
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 51  # 50 original + 1 new
+        task_ids = [json.loads(l)["task_id"] for l in lines]
+        assert task_ids.count("25") == 1
+        assert "50" in task_ids
+
+
+class TestEnrichedCascadeIntegration:
+    """Integration: main() with enriched content through cascade dedup."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_enriched_cascade_via_main(self, tmp_path):
+        """main() called 3 times with same enriched task_id -> single enriched breadcrumb."""
+        from handoff_gate import main
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": VALID_HANDOFF, "memory_saved": True}
+
+        for _ in range(3):
+            input_data = json.dumps({
+                "task_id": "7",
+                "task_subject": "CODE: auth",
+                "teammate_name": "backend-coder",
+                "team_name": "pact-test"
+            })
+            with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+                 patch("handoff_gate.Path.home", return_value=tmp_path), \
+                 patch("sys.stdin", io.StringIO(input_data)):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                assert exc_info.value.code == 0
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["task_id"] == "7"
+        assert entry["handoff"] == VALID_HANDOFF
+        assert entry["task_subject"] == "CODE: auth"
+
+    def test_enriched_sequential_completions_via_main(self, tmp_path):
+        """Two different enriched tasks via main() -> two unique enriched breadcrumbs."""
+        from handoff_gate import main
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        tasks = [
+            {"task_id": "7", "task_subject": "CODE: auth", "teammate_name": "backend-coder"},
+            {"task_id": "8", "task_subject": "TEST: auth", "teammate_name": "test-engineer"},
+        ]
+
+        for task_info in tasks:
+            handoff = {
+                "produced": [f"file-for-{task_info['task_id']}"],
+                "decisions": ["decision"],
+                "uncertainty": [],
+                "integration": [],
+                "open_questions": [],
+            }
+            metadata = {"handoff": handoff, "memory_saved": True}
+            input_data = json.dumps({**task_info, "team_name": "pact-test"})
+
+            with patch("handoff_gate.read_task_metadata", return_value=metadata), \
+                 patch("handoff_gate.Path.home", return_value=tmp_path), \
+                 patch("sys.stdin", io.StringIO(input_data)):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+                assert exc_info.value.code == 0
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 2
+
+        entries = [json.loads(l) for l in lines]
+        assert entries[0]["task_id"] == "7"
+        assert entries[0]["handoff"]["produced"] == ["file-for-7"]
+        assert entries[0]["task_subject"] == "CODE: auth"
+        assert entries[1]["task_id"] == "8"
+        assert entries[1]["handoff"]["produced"] == ["file-for-8"]
+        assert entries[1]["task_subject"] == "TEST: auth"
+
+
+class TestEnrichedLifecycle:
+    """E2E: enriched breadcrumb creation -> consumption -> deletion."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_enriched_breadcrumb_lifecycle(self, tmp_path):
+        """Create enriched breadcrumbs, consume inline HANDOFFs, delete, re-create."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        filepath = self._breadcrumb_path(teams_dir)
+
+        # Phase 1: Create enriched breadcrumbs
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "10", "backend-coder", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="CODE: backend",
+            )
+            append_pending_handoff(
+                "11", "frontend-coder", "pact-test",
+                task_metadata={"handoff": {
+                    "produced": ["src/ui.tsx"],
+                    "decisions": ["Used React"],
+                    "uncertainty": [],
+                    "integration": ["BackendAPI"],
+                    "open_questions": [],
+                }},
+                task_subject="CODE: frontend",
+            )
+
+        assert filepath.exists()
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 2
+
+        # Phase 2: Consume — secretary reads inline HANDOFFs from breadcrumb
+        consumed_handoffs = {}
+        for line in lines:
+            entry = json.loads(line)
+            if "handoff" in entry:
+                consumed_handoffs[entry["task_id"]] = entry["handoff"]
+
+        assert len(consumed_handoffs) == 2
+        assert consumed_handoffs["10"] == VALID_HANDOFF
+        assert consumed_handoffs["11"]["produced"] == ["src/ui.tsx"]
+
+        # Phase 3: Delete breadcrumb (secretary cleanup)
+        filepath.unlink()
+        assert not filepath.exists()
+
+        # Phase 4: New completions create fresh file
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "20", "test-engineer", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="TEST: all",
+            )
+
+        assert filepath.exists()
+        new_lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(new_lines) == 1
+        new_entry = json.loads(new_lines[0])
+        assert new_entry["task_id"] == "20"
+        assert new_entry["handoff"] == VALID_HANDOFF
 
 
 class TestMainBreadcrumbIntegration:
