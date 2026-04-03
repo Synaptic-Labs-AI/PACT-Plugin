@@ -149,6 +149,27 @@ def get_project_dir() -> str:
     return get_pact_context().get("project_dir", "")
 
 
+def get_session_dir() -> str:
+    """Return the session-scoped directory path, or '' if unavailable.
+
+    Constructs: ~/.claude/pact-sessions/{slug}/{session_id}/
+
+    Uses get_session_id() and get_project_dir() from the cached context.
+    Returns "" if either is unavailable.
+
+    The returned path may not exist on disk — callers must create it
+    (mkdir -p) before writing files.
+    """
+    session_id = get_session_id()
+    project_dir = get_project_dir()
+    if not session_id or not project_dir:
+        return ""
+    slug = Path(project_dir).name
+    return str(
+        Path.home() / ".claude" / "pact-sessions" / slug / session_id
+    )
+
+
 def resolve_agent_name(
     input_data: dict,
     team_name: str | None = None,

@@ -125,7 +125,7 @@ pact_session.py path:
 init()-before-reader ordering guard:
 69. (parametrized) Every hook that calls a pact_context reader calls init() first
 70. session_end.py: init() before get_project_slug() (indirect get_project_dir() call)
-73. teachback_check.py: init() before should_warn() (indirect _get_project_slug() → get_project_dir())
+73. teachback_check.py: init() before should_warn() (indirect get_session_dir())
 
 Library module init() contract:
 71. task_utils.get_task_list() works when init() was called by a prior hook
@@ -286,6 +286,47 @@ class TestGetProjectDir:
         pact_context(project_dir="/Users/test/my-project")
 
         assert get_project_dir() == "/Users/test/my-project"
+
+
+class TestGetSessionDir:
+    """Tests for get_session_dir() — session-scoped directory path."""
+
+    def test_returns_session_dir_path(self, pact_context):
+        """Should construct ~/.claude/pact-sessions/{slug}/{session_id}/ path."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(
+            session_id="abc-123-def",
+            project_dir="/Users/test/my-project",
+        )
+
+        result = get_session_dir()
+        assert result.endswith("pact-sessions/my-project/abc-123-def")
+        assert ".claude" in result
+
+    def test_returns_empty_when_no_session_id(self, pact_context):
+        """Should return '' when session_id is unavailable."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="", project_dir="/Users/test/my-project")
+
+        assert get_session_dir() == ""
+
+    def test_returns_empty_when_no_project_dir(self, pact_context):
+        """Should return '' when project_dir is unavailable."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="abc-123", project_dir="")
+
+        assert get_session_dir() == ""
+
+    def test_returns_empty_when_both_missing(self, pact_context):
+        """Should return '' when both session_id and project_dir are missing."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(session_id="", project_dir="")
+
+        assert get_session_dir() == ""
 
 
 class TestInit:
@@ -1599,10 +1640,10 @@ class TestInitBeforeReaderOrdering:
         )
 
     def test_teachback_check_init_before_indirect_reader(self):
-        """teachback_check.py: init() must appear before should_warn() (which calls _get_project_slug() → get_project_dir()).
+        """teachback_check.py: init() must appear before should_warn() (which calls _get_marker_path() → get_session_dir()).
 
-        teachback_check.py calls get_project_dir() indirectly through
-        _get_project_slug(), which is called from should_warn(). The
+        teachback_check.py calls get_session_dir() indirectly through
+        _get_marker_path(), which is called from should_warn(). The
         parametrized test covers the direct readers (get_team_name,
         resolve_agent_name), so this test verifies the indirect case.
         """
@@ -1612,21 +1653,21 @@ class TestInitBeforeReaderOrdering:
         source = (hooks_dir / "teachback_check.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
 
-        # Verify _get_project_slug() calls get_project_dir()
-        slug_func = None
+        # Verify _get_marker_path() calls get_session_dir()
+        marker_func = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_get_project_slug":
-                slug_func = node
+            if isinstance(node, ast.FunctionDef) and node.name == "_get_marker_path":
+                marker_func = node
                 break
-        assert slug_func is not None, "teachback_check.py has no _get_project_slug() function"
+        assert marker_func is not None, "teachback_check.py has no _get_marker_path() function"
 
-        calls_get_project_dir = any(
+        calls_get_session_dir = any(
             isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-            and n.func.id == "get_project_dir"
-            for n in ast.walk(slug_func)
+            and n.func.id == "get_session_dir"
+            for n in ast.walk(marker_func)
         )
-        assert calls_get_project_dir, (
-            "teachback_check.py: _get_project_slug() does not call get_project_dir()"
+        assert calls_get_session_dir, (
+            "teachback_check.py: _get_marker_path() does not call get_session_dir()"
         )
 
         # Verify init() appears before should_warn() in main()
