@@ -106,9 +106,9 @@ Processed task IDs: 6, 7, 12, 15
 Last processed: {timestamp}
 ```
 
-### Step 9: Breadcrumb Cleanup
+### Step 9: Breadcrumb Preservation
 
-Delete the breadcrumb file after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete). Use `python3 -c "from pathlib import Path; Path('~/.claude/teams/{team_name}/completed_handoffs.jsonl').expanduser().unlink(missing_ok=True)"` — not shell `rm`, because the file is inside `~/.claude/teams/` which Claude Code treats as sensitive, and `rm` via Bash triggers a permission prompt.
+**Do NOT delete the breadcrumb file during harvest.** The breadcrumb now contains enriched HANDOFF content that serves as the primary data source. Deleting it before pact-memory save completes risks permanent data loss on crash or disconnect. The breadcrumb is cleaned up only by `TeamDelete` at session end (after the wrap-up command verifies all entries are processed).
 
 ### Step 10: Report Summary
 
@@ -126,8 +126,8 @@ Gaps: {any HANDOFFs that were thin or missing}",
 ### Step 11: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
-- Read the feature task metadata for `initial_variety_score` (stored during variety assessment)
-- Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject)
+- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the lead for the variety score instead.
+- Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject). Note: `TaskList` may be incomplete in long sessions due to garbage collection — report what's available.
 - Scan `TaskList` for phase rerun count (retry/redo phase tasks)
 - Note domain from feature task description
 - Infer specialist fit from HANDOFF content (scope mismatch signals, blocker patterns)
@@ -146,9 +146,9 @@ After processing HANDOFFs, gather calibration metrics for the orchestrator's var
 Triggered after remediation completes — processes only the delta since the last harvest pass. Fires only when remediation occurred and produced new completed tasks.
 
 1. **Check processed task tracking**: Read `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md` for already-processed task IDs
-2. **Read `TaskList`** for completed tasks not in the processed set — these are new completions from remediation
+2. **Discover new completions**: Check the breadcrumb file (primary) and `TaskList` (supplementary) for completed tasks not in the processed set — these are new completions from remediation. The breadcrumb may contain tasks that `TaskList` no longer shows (garbage-collected).
 3. **If no new completions**: Report "No new HANDOFFs since last harvest" and complete
-4. **Read new HANDOFFs** via `TaskGet(taskId).metadata.handoff`
+4. **Read new HANDOFFs** using the Standard Harvest Step 3 priority: prefer breadcrumb inline content, fall back to `TaskGet(taskId).metadata.handoff` for old-format entries
 5. **Extract and save** using Steps 4-7 from Standard Harvest (extract knowledge, organizational state, dedup protocol, save)
 6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
 7. **Do NOT delete the breadcrumb file** — it may still be accumulating entries from ongoing work
@@ -163,7 +163,7 @@ Triggered during `/PACT:wrap-up` or `/PACT:pause`. This is the deep-clean pass �
 
 ### Step 1: Safety Net (Unprocessed HANDOFFs)
 
-If the breadcrumb file at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` still exists, process remaining HANDOFFs first using the Standard Harvest workflow above (Layer 2 may have been missed). Then continue with consolidation.
+Check the breadcrumb file at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` for entries not yet in the processed task set. If unprocessed entries exist, run the Standard Harvest workflow above first (earlier harvest triggers may have been missed). Then continue with consolidation.
 
 ### Step 2: Review Session Memories
 
