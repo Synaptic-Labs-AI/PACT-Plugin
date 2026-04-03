@@ -106,11 +106,7 @@ Processed task IDs: 6, 7, 12, 15
 Last processed: {timestamp}
 ```
 
-### Step 9: Breadcrumb Preservation
-
-**Do NOT delete the breadcrumb file during harvest.** The breadcrumb now contains enriched HANDOFF content that serves as the primary data source. Deleting it before pact-memory save completes risks permanent data loss on crash or disconnect. The breadcrumb is cleaned up only by `TeamDelete` at session end (after the wrap-up command verifies all entries are processed).
-
-### Step 10: Report Summary
+### Step 9: Report Summary
 
 Report to the lead:
 
@@ -123,7 +119,7 @@ Gaps: {any HANDOFFs that were thin or missing}",
   summary="HANDOFF review complete: N memories from M HANDOFFs")
 ```
 
-### Step 11: Gather Calibration Data
+### Step 10: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
 - Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the lead for the variety score instead.
@@ -180,7 +176,7 @@ Sync Working Memory to CLAUDE.md. The auto-sync mechanism handles individual sav
 
 ### Step 5: Save Orchestration Retrospective
 
-Save orchestration retrospective as calibration data (see Standard Harvest Step 11 for CalibrationRecord schema). This captures the session-level view: overall workflow effectiveness, recurring patterns, and calibration for future variety scoring.
+Save orchestration retrospective as calibration data (see Standard Harvest Step 10 for CalibrationRecord schema). This captures the session-level view: overall workflow effectiveness, recurring patterns, and calibration for future variety scoring.
 
 ### Step 6: Report Summary
 
