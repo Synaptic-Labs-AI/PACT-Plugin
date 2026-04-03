@@ -239,7 +239,10 @@ def append_pending_handoff(
             "teammate_name": teammate_name,
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
-        # Enrich with HANDOFF content when available (GC-proof breadcrumb)
+        # Enrich with HANDOFF content when available (GC-proof breadcrumb).
+        # task_subject is nested inside `if task_metadata` intentionally:
+        # when metadata is None/empty, we produce a legacy-format entry with no
+        # extra fields. task_subject is only useful alongside metadata context.
         if task_metadata:
             handoff = task_metadata.get("handoff")
             if handoff:
@@ -252,8 +255,8 @@ def append_pending_handoff(
             os.write(fd, entry.encode())
         finally:
             os.close(fd)
-    except OSError:
-        pass
+    except (OSError, TypeError, ValueError):
+        pass  # Fail-open: TypeError/ValueError from json.dumps on non-serializable data
 
 
 def main():

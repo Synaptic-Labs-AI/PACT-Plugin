@@ -24,7 +24,7 @@ Determine which variant to run from the task subject/description: "harvest" or "
 
 ### Read All HANDOFFs Before Saving
 
-When reviewing multiple HANDOFFs, read ALL of them via `TaskGet` before saving any memories. This lets you deduplicate and consolidate across HANDOFFs before committing to pact-memory — producing cleaner entries than saving after each individual HANDOFF.
+When reviewing multiple HANDOFFs, read ALL of them (using the Step 3 priority cascade: prefer breadcrumb inline content, fall back to TaskGet) before saving any memories. This lets you deduplicate and consolidate across HANDOFFs before committing to pact-memory — producing cleaner entries than saving after each individual HANDOFF.
 
 ### Step 1: Task Discovery
 
