@@ -676,10 +676,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_when_agent_name_empty(self, capsys):
+    def test_suppress_output_when_agent_name_empty(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {"CLAUDE_CODE_AGENT_NAME": ""}), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -688,12 +690,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_when_no_team_name(self, capsys):
+    def test_suppress_output_when_no_team_name(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-        }), patch("sys.stdin", io.StringIO("{}")):
+        # pact_context not called → get_team_name() returns ""
+
+        with patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -701,13 +703,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_when_team_name_empty(self, capsys):
+    def test_suppress_output_when_team_name_empty(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "",
-        }), patch("sys.stdin", io.StringIO("{}")):
+        pact_context(team_name="")
+
+        with patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -715,13 +716,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_suppress_output_on_invalid_json_stdin(self, capsys):
+    def test_suppress_output_on_invalid_json_stdin(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), patch("sys.stdin", io.StringIO("not valid json")):
+        pact_context(team_name="pact-test")
+
+        with patch("sys.stdin", io.StringIO("not valid json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
@@ -729,13 +729,12 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_emits_warning_when_should_warn_true(self, capsys):
+    def test_emits_warning_when_should_warn_true(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(True, "1")), \
              patch("teachback_check._mark_warned") as mock_mark:
@@ -748,13 +747,12 @@ class TestMainEntryPoint:
         assert "TEACHBACK REMINDER" in output["systemMessage"]
         mock_mark.assert_called_once_with("backend-coder-1", "1")
 
-    def test_suppress_output_when_should_warn_false(self, capsys):
+    def test_suppress_output_when_should_warn_false(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(False, "")):
             with pytest.raises(SystemExit) as exc_info:
@@ -764,14 +762,13 @@ class TestMainEntryPoint:
         output = json.loads(capsys.readouterr().out.strip())
         assert output == {"suppressOutput": True}
 
-    def test_team_name_lowercased(self, capsys):
-        """CLAUDE_CODE_TEAM_NAME should be lowercased before passing to should_warn."""
+    def test_team_name_lowercased(self, capsys, pact_context):
+        """get_team_name() returns lowercased value for should_warn."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "PACT-TEST",
-        }), \
+        pact_context(team_name="PACT-TEST")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(False, "")) as mock_warn:
             with pytest.raises(SystemExit) as exc_info:
@@ -780,14 +777,13 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 0
         mock_warn.assert_called_once_with("backend-coder-1", "pact-test")
 
-    def test_always_exits_0(self, capsys):
+    def test_always_exits_0(self, capsys, pact_context):
         """Hook should always exit 0 — it's a warning layer, not a gate."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(True, "1")), \
              patch("teachback_check._mark_warned"):
@@ -804,14 +800,13 @@ class TestMainEntryPoint:
 class TestExceptionHandler:
     """Tests for the outer exception handler — fail open with hook_error_json."""
 
-    def test_fail_open_on_unexpected_error(self, capsys):
+    def test_fail_open_on_unexpected_error(self, capsys, pact_context):
         """Any unhandled exception should produce hook_error_json and exit 0."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit) as exc_info:
@@ -824,14 +819,13 @@ class TestExceptionHandler:
         assert "teachback_check" in output["systemMessage"]
         assert "boom" in captured.err
 
-    def test_error_and_suppress_mutually_exclusive(self, capsys):
+    def test_error_and_suppress_mutually_exclusive(self, capsys, pact_context):
         """Error path should emit systemMessage, NOT suppressOutput."""
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
@@ -849,10 +843,12 @@ class TestExceptionHandler:
 class TestSuppressOutput:
     """Verify all bare exit paths emit suppressOutput, not empty stdout."""
 
-    def test_no_agent_name_emits_suppress(self, capsys):
+    def test_no_agent_name_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {}, clear=True), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit):
                 main()
@@ -860,38 +856,36 @@ class TestSuppressOutput:
         output = json.loads(capsys.readouterr().out.strip())
         assert output.get("suppressOutput") is True
 
-    def test_no_team_name_emits_suppress(self, capsys):
+    def test_no_team_name_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "coder-1",
-        }), patch("sys.stdin", io.StringIO("{}")):
+        # pact_context not called → get_team_name() returns ""
+
+        with patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit):
                 main()
 
         output = json.loads(capsys.readouterr().out.strip())
         assert output.get("suppressOutput") is True
 
-    def test_invalid_json_emits_suppress(self, capsys):
+    def test_invalid_json_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), patch("sys.stdin", io.StringIO("not json")):
+        pact_context(team_name="pact-test")
+
+        with patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit):
                 main()
 
         output = json.loads(capsys.readouterr().out.strip())
         assert output.get("suppressOutput") is True
 
-    def test_should_warn_false_emits_suppress(self, capsys):
+    def test_should_warn_false_emits_suppress(self, capsys, pact_context):
         from teachback_check import main
 
-        with patch.dict("os.environ", {
-            "CLAUDE_CODE_AGENT_NAME": "coder-1",
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }), \
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="coder-1"), \
              patch("sys.stdin", io.StringIO("{}")), \
              patch("teachback_check.should_warn", return_value=(False, "")):
             with pytest.raises(SystemExit):

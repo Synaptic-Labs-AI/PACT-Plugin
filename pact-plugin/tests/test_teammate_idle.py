@@ -391,20 +391,14 @@ class TestCheckIdleCleanup:
 class TestMain:
     """Tests for teammate_idle.main() stdin/stdout/exit behavior."""
 
-    def _run_main(self, input_data, env=None, tasks=None):
+    def _run_main(self, input_data, team_name="pact-test", tasks=None):
         """Helper to run main() with mocked inputs."""
         import io
         from teammate_idle import main
 
-        default_env = {
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }
-        if env:
-            default_env.update(env)
-
         mock_tasks = tasks if tasks is not None else []
 
-        with patch.dict(os.environ, default_env, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value=team_name), \
              patch("sys.stdin", io.StringIO(json.dumps(input_data))), \
              patch("teammate_idle.get_task_list", return_value=mock_tasks):
             with pytest.raises(SystemExit) as exc_info:
@@ -414,10 +408,9 @@ class TestMain:
 
     def test_exits_0_when_no_team(self, capsys):
         import io
-        import os
         from teammate_idle import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": ""}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value=""), \
              patch("sys.stdin", io.StringIO("{}")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -437,16 +430,11 @@ class TestMain:
 
     def test_outputs_stall_warning(self, capsys, tmp_path):
         import io
-        import os
         from teammate_idle import main
 
         tasks = [make_task(status="in_progress", owner="coder-a")]
 
-        env = {
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }
-
-        with patch.dict(os.environ, env, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
              patch("teammate_idle.get_task_list", return_value=tasks):
             with pytest.raises(SystemExit) as exc_info:
@@ -461,18 +449,13 @@ class TestMain:
 
     def test_outputs_nothing_for_completed_below_threshold(self, capsys, tmp_path):
         import io
-        import os
         from teammate_idle import main
 
         tasks = [make_task(status="completed", owner="coder-a")]
 
-        env = {
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-        }
-
         # Patch Path.home() so idle_counts.json uses tmp_path instead of real home
         # (prevents cross-test pollution from persisted idle count files)
-        with patch.dict(os.environ, env, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
              patch("teammate_idle.get_task_list", return_value=tasks), \
              patch("teammate_idle.Path.home", return_value=tmp_path):
@@ -486,10 +469,9 @@ class TestMain:
 
     def test_exits_0_on_invalid_json(self):
         import io
-        import os
         from teammate_idle import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -589,7 +571,7 @@ class TestStallIdleInteraction:
         # Agent with in_progress task (stall case)
         tasks = [make_task(status="in_progress", owner="coder-a")]
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
              patch("teammate_idle.get_task_list", return_value=tasks):
             with pytest.raises(SystemExit):
@@ -766,12 +748,12 @@ class TestMainEdgeCases:
     """Additional edge cases for main() entry point."""
 
     def test_team_name_lowercased(self):
-        """CLAUDE_CODE_TEAM_NAME should be lowercased per v3.3.2 convention."""
+        """get_team_name() returns lowercased value per v3.3.2 convention."""
         import io
         from teammate_idle import main
 
-        # Use uppercase team name — should work (lowercased internally)
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "PACT-TEST"}, clear=True), \
+        # get_team_name() already returns lowercased — test that main() works
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": ""}))):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -783,7 +765,7 @@ class TestMainEdgeCases:
         import io
         from teammate_idle import main
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
              patch("teammate_idle.get_task_list", return_value=None):
             with pytest.raises(SystemExit) as exc_info:
@@ -804,7 +786,7 @@ class TestMainEdgeCases:
         idle_dir.mkdir(parents=True)
         write_idle_counts(str(idle_dir / "idle_counts.json"), {"coder-a": 4})
 
-        with patch.dict(os.environ, {"CLAUDE_CODE_TEAM_NAME": "pact-test"}, clear=True), \
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
              patch("teammate_idle.get_task_list", return_value=tasks), \
              patch("pathlib.Path.home", return_value=tmp_path):

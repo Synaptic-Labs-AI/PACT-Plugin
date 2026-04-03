@@ -202,30 +202,27 @@ class TestMainEntryPoint:
     def test_main_exits_0_when_no_team_name(self):
         from file_tracker import main
 
-        with patch.dict("os.environ", {}, clear=True):
+        input_data = json.dumps({"tool_name": "Edit"})
+
+        with patch("file_tracker.get_team_name", return_value=""), \
+             patch("file_tracker.pact_context.init"), \
+             patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_on_valid_edit(self, tmp_path):
+    def test_main_exits_0_on_valid_edit(self, tmp_path, pact_context):
         from file_tracker import main
+
+        pact_context(team_name="pact-test")
 
         input_data = json.dumps({
             "tool_input": {"file_path": "src/auth.ts"},
             "tool_name": "Edit",
         })
 
-        tracking_path = str(tmp_path / "file-edits.json")
-        teams_dir = tmp_path / "pact-test"
-        teams_dir.mkdir(parents=True)
-
-        env = {
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-            "CLAUDE_CODE_AGENT_NAME": "backend-coder",
-        }
-
-        with patch.dict("os.environ", env, clear=True), \
+        with patch("file_tracker.resolve_agent_name", return_value="backend-coder"), \
              patch("file_tracker.check_conflict", return_value=None), \
              patch("file_tracker.track_edit"), \
              patch("sys.stdin", io.StringIO(input_data)):
@@ -234,45 +231,42 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_on_invalid_json(self):
+    def test_main_exits_0_on_invalid_json(self, pact_context):
         from file_tracker import main
 
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-        with patch.dict("os.environ", env, clear=True), \
-             patch("sys.stdin", io.StringIO("not json")):
+        pact_context(team_name="pact-test")
+
+        with patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_when_no_file_path(self):
+    def test_main_exits_0_when_no_file_path(self, pact_context):
         from file_tracker import main
+
+        pact_context(team_name="pact-test")
 
         input_data = json.dumps({"tool_input": {}})
 
-        env = {"CLAUDE_CODE_TEAM_NAME": "pact-test"}
-        with patch.dict("os.environ", env, clear=True), \
-             patch("sys.stdin", io.StringIO(input_data)):
+        with patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_outputs_warning_on_conflict(self, capsys):
+    def test_main_outputs_warning_on_conflict(self, capsys, pact_context):
         from file_tracker import main
+
+        pact_context(team_name="pact-test")
 
         input_data = json.dumps({
             "tool_input": {"file_path": "src/auth.ts"},
             "tool_name": "Edit",
         })
 
-        env = {
-            "CLAUDE_CODE_TEAM_NAME": "pact-test",
-            "CLAUDE_CODE_AGENT_NAME": "frontend-coder",
-        }
-
         conflict_msg = "File conflict: src/auth.ts was also edited by backend-coder."
-        with patch.dict("os.environ", env, clear=True), \
+        with patch("file_tracker.resolve_agent_name", return_value="frontend-coder"), \
              patch("file_tracker.check_conflict", return_value=conflict_msg), \
              patch("file_tracker.track_edit"), \
              patch("sys.stdin", io.StringIO(input_data)):

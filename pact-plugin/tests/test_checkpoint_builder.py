@@ -33,19 +33,17 @@ from refresh.transcript_parser import Turn
 class TestGetSessionId:
     """Tests for get_session_id function."""
 
-    def test_returns_env_session_id(self):
-        """Test that session ID is read from environment."""
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session-abc"}):
-            session_id = get_session_id()
+    def test_returns_context_session_id(self, pact_context):
+        """Test that session ID is read from pact context file."""
+        pact_context(session_id="test-session-abc")
+        session_id = get_session_id()
 
         assert session_id == "test-session-abc"
 
-    def test_returns_unknown_when_not_set(self):
-        """Test default when CLAUDE_SESSION_ID not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            # Remove CLAUDE_SESSION_ID if it exists
-            os.environ.pop("CLAUDE_SESSION_ID", None)
-            session_id = get_session_id()
+    def test_returns_unknown_when_not_set(self, pact_context):
+        """Test default when session ID not available."""
+        pact_context(session_id="")  # Empty session_id → get_session_id() returns "" → or "unknown"
+        session_id = get_session_id()
 
         assert session_id == "unknown"
 
@@ -144,15 +142,15 @@ class TestBuildCheckpoint:
             },
         )
 
-    def test_build_complete_checkpoint(self, sample_workflow_info, sample_step_info):
+    def test_build_complete_checkpoint(self, sample_workflow_info, sample_step_info, pact_context):
         """Test building checkpoint with all fields."""
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}):
-            checkpoint = build_checkpoint(
-                transcript_path="/test/path/session.jsonl",
-                workflow_info=sample_workflow_info,
-                step_info=sample_step_info,
-                lines_scanned=150,
-            )
+        pact_context(session_id="test-session")
+        checkpoint = build_checkpoint(
+            transcript_path="/test/path/session.jsonl",
+            workflow_info=sample_workflow_info,
+            step_info=sample_step_info,
+            lines_scanned=150,
+        )
 
         assert checkpoint["version"] == "1.0"
         assert checkpoint["session_id"] == "test-session"
@@ -209,14 +207,14 @@ class TestBuildCheckpoint:
 class TestBuildNoWorkflowCheckpoint:
     """Tests for build_no_workflow_checkpoint function."""
 
-    def test_build_no_workflow_checkpoint(self):
+    def test_build_no_workflow_checkpoint(self, pact_context):
         """Test building checkpoint when no workflow detected."""
-        with patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}):
-            checkpoint = build_no_workflow_checkpoint(
-                transcript_path="/test/path",
-                lines_scanned=500,
-                reason="No PACT trigger found",
-            )
+        pact_context(session_id="test-session")
+        checkpoint = build_no_workflow_checkpoint(
+            transcript_path="/test/path",
+            lines_scanned=500,
+            reason="No PACT trigger found",
+        )
 
         assert checkpoint["version"] == "1.0"
         assert checkpoint["workflow"]["name"] == "none"

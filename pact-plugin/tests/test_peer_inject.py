@@ -8,7 +8,7 @@ Tests cover:
 2. Excludes the spawning agent from peer list (+ teachback reminder)
 3. Returns None when no team config exists
 4. Returns "only active teammate" when alone (+ teachback reminder)
-5. No-op when CLAUDE_CODE_TEAM_NAME not set
+5. No-op when team_name not available
 6. main() entry point: stdin JSON parsing, exit codes, output format,
    exception propagation from get_peer_context
 7. Corrupted config.json returns None
@@ -230,8 +230,10 @@ class TestTeachbackReminder:
 class TestMainEntryPoint:
     """Tests for peer_inject.main() stdin/stdout/exit behavior."""
 
-    def test_main_exits_0_with_peer_context(self, capsys):
+    def test_main_exits_0_with_peer_context(self, capsys, pact_context):
         from peer_inject import main
+
+        pact_context(team_name="pact-test")
 
         input_data = json.dumps({
             "agent_type": "pact-backend-coder",
@@ -239,7 +241,6 @@ class TestMainEntryPoint:
 
         peer_context = "Active teammates on your team: frontend-coder"
         with patch("peer_inject.get_peer_context", return_value=peer_context), \
-             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -250,51 +251,55 @@ class TestMainEntryPoint:
         assert "additionalContext" in output["hookSpecificOutput"]
         assert "frontend-coder" in output["hookSpecificOutput"]["additionalContext"]
 
-    def test_main_exits_0_on_invalid_json(self):
+    def test_main_exits_0_on_invalid_json(self, pact_context):
         from peer_inject import main
 
-        with patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
-             patch("sys.stdin", io.StringIO("not json")):
+        pact_context(team_name="pact-test")
+
+        with patch("sys.stdin", io.StringIO("not json")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_when_no_team_name(self):
+    def test_main_exits_0_when_no_team_name(self, pact_context):
         from peer_inject import main
+
+        # pact_context not called → no context file → get_team_name() returns ""
 
         input_data = json.dumps({"agent_type": "pact-backend-coder"})
 
-        with patch.dict("os.environ", {}, clear=True), \
-             patch("sys.stdin", io.StringIO(input_data)):
+        with patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_when_no_peer_context(self):
+    def test_main_exits_0_when_no_peer_context(self, pact_context):
         from peer_inject import main
+
+        pact_context(team_name="pact-test")
 
         input_data = json.dumps({"agent_type": "pact-backend-coder"})
 
         with patch("peer_inject.get_peer_context", return_value=None), \
-             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
 
-    def test_main_propagates_exception_from_get_peer_context(self):
+    def test_main_propagates_exception_from_get_peer_context(self, pact_context):
         """RuntimeError from get_peer_context propagates — peer_inject has no
         outer except Exception handler (only catches JSONDecodeError on stdin).
         This documents the current behavior: unhandled exceptions crash the hook."""
         from peer_inject import main
 
+        pact_context(team_name="pact-test")
+
         input_data = json.dumps({"agent_type": "pact-backend-coder"})
 
         with patch("peer_inject.get_peer_context", side_effect=RuntimeError("boom")), \
-             patch.dict("os.environ", {"CLAUDE_CODE_TEAM_NAME": "pact-test"}), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(RuntimeError, match="boom"):
                 main()

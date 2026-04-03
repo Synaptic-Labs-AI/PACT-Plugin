@@ -38,24 +38,24 @@ def write_task(tasks_dir, task_id, task_data):
 class TestGetTaskList:
     """Tests for get_task_list() — filesystem-based task reading."""
 
-    def test_returns_none_when_no_session_id(self, monkeypatch):
+    def test_returns_none_when_no_session_id(self, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+        pact_context(session_id="")  # No session ID available
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         result = get_task_list()
         assert result is None
 
-    def test_returns_none_when_tasks_dir_missing(self, tmp_path, monkeypatch):
+    def test_returns_none_when_tasks_dir_missing(self, tmp_path, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session")
+        pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         result = get_task_list()
         assert result is None
 
-    def test_reads_tasks_from_filesystem(self, tmp_path, monkeypatch):
+    def test_reads_tasks_from_filesystem(self, tmp_path, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session")
+        pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -68,9 +68,9 @@ class TestGetTaskList:
         assert result is not None
         assert len(result) == 2
 
-    def test_prefers_task_list_id_over_session_id(self, tmp_path, monkeypatch):
+    def test_prefers_task_list_id_over_session_id(self, tmp_path, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "session-id")
+        pact_context(session_id="session-id")
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "task-list-id")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -83,9 +83,9 @@ class TestGetTaskList:
         assert result is not None
         assert len(result) == 1
 
-    def test_returns_none_for_empty_dir(self, tmp_path, monkeypatch):
+    def test_returns_none_for_empty_dir(self, tmp_path, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session")
+        pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -95,9 +95,9 @@ class TestGetTaskList:
         result = get_task_list()
         assert result is None
 
-    def test_skips_invalid_json_files(self, tmp_path, monkeypatch):
+    def test_skips_invalid_json_files(self, tmp_path, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session")
+        pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -110,9 +110,9 @@ class TestGetTaskList:
         assert result is not None
         assert len(result) == 1
 
-    def test_returns_none_on_exception(self, tmp_path, monkeypatch):
+    def test_returns_none_on_exception(self, tmp_path, monkeypatch, pact_context):
         from task_utils import get_task_list
-        monkeypatch.setenv("CLAUDE_SESSION_ID", "test-session")
+        pact_context(session_id="test-session")
         monkeypatch.delenv("CLAUDE_CODE_TASK_LIST_ID", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 

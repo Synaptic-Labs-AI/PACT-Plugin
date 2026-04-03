@@ -28,8 +28,9 @@ from conftest import (
 class TestPlanModeWorkflowE2E:
     """End-to-end tests for plan-mode workflow refresh cycle."""
 
-    def test_plan_mode_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path):
+    def test_plan_mode_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path, pact_context):
         """Test complete refresh cycle for plan-mode workflow in consult phase."""
+        pact_context(session_id="plan-mode-session")
         # Step 1: Create plan-mode transcript mid-workflow
         transcript_content = create_plan_mode_transcript(
             step="consult",
@@ -52,7 +53,6 @@ class TestPlanModeWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "plan-mode-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -74,10 +74,7 @@ class TestPlanModeWorkflowE2E:
         sessionstart_input = json.dumps({"source": "compact"})
 
         with patch("sys.stdin", StringIO(sessionstart_input)), \
-             patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "plan-mode-session",
-                 "CLAUDE_PROJECT_DIR": "/test/project",
-             }), \
+             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/test/project"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from compaction_refresh import main as sessionstart_main
@@ -95,8 +92,9 @@ class TestPlanModeWorkflowE2E:
         assert "[POST-COMPACTION CHECKPOINT]" in refresh_msg
         assert "plan-mode" in refresh_msg
 
-    def test_plan_mode_present_phase_with_pending_question(self, tmp_path: Path):
+    def test_plan_mode_present_phase_with_pending_question(self, tmp_path: Path, pact_context):
         """Test plan-mode in present phase with pending user question."""
+        pact_context(session_id="plan-present-session")
         transcript_content = create_plan_mode_transcript(
             step="present",
             include_task="implement feature X",
@@ -116,7 +114,6 @@ class TestPlanModeWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "plan-present-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -131,8 +128,9 @@ class TestPlanModeWorkflowE2E:
 
         assert checkpoint["workflow"]["name"] == "plan-mode"
 
-    def test_plan_mode_terminated_no_refresh(self, tmp_path: Path):
+    def test_plan_mode_terminated_no_refresh(self, tmp_path: Path, pact_context):
         """Test that terminated plan-mode workflow doesn't trigger active refresh."""
+        pact_context(session_id="plan-terminated-session")
         transcript_content = create_plan_mode_transcript(
             step="present",
             include_task="implement feature",
@@ -152,7 +150,6 @@ class TestPlanModeWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "plan-terminated-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -172,8 +169,9 @@ class TestPlanModeWorkflowE2E:
 class TestComPACTWorkflowE2E:
     """End-to-end tests for comPACT workflow refresh cycle."""
 
-    def test_compact_backend_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path):
+    def test_compact_backend_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path, pact_context):
         """Test complete refresh cycle for comPACT workflow with backend specialist."""
+        pact_context(session_id="compact-session")
         transcript_content = create_compact_transcript(
             specialist="backend",
             include_task="fix authentication bug",
@@ -193,7 +191,6 @@ class TestComPACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "compact-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -214,10 +211,7 @@ class TestComPACTWorkflowE2E:
         sessionstart_input = json.dumps({"source": "compact"})
 
         with patch("sys.stdin", StringIO(sessionstart_input)), \
-             patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "compact-session",
-                 "CLAUDE_PROJECT_DIR": "/test/project",
-             }), \
+             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/test/project"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from compaction_refresh import main as sessionstart_main
@@ -234,8 +228,9 @@ class TestComPACTWorkflowE2E:
         assert "[POST-COMPACTION CHECKPOINT]" in refresh_msg
         assert "comPACT" in refresh_msg
 
-    def test_compact_frontend_specialist(self, tmp_path: Path):
+    def test_compact_frontend_specialist(self, tmp_path: Path, pact_context):
         """Test comPACT workflow with frontend specialist."""
+        pact_context(session_id="compact-frontend-session")
         transcript_content = create_compact_transcript(
             specialist="frontend",
             include_task="update button styles",
@@ -255,7 +250,6 @@ class TestComPACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "compact-frontend-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -270,8 +264,9 @@ class TestComPACTWorkflowE2E:
 
         assert checkpoint["workflow"]["name"] == "comPACT"
 
-    def test_compact_test_specialist(self, tmp_path: Path):
+    def test_compact_test_specialist(self, tmp_path: Path, pact_context):
         """Test comPACT workflow with test specialist."""
+        pact_context(session_id="compact-test-session")
         transcript_content = create_compact_transcript(
             specialist="test",
             include_task="add unit tests for auth module",
@@ -291,7 +286,6 @@ class TestComPACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "compact-test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -306,8 +300,9 @@ class TestComPACTWorkflowE2E:
 
         assert checkpoint["workflow"]["name"] == "comPACT"
 
-    def test_compact_terminated_workflow(self, tmp_path: Path):
+    def test_compact_terminated_workflow(self, tmp_path: Path, pact_context):
         """Test that terminated comPACT workflow is handled appropriately."""
+        pact_context(session_id="compact-term-session")
         transcript_content = create_compact_transcript(
             specialist="backend",
             include_task="fix bug",
@@ -327,7 +322,6 @@ class TestComPACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "compact-term-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -347,8 +341,9 @@ class TestComPACTWorkflowE2E:
 class TestRePACTWorkflowE2E:
     """End-to-end tests for rePACT (nested PACT) workflow refresh cycle."""
 
-    def test_repact_nested_code_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path):
+    def test_repact_nested_code_precompact_checkpoint_sessionstart_flow(self, tmp_path: Path, pact_context):
         """Test complete refresh cycle for rePACT workflow in nested-code phase."""
+        pact_context(session_id="repact-session")
         transcript_content = create_repact_transcript(
             nested_phase="nested-code",
             parent_workflow="orchestrate",
@@ -368,7 +363,6 @@ class TestRePACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "repact-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -390,10 +384,7 @@ class TestRePACTWorkflowE2E:
         sessionstart_input = json.dumps({"source": "compact"})
 
         with patch("sys.stdin", StringIO(sessionstart_input)), \
-             patch.dict(os.environ, {
-                 "CLAUDE_SESSION_ID": "repact-session",
-                 "CLAUDE_PROJECT_DIR": "/test/project",
-             }), \
+             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/test/project"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from compaction_refresh import main as sessionstart_main
@@ -410,8 +401,9 @@ class TestRePACTWorkflowE2E:
         assert "[POST-COMPACTION CHECKPOINT]" in refresh_msg
         assert "rePACT" in refresh_msg
 
-    def test_repact_nested_architect_phase(self, tmp_path: Path):
+    def test_repact_nested_architect_phase(self, tmp_path: Path, pact_context):
         """Test rePACT workflow in nested-architect phase."""
+        pact_context(session_id="repact-arch-session")
         transcript_content = create_repact_transcript(
             nested_phase="nested-architect",
             parent_workflow="orchestrate",
@@ -431,7 +423,6 @@ class TestRePACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "repact-arch-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -446,8 +437,9 @@ class TestRePACTWorkflowE2E:
 
         assert checkpoint["workflow"]["name"] == "rePACT"
 
-    def test_repact_nested_test_phase(self, tmp_path: Path):
+    def test_repact_nested_test_phase(self, tmp_path: Path, pact_context):
         """Test rePACT workflow in nested-test phase."""
+        pact_context(session_id="repact-test-session")
         transcript_content = create_repact_transcript(
             nested_phase="nested-test",
             parent_workflow="orchestrate",
@@ -467,7 +459,6 @@ class TestRePACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "repact-test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -482,8 +473,9 @@ class TestRePACTWorkflowE2E:
 
         assert checkpoint["workflow"]["name"] == "rePACT"
 
-    def test_repact_terminated_returns_to_parent(self, tmp_path: Path):
+    def test_repact_terminated_returns_to_parent(self, tmp_path: Path, pact_context):
         """Test that terminated rePACT workflow is handled appropriately."""
+        pact_context(session_id="repact-term-session")
         transcript_content = create_repact_transcript(
             nested_phase="nested-test",
             parent_workflow="orchestrate",
@@ -503,7 +495,6 @@ class TestRePACTWorkflowE2E:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "repact-term-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -523,8 +514,9 @@ class TestRePACTWorkflowE2E:
 class TestMixedWorkflowScenarios:
     """Tests for scenarios involving transitions between workflows."""
 
-    def test_orchestrate_spawns_repact_detects_repact(self, tmp_path: Path):
+    def test_orchestrate_spawns_repact_detects_repact(self, tmp_path: Path, pact_context):
         """Test that when orchestrate spawns rePACT, the rePACT is detected."""
+        pact_context(session_id="mixed-session")
         # This is tested implicitly by create_repact_transcript which includes
         # the parent orchestrate trigger before the rePACT trigger
         transcript_content = create_repact_transcript(
@@ -545,7 +537,6 @@ class TestMixedWorkflowScenarios:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "mixed-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main
@@ -561,8 +552,9 @@ class TestMixedWorkflowScenarios:
         # Should detect rePACT as the most recent workflow
         assert checkpoint["workflow"]["name"] == "rePACT"
 
-    def test_workflow_detection_uses_most_recent_trigger(self, tmp_path: Path):
+    def test_workflow_detection_uses_most_recent_trigger(self, tmp_path: Path, pact_context):
         """Test that workflow detection always uses the most recent trigger."""
+        pact_context(session_id="multi-workflow-session")
         from conftest import make_user_message, make_assistant_message, create_transcript_lines
 
         # Create transcript with multiple workflow triggers
@@ -588,7 +580,6 @@ class TestMixedWorkflowScenarios:
         precompact_input = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(precompact_input)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "multi-workflow-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main as precompact_main

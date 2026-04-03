@@ -349,7 +349,7 @@ class TestMaybeEmbedPending:
         # Use a unique session ID for this test
         test_session_id = f"test-once-{time.time()}"
 
-        with patch.dict(os.environ, {'CLAUDE_SESSION_ID': test_session_id}):
+        with patch("memory_init.get_session_id_from_context_file", return_value=test_session_id):
             marker_path = _get_embedding_attempted_path()
 
             # Clean up any existing marker
@@ -382,7 +382,7 @@ class TestMaybeEmbedPending:
 
         test_session_id = f"test-marker-{time.time()}"
 
-        with patch.dict(os.environ, {'CLAUDE_SESSION_ID': test_session_id}):
+        with patch("memory_init.get_session_id_from_context_file", return_value=test_session_id):
             marker_path = _get_embedding_attempted_path()
 
             # Ensure marker doesn't exist
@@ -407,7 +407,7 @@ class TestMaybeEmbedPending:
 
         test_session_id = f"test-skip-{time.time()}"
 
-        with patch.dict(os.environ, {'CLAUDE_SESSION_ID': test_session_id}):
+        with patch("memory_init.get_session_id_from_context_file", return_value=test_session_id):
             marker_path = _get_embedding_attempted_path()
 
             # Pre-create the marker

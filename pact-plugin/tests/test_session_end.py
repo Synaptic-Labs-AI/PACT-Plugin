@@ -39,6 +39,7 @@ File permission hardening:
 26. write_session_snapshot creates file with 0o600
 27. check_unpaused_pr re-applies 0o600 after appending warning
 """
+import io
 import json
 import sys
 from pathlib import Path
@@ -324,6 +325,7 @@ class TestMainEntryPoint:
         }
 
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot"):
             with pytest.raises(SystemExit) as exc_info:
@@ -340,6 +342,7 @@ class TestMainEntryPoint:
         }
 
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -350,6 +353,7 @@ class TestMainEntryPoint:
         from session_end import main
 
         with patch.dict("os.environ", {}, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=None), \
              patch("session_end.write_session_snapshot"):
             with pytest.raises(SystemExit) as exc_info:
@@ -367,6 +371,7 @@ class TestMainEntryPoint:
         mock_tasks = [{"id": "1", "subject": "test", "status": "completed", "metadata": {}}]
 
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=mock_tasks), \
              patch("session_end.write_session_snapshot") as mock_snapshot:
             with pytest.raises(SystemExit):
@@ -390,6 +395,7 @@ class TestMainEntryPoint:
         env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
 
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot",
                    side_effect=lambda **kw: call_order.append("write_session_snapshot")), \
@@ -628,6 +634,7 @@ class TestCheckUnpausedPr:
         env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
 
         with patch.dict("os.environ", env, clear=True), \
+             patch("sys.stdin", io.StringIO("{}")), \
              patch("session_end.get_task_list", return_value=[]), \
              patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr") as mock_check:

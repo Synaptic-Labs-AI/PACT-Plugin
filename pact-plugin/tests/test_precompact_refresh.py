@@ -150,8 +150,9 @@ class TestBuildNoWorkflowCheckpoint:
 class TestPrecompactMain:
     """Integration tests for the main() function."""
 
-    def test_main_with_active_workflow(self, tmp_path: Path):
+    def test_main_with_active_workflow(self, tmp_path: Path, pact_context):
         """Test full flow with active peer-review workflow."""
+        pact_context(session_id="test-session")
         # Create transcript
         transcript_content = create_peer_review_transcript(
             step="recommendations",
@@ -173,7 +174,6 @@ class TestPrecompactMain:
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             # Import and run main
@@ -202,8 +202,9 @@ class TestPrecompactMain:
         assert checkpoint["workflow"]["name"] == "peer-review"
         assert checkpoint["session_id"] == "test-session"
 
-    def test_main_with_no_workflow(self, tmp_path: Path):
+    def test_main_with_no_workflow(self, tmp_path: Path, pact_context):
         """Test flow when no workflow is active."""
+        pact_context(session_id="test-session")
         # Create transcript without workflow
         transcript_content = create_no_workflow_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
@@ -220,7 +221,6 @@ class TestPrecompactMain:
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main
@@ -295,8 +295,9 @@ class TestPrecompactMain:
                     main()
                 assert exc_info.value.code == 0
 
-    def test_main_with_terminated_workflow(self, tmp_path: Path):
+    def test_main_with_terminated_workflow(self, tmp_path: Path, pact_context):
         """Test flow with terminated workflow."""
+        pact_context(session_id="test-session")
         transcript_content = create_terminated_workflow_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
         encoded_path = "-test-project"
@@ -311,7 +312,6 @@ class TestPrecompactMain:
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main
@@ -332,7 +332,7 @@ class TestPrecompactMain:
 class TestIntegrationScenarios:
     """Integration tests for specific scenarios."""
 
-    def test_orchestrate_code_phase_refresh(self, tmp_path: Path):
+    def test_orchestrate_code_phase_refresh(self, tmp_path: Path, pact_context):
         """Test refresh checkpoint for orchestrate workflow in CODE phase."""
         transcript_content = create_orchestrate_transcript(
             phase="code",
@@ -351,8 +351,9 @@ class TestIntegrationScenarios:
 
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
+        pact_context(session_id="test-session")
+
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main
@@ -367,8 +368,9 @@ class TestIntegrationScenarios:
 
         assert checkpoint["workflow"]["name"] == "orchestrate"
 
-    def test_malformed_transcript_handling(self, tmp_path: Path):
+    def test_malformed_transcript_handling(self, tmp_path: Path, pact_context):
         """Test handling of transcript with malformed lines."""
+        pact_context(session_id="test-session")
         transcript_content = create_malformed_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
         encoded_path = "-test-project"
@@ -383,7 +385,6 @@ class TestIntegrationScenarios:
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main
@@ -399,8 +400,9 @@ class TestIntegrationScenarios:
         assert "systemMessage" in result
         assert "PACT: checkpoint saved" in result["systemMessage"]
 
-    def test_checkpoint_overwrite(self, tmp_path: Path):
+    def test_checkpoint_overwrite(self, tmp_path: Path, pact_context):
         """Test that new checkpoint overwrites old one."""
+        pact_context(session_id="new-session")
         # Create old checkpoint
         checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
         checkpoint_dir.mkdir(parents=True)
@@ -419,7 +421,6 @@ class TestIntegrationScenarios:
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "new-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main
@@ -438,12 +439,13 @@ class TestIntegrationScenarios:
 class TestExceptionHandlingPaths:
     """Tests for exception handling and defensive paths in precompact_refresh."""
 
-    def test_import_error_handling_fallback(self, tmp_path: Path):
+    def test_import_error_handling_fallback(self, tmp_path: Path, pact_context):
         """Test that ImportError during refresh module import is handled gracefully.
 
         When the refresh package is unavailable, the hook should still
         write a checkpoint with no workflow state.
         """
+        pact_context(session_id="test-session")
         # Create transcript
         transcript_content = create_peer_review_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
@@ -460,7 +462,6 @@ class TestExceptionHandlingPaths:
 
         # Mock the import to raise ImportError
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path), \
              patch.dict(sys.modules, {"refresh": None}):  # Force import to fail
 
@@ -477,12 +478,13 @@ class TestExceptionHandlingPaths:
         result = json.loads(output)
         assert "systemMessage" in result
 
-    def test_extract_workflow_state_exception_handling(self, tmp_path: Path):
+    def test_extract_workflow_state_exception_handling(self, tmp_path: Path, pact_context):
         """Test that exceptions during transcript parsing are handled.
 
         When extract_workflow_state raises an exception, the hook should
         catch it and continue with a fallback checkpoint.
         """
+        pact_context(session_id="test-session")
         # Create transcript
         transcript_content = create_peer_review_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
@@ -502,7 +504,6 @@ class TestExceptionHandlingPaths:
             raise ValueError("Simulated parsing failure")
 
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             # Import and patch the function
@@ -520,12 +521,13 @@ class TestExceptionHandlingPaths:
         result = json.loads(output)
         assert "systemMessage" in result
 
-    def test_file_permission_error_on_checkpoint_write(self, tmp_path: Path):
+    def test_file_permission_error_on_checkpoint_write(self, tmp_path: Path, pact_context):
         """Test handling of file permission errors when writing checkpoint.
 
         When the checkpoint directory is not writable, the hook should
         handle the error gracefully without crashing.
         """
+        pact_context(session_id="test-session")
         # Create transcript
         transcript_content = create_peer_review_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
@@ -543,7 +545,6 @@ class TestExceptionHandlingPaths:
 
         # Mock write_checkpoint_atomic to return False (simulating permission error)
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, {"CLAUDE_SESSION_ID": "test-session"}), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main, write_checkpoint_atomic
@@ -583,8 +584,11 @@ class TestExceptionHandlingPaths:
 
             assert exc_info.value.code == 0
 
-    def test_missing_session_id_uses_unknown(self, tmp_path: Path):
-        """Test that missing CLAUDE_SESSION_ID uses 'unknown' fallback."""
+    def test_missing_session_id_uses_unknown(self, tmp_path: Path, pact_context):
+        """Test that missing session ID uses 'unknown' fallback."""
+        # Set up pact_context with empty session_id — get_session_id() returns ""
+        # and the source code's `or "unknown"` fallback kicks in
+        pact_context(session_id="")
         transcript_content = create_peer_review_transcript()
         projects_dir = tmp_path / ".claude" / "projects"
         encoded_path = "-test-project"
@@ -598,11 +602,7 @@ class TestExceptionHandlingPaths:
 
         input_data = json.dumps({"transcript_path": str(transcript_path)})
 
-        # Remove CLAUDE_SESSION_ID from environment
-        env_without_session = {k: v for k, v in os.environ.items() if k != "CLAUDE_SESSION_ID"}
-
         with patch("sys.stdin", StringIO(input_data)), \
-             patch.dict(os.environ, env_without_session, clear=True), \
              patch("pathlib.Path.home", return_value=tmp_path):
 
             from precompact_refresh import main
