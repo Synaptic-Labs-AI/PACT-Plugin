@@ -24,16 +24,16 @@ Determine which variant to run from the task subject/description: "harvest" or "
 
 ### Read All HANDOFFs Before Saving
 
-When reviewing multiple HANDOFFs, read ALL of them via `TaskGet` before saving any memories. This lets you deduplicate and consolidate across HANDOFFs before committing to pact-memory — producing cleaner entries than saving after each individual HANDOFF.
+When reviewing multiple HANDOFFs, read ALL of them (prefer breadcrumb inline content, fall back to `TaskGet`) before saving any memories. This lets you deduplicate and consolidate across HANDOFFs before committing to pact-memory — producing cleaner entries than saving after each individual HANDOFF.
 
 ### Step 1: Task Discovery
 
 You have two complementary sources for finding completed agent tasks:
 
-1. **TaskList** (primary): Read TaskList for all completed tasks owned by agents. This is authoritative — it reflects the current state of every task regardless of hook behavior.
-2. **Breadcrumb file** (supplementary): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. Each line contains `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Provides temporal ordering and serves as a cross-reference. May not exist (already processed or hooks didn't fire). **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
+1. **Breadcrumb file** (primary): `~/.claude/teams/{team_name}/completed_handoffs.jsonl` — appended by the `handoff_gate.py` hook each time an agent passes completion gates. This is the **primary source** for both discovery and HANDOFF content. Each line contains at minimum `{"task_id": "...", "teammate_name": "...", "timestamp": "..."}`. Enriched entries also include `"handoff": {...}` and `"task_subject": "..."` inline — these are **garbage-collection-proof** and survive platform task file cleanup. **Deduplicate**: extract unique task_ids only (the file may contain duplicates from prior cascade behavior).
+2. **`TaskList`** (supplementary): Read `TaskList` for completed tasks owned by agents. Useful as a cross-reference and for catching tasks where the breadcrumb hook didn't fire. Note: the platform garbage-collects older task files during long sessions, so `TaskList` may be incomplete — tasks that completed early in the session may no longer appear.
 
-If neither TaskList has completed agent tasks nor the breadcrumb file exists, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
+If neither the breadcrumb file exists nor `TaskList` has completed agent tasks, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
 
 ### Step 2: Dedup Check (Processed Tasks)
 
@@ -41,7 +41,13 @@ Read your processed task list from agent memory (`~/.claude/agent-memory/pact-se
 
 ### Step 3: Read All HANDOFFs
 
-Read each HANDOFF via `TaskGet(taskId).metadata.handoff` for every discovered task. Read all before proceeding to extraction.
+For each discovered task, read the HANDOFF using this priority order:
+
+1. **Breadcrumb inline** (preferred, garbage-collection-proof): If the breadcrumb entry has a `handoff` key, use it directly — this content was captured at completion time and survives platform task garbage collection.
+2. **`TaskGet` fallback** (legacy): If the breadcrumb entry has only `task_id` (old format, no `handoff` key), fall back to `TaskGet(taskId).metadata.handoff`. This may fail for garbage-collected tasks — the platform deletes older task files during long sessions.
+3. **Report gap**: If both sources fail (old-format breadcrumb + garbage-collected task), report the gap to lead — note the task_id, teammate_name, and timestamp from the breadcrumb so the lead has context.
+
+Read all HANDOFFs before proceeding to extraction.
 
 ### Step 4: Extract Institutional Knowledge
 
@@ -55,7 +61,7 @@ Focus on:
 
 ### Step 5: Capture Organizational State
 
-Alongside institutional knowledge, snapshot the current workflow state for session recovery. Read TaskList and extract:
+Alongside institutional knowledge, snapshot the current workflow state for session recovery. Read `TaskList` and extract:
 - Current phase statuses (which phases are completed, in-progress, pending)
 - Active agents and their roles/task assignments
 - Key decisions extracted from the HANDOFFs being processed (the "why" behind implementation choices)
@@ -100,11 +106,7 @@ Processed task IDs: 6, 7, 12, 15
 Last processed: {timestamp}
 ```
 
-### Step 9: Breadcrumb Cleanup
-
-Delete the breadcrumb file after all entries are processed (simple cleanup; the file is session-scoped and also cleaned up with TeamDelete). Use `python3 -c "from pathlib import Path; Path('~/.claude/teams/{team_name}/completed_handoffs.jsonl').expanduser().unlink(missing_ok=True)"` — not shell `rm`, because the file is inside `~/.claude/teams/` which Claude Code treats as sensitive, and `rm` via Bash triggers a permission prompt.
-
-### Step 10: Report Summary
+### Step 9: Report Summary
 
 Report to the lead:
 
@@ -117,12 +119,12 @@ Gaps: {any HANDOFFs that were thin or missing}",
   summary="HANDOFF review complete: N memories from M HANDOFFs")
 ```
 
-### Step 11: Gather Calibration Data
+### Step 10: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
-- Read the feature task metadata for `initial_variety_score` (stored during variety assessment)
-- Scan TaskList for blocker count (tasks with "BLOCKER:" in subject)
-- Scan TaskList for phase rerun count (retry/redo phase tasks)
+- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the lead for the variety score instead.
+- Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject). Note: `TaskList` may be incomplete in long sessions due to garbage collection — report what's available.
+- Scan `TaskList` for phase rerun count (retry/redo phase tasks)
 - Note domain from feature task description
 - Infer specialist fit from HANDOFF content (scope mismatch signals, blocker patterns)
 - Send a calibration check to the lead:
@@ -140,9 +142,9 @@ After processing HANDOFFs, gather calibration metrics for the orchestrator's var
 Triggered after remediation completes — processes only the delta since the last harvest pass. Fires only when remediation occurred and produced new completed tasks.
 
 1. **Check processed task tracking**: Read `~/.claude/agent-memory/pact-secretary/session_processed_tasks.md` for already-processed task IDs
-2. **Read TaskList** for completed tasks not in the processed set — these are new completions from remediation
+2. **Discover new completions**: Check the breadcrumb file (primary) and `TaskList` (supplementary) for completed tasks not in the processed set — these are new completions from remediation. The breadcrumb may contain tasks that `TaskList` no longer shows (garbage-collected).
 3. **If no new completions**: Report "No new HANDOFFs since last harvest" and complete
-4. **Read new HANDOFFs** via `TaskGet(taskId).metadata.handoff`
+4. **Read new HANDOFFs** using the Standard Harvest Step 3 priority: prefer breadcrumb inline content, fall back to `TaskGet(taskId).metadata.handoff` for old-format entries
 5. **Extract and save** using Steps 4-7 from Standard Harvest (extract knowledge, organizational state, dedup protocol, save)
 6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
 7. **Do NOT delete the breadcrumb file** — it may still be accumulating entries from ongoing work
@@ -157,7 +159,7 @@ Triggered during `/PACT:wrap-up` or `/PACT:pause`. This is the deep-clean pass �
 
 ### Step 1: Safety Net (Unprocessed HANDOFFs)
 
-If the breadcrumb file at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` still exists, process remaining HANDOFFs first using the Standard Harvest workflow above (Layer 2 may have been missed). Then continue with consolidation.
+Check the breadcrumb file at `~/.claude/teams/{team_name}/completed_handoffs.jsonl` for entries not yet in the processed task set. If unprocessed entries exist, run the Standard Harvest workflow above first (earlier harvest triggers may have been missed). Then continue with consolidation.
 
 ### Step 2: Review Session Memories
 
@@ -174,7 +176,7 @@ Sync Working Memory to CLAUDE.md. The auto-sync mechanism handles individual sav
 
 ### Step 5: Save Orchestration Retrospective
 
-Save orchestration retrospective as calibration data (see Standard Harvest Step 11 for CalibrationRecord schema). This captures the session-level view: overall workflow effectiveness, recurring patterns, and calibration for future variety scoring.
+Save orchestration retrospective as calibration data (see Standard Harvest Step 10 for CalibrationRecord schema). This captures the session-level view: overall workflow effectiveness, recurring patterns, and calibration for future variety scoring.
 
 ### Step 6: Report Summary
 
@@ -267,6 +269,6 @@ This is the Layer 4 fallback for breadcrumbs left behind by sessions that ended 
 
 1. Look for `completed_handoffs.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session-id}/pact-session-context.json`, or the team name provided in your dispatch prompt) — that team's breadcrumbs are active, not orphaned.
 2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
-3. Attempt to process them (TaskGet may fail for old tasks — extract what's available from breadcrumb metadata)
+3. Attempt to process them — enriched entries (with `handoff` key) can be read directly; for old-format entries, try `TaskGet` (may fail for garbage-collected tasks — extract what's available from breadcrumb metadata)
 4. Delete the breadcrumb file after processing (use `python3 -c "from pathlib import Path; Path(...).unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts)
-5. Report summary of recovered knowledge (or gaps where TaskGet failed)
+5. Report summary of recovered knowledge (or gaps where `TaskGet` failed)
