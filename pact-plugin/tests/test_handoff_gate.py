@@ -38,6 +38,9 @@ Tests cover:
 32. Enriched: task_subject present when metadata truthy but handoff falsy (edge case)
 33. Enriched: file permissions preserved for enriched entries
 34. Enriched: truthy non-dict handoff (string) embedded verbatim
+35. Enriched: non-serializable metadata fails open (TypeError caught)
+36. Enriched: 100+ enriched entries (~2KB each) dedup at scale
+37. Enriched: version field (v=1) present on enriched, absent on legacy
 """
 import threading
 import json
@@ -821,6 +824,7 @@ class TestEnrichedBreadcrumb:
         assert entry["task_id"] == "42"
         assert entry["teammate_name"] == "backend-coder"
         assert "timestamp" in entry
+        assert entry["v"] == 1
         assert entry["handoff"] == VALID_HANDOFF
         assert entry["task_subject"] == "CODE: auth"
 
@@ -865,6 +869,7 @@ class TestEnrichedBreadcrumb:
         assert "task_id" in entry
         assert "teammate_name" in entry
         assert "timestamp" in entry
+        assert "v" not in entry  # legacy entries have no version field
         assert "handoff" not in entry
         assert "task_subject" not in entry
 
@@ -882,6 +887,7 @@ class TestEnrichedBreadcrumb:
 
         filepath = breadcrumb_path(teams_dir)
         entry = json.loads(filepath.read_text().strip())
+        assert "v" not in entry  # empty dict is falsy — no enrichment
         assert "handoff" not in entry
         assert "task_subject" not in entry
 
@@ -901,10 +907,11 @@ class TestEnrichedBreadcrumb:
         filepath = breadcrumb_path(teams_dir)
         entry = json.loads(filepath.read_text().strip())
         assert "handoff" not in entry
-        # task_subject is only included when metadata is truthy (it is here),
-        # but only when handoff is absent, task_subject should still be included
-        # since the conditional is about task_metadata being truthy + task_subject being truthy
+        # task_subject IS included here because it's gated on task_metadata truthiness
+        # (not handoff presence). metadata={"memory_saved": True} is truthy, so the
+        # enrichment block runs and adds task_subject even though handoff is absent.
         assert entry.get("task_subject") == "CODE: auth"
+        assert entry["v"] == 1  # version field present on all enriched entries
 
     def test_enriched_entry_without_task_subject(self, tmp_path):
         """P1: Handoff present but no task_subject -> entry has handoff only."""
@@ -1021,8 +1028,13 @@ class TestEnrichedBreadcrumb:
         # Entry 3: legacy
         assert "handoff" not in entries[2]
 
-    def test_handoff_none_value_no_enrichment(self, tmp_path):
-        """Edge: metadata has handoff=None -> no handoff key in entry."""
+    @pytest.mark.parametrize("falsy_handoff,label", [
+        (None, "None"),
+        ({}, "empty dict"),
+        ([], "empty list"),
+    ])
+    def test_falsy_handoff_no_enrichment(self, tmp_path, falsy_handoff, label):
+        """Edge: falsy handoff values (None, {}, []) -> no handoff key in entry."""
         from handoff_gate import append_pending_handoff
 
         teams_dir = make_teams_dir(tmp_path)
@@ -1030,50 +1042,16 @@ class TestEnrichedBreadcrumb:
         with patch("handoff_gate.Path.home", return_value=tmp_path):
             append_pending_handoff(
                 "42", "backend-coder", "pact-test",
-                task_metadata={"handoff": None, "memory_saved": True},
+                task_metadata={"handoff": falsy_handoff, "memory_saved": True},
                 task_subject="CODE: auth",
             )
 
         filepath = breadcrumb_path(teams_dir)
         entry = json.loads(filepath.read_text().strip())
-        assert "handoff" not in entry
+        assert "handoff" not in entry, f"handoff={label} should not appear in entry"
         # task_subject IS included because metadata is truthy (has memory_saved key)
         assert entry["task_subject"] == "CODE: auth"
-
-    def test_handoff_empty_dict_no_enrichment(self, tmp_path):
-        """Edge: metadata has handoff={} (empty dict, falsy) -> no handoff key."""
-        from handoff_gate import append_pending_handoff
-
-        teams_dir = make_teams_dir(tmp_path)
-
-        with patch("handoff_gate.Path.home", return_value=tmp_path):
-            append_pending_handoff(
-                "42", "backend-coder", "pact-test",
-                task_metadata={"handoff": {}, "memory_saved": True},
-                task_subject="CODE: auth",
-            )
-
-        filepath = breadcrumb_path(teams_dir)
-        entry = json.loads(filepath.read_text().strip())
-        assert "handoff" not in entry
-        assert entry["task_subject"] == "CODE: auth"
-
-    def test_handoff_empty_list_no_enrichment(self, tmp_path):
-        """Edge: metadata has handoff=[] (empty list, falsy) -> no handoff key."""
-        from handoff_gate import append_pending_handoff
-
-        teams_dir = make_teams_dir(tmp_path)
-
-        with patch("handoff_gate.Path.home", return_value=tmp_path):
-            append_pending_handoff(
-                "42", "backend-coder", "pact-test",
-                task_metadata={"handoff": [], "memory_saved": True},
-                task_subject="CODE: auth",
-            )
-
-        filepath = breadcrumb_path(teams_dir)
-        entry = json.loads(filepath.read_text().strip())
-        assert "handoff" not in entry
+        assert entry["v"] == 1
 
     def test_task_subject_special_characters_roundtrip(self, tmp_path):
         """task_subject with quotes, newlines, unicode survives JSON roundtrip."""
@@ -1170,6 +1148,25 @@ class TestEnrichedBreadcrumb:
         filepath = breadcrumb_path(teams_dir)
         assert not filepath.exists()
 
+    def test_enriched_fail_open_on_non_serializable_metadata(self, tmp_path):
+        """TypeError from json.dumps on non-serializable data -> silent failure."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = make_teams_dir(tmp_path)
+        # object() is not JSON-serializable — triggers TypeError in json.dumps
+        metadata = {"handoff": {"key": object()}}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            # Should not raise — fail-open via broadened except clause
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: auth",
+            )
+
+        filepath = breadcrumb_path(teams_dir)
+        assert not filepath.exists()
+
     def test_enriched_file_permissions_0o600(self, tmp_path):
         """Enriched entries maintain 0o600 file permissions."""
         from handoff_gate import append_pending_handoff
@@ -1223,6 +1220,7 @@ class TestEnrichedBreadcrumb:
 
         filepath = breadcrumb_path(teams_dir)
         entry = json.loads(filepath.read_text().strip())
+        assert "v" not in entry  # None metadata — no enrichment
         assert "task_subject" not in entry
         assert "handoff" not in entry
 
@@ -1246,6 +1244,7 @@ class TestEnrichedBreadcrumb:
 
         filepath = breadcrumb_path(teams_dir)
         entry = json.loads(filepath.read_text().strip())
+        assert entry["v"] == 1
         assert entry["handoff"] == "not a dict"
         assert entry["task_subject"] == "CODE: auth"
 
@@ -1379,6 +1378,61 @@ class TestEnrichedDedupLargeFile:
         task_ids = [json.loads(l)["task_id"] for l in lines]
         assert task_ids.count("25") == 1
         assert "50" in task_ids
+
+    def test_dedup_100_enriched_entries_at_scale(self, tmp_path):
+        """Dedup works correctly with 100+ enriched entries (~2KB each)."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = make_teams_dir(tmp_path)
+        filepath = breadcrumb_path(teams_dir)
+
+        # Build a ~2KB handoff payload
+        large_handoff = {
+            "produced": [f"src/module_{i}/handler.ts" for i in range(30)],
+            "decisions": [f"Decision {i}: " + "x" * 30 for i in range(15)],
+            "uncertainty": [{"level": "HIGH", "description": "y" * 80}],
+            "integration": [f"Service{i}" for i in range(10)],
+            "open_questions": [f"Question {i}?" for i in range(5)],
+        }
+        assert len(json.dumps(large_handoff)) > 1500
+
+        # Pre-populate with 120 enriched entries
+        entries = []
+        for i in range(120):
+            entries.append(json.dumps({
+                "task_id": str(i),
+                "teammate_name": f"agent-{i}",
+                "timestamp": "2026-04-03T00:00:00Z",
+                "v": 1,
+                "handoff": large_handoff,
+                "task_subject": f"CODE: task-{i}",
+            }))
+        filepath.write_text("\n".join(entries) + "\n")
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            # Duplicate of existing entry — should be skipped
+            append_pending_handoff(
+                "60", "agent-60", "pact-test",
+                task_metadata={"handoff": large_handoff},
+                task_subject="CODE: task-60",
+            )
+            # New entry — should be appended
+            append_pending_handoff(
+                "120", "agent-120", "pact-test",
+                task_metadata={"handoff": large_handoff},
+                task_subject="CODE: task-120",
+            )
+
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 121  # 120 original + 1 new
+        task_ids = [json.loads(l)["task_id"] for l in lines]
+        assert task_ids.count("60") == 1  # dedup worked
+        assert "120" in task_ids  # new entry appended
+        # Verify all lines are valid JSON with enriched content
+        for line in lines:
+            entry = json.loads(line)
+            assert "task_id" in entry
+            assert entry["handoff"] == large_handoff
 
 
 class TestEnrichedCascadeIntegration:
@@ -1552,6 +1606,7 @@ class TestMainBreadcrumbIntegration:
         assert entry["task_id"] == "5"
         assert entry["teammate_name"] == "backend-coder"
         # Verify enriched content from main() passthrough
+        assert entry["v"] == 1
         assert entry["handoff"] == VALID_HANDOFF
         assert entry["task_subject"] == "CODE: auth"
 
