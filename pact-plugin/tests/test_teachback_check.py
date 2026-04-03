@@ -15,7 +15,7 @@ Tests cover:
 4. Per-task marker isolation — same agent gets independent warnings per task
 5. main() entry point — env var guards, stdin parsing, warn vs suppress output,
    fail-open exception handler, suppressOutput on bare exit paths
-6. _get_project_slug() — CLAUDE_PROJECT_DIR derivation
+6. _get_marker_path() — session-scoped marker path construction
 7. Concurrent access stress tests — multiple writers, idempotency under threading
 8. hooks.json structural tests — registration position verification
 """
@@ -43,72 +43,53 @@ def _write_task(task_dir: Path, filename: str, data: dict) -> Path:
     return path
 
 
-# =============================================================================
-# Unit Tests: _get_project_slug()
-# =============================================================================
-
-class TestGetProjectSlug:
-    """Tests for _get_project_slug() — reads project_dir via get_project_dir()."""
-
-    def test_extracts_basename_from_project_dir(self):
-        from teachback_check import _get_project_slug
-
-        with patch("teachback_check.get_project_dir", return_value="/Users/dev/projects/my-app"):
-            assert _get_project_slug() == "my-app"
-
-    def test_returns_empty_when_project_dir_not_set(self):
-        from teachback_check import _get_project_slug
-
-        with patch("teachback_check.get_project_dir", return_value=""):
-            assert _get_project_slug() == ""
-
-    def test_handles_root_path(self):
-        from teachback_check import _get_project_slug
-
-        with patch("teachback_check.get_project_dir", return_value="/"):
-            # Path("/").name returns "" on most systems
-            result = _get_project_slug()
-            assert isinstance(result, str)
-
-    def test_handles_nested_path(self):
-        from teachback_check import _get_project_slug
-
-        with patch("teachback_check.get_project_dir", return_value="/a/b/c/deep-project"):
-            assert _get_project_slug() == "deep-project"
-
 
 # =============================================================================
 # Unit Tests: Marker file lifecycle
 # =============================================================================
 
 class TestMarkerPath:
-    """Tests for _get_marker_path() — per-task marker format."""
+    """Tests for _get_marker_path() — per-task marker format.
+
+    When sessions_dir is provided (test injection), markers go directly into
+    that directory. In production, markers use get_session_dir() to construct
+    session-scoped paths: {slug}/{session_id}/teachback-warned-{agent}-{task_id}.
+    """
 
     def test_builds_correct_path_with_task_id(self, tmp_path):
         from teachback_check import _get_marker_path
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/my-app"):
-            result = _get_marker_path("backend-coder-1", "42", sessions_dir=str(tmp_path))
+        result = _get_marker_path("backend-coder-1", "42", sessions_dir=str(tmp_path))
 
-        assert result == tmp_path / "my-app" / "teachback-warned-backend-coder-1-42"
+        assert result == tmp_path / "teachback-warned-backend-coder-1-42"
 
-    def test_uses_project_slug(self, tmp_path):
+    def test_marker_name_format(self, tmp_path):
         from teachback_check import _get_marker_path
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/PACT-prompt"):
-            result = _get_marker_path("test-engineer", "7", sessions_dir=str(tmp_path))
+        result = _get_marker_path("test-engineer", "7", sessions_dir=str(tmp_path))
 
-        assert "PACT-prompt" in str(result)
         assert result.name == "teachback-warned-test-engineer-7"
 
-    def test_empty_slug_when_no_project_dir(self, tmp_path):
+    def test_uses_session_dir_when_no_override(self):
+        """Without sessions_dir override, uses get_session_dir() for session-scoped path."""
         from teachback_check import _get_marker_path
 
-        with patch("teachback_check.get_project_dir", return_value=""):
-            result = _get_marker_path("agent-1", "1", sessions_dir=str(tmp_path))
+        with patch("teachback_check.get_session_dir",
+                   return_value="/home/user/.claude/pact-sessions/my-app/abc-123"):
+            result = _get_marker_path("agent-1", "1")
 
-        # Path ends with /<empty>/teachback-warned-agent-1-1
+        expected = Path("/home/user/.claude/pact-sessions/my-app/abc-123/teachback-warned-agent-1-1")
+        assert result == expected
+
+    def test_fallback_when_no_session_dir(self):
+        """When get_session_dir() returns '', falls back to pact-sessions root."""
+        from teachback_check import _get_marker_path
+
+        with patch("teachback_check.get_session_dir", return_value=""):
+            result = _get_marker_path("agent-1", "1")
+
         assert result.name == "teachback-warned-agent-1-1"
+        assert "pact-sessions" in str(result)
 
     def test_empty_task_id_omits_suffix(self, tmp_path):
         """Empty task_id should produce path without trailing dash or task_id.
@@ -118,10 +99,9 @@ class TestMarkerPath:
         """
         from teachback_check import _get_marker_path
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/my-app"):
-            result = _get_marker_path("backend-coder-1", "", sessions_dir=str(tmp_path))
+        result = _get_marker_path("backend-coder-1", "", sessions_dir=str(tmp_path))
 
-        assert result == tmp_path / "my-app" / "teachback-warned-backend-coder-1"
+        assert result == tmp_path / "teachback-warned-backend-coder-1"
         assert result.name == "teachback-warned-backend-coder-1"
         # No trailing dash — empty task_id should not append "-"
         assert not result.name.endswith("-")
@@ -133,28 +113,25 @@ class TestMarkWarned:
     def test_mark_creates_file(self, tmp_path):
         from teachback_check import _mark_warned, _was_already_warned
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            assert not _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
-            _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
-            assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        assert not _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
 
     def test_mark_creates_parent_directories(self, tmp_path):
         from teachback_check import _mark_warned
 
         sessions_dir = str(tmp_path / "nonexistent" / "deep" / "path")
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "42", sessions_dir=sessions_dir)
+        _mark_warned("coder-1", "42", sessions_dir=sessions_dir)
 
-        # Verify the directory structure was created
-        marker = Path(sessions_dir) / "test" / "teachback-warned-coder-1-42"
+        # Verify the marker was created
+        marker = Path(sessions_dir) / "teachback-warned-coder-1-42"
         assert marker.exists()
 
     def test_mark_uses_secure_permissions(self, tmp_path):
         from teachback_check import _mark_warned, _get_marker_path
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
-            marker = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
+        _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        marker = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
 
         # Check file permissions are 0o600 (user read/write only)
         mode = marker.stat().st_mode & 0o777
@@ -163,19 +140,17 @@ class TestMarkWarned:
     def test_mark_idempotent(self, tmp_path):
         from teachback_check import _mark_warned, _was_already_warned
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
-            _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))  # Should not error
-            assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))  # Should not error
+        assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
 
     def test_different_agents_have_separate_markers(self, tmp_path):
         from teachback_check import _mark_warned, _was_already_warned
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        _mark_warned("coder-1", "42", sessions_dir=str(tmp_path))
 
-            assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
-            assert not _was_already_warned("coder-2", "42", sessions_dir=str(tmp_path))
+        assert _was_already_warned("coder-1", "42", sessions_dir=str(tmp_path))
+        assert not _was_already_warned("coder-2", "42", sessions_dir=str(tmp_path))
 
     def test_mark_survives_readonly_parent_gracefully(self, tmp_path):
         """_mark_warned should not raise even if writing fails."""
@@ -187,9 +162,8 @@ class TestMarkWarned:
         readonly_dir.chmod(0o444)
 
         try:
-            with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-                # Should not raise — the OSError is caught internally
-                _mark_warned("coder-1", "42", sessions_dir=str(readonly_dir / "sub"))
+            # Should not raise — the OSError is caught internally
+            _mark_warned("coder-1", "42", sessions_dir=str(readonly_dir / "sub"))
         finally:
             readonly_dir.chmod(0o755)  # Restore for cleanup
 
@@ -533,14 +507,13 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert task_id == "1"
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert task_id == "1"
 
     def test_no_warn_when_teachback_sent(self, tmp_path):
         from teachback_check import should_warn
@@ -553,14 +526,13 @@ class TestShouldWarn:
             "metadata": {"teachback_sent": True},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
-            assert task_id == ""
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
+        assert task_id == ""
 
     def test_no_warn_when_already_warned(self, tmp_path):
         from teachback_check import should_warn, _mark_warned
@@ -573,15 +545,14 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("backend-coder-1", "1", sessions_dir=sessions_dir)
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
-            assert task_id == ""
+        _mark_warned("backend-coder-1", "1", sessions_dir=sessions_dir)
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
+        assert task_id == ""
 
     @pytest.mark.parametrize("agent_name", [
         "secretary",
@@ -600,14 +571,13 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                agent_name, "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
-            assert task_id == ""
+        warn, task_id = should_warn(
+            agent_name, "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
+        assert task_id == ""
 
     @pytest.mark.parametrize("agent_name", [
         "Secretary",
@@ -621,14 +591,13 @@ class TestShouldWarn:
 
         sessions_dir = str(tmp_path / "sessions")
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                agent_name, "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
-            assert task_id == ""
+        warn, task_id = should_warn(
+            agent_name, "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
+        assert task_id == ""
 
     def test_warns_for_non_exempt_agent(self, tmp_path):
         from teachback_check import should_warn
@@ -641,14 +610,13 @@ class TestShouldWarn:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert task_id == "1"
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert task_id == "1"
 
 
 # =============================================================================
@@ -908,27 +876,26 @@ class TestEndToEnd:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            # First call: should warn
-            warn1, tid1 = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn1 is True
-            assert tid1 == "1"
+        # First call: should warn
+        warn1, tid1 = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn1 is True
+        assert tid1 == "1"
 
-            # Simulate main() marking warned for this task
-            _mark_warned("backend-coder-1", tid1, sessions_dir=sessions_dir)
+        # Simulate main() marking warned for this task
+        _mark_warned("backend-coder-1", tid1, sessions_dir=sessions_dir)
 
-            # Second call: should NOT warn (per-task marker exists)
-            warn2, tid2 = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn2 is False
-            assert tid2 == ""
+        # Second call: should NOT warn (per-task marker exists)
+        warn2, tid2 = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn2 is False
+        assert tid2 == ""
 
     def test_full_flow_no_warn_after_teachback_set(self, tmp_path):
         """Once teachback_sent is set in metadata, no warning needed."""
@@ -944,14 +911,13 @@ class TestEndToEnd:
             "metadata": {"teachback_sent": True},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
-            assert task_id == ""
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
+        assert task_id == ""
 
     def test_agent_reuse_warns_for_new_task(self, tmp_path):
         """Full agent reuse scenario: old task has teachback, new task added
@@ -979,14 +945,13 @@ class TestEndToEnd:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert task_id == "20"
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert task_id == "20"
 
     def test_warning_message_content(self):
         """Verify the warning message contains expected instructions."""
@@ -1025,11 +990,10 @@ class TestPerTaskMarkerIsolation:
 
         sessions_dir = str(tmp_path)
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "10", sessions_dir)
+        _mark_warned("coder-1", "10", sessions_dir)
 
-            assert _was_already_warned("coder-1", "10", sessions_dir)
-            assert not _was_already_warned("coder-1", "20", sessions_dir)
+        assert _was_already_warned("coder-1", "10", sessions_dir)
+        assert not _was_already_warned("coder-1", "20", sessions_dir)
 
     def test_different_tasks_have_independent_markers(self, tmp_path):
         """Each task gets its own marker file, even for the same agent."""
@@ -1037,16 +1001,15 @@ class TestPerTaskMarkerIsolation:
 
         sessions_dir = str(tmp_path)
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "10", sessions_dir)
-            _mark_warned("coder-1", "20", sessions_dir)
+        _mark_warned("coder-1", "10", sessions_dir)
+        _mark_warned("coder-1", "20", sessions_dir)
 
-            marker_10 = _get_marker_path("coder-1", "10", sessions_dir)
-            marker_20 = _get_marker_path("coder-1", "20", sessions_dir)
+        marker_10 = _get_marker_path("coder-1", "10", sessions_dir)
+        marker_20 = _get_marker_path("coder-1", "20", sessions_dir)
 
-            assert marker_10.exists()
-            assert marker_20.exists()
-            assert marker_10 != marker_20
+        assert marker_10.exists()
+        assert marker_20.exists()
+        assert marker_10 != marker_20
 
     def test_should_warn_per_task_isolation_full_flow(self, tmp_path):
         """Full flow: agent warned on task A, still warned on new task B.
@@ -1073,55 +1036,53 @@ class TestPerTaskMarkerIsolation:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            # First call for task A: should warn
-            warn_a, tid_a = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn_a is True
-            assert tid_a == "10"
+        # First call for task A: should warn
+        warn_a, tid_a = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn_a is True
+        assert tid_a == "10"
 
-            # Mark warned for task A
-            _mark_warned("coder-1", tid_a, sessions_dir=sessions_dir)
+        # Mark warned for task A
+        _mark_warned("coder-1", tid_a, sessions_dir=sessions_dir)
 
-            # Now task A should NOT warn (per-task marker exists)
-            warn_a2, tid_a2 = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn_a2 is False
-            assert tid_a2 == ""
+        # Now task A should NOT warn (per-task marker exists)
+        warn_a2, tid_a2 = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn_a2 is False
+        assert tid_a2 == ""
 
-            # Agent reassigned: mark task A completed, create task B
-            _write_task(task_dir, "10.json", {
-                "owner": "coder-1",
-                "status": "completed",
-                "metadata": {},
-            })
-            _write_task(task_dir, "20.json", {
-                "owner": "coder-1",
-                "status": "in_progress",
-                "metadata": {},
-            })
+        # Agent reassigned: mark task A completed, create task B
+        _write_task(task_dir, "10.json", {
+            "owner": "coder-1",
+            "status": "completed",
+            "metadata": {},
+        })
+        _write_task(task_dir, "20.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
 
-            # Task B should still warn (different task, no marker yet)
-            warn_b, tid_b = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn_b is True
-            assert tid_b == "20"
+        # Task B should still warn (different task, no marker yet)
+        warn_b, tid_b = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn_b is True
+        assert tid_b == "20"
 
     def test_marker_filename_includes_task_id(self, tmp_path):
         """Verify the marker filename contains both agent name and task ID."""
         from teachback_check import _get_marker_path
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            path = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
+        path = _get_marker_path("coder-1", "42", sessions_dir=str(tmp_path))
 
         assert path.name == "teachback-warned-coder-1-42"
 
@@ -1131,11 +1092,10 @@ class TestPerTaskMarkerIsolation:
 
         sessions_dir = str(tmp_path)
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            _mark_warned("coder-1", "42", sessions_dir)
+        _mark_warned("coder-1", "42", sessions_dir)
 
-            assert _was_already_warned("coder-1", "42", sessions_dir)
-            assert not _was_already_warned("coder-2", "42", sessions_dir)
+        assert _was_already_warned("coder-1", "42", sessions_dir)
+        assert not _was_already_warned("coder-2", "42", sessions_dir)
 
 
 # =============================================================================
@@ -1153,18 +1113,17 @@ class TestConcurrentMarkerAccess:
         sessions_dir = str(tmp_path)
         num_writers = 10
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_writers) as pool:
-                futures = [
-                    pool.submit(_mark_warned, "coder-1", "42", sessions_dir)
-                    for _ in range(num_writers)
-                ]
-                # All should complete without exception
-                for f in futures:
-                    f.result()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_writers) as pool:
+            futures = [
+                pool.submit(_mark_warned, "coder-1", "42", sessions_dir)
+                for _ in range(num_writers)
+            ]
+            # All should complete without exception
+            for f in futures:
+                f.result()
 
-            # Marker should exist after all concurrent writes
-            assert _was_already_warned("coder-1", "42", sessions_dir)
+        # Marker should exist after all concurrent writes
+        assert _was_already_warned("coder-1", "42", sessions_dir)
 
     def test_concurrent_writes_different_agents(self, tmp_path):
         """Multiple agents writing per-task markers concurrently should not interfere."""
@@ -1174,18 +1133,17 @@ class TestConcurrentMarkerAccess:
         sessions_dir = str(tmp_path)
         agent_task_pairs = [(f"coder-{i}", str(i)) for i in range(10)]
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-                futures = [
-                    pool.submit(_mark_warned, name, tid, sessions_dir)
-                    for name, tid in agent_task_pairs
-                ]
-                for f in futures:
-                    f.result()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [
+                pool.submit(_mark_warned, name, tid, sessions_dir)
+                for name, tid in agent_task_pairs
+            ]
+            for f in futures:
+                f.result()
 
-            # Each agent-task pair should have its own marker
-            for name, tid in agent_task_pairs:
-                assert _was_already_warned(name, tid, sessions_dir)
+        # Each agent-task pair should have its own marker
+        for name, tid in agent_task_pairs:
+            assert _was_already_warned(name, tid, sessions_dir)
 
     def test_concurrent_read_write(self, tmp_path):
         """Reading and writing per-task markers concurrently should not raise."""
@@ -1200,18 +1158,17 @@ class TestConcurrentMarkerAccess:
         def read_marker():
             return _was_already_warned("coder-1", "42", sessions_dir)
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-                futures = []
-                for _ in range(5):
-                    futures.append(pool.submit(write_marker))
-                    futures.append(pool.submit(read_marker))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            futures = []
+            for _ in range(5):
+                futures.append(pool.submit(write_marker))
+                futures.append(pool.submit(read_marker))
 
-                # All operations should complete without exception
-                results = [f.result() for f in futures]
+            # All operations should complete without exception
+            results = [f.result() for f in futures]
 
-            # After all writes, marker should exist
-            assert _was_already_warned("coder-1", "42", sessions_dir)
+        # After all writes, marker should exist
+        assert _was_already_warned("coder-1", "42", sessions_dir)
 
 
 # =============================================================================
@@ -1362,14 +1319,13 @@ class TestAllMatchEdgeCases:
             "subject": "Fix review findings from PR #42",
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "architect", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert task_id == "25"
+        warn, task_id = should_warn(
+            "architect", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert task_id == "25"
 
     def test_self_claim_followup_both_in_progress(self, tmp_path):
         """Self-claim follow-up: agent claims task B before lead marks task A
@@ -1396,14 +1352,13 @@ class TestAllMatchEdgeCases:
             "metadata": {},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert task_id == "6"
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert task_id == "6"
 
     def test_no_in_progress_tasks_should_warn_with_empty_task_id(self, tmp_path):
         """When check_teachback_sent returns (False, ""), should_warn proceeds
@@ -1421,17 +1376,16 @@ class TestAllMatchEdgeCases:
             "metadata": {"teachback_sent": True},
         })
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            warn, task_id = should_warn(
-                "backend-coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            # check_teachback_sent returns (False, "") for no in_progress tasks
-            # should_warn checks confirmed=False, then checks marker for empty task_id
-            # No marker exists, so it should warn with empty task_id
-            assert warn is True
-            assert task_id == ""
+        warn, task_id = should_warn(
+            "backend-coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        # check_teachback_sent returns (False, "") for no in_progress tasks
+        # should_warn checks confirmed=False, then checks marker for empty task_id
+        # No marker exists, so it should warn with empty task_id
+        assert warn is True
+        assert task_id == ""
 
     def test_complex_multi_agent_mixed_ownership(self, tmp_path):
         """Multiple agents with interleaved tasks in the same directory.
@@ -1499,62 +1453,61 @@ class TestAllMatchEdgeCases:
         task_dir = tmp_path / "tasks" / "pact-test"
         sessions_dir = str(tmp_path / "sessions")
 
-        with patch("teachback_check.get_project_dir", return_value="/projects/test"):
-            # Step 1: Agent starts task A — no teachback
-            _write_task(task_dir, "10.json", {
-                "owner": "coder-1",
-                "status": "in_progress",
-                "metadata": {},
-            })
-            warn, tid = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert tid == "10"
-            _mark_warned("coder-1", tid, sessions_dir=sessions_dir)
+        # Step 1: Agent starts task A — no teachback
+        _write_task(task_dir, "10.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        warn, tid = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert tid == "10"
+        _mark_warned("coder-1", tid, sessions_dir=sessions_dir)
 
-            # Step 2: Agent sends teachback (metadata updated)
-            _write_task(task_dir, "10.json", {
-                "owner": "coder-1",
-                "status": "in_progress",
-                "metadata": {"teachback_sent": True},
-            })
-            warn, tid = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
+        # Step 2: Agent sends teachback (metadata updated)
+        _write_task(task_dir, "10.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        warn, tid = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
 
-            # Step 3: Agent reused — new task B added, both in_progress
-            _write_task(task_dir, "20.json", {
-                "owner": "coder-1",
-                "status": "in_progress",
-                "metadata": {},
-            })
-            warn, tid = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is True
-            assert tid == "20"
-            _mark_warned("coder-1", tid, sessions_dir=sessions_dir)
+        # Step 3: Agent reused — new task B added, both in_progress
+        _write_task(task_dir, "20.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},
+        })
+        warn, tid = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is True
+        assert tid == "20"
+        _mark_warned("coder-1", tid, sessions_dir=sessions_dir)
 
-            # Step 4: Agent sends teachback for task B
-            _write_task(task_dir, "20.json", {
-                "owner": "coder-1",
-                "status": "in_progress",
-                "metadata": {"teachback_sent": True},
-            })
-            warn, tid = should_warn(
-                "coder-1", "pact-test",
-                tasks_base_dir=str(tmp_path / "tasks"),
-                sessions_dir=sessions_dir,
-            )
-            assert warn is False
+        # Step 4: Agent sends teachback for task B
+        _write_task(task_dir, "20.json", {
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {"teachback_sent": True},
+        })
+        warn, tid = should_warn(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path / "tasks"),
+            sessions_dir=sessions_dir,
+        )
+        assert warn is False
 
 
 # =============================================================================
