@@ -448,12 +448,21 @@ class TestRestoreLastSessionErrorPaths:
 # check_paused_state() Tests
 # =============================================================================
 
+# Use a dynamic date within the 14-day TTL window so tests don't rot over time.
+# The TTL check in check_paused_state() cleans up paused states older than 14 days,
+# so a hardcoded date would cause test failures once it ages past the threshold.
+from datetime import datetime, timezone, timedelta as _timedelta
+
+_RECENT_PAUSED_AT = (
+    datetime.now(timezone.utc) - _timedelta(days=1)
+).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 VALID_PAUSED_STATE = {
     "pr_number": 288,
     "pr_url": "https://github.com/owner/repo/pull/288",
     "branch": "feat/pause-mode-289",
     "worktree_path": "/path/to/.worktrees/feat-pause-mode-289",
-    "paused_at": "2026-03-18T09:30:00Z",
+    "paused_at": _RECENT_PAUSED_AT,
     "consolidation_completed": True,
     "team_name": "pact-d7ab1edb",
 }
@@ -845,7 +854,7 @@ class TestCheckPausedStateTTL:
 
         stale_state = {
             **VALID_PAUSED_STATE,
-            "paused_at": "2026-02-01T09:30:00Z",  # well over 14 days ago from 2026-03-18
+            "paused_at": "2026-02-01T09:30:00Z",  # well over 14 days ago
         }
         state_file = self._write_paused_state(tmp_path, "proj", stale_state)
 
