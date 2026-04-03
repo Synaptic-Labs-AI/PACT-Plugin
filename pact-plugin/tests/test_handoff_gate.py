@@ -322,6 +322,7 @@ class TestCheckMemorySaved:
             task_metadata={"handoff": VALID_HANDOFF},
             teammate_name="test-engineer",
         )
+        assert result is not None
         assert "test-engineer" in result
 
     def test_feedback_contains_memory_path(self):
@@ -332,6 +333,7 @@ class TestCheckMemorySaved:
             task_metadata={"handoff": VALID_HANDOFF},
             teammate_name="frontend-coder",
         )
+        assert result is not None
         assert "~/.claude/agent-memory/frontend-coder/" in result
 
     def test_feedback_contains_taskupdate_instruction(self):
@@ -342,6 +344,7 @@ class TestCheckMemorySaved:
             task_metadata={"handoff": VALID_HANDOFF},
             teammate_name="backend-coder",
         )
+        assert result is not None
         assert "memory_saved" in result
         assert "TaskUpdate" in result
 

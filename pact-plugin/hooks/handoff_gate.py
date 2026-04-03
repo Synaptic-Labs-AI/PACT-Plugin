@@ -20,6 +20,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from shared.handoff_example import format_handoff_example
 import shared.pact_context as pact_context
@@ -234,7 +235,7 @@ def append_pending_handoff(
         pass  # Can't read or file missing? Proceed with append (fail-open)
 
     try:
-        entry_dict = {
+        entry_dict: dict[str, Any] = {
             "task_id": task_id,
             "teammate_name": teammate_name,
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
