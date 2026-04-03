@@ -180,7 +180,13 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
     return {}
 
 
-def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> None:
+def append_pending_handoff(
+    task_id: str,
+    teammate_name: str,
+    team_name: str,
+    task_metadata: dict | None = None,
+    task_subject: str = "",
+) -> None:
     """
     Append a breadcrumb to the pending handoffs file for secretary consumption.
 
@@ -188,6 +194,12 @@ def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> 
     so the secretary can discover completed tasks without the orchestrator needing
     to enumerate task IDs. Uses POSIX atomic append (O_WRONLY|O_APPEND|O_CREAT) with
     0o600 permissions for concurrent safety and security.
+
+    When task_metadata is provided, the entry is enriched with the full HANDOFF
+    content and task_subject. This makes the breadcrumb GC-proof — the secretary
+    can read HANDOFFs directly from the breadcrumb without needing TaskGet (which
+    fails for GC'd tasks). Old-format entries (without handoff) remain valid;
+    the secretary falls back to TaskGet for those.
 
     Dedup guard: reads the file before appending and skips if task_id is already
     present. This prevents cascade duplicates when TaskCompleted fires for multiple
@@ -222,11 +234,19 @@ def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> 
         pass  # Can't read or file missing? Proceed with append (fail-open)
 
     try:
-        entry = json.dumps({
+        entry_dict = {
             "task_id": task_id,
             "teammate_name": teammate_name,
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }) + "\n"
+        }
+        # Enrich with HANDOFF content when available (GC-proof breadcrumb)
+        if task_metadata:
+            handoff = task_metadata.get("handoff")
+            if handoff:
+                entry_dict["handoff"] = handoff
+            if task_subject:
+                entry_dict["task_subject"] = task_subject
+        entry = json.dumps(entry_dict) + "\n"
         fd = os.open(str(filepath), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, entry.encode())
@@ -276,7 +296,11 @@ def main():
 
     # Both gates passed — append breadcrumb for secretary consumption.
     # This is the LAST action before exit: every breadcrumb = fully complete task.
-    append_pending_handoff(task_id, teammate_name, team_name)
+    append_pending_handoff(
+        task_id, teammate_name, team_name,
+        task_metadata=task_metadata,
+        task_subject=task_subject,
+    )
 
     print(_SUPPRESS_OUTPUT)
     sys.exit(0)

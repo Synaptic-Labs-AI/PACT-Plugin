@@ -783,6 +783,237 @@ class TestAppendPendingHandoff:
             append_pending_handoff("42", "backend-coder", "pact-test")
 
 
+class TestEnrichedBreadcrumb:
+    """Tests for enriched breadcrumb entries with inline HANDOFF content (#341)."""
+
+    def _make_teams_dir(self, tmp_path, team_name="pact-test"):
+        teams_dir = tmp_path / ".claude" / "teams" / team_name
+        teams_dir.mkdir(parents=True)
+        return teams_dir
+
+    def _breadcrumb_path(self, teams_dir):
+        return teams_dir / "completed_handoffs.jsonl"
+
+    def test_enriched_entry_contains_handoff(self, tmp_path):
+        """P0: When task_metadata has handoff, breadcrumb entry includes it."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": VALID_HANDOFF}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert entry["task_id"] == "42"
+        assert entry["teammate_name"] == "backend-coder"
+        assert "timestamp" in entry
+        assert entry["handoff"] == VALID_HANDOFF
+        assert entry["task_subject"] == "CODE: auth"
+
+    def test_enriched_entry_preserves_handoff_fields(self, tmp_path):
+        """P0: All HANDOFF fields survive JSON roundtrip exactly."""
+        from handoff_gate import append_pending_handoff
+
+        handoff = {
+            "produced": ["src/auth.ts", "src/middleware.ts"],
+            "decisions": ["Used JWT for stateless auth", "Added rate limiting"],
+            "uncertainty": [{"level": "HIGH", "description": "Token refresh timing"}],
+            "integration": ["UserService", "AuthMiddleware"],
+            "open_questions": ["Should we support OAuth?"],
+            "reasoning_chain": "JWT because stateless -> rate limit because public API",
+        }
+        metadata = {"handoff": handoff}
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "7", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: implement auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert entry["handoff"] == handoff
+
+    def test_none_metadata_produces_legacy_entry(self, tmp_path):
+        """P0: task_metadata=None produces old-format entry (backward compat)."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff("42", "backend-coder", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "task_id" in entry
+        assert "teammate_name" in entry
+        assert "timestamp" in entry
+        assert "handoff" not in entry
+        assert "task_subject" not in entry
+
+    def test_empty_metadata_produces_legacy_entry(self, tmp_path):
+        """P0: Empty metadata dict produces old-format entry."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={},
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "handoff" not in entry
+        assert "task_subject" not in entry
+
+    def test_metadata_without_handoff_key_no_enrichment(self, tmp_path):
+        """P1: Metadata dict with no 'handoff' key -> no handoff in entry."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata={"memory_saved": True},
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert "handoff" not in entry
+        # task_subject is only included when metadata is truthy (it is here),
+        # but only when handoff is absent, task_subject should still be included
+        # since the conditional is about task_metadata being truthy + task_subject being truthy
+        assert entry.get("task_subject") == "CODE: auth"
+
+    def test_enriched_entry_without_task_subject(self, tmp_path):
+        """P1: Handoff present but no task_subject -> entry has handoff only."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": VALID_HANDOFF}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        entry = json.loads(filepath.read_text().strip())
+        assert entry["handoff"] == VALID_HANDOFF
+        assert "task_subject" not in entry
+
+    def test_large_handoff_valid_jsonl(self, tmp_path):
+        """P1: Large HANDOFF (2KB+) doesn't corrupt JSONL format."""
+        from handoff_gate import append_pending_handoff
+
+        large_handoff = {
+            "produced": [f"src/file_{i}.ts" for i in range(50)],
+            "decisions": [f"Decision {i}: " + "x" * 40 for i in range(20)],
+            "uncertainty": [{"level": "HIGH", "description": "y" * 100}],
+            "integration": [f"Service{i}" for i in range(10)],
+            "open_questions": [f"Question {i}?" for i in range(5)],
+        }
+        # Verify it's actually large
+        assert len(json.dumps(large_handoff)) > 2000
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": large_handoff}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: big feature",
+            )
+            # Append another entry after the large one
+            append_pending_handoff(
+                "43", "frontend-coder", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="CODE: small feature",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 2
+
+        # Both lines must be valid JSON
+        entry1 = json.loads(lines[0])
+        entry2 = json.loads(lines[1])
+        assert entry1["task_id"] == "42"
+        assert entry1["handoff"] == large_handoff
+        assert entry2["task_id"] == "43"
+
+    def test_dedup_works_with_enriched_entries(self, tmp_path):
+        """P1: Dedup correctly skips duplicate task_id even with enriched payloads."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+        metadata = {"handoff": VALID_HANDOFF}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: auth",
+            )
+            # Same task_id again — should be deduped
+            append_pending_handoff(
+                "42", "backend-coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="CODE: auth",
+            )
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 1
+        assert json.loads(lines[0])["handoff"] == VALID_HANDOFF
+
+    def test_mixed_legacy_and_enriched_entries(self, tmp_path):
+        """P1: File with both old-format and enriched entries remains valid."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = self._make_teams_dir(tmp_path)
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path):
+            # Legacy entry (no metadata)
+            append_pending_handoff("1", "backend-coder", "pact-test")
+            # Enriched entry
+            append_pending_handoff(
+                "2", "frontend-coder", "pact-test",
+                task_metadata={"handoff": VALID_HANDOFF},
+                task_subject="CODE: frontend",
+            )
+            # Another legacy
+            append_pending_handoff("3", "test-engineer", "pact-test")
+
+        filepath = self._breadcrumb_path(teams_dir)
+        lines = filepath.read_text().strip().split("\n")
+        assert len(lines) == 3
+
+        entries = [json.loads(line) for line in lines]
+        # Entry 1: legacy (no handoff key)
+        assert "handoff" not in entries[0]
+        # Entry 2: enriched
+        assert entries[1]["handoff"] == VALID_HANDOFF
+        assert entries[1]["task_subject"] == "CODE: frontend"
+        # Entry 3: legacy
+        assert "handoff" not in entries[2]
+
+
 class TestMainBreadcrumbIntegration:
     """Integration tests: main() produces/skips breadcrumbs based on gate outcomes."""
 
@@ -820,6 +1051,9 @@ class TestMainBreadcrumbIntegration:
         entry = json.loads(filepath.read_text().strip())
         assert entry["task_id"] == "5"
         assert entry["teammate_name"] == "backend-coder"
+        # Verify enriched content from main() passthrough
+        assert entry["handoff"] == VALID_HANDOFF
+        assert entry["task_subject"] == "CODE: auth"
 
     def test_no_breadcrumb_on_handoff_validation_failure(self, tmp_path):
         """P0: Missing handoff -> exit 2, no breadcrumb file."""
