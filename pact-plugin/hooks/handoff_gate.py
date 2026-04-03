@@ -244,7 +244,7 @@ def append_pending_handoff(
         # task_subject is nested inside `if task_metadata` intentionally:
         # when metadata is None/empty, we produce a legacy-format entry with no
         # extra fields. task_subject is only useful alongside metadata context.
-        # "v": 1 marks enriched format for forward compat (session-journal #342).
+        # "v": 1 is a schema version for enriched entries (enables future format migration).
         if task_metadata:
             entry_dict["v"] = 1
             handoff = task_metadata.get("handoff")
