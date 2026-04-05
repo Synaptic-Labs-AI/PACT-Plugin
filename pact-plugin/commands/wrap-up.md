@@ -66,7 +66,7 @@ python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py"
   --type session_end --team '{team_name}'
 ```
 
-**Recovery note**: If wrap-up is interrupted before the team directory is deleted, team directories at `~/.claude/teams/{team_name}/` accumulate but do not affect functionality. These directories can be safely deleted manually after extracting any needed journal data from `session-journal.jsonl`.
+**Recovery note**: If wrap-up is interrupted before the team directory is deleted, team directories at `~/.claude/teams/{team_name}/` accumulate but do not affect functionality. These directories can be safely deleted manually after extracting any needed journal data from `session-journal.jsonl`. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
 
 ## 6. Worktree Cleanup
 
