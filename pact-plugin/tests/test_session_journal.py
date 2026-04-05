@@ -1248,7 +1248,7 @@ class TestExtractPrevTeamName:
         """Returns None when project_dir is None."""
         from session_init import _extract_prev_team_name
 
-        result = _extract_prev_team_name(None)
+        result = _extract_prev_team_name(None)  # type: ignore[arg-type]
         assert result is None
 
     def test_returns_none_on_ioerror(self, tmp_path):

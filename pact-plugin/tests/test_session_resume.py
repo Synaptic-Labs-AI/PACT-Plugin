@@ -580,6 +580,7 @@ class TestCheckPausedState:
                 sessions_dir=str(tmp_path),
             )
 
+        assert result is not None
         assert "PR #42" in result
         assert "fix/login-bug" in result
 
