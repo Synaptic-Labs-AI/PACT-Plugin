@@ -17,7 +17,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -1295,7 +1295,7 @@ class TestMemoryAdhocReminderSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
-    def test_no_reminder_type_suppress(self, capsys, tmp_path):
+    def test_no_reminder_type_suppress(self, capsys):
         """No reminder type outputs suppressOutput."""
         from memory_adhoc_reminder import main
 
@@ -1630,7 +1630,7 @@ class TestTrackFilesSuppressOutput:
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
 
-    def test_success_path_suppress(self, capsys, tmp_path):
+    def test_success_path_suppress(self, capsys):
         """Normal tracking (Edit tool with file_path) outputs suppressOutput."""
         from track_files import main
 
