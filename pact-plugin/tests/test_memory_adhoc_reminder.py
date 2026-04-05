@@ -4,19 +4,19 @@ reminders at session end.
 
 Tests cover:
 1. get_reminder_type returns "adhoc_save" for substantive ad-hoc work sessions
-2. get_reminder_type returns "unprocessed_handoffs" when breadcrumb file exists
+2. get_reminder_type returns "unprocessed_handoffs" when completed_handoffs.jsonl exists
 3. get_reminder_type returns None for trivial sessions (< 500 chars)
 4. get_reminder_type returns None when no team_name
 5. get_reminder_type returns None when no Edit/Write evidence in transcript
 6. get_reminder_type returns None when .adhoc_reminded guard file exists
 7. main() emits systemMessage JSON for ad-hoc work sessions
-8. main() emits unprocessed_handoffs message for workflow sessions with breadcrumbs
+8. main() emits unprocessed_handoffs message for workflow sessions with completed_handoffs.jsonl
 9. main() exits 0 on invalid JSON input
 10. main() exits 0 on unexpected errors (fail-silent)
 11. main() writes .adhoc_reminded guard file on reminder
 12. main() guard file has 0o600 permissions
-13. Edge: empty breadcrumb file (0 bytes) triggers unprocessed_handoffs
-14. Edge: breadcrumb file with only malformed JSON triggers unprocessed_handoffs
+13. Edge: empty completed_handoffs.jsonl file (0 bytes) triggers unprocessed_handoffs
+14. Edge: completed_handoffs.jsonl file with only malformed JSON triggers unprocessed_handoffs
 15. Edge: guard file blocks both unprocessed_handoffs and adhoc_save via main()
 16. Integration: main() guard file written for unprocessed_handoffs path too
 
@@ -210,7 +210,7 @@ class TestGetReminderType:
     """Tests for memory_adhoc_reminder.get_reminder_type()."""
 
     def test_adhoc_save_for_work_session(self, tmp_path):
-        """Substantive work session with no breadcrumb -> 'adhoc_save'."""
+        """Substantive work session with no completed_handoffs.jsonl -> 'adhoc_save'."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -221,8 +221,8 @@ class TestGetReminderType:
 
         assert result == "adhoc_save"
 
-    def test_unprocessed_handoffs_when_breadcrumb_exists(self, tmp_path):
-        """Breadcrumb file exists -> unprocessed HANDOFFs warning."""
+    def test_unprocessed_handoffs_when_completed_handoffs_exists(self, tmp_path):
+        """completed_handoffs.jsonl exists -> unprocessed HANDOFFs warning."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -292,14 +292,14 @@ class TestGetReminderType:
         assert result == "adhoc_save"
 
     def test_adhoc_save_when_team_dir_missing(self, tmp_path):
-        """Team dir doesn't exist -> breadcrumb check still works (no crash)."""
+        """Team dir doesn't exist -> completed_handoffs.jsonl check still works (no crash)."""
         from memory_adhoc_reminder import get_reminder_type
 
         # Don't create team dir at all
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        # breadcrumb.exists() returns False, .adhoc_reminded.exists() returns False,
+        # completed_handoffs.jsonl .exists() returns False, .adhoc_reminded.exists() returns False,
         # transcript is long enough and has quoted "Edit" evidence -> "adhoc_save"
         assert result == "adhoc_save"
 
@@ -356,7 +356,7 @@ class TestGetReminderType:
         assert result is None
 
     def test_unprocessed_handoffs_ignores_transcript_length(self, tmp_path):
-        """Breadcrumbs trigger unprocessed_handoffs regardless of transcript length."""
+        """completed_handoffs.jsonl triggers unprocessed_handoffs regardless of transcript length."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -369,12 +369,12 @@ class TestGetReminderType:
         assert result == "unprocessed_handoffs"
 
     def test_uncompleted_tasks_highest_priority(self, tmp_path):
-        """Uncompleted tasks take priority over breadcrumbs AND adhoc_save."""
+        """Uncompleted tasks take priority over completed_handoffs.jsonl AND adhoc_save."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        # Both breadcrumb AND work transcript exist
+        # Both completed_handoffs.jsonl AND work transcript exist
         (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
 
         # Also have uncompleted tasks
@@ -388,7 +388,7 @@ class TestGetReminderType:
         assert result == "uncompleted_tasks"
 
     def test_uncompleted_tasks_over_adhoc_save(self, tmp_path):
-        """Uncompleted tasks take priority over adhoc_save (no breadcrumbs)."""
+        """Uncompleted tasks take priority over adhoc_save (no completed_handoffs.jsonl)."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -421,7 +421,7 @@ class TestGetReminderType:
         assert result is None
 
     def test_falls_through_when_no_uncompleted_tasks(self, tmp_path):
-        """No uncompleted tasks + breadcrumbs → falls through to unprocessed_handoffs."""
+        """No uncompleted tasks + completed_handoffs.jsonl → falls through to unprocessed_handoffs."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -465,7 +465,7 @@ class TestMain:
         assert "SendMessage" in output["systemMessage"]
 
     def test_emits_unprocessed_handoffs_message(self, tmp_path, capsys):
-        """Workflow session (breadcrumb exists) -> unprocessed HANDOFFs warning, exit 0."""
+        """Workflow session (completed_handoffs.jsonl exists) -> unprocessed HANDOFFs warning, exit 0."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -645,18 +645,18 @@ class TestMain:
         assert not guard.exists()
 
 
-class TestEdgeCaseBreadcrumbContent:
-    """Edge case tests for breadcrumb file content vs existence checks.
+class TestEdgeCaseCompletedHandoffsContent:
+    """Edge case tests for completed_handoffs.jsonl content vs existence checks.
 
-    The get_reminder_type() function checks .exists() on the breadcrumb file,
+    The get_reminder_type() function checks .exists() on completed_handoffs.jsonl,
     not its content. These tests verify behavior when the file exists but has
     unusual content (empty, malformed, etc.).
     """
 
-    def test_empty_breadcrumb_file_triggers_unprocessed(self, tmp_path):
+    def test_empty_completed_handoffs_file_triggers_unprocessed(self, tmp_path):
         """Empty file (0 bytes) — .exists() returns True → 'unprocessed_handoffs'.
 
-        This is intentional behavior: an empty breadcrumb file means the hook
+        This is intentional behavior: an empty completed_handoffs.jsonl file means the hook
         created it (O_CREAT) but the write failed or was interrupted. The file's
         presence is the signal, not its content. The secretary handles empty
         files gracefully.
@@ -672,7 +672,7 @@ class TestEdgeCaseBreadcrumbContent:
 
         assert result == "unprocessed_handoffs"
 
-    def test_breadcrumb_with_only_malformed_json_triggers_unprocessed(self, tmp_path):
+    def test_completed_handoffs_with_only_malformed_json_triggers_unprocessed(self, tmp_path):
         """File with only malformed JSON — .exists() True → 'unprocessed_handoffs'.
 
         The reminder hook doesn't parse the file — it only checks existence.
@@ -691,7 +691,7 @@ class TestEdgeCaseBreadcrumbContent:
 
         assert result == "unprocessed_handoffs"
 
-    def test_breadcrumb_with_only_whitespace_triggers_unprocessed(self, tmp_path):
+    def test_completed_handoffs_with_only_whitespace_triggers_unprocessed(self, tmp_path):
         """File with only whitespace/newlines — .exists() True → 'unprocessed_handoffs'."""
         from memory_adhoc_reminder import get_reminder_type
 
@@ -802,8 +802,8 @@ class TestMainIntegrationBothPaths:
         # Must suggest wrap-up as remediation
         assert "wrap-up" in msg
 
-    def test_empty_breadcrumb_triggers_warning_via_main(self, tmp_path, capsys):
-        """Empty breadcrumb file → unprocessed_handoffs warning via main()."""
+    def test_empty_completed_handoffs_triggers_warning_via_main(self, tmp_path, capsys):
+        """Empty completed_handoffs.jsonl file → unprocessed_handoffs warning via main()."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -917,7 +917,7 @@ class TestMainUncompletedTasks:
         assert "Update UI" in output["systemMessage"]
 
     def test_uncompleted_tasks_takes_priority_via_main(self, tmp_path, capsys):
-        """Uncompleted tasks + breadcrumbs → uncompleted_tasks message wins."""
+        """Uncompleted tasks + completed_handoffs.jsonl → uncompleted_tasks message wins."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"

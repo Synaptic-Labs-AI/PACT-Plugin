@@ -20,6 +20,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from shared.handoff_example import format_handoff_example
 import shared.pact_context as pact_context
@@ -29,6 +30,10 @@ from shared.pact_context import get_team_name
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
+
+# Schema version for enriched completed_handoffs.jsonl entries.
+# Enables future format migration without breaking backward-compat readers.
+ENRICHED_SCHEMA_VERSION = 1
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -137,9 +142,12 @@ def check_memory_saved(
     )
 
 
-def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
+def _read_task_json(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
     """
-    Read task metadata from the task file.
+    Read the raw task JSON from disk.
+
+    Shared logic for read_task_metadata() and read_task_owner(). Locates the
+    task file in the team directory first, then falls back to the base directory.
 
     Args:
         task_id: Task identifier
@@ -147,7 +155,7 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
         tasks_base_dir: Override for tasks base directory (for testing)
 
     Returns:
-        Task metadata dict, or empty dict if not found
+        Full task dict from the JSON file, or empty dict if not found
     """
     if not task_id:
         return {}
@@ -172,28 +180,72 @@ def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str 
         task_file = task_dir / f"{task_id}.json"
         if task_file.exists():
             try:
-                data = json.loads(task_file.read_text(encoding="utf-8"))
-                return data.get("metadata", {})
+                return json.loads(task_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, IOError):
                 return {}
 
     return {}
 
 
-def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> None:
+def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
     """
-    Append a breadcrumb to the pending handoffs file for secretary consumption.
+    Read task metadata from the task file.
+
+    Args:
+        task_id: Task identifier
+        team_name: Team name for scoped task lookup
+        tasks_base_dir: Override for tasks base directory (for testing)
+
+    Returns:
+        Task metadata dict, or empty dict if not found
+    """
+    return _read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
+
+
+def read_task_owner(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> str | None:
+    """
+    Read the task owner from the task file.
+
+    Used as a fallback when the platform doesn't provide teammate_name in hook
+    input (e.g., orchestrator marks a task completed on behalf of an agent).
+
+    Args:
+        task_id: Task identifier
+        team_name: Team name for scoped task lookup
+        tasks_base_dir: Override for tasks base directory (for testing)
+
+    Returns:
+        Owner string if present, None otherwise
+    """
+    return _read_task_json(task_id, team_name, tasks_base_dir).get("owner")
+
+
+def append_pending_handoff(
+    task_id: str,
+    teammate_name: str,
+    team_name: str,
+    task_metadata: dict | None = None,
+    task_subject: str = "",
+) -> None:
+    """
+    Append a completed handoff entry to completed_handoffs.jsonl for secretary consumption.
 
     Writes a single JSONL line to ~/.claude/teams/{team_name}/completed_handoffs.jsonl
     so the secretary can discover completed tasks without the orchestrator needing
     to enumerate task IDs. Uses POSIX atomic append (O_WRONLY|O_APPEND|O_CREAT) with
     0o600 permissions for concurrent safety and security.
 
+    When task_metadata is provided, the entry is enriched with the full HANDOFF
+    content and task_subject. This makes the entry garbage-collection-proof — the
+    secretary can read HANDOFFs directly from completed_handoffs.jsonl without
+    needing TaskGet (which fails for garbage-collected tasks). Old-format entries
+    (without handoff) remain valid; the secretary falls back to TaskGet for those.
+
     Dedup guard: reads the file before appending and skips if task_id is already
     present. This prevents cascade duplicates when TaskCompleted fires for multiple
     tasks owned by the same agent. Fails open — if the read fails, appends anyway.
 
-    Fails silently — breadcrumb loss is acceptable; blocking task completion is not.
+    Fails silently — entry loss is acceptable; blocking task completion is not.
     """
     if not teammate_name or not team_name:
         return
@@ -222,18 +274,31 @@ def append_pending_handoff(task_id: str, teammate_name: str, team_name: str) -> 
         pass  # Can't read or file missing? Proceed with append (fail-open)
 
     try:
-        entry = json.dumps({
+        entry_dict: dict[str, Any] = {
             "task_id": task_id,
             "teammate_name": teammate_name,
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }) + "\n"
+        }
+        # Enrich with HANDOFF content when available (GC-proof completed_handoffs entry).
+        # task_subject is nested inside `if task_metadata` intentionally:
+        # when metadata is None/empty, we produce a legacy-format entry with no
+        # extra fields. task_subject is only useful alongside metadata context.
+        # "v": 1 is a schema version for enriched entries (enables future format migration).
+        if task_metadata:
+            entry_dict["v"] = ENRICHED_SCHEMA_VERSION
+            handoff = task_metadata.get("handoff")
+            if handoff:
+                entry_dict["handoff"] = handoff
+            if task_subject:
+                entry_dict["task_subject"] = task_subject
+        entry = json.dumps(entry_dict) + "\n"
         fd = os.open(str(filepath), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, entry.encode())
         finally:
             os.close(fd)
-    except OSError:
-        pass
+    except (OSError, TypeError, ValueError):
+        pass  # Fail-open: TypeError/ValueError from json.dumps on non-serializable data
 
 
 def main():
@@ -246,11 +311,21 @@ def main():
     pact_context.init(input_data)
     task_id = input_data.get("task_id", "")
     task_subject = input_data.get("task_subject", "")
-    teammate_name = input_data.get("teammate_name")
     team_name = (input_data.get("team_name") or get_team_name()).lower()
 
-    # TaskCompleted input doesn't include metadata — read from task file
-    task_metadata = read_task_metadata(task_id, team_name)
+    # Read task file once — used for both owner resolution and metadata.
+    task_data = _read_task_json(task_id, team_name)
+
+    # Owner field (set during dispatch) is the authoritative teammate identity.
+    # Platform-provided teammate_name is fallback for tasks without an owner.
+    teammate_name = task_data.get("owner") or input_data.get("teammate_name")
+
+    # No teammate after both sources → genuine non-agent completion.
+    if not teammate_name:
+        print(_SUPPRESS_OUTPUT)
+        sys.exit(0)
+
+    task_metadata = task_data.get("metadata", {})
 
     error = validate_task_handoff(
         task_subject=task_subject,
@@ -274,9 +349,13 @@ def main():
         print(memory_feedback, file=sys.stderr)
         sys.exit(2)  # Block completion — feedback goes to agent
 
-    # Both gates passed — append breadcrumb for secretary consumption.
-    # This is the LAST action before exit: every breadcrumb = fully complete task.
-    append_pending_handoff(task_id, teammate_name, team_name)
+    # Both gates passed — append to completed_handoffs.jsonl for secretary consumption.
+    # This is the LAST action before exit: every entry = fully complete task.
+    append_pending_handoff(
+        task_id, teammate_name, team_name,
+        task_metadata=task_metadata,
+        task_subject=task_subject,
+    )
 
     print(_SUPPRESS_OUTPUT)
     sys.exit(0)

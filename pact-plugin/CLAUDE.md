@@ -159,7 +159,7 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 - After comPACT specialist completes → Standard Harvest
 - During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
-These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via TaskList (primary source) and cross-references with the breadcrumb file for temporal ordering (supplementary).
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via `completed_handoffs.jsonl` (primary source) and cross-references with `TaskList` (supplementary). `TaskList` may be incomplete in long sessions due to platform garbage collection of older task files.
 
 NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
