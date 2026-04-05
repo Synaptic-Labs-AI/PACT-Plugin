@@ -22,6 +22,9 @@ from typing import Any
 
 from shared.session_journal import read_events, read_last_event
 
+# Maximum characters for decision summaries in journal resume output
+_DECISION_TRUNCATION_LIMIT = 80
+
 
 def update_session_info(session_id: str, team_name: str) -> str | None:
     """
@@ -196,8 +199,8 @@ def _build_journal_resume(team_name: str) -> str | None:
             handoff_data = h.get("handoff", {})
             decisions = handoff_data.get("decisions", [])
             summary = decisions[0] if decisions else ""
-            if len(summary) > 80:
-                summary = summary[:77] + "..."
+            if len(summary) > _DECISION_TRUNCATION_LIMIT:
+                summary = summary[:_DECISION_TRUNCATION_LIMIT - 3] + "..."
             if summary:
                 lines.append(f"- {agent}: {subject} -> {summary}")
             else:

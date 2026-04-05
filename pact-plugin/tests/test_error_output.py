@@ -946,7 +946,6 @@ class TestSessionEndSuppressOutput:
         with patch("sys.stdin", io.StringIO("{}")), \
              patch.dict(os.environ, env, clear=False), \
              patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr"):
             with pytest.raises(SystemExit) as exc_info:
                 main()

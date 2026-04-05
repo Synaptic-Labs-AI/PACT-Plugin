@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/session_end.py
-Summary: SessionEnd hook that captures a last-session snapshot for cross-session
-         continuity and performs session directory cleanup.
+Summary: SessionEnd hook that writes a session_end journal event and performs
+         session directory cleanup.
 Used by: hooks.json SessionEnd hook
 
 Actions:
-1. Write last-session snapshot to ~/.claude/pact-sessions/{slug}/last-session.md
-2. Detect open PRs that were not paused (append warning to snapshot)
+1. Write session_end event to the session journal
+2. Detect open PRs that were not paused (append warning to journal)
 3. Clean up teachback warning markers (session-scoped + legacy slug-level)
 4. Clean up stale session directories older than 7 days
 
@@ -47,33 +47,6 @@ def get_project_slug() -> str:
     if project_dir:
         return Path(project_dir).name
     return ""
-
-
-def write_session_snapshot(
-    tasks: list[dict] | None,
-    project_slug: str,
-    sessions_dir: str | None = None,
-) -> None:
-    """
-    Write a structured last-session snapshot from task states.
-
-    Deprecated: The session journal (session-journal.jsonl) is now the primary
-    source for cross-session continuity. The session_end event is written to
-    the journal in main(). session_init.py reads the previous session's journal
-    to construct resume context.
-
-    This function is preserved as a no-op for backward compatibility with any
-    external callers. No slug-level last-session.md is written.
-
-    Args:
-        tasks: List of task dicts from get_task_list(), or None
-        project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
-    """
-    # No-op: the session journal replaces slug-level last-session.md.
-    # The session_end event (written in main()) and agent_handoff events
-    # (written by handoff_gate.py) provide equivalent data for resume.
-    pass
 
 
 def check_unpaused_pr(

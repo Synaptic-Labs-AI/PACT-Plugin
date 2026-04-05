@@ -5,15 +5,14 @@ Tests for session_end.py — SessionEnd hook for session lifecycle management.
 session_end.py is purely observational — no destructive operations on project files.
 
 Tests cover:
-1. write_session_snapshot() is a no-op (deprecated — journal replaces slug-level files)
-2. main() entry point: exit codes, error handling, journal event emission
-3. check_unpaused_pr() — journal-based safety-net for unpaused PRs:
+1. main() entry point: exit codes, error handling, journal event emission
+2. check_unpaused_pr() — journal-based safety-net for unpaused PRs:
    - Reads session_paused events from journal (skip warning if paused)
    - Reads review_dispatch events from journal (primary PR detection)
    - Falls back to task metadata/handoff scanning for PR number
    - Writes warning to journal via append_event (not to last-session.md)
-4. cleanup_teachback_markers() — session-scoped marker cleanup
-5. cleanup_old_sessions() — stale session directory removal
+3. cleanup_teachback_markers() — session-scoped marker cleanup
+4. cleanup_old_sessions() — stale session directory removal
 """
 import io
 import json
@@ -43,64 +42,6 @@ class TestGetProjectSlug:
             assert get_project_slug() == ""
 
 
-class TestWriteSessionSnapshot:
-    """Tests for session_end.write_session_snapshot() — now a no-op.
-
-    write_session_snapshot() is deprecated: the session journal (session-journal.jsonl)
-    replaces slug-level last-session.md. The function body is `pass` for backward
-    compatibility. Tests verify it does nothing and doesn't crash.
-    """
-
-    def test_noop_does_not_create_files(self, tmp_path):
-        """No-op: should not create any files or directories."""
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[{"id": "1", "subject": "test", "status": "completed", "metadata": {}}],
-            project_slug="my-project",
-            sessions_dir=str(tmp_path),
-        )
-
-        # No file should be created — function is a no-op
-        assert not list(tmp_path.iterdir())
-
-    def test_noop_accepts_none_tasks(self, tmp_path):
-        """No-op: should handle None tasks without crashing."""
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=None,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        assert not list(tmp_path.iterdir())
-
-    def test_noop_accepts_empty_tasks(self, tmp_path):
-        """No-op: should handle empty list without crashing."""
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[],
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        assert not list(tmp_path.iterdir())
-
-    def test_noop_accepts_empty_slug(self, tmp_path):
-        """No-op: should handle empty project slug without crashing."""
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[{"id": "1", "subject": "t", "status": "completed", "metadata": {}}],
-            project_slug="",
-            sessions_dir=str(tmp_path),
-        )
-
-        assert not list(tmp_path.iterdir())
-
-
 class TestMainEntryPoint:
     """Tests for session_end.main() exit behavior and call orchestration."""
 
@@ -109,8 +50,7 @@ class TestMainEntryPoint:
 
         Default mocks: pact_context.init, get_project_dir, get_session_dir,
         get_session_id, get_team_name, get_task_list, append_event,
-        write_session_snapshot, check_unpaused_pr, cleanup_teachback_markers,
-        cleanup_old_sessions.
+        check_unpaused_pr, cleanup_teachback_markers, cleanup_old_sessions.
 
         Pass keyword overrides to replace defaults (e.g., get_task_list=...).
         """
@@ -126,7 +66,6 @@ class TestMainEntryPoint:
             "get_team_name": patch("session_end.get_team_name", return_value="pact-abc12345"),
             "get_task_list": patch("session_end.get_task_list", return_value=[]),
             "append_event": patch("session_end.append_event"),
-            "write_session_snapshot": patch("session_end.write_session_snapshot"),
             "check_unpaused_pr": patch("session_end.check_unpaused_pr"),
             "cleanup_teachback_markers": patch("session_end.cleanup_teachback_markers"),
             "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
@@ -1207,7 +1146,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_session_dir", return_value="/tmp/session"), \
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_teachback_markers") as mock_cleanup, \
              patch("session_end.cleanup_old_sessions"), \
@@ -1234,7 +1172,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_session_dir", return_value="/tmp/session"), \
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_teachback_markers"), \
              patch("session_end.cleanup_old_sessions") as mock_cleanup, \

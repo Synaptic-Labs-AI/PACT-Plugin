@@ -62,12 +62,11 @@ Before deleting the team (step 7), ensure all journal entries have been processe
 
 **Journal event**: Write a `session_end` event after confirmation:
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-from shared.session_journal import append_event, make_event
-append_event(make_event('session_end'), '{team_name}')
-"
+python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+  --type session_end --team '{team_name}'
 ```
+
+**Recovery note**: If wrap-up is interrupted before the team directory is deleted, team directories at `~/.claude/teams/{team_name}/` accumulate but do not affect functionality. These directories can be safely deleted manually after extracting any needed journal data from `session-journal.jsonl`.
 
 ## 6. Worktree Cleanup
 
