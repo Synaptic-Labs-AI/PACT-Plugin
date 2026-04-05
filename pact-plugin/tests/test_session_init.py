@@ -558,10 +558,7 @@ class TestMainPausedStateIntegration:
                 main()
 
         assert exc_info.value.code == 0
-        mock_paused.assert_called_once_with(
-            project_slug="test-project",
-            prev_team_name=None,
-        )
+        mock_paused.assert_called_once_with(prev_team_name=None)
 
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]

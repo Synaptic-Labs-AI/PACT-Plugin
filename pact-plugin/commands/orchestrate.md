@@ -257,7 +257,7 @@ Wire variety dimension scores (already computed in the Task Variety Assessment a
 
 **If any hard gate fires** → Phase runs. No further analysis needed for this phase.
 
-**Missing variety data**: If variety scores are not available, hard gates cannot be evaluated — the default-run posture applies. After compaction, check `TaskGet(featureTaskId).metadata.variety` first. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full journal-based recovery hierarchy.
+**Missing variety data**: If variety scores are not available, hard gates cannot be evaluated — the default-run posture applies. After compaction, read the journal's `variety_assessed` event first (`python3 "$SJ" read-last --team '{team_name}' --type variety_assessed`); fall back to `TaskGet(featureTaskId).metadata.variety` if journal is unavailable. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery hierarchy.
 
 ### Layer 3: Structured Analysis Gate
 

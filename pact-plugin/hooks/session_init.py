@@ -394,20 +394,13 @@ def main():
 
         # 7. Restore last session snapshot for cross-session continuity
         # Locate previous session's team name from project CLAUDE.md for journal access
-        project_slug = Path(project_dir).name if project_dir else ""
         prev_team = _extract_prev_team_name(project_dir)
-        session_snapshot = restore_last_session(
-            project_slug=project_slug,
-            prev_team_name=prev_team,
-        )
+        session_snapshot = restore_last_session(prev_team_name=prev_team)
         if session_snapshot:
             context_parts.append(session_snapshot)
 
         # 8. Check for paused work from previous session's /PACT:pause
-        paused_msg = check_paused_state(
-            project_slug=project_slug,
-            prev_team_name=prev_team,
-        )
+        paused_msg = check_paused_state(prev_team_name=prev_team)
         if paused_msg:
             context_parts.append(paused_msg)
 

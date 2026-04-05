@@ -925,14 +925,13 @@ class TestCheckJournalPausedState:
 
 
 class TestJournalPreference:
-    """Tests that restore_last_session and check_paused_state prefer journal."""
+    """Tests that restore_last_session and check_paused_state use journal."""
 
-    def test_restore_prefers_journal_over_slug(self, journal_home, team_name, tmp_path):
-        """restore_last_session uses journal when prev_team_name is available."""
+    def test_restore_uses_journal(self, journal_home, team_name):
+        """restore_last_session reads journal when prev_team_name is provided."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import restore_last_session
 
-        # Set up journal with handoff events
         append_event(
             make_event(
                 "agent_handoff",
@@ -943,42 +942,20 @@ class TestJournalPreference:
             team_name,
         )
 
-        # Also set up slug-level fallback (should be ignored)
-        sessions_dir = tmp_path / "sessions"
-        slug_dir = sessions_dir / "my-project"
-        slug_dir.mkdir(parents=True)
-        (slug_dir / "last-session.md").write_text("Slug-level content")
-
-        result = restore_last_session(
-            project_slug="my-project",
-            sessions_dir=str(sessions_dir),
-            prev_team_name=team_name,
-        )
+        result = restore_last_session(prev_team_name=team_name)
 
         assert result is not None
         assert "journal" in result  # Journal-based resume header
-        assert "Slug-level content" not in result
 
-    def test_restore_falls_back_to_slug(self, journal_home, tmp_path):
-        """restore_last_session falls back to slug when no prev_team_name."""
+    def test_restore_returns_none_without_team_name(self, journal_home):
+        """restore_last_session returns None when no prev_team_name."""
         from shared.session_resume import restore_last_session
 
-        sessions_dir = tmp_path / "sessions"
-        slug_dir = sessions_dir / "my-project"
-        slug_dir.mkdir(parents=True)
-        (slug_dir / "last-session.md").write_text("Slug-level content here")
+        result = restore_last_session(prev_team_name=None)
+        assert result is None
 
-        result = restore_last_session(
-            project_slug="my-project",
-            sessions_dir=str(sessions_dir),
-            prev_team_name=None,
-        )
-
-        assert result is not None
-        assert "Slug-level content here" in result
-
-    def test_check_paused_prefers_journal(self, journal_home, team_name, tmp_path):
-        """check_paused_state uses journal when prev_team_name is available."""
+    def test_check_paused_uses_journal(self, journal_home, team_name):
+        """check_paused_state reads journal when prev_team_name is provided."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import check_paused_state
 
@@ -994,39 +971,17 @@ class TestJournalPreference:
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
-            result = check_paused_state(
-                project_slug="my-project",
-                sessions_dir=str(tmp_path),
-                prev_team_name=team_name,
-            )
+            result = check_paused_state(prev_team_name=team_name)
 
         assert result is not None
         assert "PR #42" in result
 
-    def test_check_paused_falls_back_to_slug(self, journal_home, tmp_path):
-        """check_paused_state falls back to slug when no journal paused events."""
+    def test_check_paused_returns_none_without_team_name(self, journal_home):
+        """check_paused_state returns None when no prev_team_name."""
         from shared.session_resume import check_paused_state
 
-        # Create slug-level paused-state.json
-        slug_dir = tmp_path / "sessions" / "my-project"
-        slug_dir.mkdir(parents=True)
-        state = {
-            "pr_number": 99,
-            "branch": "feat/slug",
-            "worktree_path": "/tmp/slug-wt",
-            "consolidation_completed": True,
-        }
-        (slug_dir / "paused-state.json").write_text(json.dumps(state))
-
-        with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
-            result = check_paused_state(
-                project_slug="my-project",
-                sessions_dir=str(tmp_path / "sessions"),
-                prev_team_name=None,
-            )
-
-        assert result is not None
-        assert "PR #99" in result
+        result = check_paused_state(prev_team_name=None)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
