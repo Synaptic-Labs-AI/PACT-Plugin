@@ -115,9 +115,9 @@ class TestSupportingSections:
         """Skill must include Ad-Hoc Save Requests section."""
         assert "## Ad-Hoc Save Requests" in skill_content
 
-    def test_has_orphaned_breadcrumb_recovery(self, skill_content):
-        """Skill must include Orphaned Breadcrumb Recovery section."""
-        assert "## Orphaned Breadcrumb Recovery" in skill_content
+    def test_has_orphaned_handoff_recovery(self, skill_content):
+        """Skill must include Orphaned Handoff Recovery section."""
+        assert "## Orphaned Handoff Recovery" in skill_content
 
 
 class TestKeywordRouting:
@@ -181,10 +181,10 @@ class TestCriticalProtocolReferences:
         """Skill must reference CalibrationRecord for variety scoring feedback."""
         assert "CalibrationRecord" in skill_content
 
-    def test_has_breadcrumb_cleanup_guidance(self, skill_content):
-        """Skill must include Path.unlink breadcrumb cleanup guidance."""
+    def test_has_completed_handoffs_cleanup_guidance(self, skill_content):
+        """Skill must include Path.unlink completed_handoffs.jsonl cleanup guidance."""
         assert "unlink" in skill_content, (
-            "Skill must reference Path.unlink for breadcrumb cleanup"
+            "Skill must reference Path.unlink for completed_handoffs.jsonl cleanup"
         )
 
     def test_has_processed_tasks_tracking(self, skill_content):

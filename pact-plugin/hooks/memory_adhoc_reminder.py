@@ -7,9 +7,9 @@ Used by: hooks.json Stop hook
 Non-blocking (always exit 0). Three reminder paths (checked in priority order):
 1. "uncompleted_tasks" — agent-owned tasks still in_progress at session end.
    Last-resort safety net for agents that crashed or missed the TeammateIdle gate.
-2. "unprocessed_handoffs" — breadcrumb file exists at session end, meaning
-   workflow HANDOFFs were captured but never processed by the secretary.
-3. "adhoc_save" — no breadcrumb file but session had substantive ad-hoc work
+2. "unprocessed_handoffs" — completed_handoffs.jsonl exists at session end,
+   meaning workflow HANDOFFs were captured but never processed by the secretary.
+3. "adhoc_save" — no completed_handoffs.jsonl but session had substantive ad-hoc work
    outside formal PACT workflows.
 
 Uses a file-based reentrancy guard (~/.claude/teams/{team_name}/.adhoc_reminded)
@@ -97,8 +97,8 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
 
     Returns:
         REMINDER_UNCOMPLETED_TASKS — agent tasks still in_progress at session end
-        REMINDER_UNPROCESSED_HANDOFFS — breadcrumbs exist (workflow ran but memory not processed)
-        REMINDER_ADHOC_SAVE — no breadcrumbs but substantive ad-hoc work detected
+        REMINDER_UNPROCESSED_HANDOFFS — completed_handoffs.jsonl exists (workflow ran but memory not processed)
+        REMINDER_ADHOC_SAVE — no completed_handoffs.jsonl but substantive ad-hoc work detected
         None — no reminder needed
 
     Args:
@@ -118,11 +118,11 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
     if find_uncompleted_tasks(team_name):
         return REMINDER_UNCOMPLETED_TASKS
 
-    # Path 1: Breadcrumbs exist → unprocessed HANDOFFs
+    # Path 1: completed_handoffs.jsonl exists → unprocessed HANDOFFs
     if (teams_dir / "completed_handoffs.jsonl").exists():
         return REMINDER_UNPROCESSED_HANDOFFS
 
-    # Path 2: No breadcrumbs but substantive ad-hoc work
+    # Path 2: No completed_handoffs.jsonl but substantive ad-hoc work
     if len(transcript) < MIN_TRANSCRIPT_LENGTH:
         return None
 
