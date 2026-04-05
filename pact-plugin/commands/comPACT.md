@@ -172,11 +172,9 @@ For each specialist needed:
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning each specialist:
    ```bash
-   python3 -c "
-   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-   from shared.session_journal import append_event, make_event
-   append_event(make_event('agent_dispatch', agent='{specialist-name}', task_id='{taskId}', phase='CODE', scope=['{assigned_paths}']), '{team_name}')
-   "
+   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+     --type agent_dispatch --team '{team_name}' \
+     --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
    ```
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -199,11 +197,9 @@ Use a single specialist agent only when:
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
-   python3 -c "
-   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-   from shared.session_journal import append_event, make_event
-   append_event(make_event('agent_dispatch', agent='{specialist-name}', task_id='{taskId}', phase='CODE', scope=[]), '{team_name}')
-   "
+   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+     --type agent_dispatch --team '{team_name}' \
+     --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}'
    ```
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -250,11 +246,9 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
 - [ ] **Journal events**: After each commit, write a `commit` event:
   ```bash
-  python3 -c "
-  import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-  from shared.session_journal import append_event, make_event
-  append_event(make_event('commit', sha='{short_sha}', message='{first_line}', phase='CODE'), '{team_name}')
-  "
+  python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+    --type commit --team '{team_name}' \
+    --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
   ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Process specialist HANDOFFs** (non-blocking):
@@ -266,11 +260,9 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 - [ ] **Journal event**: Write `phase_transition` to mark comPACT completion:
   ```bash
-  python3 -c "
-  import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-  from shared.session_journal import append_event, make_event
-  append_event(make_event('phase_transition', phase='CODE', status='completed', skip_reason='', metadata={'workflow': 'comPACT'}), '{team_name}')
-  "
+  python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+    --type phase_transition --team '{team_name}' \
+    --data '{"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}'
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 

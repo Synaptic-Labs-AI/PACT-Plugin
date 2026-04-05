@@ -149,11 +149,9 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-from shared.session_journal import append_event, make_event
-append_event(make_event('review_dispatch', pr_number={pr_number}, pr_url='{pr_url}', reviewers=['{reviewer1}', '{reviewer2}', ...]), '{team_name}')
-"
+python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+  --type review_dispatch --team '{team_name}' \
+  --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}'
 ```
 
 **HANDOFF review** (dispatched parallel with reviewers — PRIMARY memory trigger):
@@ -201,12 +199,10 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 1. Synthesize findings into a unified review summary with consolidated recommendations
 2. **Journal events**: Write a `review_finding` event for each synthesized finding:
    ```bash
-   python3 -c "
-   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-   from shared.session_journal import append_event, make_event
    # Repeat for each finding:
-   append_event(make_event('review_finding', severity='{blocking|suggestion|nitpick}', finding='{one-line description}', reviewer='{reviewer-name}', task_id='{reviewer_task_id}'), '{team_name}')
-   "
+   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+     --type review_finding --team '{team_name}' \
+     --data '{"severity": "{blocking|suggestion|nitpick}", "finding": "{one-line description}", "reviewer": "{reviewer-name}", "task_id": "{reviewer_task_id}"}'
    ```
 3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
 
@@ -227,11 +223,9 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        - Mixed (both independent and dependent) → Use `/PACT:comPACT` for the independent batch AND `/PACT:orchestrate` for the dependent batch (can run in parallel if non-overlapping)
      - **Journal event**: Write a `remediation` event when dispatching fixes:
        ```bash
-       python3 -c "
-       import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-       from shared.session_journal import append_event, make_event
-       append_event(make_event('remediation', cycle={cycle_number}, items=['{finding_id1}', ...], fixer='{agent-name}'), '{team_name}')
-       "
+       python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+         --type remediation --team '{team_name}' \
+         --data '{"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}"}'
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
      - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
@@ -281,11 +275,9 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 
    **Journal event**: When merge-ready, write a `pr_ready` event:
    ```bash
-   python3 -c "
-   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-   from shared.session_journal import append_event, make_event
-   append_event(make_event('pr_ready', pr_number={pr_number}, pr_url='{pr_url}', commits={total_commit_count}), '{team_name}')
-   "
+   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+     --type pr_ready --team '{team_name}' \
+     --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}'
    ```
 
 5. **Calibration save**:

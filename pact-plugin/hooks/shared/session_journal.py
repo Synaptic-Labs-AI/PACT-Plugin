@@ -2,7 +2,8 @@
 Location: pact-plugin/hooks/shared/session_journal.py
 Summary: Append-only JSONL event store for GC-proof workflow state persistence.
 Used by: session_init.py, session_end.py, handoff_gate.py (hooks);
-         orchestrate.md, comPACT.md, peer-review.md, pause.md (commands via Bash).
+         orchestrate.md, comPACT.md, peer-review.md, wrap-up.md, pause.md
+         (commands invoke via CLI: python3 session_journal.py write|read|read-last).
 
 Write path: POSIX O_APPEND atomic append. Safe for concurrent writers
 (hooks + orchestrator commands). O_APPEND on regular files guarantees
@@ -220,3 +221,86 @@ def get_journal_path(team_name: str) -> str:
 def _journal_path(team_name: str) -> Path:
     """Compute the journal file path for a given team name."""
     return Path.home() / ".claude" / "teams" / team_name / "session-journal.jsonl"
+
+
+# --- CLI ---
+
+
+def main() -> int:
+    """
+    CLI entry point for session journal operations.
+
+    Subcommands:
+        write  — Append an event via make_event() + append_event()
+        read   — Read events, optionally filtered by type, output JSON
+        read-last — Read the most recent event of a given type, output JSON
+
+    Returns:
+        0 on success, 1 on error.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Session journal CLI — append and query JSONL events.",
+    )
+    sub = parser.add_subparsers(dest="command")
+    sub.required = True
+
+    # --- write ---
+    write_p = sub.add_parser("write", help="Append an event to the journal")
+    write_p.add_argument("--type", required=True, dest="event_type",
+                         help="Event type string (e.g. phase_transition)")
+    write_p.add_argument("--team", required=True, help="Team name")
+    write_p.add_argument("--data", default="{}",
+                         help="JSON object of extra event fields")
+
+    # --- read ---
+    read_p = sub.add_parser("read", help="Read events (JSON array to stdout)")
+    read_p.add_argument("--team", required=True, help="Team name")
+    read_p.add_argument("--type", default=None, dest="event_type",
+                        help="Filter by event type")
+
+    # --- read-last ---
+    last_p = sub.add_parser("read-last",
+                            help="Read the most recent event of a type")
+    last_p.add_argument("--team", required=True, help="Team name")
+    last_p.add_argument("--type", required=True, dest="event_type",
+                        help="Event type to find")
+
+    args = parser.parse_args()
+
+    if args.command == "write":
+        try:
+            extra = json.loads(args.data)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"session_journal: invalid --data JSON: {exc}",
+                  file=sys.stderr)
+            return 1
+
+        if not isinstance(extra, dict):
+            print("session_journal: --data must be a JSON object",
+                  file=sys.stderr)
+            return 1
+
+        event = make_event(args.event_type, **extra)
+        ok = append_event(event, args.team)
+        return 0 if ok else 1
+
+    elif args.command == "read":
+        events = read_events(args.team, event_type=args.event_type)
+        print(json.dumps(events))
+        return 0
+
+    elif args.command == "read-last":
+        event = read_last_event(args.team, args.event_type)
+        if event is None:
+            print("null")
+        else:
+            print(json.dumps(event))
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

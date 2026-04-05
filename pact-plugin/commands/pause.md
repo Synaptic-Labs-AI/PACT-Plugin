@@ -60,17 +60,9 @@ Report task summary without deleting any tasks:
 Persist session state as a `session_paused` event in the session journal. This replaces the previous `paused-state.json` file approach — the journal event contains the same fields and is detected by `session_init.py` on resume.
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
-from shared.session_journal import append_event, make_event
-append_event(make_event('session_paused',
-    pr_number={pr_number},
-    pr_url='{pr_url}',
-    branch='{branch}',
-    worktree_path='{worktree_path}',
-    consolidation_completed={True_or_False},
-    team_name='{team_name}'), '{team_name}')
-"
+python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+  --type session_paused --team '{team_name}' \
+  --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}'
 ```
 
 **Event fields**:
