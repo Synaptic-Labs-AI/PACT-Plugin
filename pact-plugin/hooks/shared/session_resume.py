@@ -7,12 +7,11 @@ Used by: session_init.py during SessionStart hook to write session info,
 
 Manages:
 1. Writing session resume info (team name, resume command) to project CLAUDE.md
-2. Restoring last session context from session journal (with slug-level fallback)
+2. Restoring last session context from session journal
 3. Checking for in-progress tasks that indicate resumable work
-4. Detecting paused state from session journal (with slug-level fallback)
+4. Detecting paused state from session journal
 """
 
-import json
 import os
 import re
 import subprocess
@@ -106,67 +105,26 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
 
 
 def restore_last_session(
-    project_slug: str,
-    sessions_dir: str | None = None,
     prev_team_name: str | None = None,
 ) -> str | None:
     """
     Restore the last session context for cross-session continuity.
 
-    Primary path: reads the previous session's journal (located by
-    prev_team_name) and constructs a resume summary from agent_handoff,
-    phase_transition, and checkpoint events.
-
-    Fallback path: reads slug-level last-session.md (for sessions that
-    predate the journal).
+    Reads the previous session's journal (located by prev_team_name) and
+    constructs a resume summary from agent_handoff, phase_transition, and
+    checkpoint events.
 
     Args:
-        project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
         prev_team_name: Previous session's team name (from CLAUDE.md).
             When provided, reads that team's journal for resume context.
 
     Returns:
         Resume context string if available, None otherwise
     """
-    # Primary path: journal-based resume
-    if prev_team_name:
-        resume = _build_journal_resume(prev_team_name)
-        if resume:
-            return resume
-
-    # Fallback: slug-level last-session.md (pre-journal sessions)
-    if not project_slug:
+    if not prev_team_name:
         return None
 
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
-
-    snapshot_file = Path(sessions_dir) / project_slug / "last-session.md"
-    if not snapshot_file.exists():
-        return None
-
-    try:
-        content = snapshot_file.read_text(encoding="utf-8")
-    except (IOError, UnicodeDecodeError):
-        return None
-
-    if not content.strip():
-        return None
-
-    # Rotate: move last-session.md to last-session.prev.md
-    prev_file = snapshot_file.parent / "last-session.prev.md"
-    try:
-        prev_file.write_text(content, encoding="utf-8")
-        os.chmod(str(prev_file), 0o600)
-        snapshot_file.unlink()
-    except (IOError, OSError):
-        pass  # Best-effort rotation; don't fail the restore
-
-    return (
-        "Previous session summary (read-only reference -- not live tasks):\n"
-        + content
-    )
+    return _build_journal_resume(prev_team_name)
 
 
 def _build_journal_resume(team_name: str) -> str | None:
@@ -301,44 +259,32 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
 
 
 def check_paused_state(
-    project_slug: str,
-    sessions_dir: str | None = None,
     prev_team_name: str | None = None,
 ) -> str | None:
     """
     Detect paused work from a previous session's /PACT:pause invocation.
 
-    Primary path: reads the previous session's journal for session_paused
-    events. The event contains pr_number, pr_url, branch, worktree_path,
-    consolidation_completed, and team_name — all the same data as the
-    legacy paused-state.json.
-
-    Fallback path: reads slug-level paused-state.json for pre-journal sessions.
+    Reads the previous session's journal for session_paused events.
+    The event contains pr_number, pr_url, branch, worktree_path,
+    consolidation_completed, and team_name.
 
     Validation pipeline (ordered cheapest-first):
     1. TTL check: timestamp older than 14 days → return informational message
     2. Active PR validation via `gh pr view`: if MERGED/CLOSED → return info
 
-    Key difference from slug-level: the journal is immutable. No file deletion
-    is performed — the journal just reports state.
+    The journal is immutable — no file deletion is performed.
 
     Args:
-        project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
         prev_team_name: Previous session's team name (from CLAUDE.md).
             When provided, reads that team's journal for pause state.
 
     Returns:
         Formatted context string if paused state exists, None otherwise
     """
-    # Primary path: journal-based pause detection
-    if prev_team_name:
-        result = _check_journal_paused_state(prev_team_name)
-        if result:
-            return result
+    if not prev_team_name:
+        return None
 
-    # Fallback: slug-level paused-state.json (pre-journal sessions)
-    return _check_slug_paused_state(project_slug, sessions_dir)
+    return _check_journal_paused_state(prev_team_name)
 
 
 def _check_journal_paused_state(team_name: str) -> str | None:
@@ -378,80 +324,6 @@ def _check_journal_paused_state(team_name: str) -> str | None:
         )
 
     consolidation = event.get("consolidation_completed", False)
-    consolidation_note = ""
-    if not consolidation:
-        consolidation_note = (
-            " Memory consolidation did NOT complete — "
-            "run /PACT:pause or /PACT:wrap-up to capture session knowledge."
-        )
-
-    return (
-        f"Paused work detected: PR #{pr_number} ({branch}) — awaiting merge. "
-        f"Worktree at {worktree_path}. "
-        f"Run /PACT:peer-review to resume review/merge.{consolidation_note}"
-    )
-
-
-def _check_slug_paused_state(
-    project_slug: str,
-    sessions_dir: str | None = None,
-) -> str | None:
-    """Check for paused state in the legacy slug-level paused-state.json."""
-    if not project_slug:
-        return None
-
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
-
-    state_file = Path(sessions_dir) / project_slug / "paused-state.json"
-    if not state_file.exists():
-        return None
-
-    try:
-        content = state_file.read_text(encoding="utf-8")
-        state = json.loads(content)
-    except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-
-    pr_number = state.get("pr_number")
-    branch = state.get("branch", "unknown")
-    worktree_path = state.get("worktree_path", "unknown")
-
-    if pr_number is None:
-        return None
-
-    # TTL check
-    paused_at_str = state.get("paused_at")
-    if paused_at_str:
-        try:
-            paused_at = datetime.fromisoformat(paused_at_str.replace("Z", "+00:00"))
-            age_days = (datetime.now(timezone.utc) - paused_at).days
-            if age_days > 14:
-                try:
-                    state_file.unlink()
-                except OSError:
-                    pass
-                paused_date = paused_at.strftime("%Y-%m-%d")
-                return (
-                    f"Stale paused state from {paused_date} cleaned up "
-                    f"(older than 14 days). PR #{pr_number} on {branch}."
-                )
-        except (ValueError, TypeError, OverflowError):
-            pass
-
-    # Active PR validation
-    pr_state = _check_pr_state(pr_number)
-    if pr_state in ("MERGED", "CLOSED"):
-        try:
-            state_file.unlink()
-        except OSError:
-            pass
-        return (
-            f"Previously paused PR #{pr_number} has been "
-            f"{pr_state.lower()}. Cleaned up paused state."
-        )
-
-    consolidation = state.get("consolidation_completed", False)
     consolidation_note = ""
     if not consolidation:
         consolidation_note = (
