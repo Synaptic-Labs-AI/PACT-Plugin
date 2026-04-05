@@ -57,7 +57,7 @@ Report task summary without deleting any tasks:
 
 ### 5. Write Paused State to Session Journal
 
-Persist session state as a `session_paused` event in the session journal. This replaces the previous `paused-state.json` file approach — the journal event contains the same fields and is detected by `session_init.py` on resume. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery protocol.
+Persist session state as a `session_paused` event in the session journal. The event contains PR number, branch, worktree path, and consolidation status — detected by `session_init.py` on resume. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery protocol.
 
 ```bash
 python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \

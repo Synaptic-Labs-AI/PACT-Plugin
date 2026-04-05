@@ -355,7 +355,7 @@ class TestSourceAwareness:
         assert "existing — resumed session" in additional
         assert "Do not call TeamCreate" in additional
         assert "pact-aabb1122" in additional
-        assert "paused-state.json" in additional
+        assert "paused state" in additional
         # Should NOT have recovery instructions for context resets
         assert "compact-summary.txt" not in additional
         assert "CONTEXT CLEARED" not in additional

@@ -12,7 +12,6 @@ From most to least durable:
 |--------|----------|----------|---------|
 | **Session journal** | `~/.claude/teams/{team_name}/session-journal.jsonl` | Compaction, task GC, crashes | HANDOFFs, phase progress, variety scores, commits, pause state |
 | **Task system** | `TaskList` / `TaskGet` | Compaction (summaries only) | Status, blocking, assignment. Task *files* (metadata) may be GC'd |
-| **Slug-level files** | `~/.claude/pact-sessions/{slug}/` | Session boundaries | Legacy fallback for pre-journal sessions (`last-session.md`, `paused-state.json`) |
 | **pact-memory** | `~/.claude/pact-memory/memory.db` | Permanently | Cross-session knowledge (not workflow state) |
 
 ### Recovery Triggers
@@ -77,13 +76,5 @@ The journal survives crashes because:
 - **Fail-open reads** — `read_events()` silently skips malformed lines
 
 The wrap-up command uses **drain-before-delete**: the journal persists until the secretary confirms harvest is complete. This prevents data loss when the session ends.
-
-### Backward Compatibility
-
-Sessions that predate the journal use slug-level fallback:
-- `last-session.md` → rotated to `last-session.prev.md` on read
-- `paused-state.json` → deleted after TTL expiry or PR merge/close
-
-Both `restore_last_session()` and `check_paused_state()` try journal first, then fall back to slug-level files. The fallback path will be removed once all active sessions have migrated.
 
 ---

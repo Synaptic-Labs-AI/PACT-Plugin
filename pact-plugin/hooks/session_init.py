@@ -339,8 +339,7 @@ def main():
             # Normal resume: model retains context, team exists
             context_parts.insert(0, (
                 f'{_team_reuse} '
-                f'Check for paused-state.json at ~/.claude/pact-sessions/ '
-                f'for session state from /PACT:pause.'
+                f'Check session journal for paused state from /PACT:pause.'
             ))
         elif source == "startup" and not team_exists:
             # Fresh session: full initialization

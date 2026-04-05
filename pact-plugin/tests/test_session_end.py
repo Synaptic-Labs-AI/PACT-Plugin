@@ -10,7 +10,7 @@ Tests cover:
    - Reads session_paused events from journal (skip warning if paused)
    - Reads review_dispatch events from journal (primary PR detection)
    - Falls back to task metadata/handoff scanning for PR number
-   - Writes warning to journal via append_event (not to last-session.md)
+   - Writes warning to journal via append_event
 3. cleanup_teachback_markers() — session-scoped marker cleanup
 4. cleanup_old_sessions() — stale session directory removal
 """
@@ -194,7 +194,7 @@ class TestCheckUnpausedPr:
     - Reads session_paused events (if present → no warning)
     - Reads review_dispatch events (primary PR detection from journal)
     - Falls back to task metadata scanning (safety net for non-journal PRs)
-    - Writes session_end warning event to journal (not to last-session.md)
+    - Writes session_end warning event to journal
     """
 
     def _make_task_with_pr_number(self, pr_number):

@@ -17,8 +17,7 @@ Tests cover:
 11. main() integration tests for exit codes and teammate resolution
 12. read_task_owner: corrupted JSON returns None gracefully
 
-Note: Tests for append_pending_handoff and completed_handoffs.jsonl were removed
-when the session journal replaced the breadcrumb mechanism (Issue #342).
+Note: The handoff_gate hook writes agent_handoff events to the session journal.
 """
 import json
 import io

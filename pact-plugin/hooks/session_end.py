@@ -115,7 +115,7 @@ def check_unpaused_pr(
     if not pr_number:
         return
 
-    # Write warning to journal (replaces appending to last-session.md)
+    # Write warning to journal
     if resolved_team:
         append_event(
             make_event(

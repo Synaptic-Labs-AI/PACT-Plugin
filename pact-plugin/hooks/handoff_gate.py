@@ -265,8 +265,7 @@ def main():
 
     # Both gates passed — write agent_handoff event to session journal (GC-proof).
     # This is the sole HANDOFF persistence path. The secretary reads HANDOFFs from
-    # journal events via read_events(team_name, "agent_handoff"). The legacy
-    # completed_handoffs.jsonl breadcrumb has been removed — the journal subsumes it.
+    # journal events via read_events(team_name, "agent_handoff").
     append_event(
         make_event(
             "agent_handoff",

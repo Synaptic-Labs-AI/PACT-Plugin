@@ -61,8 +61,8 @@ Integration:
 38. _check_journal_paused_state handles stale (>14 day) events
 39. _check_journal_paused_state returns None when pr_number is None
 40. _check_journal_paused_state handles MERGED/CLOSED PR
-41. restore_last_session prefers journal over slug-level fallback
-42. check_paused_state prefers journal over slug-level fallback
+41. restore_last_session uses journal when prev_team_name provided
+42. check_paused_state uses journal when prev_team_name provided
 43. _extract_prev_team_name returns None on IOError (fail-open)
 
 CLI (main()):
