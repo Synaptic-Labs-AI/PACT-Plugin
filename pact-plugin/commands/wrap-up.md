@@ -52,13 +52,30 @@ entities: ["orchestration_calibration", "{domain}"]
 
 **Skip when**: Session was trivial (single comPACT, no variety assessment performed).
 
-## 5. Worktree Cleanup
+## 5. Journal Drain-Before-Delete
+
+Before deleting the team (step 7), ensure all journal entries have been processed:
+
+1. Confirm the secretary has completed the consolidation harvest (step 1). The secretary should confirm via `SendMessage`: "All journal entries processed to pact-memory."
+2. **Only on confirmation**: Proceed to worktree cleanup and team deletion.
+3. **If secretary cannot confirm**: Warn user, do NOT delete team directory — the journal must survive for future recovery.
+
+**Journal event**: Write a `session_end` event after confirmation:
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('session_end'), '{team_name}')
+"
+```
+
+## 6. Worktree Cleanup
 
 Check for open PRs associated with the current worktree branch:
-- **PR merged or no PR**: Clean up paused state if it exists (`rm -f ~/.claude/pact-sessions/{slug}/paused-state.json`), then invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.
-- **PR still open**: Skip worktree cleanup. Write `paused-state.json` (see [pause.md step 5](pause.md) for schema). Set `consolidation_completed: true` because wrap-up steps 1-4 already performed memory consolidation. Report: "Worktree preserved — PR still open. Use `/PACT:pause` to consolidate and pause, or `/PACT:peer-review` to continue review."
+- **PR merged or no PR**: Invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.
+- **PR still open**: Skip worktree cleanup. Write a `session_paused` event to the journal (see [pause.md step 5](pause.md) for the event schema). Set `consolidation_completed: true` because wrap-up steps 1-4 already performed memory consolidation. Report: "Worktree preserved — PR still open. Use `/PACT:pause` to consolidate and pause, or `/PACT:peer-review` to continue review."
 
-## 6. Task Audit
+## 7. Task Audit
 
 Audit and optionally clean up Task state:
 
@@ -84,7 +101,7 @@ Audit and optionally clean up Task state:
 
 **Why conservative:** Tasks are session-scoped by default. Cleanup only matters for multi-session work via `CLAUDE_CODE_TASK_LIST_ID`.
 
-## 7. Session Decision
+## 8. Session Decision
 
 Use `AskUserQuestion` with these exact options:
 - **"Yes, continue"** (description: "Keep team alive, ready for next task") → On selection: Report "Ready for next task."

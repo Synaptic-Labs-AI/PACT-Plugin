@@ -147,6 +147,15 @@ For each reviewer:
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
+**Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('review_dispatch', pr_number={pr_number}, pr_url='{pr_url}', reviewers=['{reviewer1}', '{reviewer2}', ...]), '{team_name}')
+"
+```
+
 **HANDOFF review** (dispatched parallel with reviewers — PRIMARY memory trigger):
 ```
 TaskCreate(subject="secretary: harvest pending HANDOFFs (primary trigger, pre-merge)",
@@ -190,7 +199,16 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 
 **After all reviews complete**:
 1. Synthesize findings into a unified review summary with consolidated recommendations
-2. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
+2. **Journal events**: Write a `review_finding` event for each synthesized finding:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+   from shared.session_journal import append_event, make_event
+   # Repeat for each finding:
+   append_event(make_event('review_finding', severity='{blocking|suggestion|nitpick}', finding='{one-line description}', reviewer='{reviewer-name}', task_id='{reviewer_task_id}'), '{team_name}')
+   "
+   ```
+3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
 
    | Recommendation | Severity | Reviewer |
    |----------------|----------|----------|
@@ -207,6 +225,14 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        - Independent items (no shared files) → `/PACT:comPACT` (invoke concurrently, same or mixed domain)
        - Items with shared-file dependencies or needing PREPARE/ARCHITECT → `/PACT:orchestrate`
        - Mixed (both independent and dependent) → Use `/PACT:comPACT` for the independent batch AND `/PACT:orchestrate` for the dependent batch (can run in parallel if non-overlapping)
+     - **Journal event**: Write a `remediation` event when dispatching fixes:
+       ```bash
+       python3 -c "
+       import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+       from shared.session_journal import append_event, make_event
+       append_event(make_event('remediation', cycle={cycle_number}, items=['{finding_id1}', ...], fixer='{agent-name}'), '{team_name}')
+       "
+       ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
      - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
    - **Minor + Future**:
@@ -252,6 +278,15 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        - If any items fixed (minor or future addressed now) → re-run review to verify fixes only (see Verify-Only Re-Review above)
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
+
+   **Journal event**: When merge-ready, write a `pr_ready` event:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+   from shared.session_journal import append_event, make_event
+   append_event(make_event('pr_ready', pr_number={pr_number}, pr_url='{pr_url}', commits={total_commit_count}), '{team_name}')
+   "
+   ```
 
 5. **Calibration save**:
 

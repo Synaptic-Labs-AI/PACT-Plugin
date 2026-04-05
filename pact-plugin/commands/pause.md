@@ -55,40 +55,35 @@ Report task summary without deleting any tasks:
 3. Do NOT delete or complete any tasks — they must survive for session resume
 ```
 
-### 5. Write Paused State
+### 5. Write Paused State to Session Journal
 
-Persist session state for the `session_init` hook to detect on resume:
+Persist session state as a `session_paused` event in the session journal. This replaces the previous `paused-state.json` file approach — the journal event contains the same fields and is detected by `session_init.py` on resume.
 
 ```bash
-mkdir -p ~/.claude/pact-sessions/{slug}/
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('session_paused',
+    pr_number={pr_number},
+    pr_url='{pr_url}',
+    branch='{branch}',
+    worktree_path='{worktree_path}',
+    consolidation_completed={True_or_False},
+    team_name='{team_name}'), '{team_name}')
+"
 ```
 
-Write `~/.claude/pact-sessions/{slug}/paused-state.json`:
-
-```json
-{
-  "pr_number": 288,
-  "pr_url": "https://github.com/owner/repo/pull/288",
-  "branch": "feat/pause-mode-consolidation-289",
-  "worktree_path": "/path/to/.worktrees/feat/pause-mode-consolidation-289",
-  "paused_at": "2026-03-18T09:30:00Z",
-  "consolidation_completed": true,
-  "team_name": "pact-d7ab1edb"
-}
-```
-
-**Schema fields**:
+**Event fields**:
 | Field | Type | Description |
 |-------|------|-------------|
 | `pr_number` | integer | GitHub PR number |
 | `pr_url` | string | Full URL to the PR |
 | `branch` | string | Git branch name |
 | `worktree_path` | string | Absolute path to the worktree |
-| `paused_at` | string | ISO 8601 timestamp of when session was paused |
 | `consolidation_completed` | boolean | Whether memory consolidation finished successfully |
 | `team_name` | string | Session team name (format: `pact-{session_hash}`) |
 
-**Slug derivation**: Use the project directory basename — the same derivation as `session_init.py` (`Path(project_dir).name`). For example, if the project directory is `/Users/me/Sites/my-app`, the slug is `my-app`.
+The timestamp (`ts`) is set automatically by `make_event()` and serves the same purpose as the previous `paused_at` field.
 
 ### 6. Shut Down Teammates
 

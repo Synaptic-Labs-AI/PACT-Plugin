@@ -134,6 +134,15 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 
 **Persist `variety`**: `TaskUpdate(featureTaskId, metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}})`
 
+**Journal event**: After persisting variety, write a `variety_assessed` event:
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('variety_assessed', task_id='{feature_task_id}', variety={'novelty': N, 'scope': N, 'uncertainty': N, 'risk': N, 'total': N}), '{team_name}')
+"
+```
+
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
 **User override**: User can always specify their preferred workflow regardless of assessment.
@@ -185,6 +194,34 @@ Sequential execution is the exception requiring explicit justification. When ass
 ### Phase Transitions
 
 Lead monitors for phase completion via `SendMessage` from teammates (completion summaries) and `TaskList` status. When all phase tasks are completed, create next phase's tasks and spawn next phase's teammates. Previous-phase teammates remain as consultants.
+
+**Journal events at every phase transition**: Write a `phase_transition` event when a phase starts, completes, or is skipped. Write a `checkpoint` event immediately after each phase completion.
+
+```bash
+# Phase started:
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('phase_transition', phase='{PHASE}', status='started', skip_reason='', metadata={}), '{team_name}')
+"
+
+# Phase completed (followed by checkpoint):
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('phase_transition', phase='{PHASE}', status='completed', skip_reason='', metadata={}), '{team_name}')
+append_event(make_event('checkpoint', phase='{PHASE}', completed_phases=[...], active_agents=[{'name': '...', 'task_id': '...', 'status': '...'}], variety=VARIETY_DICT_OR_NONE, pending_phases=[...], safe_to_retry=True), '{team_name}')
+"
+
+# Phase skipped:
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('phase_transition', phase='{PHASE}', status='skipped', skip_reason='{reason}', metadata={}), '{team_name}')
+"
+```
+
+Substitute `{PHASE}` with PREPARE/ARCHITECT/CODE/TEST, `{reason}` with the skip reason, and populate checkpoint fields from current orchestration state.
 
 ---
 
@@ -336,7 +373,15 @@ When a phase is skipped but a coder encounters a decision that would have been h
 1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 2. `TaskUpdate(taskId, owner="preparer")`
-3. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. **Journal event**: Write `agent_dispatch` before spawning:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+   from shared.session_journal import append_event, make_event
+   append_event(make_event('agent_dispatch', agent='preparer', task_id='{taskId}', phase='PREPARE', scope=[]), '{team_name}')
+   "
+   ```
+4. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -409,7 +454,15 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    - Do not read phase output files yourself or paste their content into the task description.
    - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
 2. `TaskUpdate(taskId, owner="architect")`
-3. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. **Journal event**: Write `agent_dispatch` before spawning:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+   from shared.session_journal import append_event, make_event
+   append_event(make_event('agent_dispatch', agent='architect', task_id='{taskId}', phase='ARCHITECT', scope=[]), '{team_name}')
+   "
+   ```
+4. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -489,6 +542,15 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Persist `s2_boundaries` and `established_conventions`**: `TaskUpdate(codePhaseTaskId, metadata={"s2_boundaries": {"agent_name": ["file_paths"]}, "established_conventions": {"naming": "...", "patterns": "...", "style": "..."}})`
 
+**Journal event**: After persisting S2 boundaries for concurrent dispatch, write an `s2_state_seeded` event:
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+from shared.session_journal import append_event, make_event
+append_event(make_event('s2_state_seeded', worktree='{worktree_path}', agents=['{agent1}', '{agent2}'], boundaries={'agent1': ['path/'], 'agent2': ['path/']}), '{team_name}')
+"
+```
+
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
@@ -504,7 +566,15 @@ For each coder needed:
    - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
    - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
 2. `TaskUpdate(taskId, owner="{coder-name}")`
-3. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. **Journal event**: Write `agent_dispatch` before spawning each coder:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+   from shared.session_journal import append_event, make_event
+   append_event(make_event('agent_dispatch', agent='{coder-name}', task_id='{taskId}', phase='CODE', scope=['{assigned_paths}']), '{team_name}')
+   "
+   ```
+4. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
@@ -532,6 +602,14 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
+- [ ] **Journal event**: After each commit, write a `commit` event:
+  ```bash
+  python3 -c "
+  import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+  from shared.session_journal import append_event, make_event
+  append_event(make_event('commit', sha='{short_sha}', message='{first_line}', phase='CODE'), '{team_name}')
+  "
+  ```
 - [ ] **Process coder HANDOFFs** (non-blocking):
   ```
   TaskCreate(subject="secretary: harvest pending HANDOFFs",
@@ -593,7 +671,15 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
    - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
 2. `TaskUpdate(taskId, owner="test-engineer")`
-3. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. **Journal event**: Write `agent_dispatch` before spawning:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '$HOME/.claude/protocols/pact-plugin/../hooks')
+   from shared.session_journal import append_event, make_event
+   append_event(make_event('agent_dispatch', agent='test-engineer', task_id='{taskId}', phase='TEST', scope=[]), '{team_name}')
+   "
+   ```
+4. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 **Before completing**:
 - [ ] All tests passing
@@ -601,6 +687,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - [ ] If blocker reported → `/PACT:imPACT`
 - [ ] **Agreement verification (L2)**: Before creating PR, verify implementation fulfills original purpose. `SendMessage` to test engineer to verify: "Does the tested implementation match the original requirements?" Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Create atomic commit(s)** of TEST phase work (preserves work before strategic re-assessment)
+- [ ] **Journal event**: After each commit, write a `commit` event (same pattern as CODE phase commits, with `phase='TEST'`)
 
 **Concurrent dispatch within TEST**: If test suites are independent (e.g., "unit tests AND E2E tests" or "API tests AND UI tests"), invoke multiple test engineers at once with clear suite boundaries.
 
