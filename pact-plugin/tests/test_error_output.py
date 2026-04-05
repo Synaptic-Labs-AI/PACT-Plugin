@@ -1008,7 +1008,7 @@ class TestHandoffGateSuppressOutput:
             },
         }
         with patch("handoff_gate._read_task_json", return_value=task_data), \
-             patch("handoff_gate.append_pending_handoff"), \
+             patch("handoff_gate.append_event"), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
