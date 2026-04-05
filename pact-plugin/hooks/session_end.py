@@ -19,12 +19,10 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
-import os
 import re
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Add hooks directory to path for shared package imports
@@ -34,7 +32,8 @@ if str(_hooks_dir) not in sys.path:
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_project_dir, get_session_dir, get_session_id
+from shared.pact_context import get_project_dir, get_session_dir, get_session_id, get_team_name
+from shared.session_journal import append_event, make_event, read_events
 
 from shared.task_utils import get_task_list
 
@@ -58,173 +57,104 @@ def write_session_snapshot(
     """
     Write a structured last-session snapshot from task states.
 
-    Reads completed and incomplete tasks to produce a markdown summary at
-    ~/.claude/pact-sessions/{project_slug}/last-session.md. This file is
-    read by session_init.py on the next session start to provide continuity.
+    Deprecated: The session journal (session-journal.jsonl) is now the primary
+    source for cross-session continuity. The session_end event is written to
+    the journal in main(). session_init.py reads the previous session's journal
+    to construct resume context.
+
+    This function is preserved as a no-op for backward compatibility with any
+    external callers. No slug-level last-session.md is written.
 
     Args:
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
         sessions_dir: Override for sessions base directory (for testing)
     """
-    if not project_slug:
-        return
-
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"# Last Session: {now}", ""]
-
-    completed_lines = []
-    incomplete_lines = []
-    decision_lines = []
-    unresolved_lines = []
-
-    if tasks:
-        for task in tasks:
-            task_id = task.get("id", "?")
-            subject = task.get("subject", "unknown")
-            status = task.get("status", "unknown")
-            metadata = task.get("metadata") or {}
-
-            if status == "completed":
-                # Extract 1-line summary from handoff decisions if present
-                handoff = metadata.get("handoff") or {}
-                decisions = handoff.get("decisions", [])
-                if decisions and isinstance(decisions, list):
-                    summary = decisions[0] if isinstance(decisions[0], str) else str(decisions[0])
-                    # Truncate long summaries
-                    if len(summary) > 80:
-                        summary = summary[:77] + "..."
-                    completed_lines.append(f"- #{task_id} {subject} -> {summary}")
-                else:
-                    completed_lines.append(f"- #{task_id} {subject}")
-
-            elif status in ("in_progress", "pending"):
-                incomplete_lines.append(f"- #{task_id} {subject} -- {status}")
-
-            # Collect decisions from all completed tasks with handoff metadata
-            if status == "completed":
-                handoff = metadata.get("handoff") or {}
-                for decision in handoff.get("decisions", []):
-                    if isinstance(decision, str) and decision not in decision_lines:
-                        decision_lines.append(decision)
-
-            # Collect unresolved blockers/algedonic signals
-            if metadata.get("type") in ("blocker", "algedonic") and status != "completed":
-                unresolved_lines.append(f"- #{task_id} {subject}")
-
-    # Build sections
-    lines.append("## Completed Tasks")
-    if completed_lines:
-        lines.extend(completed_lines)
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    lines.append("## Incomplete Tasks")
-    if incomplete_lines:
-        lines.extend(incomplete_lines)
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    lines.append("## Key Decisions")
-    if decision_lines:
-        for d in decision_lines[:10]:  # Cap at 10 decisions
-            lines.append(f"- {d}")
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    lines.append("## Unresolved")
-    if unresolved_lines:
-        lines.extend(unresolved_lines)
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    # Write snapshot file
-    snapshot_dir = Path(sessions_dir) / project_slug
-    snapshot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    snapshot_file = snapshot_dir / "last-session.md"
-    snapshot_file.write_text("\n".join(lines), encoding="utf-8")
-    os.chmod(str(snapshot_file), 0o600)
+    # No-op: the session journal replaces slug-level last-session.md.
+    # The session_end event (written in main()) and agent_handoff events
+    # (written by handoff_gate.py) provide equivalent data for resume.
+    pass
 
 
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
     sessions_dir: str | None = None,
+    team_name: str | None = None,
 ) -> None:
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
 
-    If paused-state.json exists, consolidation already happened — no warning needed.
-    If no paused-state.json but task metadata indicates an open PR, append a warning
-    to the last-session.md snapshot so the next session can flag it.
+    Checks the session journal for review_dispatch events (PR was created) and
+    the absence of session_paused events (pause was not run). If this condition
+    is met, writes a warning session_end event to the journal so the next session
+    can flag it.
 
-    This is detection-only. SessionEnd is async fire-and-forget and cannot run agents
-    or memory operations.
+    Also checks task metadata as fallback for PRs not tracked through the normal
+    review workflow (preserves the existing safety-net regex detection).
+
+    This is detection-only. SessionEnd is async fire-and-forget and cannot run
+    agents or memory operations.
 
     Args:
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
         sessions_dir: Override for sessions base directory (for testing)
+        team_name: Team name for journal access (defaults to get_team_name())
     """
-    if not project_slug or not tasks:
+    if not project_slug:
         return
 
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+    resolved_team = team_name or get_team_name()
 
-    slug_dir = Path(sessions_dir) / project_slug
+    # Check journal for pause state: if session_paused event exists, no warning needed
+    if resolved_team:
+        paused_events = read_events(resolved_team, "session_paused")
+        if paused_events:
+            return
 
-    # If paused-state.json exists, consolidation already happened — no warning
-    if (slug_dir / "paused-state.json").exists():
-        return
-
-    # Scan task metadata for open PR indicators
+    # Check journal for PR creation
     pr_number = None
-    for task in tasks:
-        metadata = task.get("metadata") or {}
-        # Check for pr_number in task metadata (set by peer-review workflow)
-        if metadata.get("pr_number") is not None:
-            pr_number = metadata["pr_number"]
-            break
-        # Also check handoff metadata for pr_url patterns
-        handoff = metadata.get("handoff") or {}
-        for value in handoff.values():
-            if isinstance(value, str):
-                # Extract PR number from GitHub URL like "https://github.com/owner/repo/pull/288"
-                match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
-                if match:
-                    pr_number = match.group(1)
-                    break
-        if pr_number:
-            break
+    if resolved_team:
+        review_events = read_events(resolved_team, "review_dispatch")
+        if review_events:
+            # Use the most recent review_dispatch event's PR number
+            pr_number = review_events[-1].get("pr_number")
+
+    # Fallback: scan task metadata for PR indicators (safety net for PRs
+    # not tracked through the review workflow journal events)
+    if not pr_number and tasks:
+        for task in tasks:
+            metadata = task.get("metadata") or {}
+            if metadata.get("pr_number") is not None:
+                pr_number = metadata["pr_number"]
+                break
+            handoff = metadata.get("handoff") or {}
+            for value in handoff.values():
+                if isinstance(value, str):
+                    match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
+                    if match:
+                        pr_number = match.group(1)
+                        break
+            if pr_number:
+                break
 
     if not pr_number:
         return
 
-    # Append warning to existing snapshot
-    snapshot_file = slug_dir / "last-session.md"
-    if not snapshot_file.exists():
-        return
-
-    try:
-        warning = (
-            f"\n## Pause-Mode Warning\n"
-            f"Session ended without memory consolidation. "
-            f"PR #{pr_number} is open but pause-mode was not run. "
-            f"Run /PACT:pause or /PACT:wrap-up in next session to capture session knowledge.\n"
+    # Write warning to journal (replaces appending to last-session.md)
+    if resolved_team:
+        append_event(
+            make_event(
+                "session_end",
+                warning=(
+                    f"Session ended without memory consolidation. "
+                    f"PR #{pr_number} is open but pause-mode was not run. "
+                    f"Run /PACT:pause or /PACT:wrap-up in next session."
+                ),
+            ),
+            resolved_team,
         )
-        existing = snapshot_file.read_text(encoding="utf-8")
-        snapshot_file.write_text(existing + warning, encoding="utf-8")
-        os.chmod(str(snapshot_file), 0o600)
-    except (IOError, OSError):
-        pass  # Best-effort — never block session end
 
 
 def cleanup_teachback_markers(
@@ -345,6 +275,11 @@ def main():
         session_dir = get_session_dir()
         current_session_id = get_session_id()
 
+        # Write session_end event to journal (best-effort, before other work)
+        team_name = get_team_name()
+        if team_name:
+            append_event(make_event("session_end"), team_name)
+
         # Write last-session snapshot from task states for cross-session continuity
         tasks = get_task_list()
         write_session_snapshot(
@@ -356,6 +291,7 @@ def main():
         check_unpaused_pr(
             tasks=tasks,
             project_slug=project_slug,
+            team_name=team_name,
         )
 
         # Clean up teachback warning markers (no longer needed after session)
