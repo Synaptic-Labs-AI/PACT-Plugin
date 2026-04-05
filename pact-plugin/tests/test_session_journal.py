@@ -33,6 +33,8 @@ read_events():
 20. Skips empty lines
 21. Returns empty list on outer exception (fail-open)
 22. Returns events in chronological order
+23a. Skips truncated/incomplete JSON line at end of file
+23b. Returns empty list when filtering by nonexistent event_type
 
 read_last_event():
 23. Returns the most recent event of given type
@@ -62,9 +64,18 @@ Integration:
 41. restore_last_session prefers journal over slug-level fallback
 42. check_paused_state prefers journal over slug-level fallback
 43. _extract_prev_team_name returns None on IOError (fail-open)
+
+CLI (main()):
+44. write subcommand creates event and exits 0
+45. read subcommand outputs JSON array and exits 0
+46. read-last subcommand outputs single event JSON and exits 0
+47. write with invalid --data JSON exits 1
+48. write with missing --type exits non-zero
+49. read-last with no matching events outputs "null"
 """
 import json
 import os
+import subprocess
 import sys
 import threading
 from datetime import datetime, timezone, timedelta
@@ -406,6 +417,33 @@ class TestReadEvents:
 
         events = read_events(team_name)
         assert [e["label"] for e in events] == ["alpha", "beta", "gamma"]
+
+    def test_skips_truncated_line(self, journal_home, team_name, journal_file):
+        """Truncated/incomplete JSON at end of file is skipped gracefully."""
+        from shared.session_journal import append_event, make_event, read_events
+
+        # Write two valid events
+        append_event(make_event("test", seq=1), team_name)
+        append_event(make_event("test", seq=2), team_name)
+
+        # Append a truncated JSON line (simulates crash mid-write)
+        with open(str(journal_file), "a") as f:
+            f.write('{"v":1,"type":"test","seq":3,"ts"')  # no closing brace or newline
+
+        events = read_events(team_name)
+        assert len(events) == 2
+        assert events[0]["seq"] == 1
+        assert events[1]["seq"] == 2
+
+    def test_returns_empty_for_nonexistent_event_type(self, journal_home, team_name):
+        """Filtering by a type that no event matches returns an empty list."""
+        from shared.session_journal import append_event, make_event, read_events
+
+        append_event(make_event("alpha", data=1), team_name)
+        append_event(make_event("beta", data=2), team_name)
+
+        events = read_events(team_name, event_type="nonexistent_type")
+        assert events == []
 
 
 # ---------------------------------------------------------------------------
@@ -1227,3 +1265,142 @@ class TestExtractPrevTeamName:
             result = _extract_prev_team_name(str(tmp_path))
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# CLI tests (main() via subprocess)
+# ---------------------------------------------------------------------------
+
+# Resolve absolute path to session_journal.py once.
+_SJ_SCRIPT = str(
+    Path(__file__).parent.parent / "hooks" / "shared" / "session_journal.py"
+)
+
+
+class TestCLI:
+    """Tests for the CLI entry point (main) invoked via subprocess."""
+
+    def test_write_creates_event_and_exits_0(self, journal_home, team_name, journal_file):
+        """44. write subcommand creates event and exits 0."""
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "test_event",
+                "--team", team_name,
+                "--data", '{"key": "value"}',
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        # Verify the event was written
+        assert journal_file.exists()
+        event = json.loads(journal_file.read_text().strip())
+        assert event["type"] == "test_event"
+        assert event["key"] == "value"
+        assert event["v"] == 1
+        assert "ts" in event
+
+    def test_read_outputs_json_array_and_exits_0(self, journal_home, team_name, journal_file):
+        """45. read subcommand outputs JSON array and exits 0."""
+        # Seed two events
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(
+            '{"v":1,"type":"a","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"v":1,"type":"b","ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        result = subprocess.run(
+            [sys.executable, _SJ_SCRIPT, "read", "--team", team_name],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0
+        events = json.loads(result.stdout)
+        assert len(events) == 2
+        assert events[0]["type"] == "a"
+        assert events[1]["type"] == "b"
+
+    def test_read_with_type_filter(self, journal_home, team_name, journal_file):
+        """45b. read --type filters to matching events only."""
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(
+            '{"v":1,"type":"a","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"v":1,"type":"b","ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "read",
+                "--team", team_name, "--type", "b",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0
+        events = json.loads(result.stdout)
+        assert len(events) == 1
+        assert events[0]["type"] == "b"
+
+    def test_read_last_outputs_single_event(self, journal_home, team_name, journal_file):
+        """46. read-last subcommand outputs single event JSON and exits 0."""
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(
+            '{"v":1,"type":"x","n":1,"ts":"2026-01-01T00:00:00Z"}\n'
+            '{"v":1,"type":"x","n":2,"ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "read-last",
+                "--team", team_name, "--type", "x",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0
+        event = json.loads(result.stdout)
+        assert event["n"] == 2
+
+    def test_write_invalid_data_json_exits_1(self, journal_home, team_name):
+        """47. write with invalid --data JSON exits 1."""
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "test_event",
+                "--team", team_name,
+                "--data", "not-json",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid --data JSON" in result.stderr
+
+    def test_write_missing_type_exits_nonzero(self, journal_home):
+        """48. write with missing --type exits non-zero."""
+        result = subprocess.run(
+            [sys.executable, _SJ_SCRIPT, "write", "--team", "t"],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode != 0
+
+    def test_read_last_no_match_outputs_null(self, journal_home, team_name, journal_file):
+        """49. read-last with no matching events outputs 'null'."""
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(
+            '{"v":1,"type":"a","ts":"2026-01-01T00:00:00Z"}\n'
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "read-last",
+                "--team", team_name, "--type", "nonexistent",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "null"

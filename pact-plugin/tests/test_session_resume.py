@@ -65,6 +65,10 @@ _check_pr_state() -- direct tests:
 50. Returns "" on non-zero exit code
 51. Accepts string PR number
 
+_build_journal_resume() -- truncation boundary:
+62-65. Parameterized: decision length 79 (no truncation), 80 (boundary, no truncation),
+       81 (truncated to 77+"..."), 120 (well over, truncated)
+
 _check_slug_paused_state() -- direct tests:
 52. Returns formatted context for valid paused-state.json
 53. Returns None for missing file
@@ -1333,3 +1337,62 @@ class TestCheckSlugPausedState:
             result = _check_slug_paused_state("my-project", str(tmp_path))
 
         assert result is None
+
+
+# =============================================================================
+# _build_journal_resume() Truncation Boundary Tests
+# =============================================================================
+
+
+class TestBuildJournalResumeTruncation:
+    """Tests for decision string truncation boundary in _build_journal_resume()."""
+
+    @pytest.fixture
+    def journal_home(self, tmp_path, monkeypatch):
+        """Redirect Path.home() to tmp_path for filesystem isolation."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        return tmp_path
+
+    TEAM = "pact-truncation-test"
+
+    def _write_handoff(self, team_name: str, decision: str) -> None:
+        """Write a single agent_handoff event with one decision string."""
+        from shared.session_journal import append_event, make_event
+
+        append_event(
+            make_event(
+                "agent_handoff",
+                agent="coder",
+                task_subject="CODE: boundary",
+                handoff={"decisions": [decision]},
+            ),
+            team_name,
+        )
+
+    @pytest.mark.parametrize(
+        "length, should_truncate",
+        [
+            (79, False),   # Under boundary -- no truncation
+            (80, False),   # At boundary -- no truncation (> 80 triggers)
+            (81, True),    # Over boundary -- truncated to 77+"..."
+            (120, True),   # Well over boundary
+        ],
+        ids=["79_under", "80_at_boundary", "81_over", "120_well_over"],
+    )
+    def test_decision_truncation_boundary(
+        self, journal_home, length, should_truncate
+    ):
+        """Decision strings are truncated only when len > 80."""
+        from shared.session_resume import _build_journal_resume
+
+        decision = "D" * length
+        self._write_handoff(self.TEAM, decision)
+
+        result = _build_journal_resume(self.TEAM)
+        assert result is not None
+
+        if should_truncate:
+            assert "D" * 77 + "..." in result
+            assert "D" * length not in result
+        else:
+            assert "D" * length in result
