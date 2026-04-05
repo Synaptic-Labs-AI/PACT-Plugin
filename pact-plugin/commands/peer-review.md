@@ -87,6 +87,8 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 
+> **New issue verification**: When a verify-only reviewer reports a "new issue" not in the original checklist, verify the finding against the actual file state before dispatching a fix agent. Verify-only reviewers see a narrow remediation diff and may flag issues that were already addressed in the original code or earlier commits. Check the file directly (`grep` or `Read`) before treating it as actionable.
+
 ### Post-Remediation Incremental Update
 
 After remediation fixes are verified, create an incremental update task for the secretary to process any new findings:
