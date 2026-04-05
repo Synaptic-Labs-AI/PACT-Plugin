@@ -4,21 +4,20 @@ reminders at session end.
 
 Tests cover:
 1. get_reminder_type returns "adhoc_save" for substantive ad-hoc work sessions
-2. get_reminder_type returns "unprocessed_handoffs" when completed_handoffs.jsonl exists
+2. get_reminder_type returns "unprocessed_handoffs" when session journal has agent_handoff events
 3. get_reminder_type returns None for trivial sessions (< 500 chars)
 4. get_reminder_type returns None when no team_name
 5. get_reminder_type returns None when no Edit/Write evidence in transcript
 6. get_reminder_type returns None when .adhoc_reminded guard file exists
 7. main() emits systemMessage JSON for ad-hoc work sessions
-8. main() emits unprocessed_handoffs message for workflow sessions with completed_handoffs.jsonl
+8. main() emits unprocessed_handoffs message for workflow sessions with agent_handoff events
 9. main() exits 0 on invalid JSON input
 10. main() exits 0 on unexpected errors (fail-silent)
 11. main() writes .adhoc_reminded guard file on reminder
 12. main() guard file has 0o600 permissions
-13. Edge: empty completed_handoffs.jsonl file (0 bytes) triggers unprocessed_handoffs
-14. Edge: completed_handoffs.jsonl file with only malformed JSON triggers unprocessed_handoffs
-15. Edge: guard file blocks both unprocessed_handoffs and adhoc_save via main()
-16. Integration: main() guard file written for unprocessed_handoffs path too
+13. Edge: journal with no agent_handoff events does not trigger unprocessed_handoffs
+14. Edge: guard file blocks both unprocessed_handoffs and adhoc_save via main()
+15. Integration: main() guard file written for unprocessed_handoffs path too
 
 Uncompleted tasks path (Path 0 — highest priority):
 17. find_uncompleted_tasks returns owned in_progress tasks
@@ -62,6 +61,19 @@ def _write_task(task_dir, task_id, status, owner=None, subject=None):
     if subject:
         data["subject"] = subject
     (task_dir / f"{task_id}.json").write_text(json.dumps(data))
+
+
+def _write_journal_event(teams_dir, event_type="agent_handoff", **fields):
+    """Helper to write a journal event to session-journal.jsonl.
+
+    Creates the journal file if it doesn't exist, and appends a single
+    JSONL event line. Used to set up journal state for tests.
+    """
+    event = {"v": 1, "type": event_type, "ts": "2026-01-01T00:00:00Z"}
+    event.update(fields)
+    journal = teams_dir / "session-journal.jsonl"
+    with open(str(journal), "a") as f:
+        f.write(json.dumps(event) + "\n")
 
 
 class TestFindUncompletedTasks:
@@ -210,7 +222,7 @@ class TestGetReminderType:
     """Tests for memory_adhoc_reminder.get_reminder_type()."""
 
     def test_adhoc_save_for_work_session(self, tmp_path):
-        """Substantive work session with no completed_handoffs.jsonl -> 'adhoc_save'."""
+        """Substantive work session with no agent_handoff events -> 'adhoc_save'."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -221,13 +233,13 @@ class TestGetReminderType:
 
         assert result == "adhoc_save"
 
-    def test_unprocessed_handoffs_when_completed_handoffs_exists(self, tmp_path):
-        """completed_handoffs.jsonl exists -> unprocessed HANDOFFs warning."""
+    def test_unprocessed_handoffs_when_journal_has_handoffs(self, tmp_path):
+        """Session journal with agent_handoff events -> unprocessed HANDOFFs warning."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
@@ -347,7 +359,7 @@ class TestGetReminderType:
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
         (teams_dir / ".adhoc_reminded").write_text("")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
@@ -356,12 +368,12 @@ class TestGetReminderType:
         assert result is None
 
     def test_unprocessed_handoffs_ignores_transcript_length(self, tmp_path):
-        """completed_handoffs.jsonl triggers unprocessed_handoffs regardless of transcript length."""
+        """Journal agent_handoff events trigger unprocessed_handoffs regardless of transcript length."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", "short")
@@ -369,13 +381,13 @@ class TestGetReminderType:
         assert result == "unprocessed_handoffs"
 
     def test_uncompleted_tasks_highest_priority(self, tmp_path):
-        """Uncompleted tasks take priority over completed_handoffs.jsonl AND adhoc_save."""
+        """Uncompleted tasks take priority over agent_handoff events AND adhoc_save."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        # Both completed_handoffs.jsonl AND work transcript exist
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        # Both journal agent_handoff events AND work transcript exist
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         # Also have uncompleted tasks
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
@@ -421,12 +433,12 @@ class TestGetReminderType:
         assert result is None
 
     def test_falls_through_when_no_uncompleted_tasks(self, tmp_path):
-        """No uncompleted tasks + completed_handoffs.jsonl → falls through to unprocessed_handoffs."""
+        """No uncompleted tasks + journal agent_handoff events → falls through to unprocessed_handoffs."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         # All tasks completed
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
@@ -465,12 +477,12 @@ class TestMain:
         assert "SendMessage" in output["systemMessage"]
 
     def test_emits_unprocessed_handoffs_message(self, tmp_path, capsys):
-        """Workflow session (completed_handoffs.jsonl exists) -> unprocessed HANDOFFs warning, exit 0."""
+        """Workflow session (journal has agent_handoff events) -> unprocessed HANDOFFs warning, exit 0."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
@@ -645,59 +657,56 @@ class TestMain:
         assert not guard.exists()
 
 
-class TestEdgeCaseCompletedHandoffsContent:
-    """Edge case tests for completed_handoffs.jsonl content vs existence checks.
+class TestEdgeCaseJournalContent:
+    """Edge case tests for session journal content checks.
 
-    The get_reminder_type() function checks .exists() on completed_handoffs.jsonl,
-    not its content. These tests verify behavior when the file exists but has
-    unusual content (empty, malformed, etc.).
+    The get_reminder_type() function calls read_events() to check for
+    agent_handoff events. These tests verify behavior with edge-case
+    journal content (empty journal, non-handoff events only, etc.).
     """
 
-    def test_empty_completed_handoffs_file_triggers_unprocessed(self, tmp_path):
-        """Empty file (0 bytes) — .exists() returns True → 'unprocessed_handoffs'.
+    def test_empty_journal_does_not_trigger_unprocessed(self, tmp_path):
+        """Empty journal file → no agent_handoff events → 'adhoc_save' (not unprocessed).
 
-        This is intentional behavior: an empty completed_handoffs.jsonl file means the hook
-        created it (O_CREAT) but the write failed or was interrupted. The file's
-        presence is the signal, not its content. The secretary handles empty
-        files gracefully.
+        Unlike the old completed_handoffs.jsonl check (file existence = signal),
+        the journal check is content-based: only agent_handoff events count.
         """
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text("")
+        (teams_dir / "session-journal.jsonl").write_text("")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        assert result == "unprocessed_handoffs"
+        assert result == "adhoc_save"
 
-    def test_completed_handoffs_with_only_malformed_json_triggers_unprocessed(self, tmp_path):
-        """File with only malformed JSON — .exists() True → 'unprocessed_handoffs'.
+    def test_journal_with_non_handoff_events_does_not_trigger(self, tmp_path):
+        """Journal with only session_start/session_end events → 'adhoc_save'.
 
-        The reminder hook doesn't parse the file — it only checks existence.
-        Malformed content is the secretary's problem to handle.
+        Only agent_handoff events indicate unprocessed work.
         """
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text(
-            'not valid json\n{"truncated\n'
-        )
+        _write_journal_event(teams_dir, "session_start", team="pact-test")
+        _write_journal_event(teams_dir, "session_end")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        assert result == "unprocessed_handoffs"
+        assert result == "adhoc_save"
 
-    def test_completed_handoffs_with_only_whitespace_triggers_unprocessed(self, tmp_path):
-        """File with only whitespace/newlines — .exists() True → 'unprocessed_handoffs'."""
+    def test_journal_with_agent_handoff_triggers_unprocessed(self, tmp_path):
+        """Journal with agent_handoff event → 'unprocessed_handoffs'."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text("\n\n  \n")
+        _write_journal_event(teams_dir, "session_start", team="pact-test")
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
@@ -715,7 +724,7 @@ class TestMainIntegrationBothPaths:
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": "short"})
 
@@ -738,7 +747,7 @@ class TestMainIntegrationBothPaths:
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
         (teams_dir / ".adhoc_reminded").write_text("")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
@@ -783,7 +792,7 @@ class TestMainIntegrationBothPaths:
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
@@ -802,13 +811,13 @@ class TestMainIntegrationBothPaths:
         # Must suggest wrap-up as remediation
         assert "wrap-up" in msg
 
-    def test_empty_completed_handoffs_triggers_warning_via_main(self, tmp_path, capsys):
-        """Empty completed_handoffs.jsonl file → unprocessed_handoffs warning via main()."""
+    def test_journal_handoff_triggers_warning_via_main(self, tmp_path, capsys):
+        """Journal with agent_handoff event → unprocessed_handoffs warning via main()."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text("")
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": "short"})
 
@@ -917,12 +926,12 @@ class TestMainUncompletedTasks:
         assert "Update UI" in output["systemMessage"]
 
     def test_uncompleted_tasks_takes_priority_via_main(self, tmp_path, capsys):
-        """Uncompleted tasks + completed_handoffs.jsonl → uncompleted_tasks message wins."""
+        """Uncompleted tasks + journal agent_handoff events → uncompleted_tasks message wins."""
         from memory_adhoc_reminder import main
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
         teams_dir.mkdir(parents=True)
-        (teams_dir / "completed_handoffs.jsonl").write_text('{"task_id": "1"}\n')
+        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")

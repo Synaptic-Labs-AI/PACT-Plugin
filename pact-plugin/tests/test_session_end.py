@@ -191,7 +191,7 @@ class TestMainEntryPoint:
         event_arg = mock_append.call_args[0][0]
         assert event_arg["type"] == "session_end"
 
-    def test_main_calls_write_snapshot_with_tasks(self):
+    def test_main_passes_tasks_to_check_unpaused_pr(self):
         from session_end import main
 
         mock_tasks = [{"id": "1", "subject": "test", "status": "completed", "metadata": {}}]
@@ -205,24 +205,21 @@ class TestMainEntryPoint:
                 with pytest.raises(SystemExit):
                     main()
 
-        mock_snapshot = mocks["write_session_snapshot"]
-        mock_snapshot.assert_called_once()
-        call_args = mock_snapshot.call_args
+        mock_unpaused = mocks["check_unpaused_pr"]
+        mock_unpaused.assert_called_once()
+        call_args = mock_unpaused.call_args
         assert call_args.kwargs["tasks"] == mock_tasks
         assert call_args.kwargs["project_slug"] == "my-project"
 
     def test_main_call_ordering(self):
         """main() must call functions in correct order:
-        write_session_snapshot -> check_unpaused_pr -> cleanup_teachback_markers
-        -> cleanup_old_sessions.
+        check_unpaused_pr -> cleanup_teachback_markers -> cleanup_old_sessions.
         """
         from session_end import main
 
         call_order = []
 
         patches = self._patch_main_deps(
-            write_session_snapshot=patch("session_end.write_session_snapshot",
-                side_effect=lambda **kw: call_order.append("write_session_snapshot")),
             check_unpaused_pr=patch("session_end.check_unpaused_pr",
                 side_effect=lambda **kw: call_order.append("check_unpaused_pr")),
             cleanup_teachback_markers=patch("session_end.cleanup_teachback_markers",
@@ -238,7 +235,6 @@ class TestMainEntryPoint:
                     main()
 
         assert call_order == [
-            "write_session_snapshot",
             "check_unpaused_pr",
             "cleanup_teachback_markers",
             "cleanup_old_sessions",

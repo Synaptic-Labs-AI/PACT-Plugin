@@ -15,6 +15,8 @@ append_event():
 6. Creates directory when teams dir doesn't exist (mkdir -p)
 7. Returns False when v field is missing
 8. Returns False when v field is not an int
+8a. Returns False when v is True (bool subclass of int)
+8b. Returns False when v is False (bool subclass of int)
 9. Returns False when type field is missing
 10. Returns False when type field is empty string
 11. Returns False when team_name is empty
@@ -59,6 +61,7 @@ Integration:
 40. _check_journal_paused_state handles MERGED/CLOSED PR
 41. restore_last_session prefers journal over slug-level fallback
 42. check_paused_state prefers journal over slug-level fallback
+43. _extract_prev_team_name returns None on IOError (fail-open)
 """
 import json
 import os
@@ -200,6 +203,22 @@ class TestAppendEvent:
         from shared.session_journal import append_event
 
         event = {"v": "1", "type": "test", "ts": "2026-01-01T00:00:00Z"}
+        result = append_event(event, team_name)
+        assert result is False
+
+    def test_rejects_bool_v_true(self, journal_home, team_name):
+        """P0: Returns False when v is True (bool is subclass of int)."""
+        from shared.session_journal import append_event
+
+        event = {"v": True, "type": "test", "ts": "2026-01-01T00:00:00Z"}
+        result = append_event(event, team_name)
+        assert result is False
+
+    def test_rejects_bool_v_false(self, journal_home, team_name):
+        """P0: Returns False when v is False (bool is subclass of int)."""
+        from shared.session_journal import append_event
+
+        event = {"v": False, "type": "test", "ts": "2026-01-01T00:00:00Z"}
         result = append_event(event, team_name)
         assert result is False
 
@@ -1192,4 +1211,19 @@ class TestExtractPrevTeamName:
         from session_init import _extract_prev_team_name
 
         result = _extract_prev_team_name(None)
+        assert result is None
+
+    def test_returns_none_on_ioerror(self, tmp_path):
+        """Returns None when CLAUDE.md read raises IOError (fail-open)."""
+        from unittest.mock import patch as mock_patch
+        from session_init import _extract_prev_team_name
+
+        # Create CLAUDE.md so the existence check passes
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Project\n## Current Session\n- Team: `pact-abc123`\n")
+
+        # Patch read_text to raise IOError
+        with mock_patch.object(Path, "read_text", side_effect=IOError("disk error")):
+            result = _extract_prev_team_name(str(tmp_path))
+
         assert result is None

@@ -53,6 +53,29 @@ check_paused_state() -- TTL cleanup:
 40. Does NOT clean up recent paused state
 41. Skips TTL check when paused_at is missing
 42. Skips TTL check when paused_at is unparseable
+
+_check_pr_state() -- direct tests:
+43. Returns "OPEN" for open PRs
+44. Returns "MERGED" for merged PRs
+45. Returns "CLOSED" for closed PRs
+46. Uppercases lowercase state
+47. Returns "" on FileNotFoundError (gh not installed)
+48. Returns "" on TimeoutExpired
+49. Returns "" on OSError
+50. Returns "" on non-zero exit code
+51. Accepts string PR number
+
+_check_slug_paused_state() -- direct tests:
+52. Returns formatted context for valid paused-state.json
+53. Returns None for missing file
+54. Returns None for empty slug
+55. Returns None for corrupt JSON
+56. Returns None when pr_number missing
+57. Returns stale message and deletes file for >14 day state
+58. Returns merged message and deletes file for MERGED PR
+59. Returns closed message and deletes file for CLOSED PR
+60. Includes consolidation warning when not completed
+61. Returns None on IOError (fail-open)
 """
 
 import sys
@@ -987,3 +1010,326 @@ class TestPausedStateFixtureRobustness:
         assert _RECENT_PAUSED_AT.endswith("Z"), (
             f"Expected UTC 'Z' suffix, got: {_RECENT_PAUSED_AT}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _check_pr_state() -- direct tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPrState:
+    """Direct tests for _check_pr_state() -- gh CLI wrapper.
+
+    This function is always mocked in the paused_state tests. These tests
+    verify the function itself: subprocess call, return value normalization,
+    and fail-open error handling.
+    """
+
+    def test_returns_open_for_open_pr(self):
+        """Returns 'OPEN' when gh pr view reports OPEN."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_pr_state
+
+        mock_result = MagicMock(returncode=0, stdout="OPEN\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = _check_pr_state(42)
+
+        assert result == "OPEN"
+
+    def test_returns_merged_for_merged_pr(self):
+        """Returns 'MERGED' when gh pr view reports MERGED."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_pr_state
+
+        mock_result = MagicMock(returncode=0, stdout="MERGED\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = _check_pr_state(77)
+
+        assert result == "MERGED"
+
+    def test_returns_closed_for_closed_pr(self):
+        """Returns 'CLOSED' when gh pr view reports CLOSED."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_pr_state
+
+        mock_result = MagicMock(returncode=0, stdout="CLOSED\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = _check_pr_state(99)
+
+        assert result == "CLOSED"
+
+    def test_uppercases_lowercase_state(self):
+        """Normalizes lowercase state to uppercase."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_pr_state
+
+        mock_result = MagicMock(returncode=0, stdout="open\n")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = _check_pr_state(42)
+
+        assert result == "OPEN"
+
+    def test_returns_empty_on_file_not_found(self):
+        """Returns '' when gh is not installed (FileNotFoundError)."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_pr_state
+
+        with mock_patch(
+            "shared.session_resume.subprocess.run",
+            side_effect=FileNotFoundError("gh not found"),
+        ):
+            result = _check_pr_state(42)
+
+        assert result == ""
+
+    def test_returns_empty_on_timeout(self):
+        """Returns '' when gh times out."""
+        import subprocess as sp
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_pr_state
+
+        with mock_patch(
+            "shared.session_resume.subprocess.run",
+            side_effect=sp.TimeoutExpired(cmd="gh", timeout=5),
+        ):
+            result = _check_pr_state(42)
+
+        assert result == ""
+
+    def test_returns_empty_on_oserror(self):
+        """Returns '' on OSError (e.g., permission denied)."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_pr_state
+
+        with mock_patch(
+            "shared.session_resume.subprocess.run",
+            side_effect=OSError("permission denied"),
+        ):
+            result = _check_pr_state(42)
+
+        assert result == ""
+
+    def test_returns_empty_on_nonzero_exit(self):
+        """Returns '' when gh exits with non-zero code."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_pr_state
+
+        mock_result = MagicMock(returncode=1, stdout="")
+        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+            result = _check_pr_state(42)
+
+        assert result == ""
+
+    def test_accepts_string_pr_number(self):
+        """Accepts string PR number (converted to str in subprocess call)."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_pr_state
+
+        mock_result = MagicMock(returncode=0, stdout="OPEN\n")
+        with mock_patch(
+            "shared.session_resume.subprocess.run", return_value=mock_result
+        ) as mock_sub:
+            result = _check_pr_state("42")
+
+        assert result == "OPEN"
+        # Verify str(pr_number) is used in the command
+        call_args = mock_sub.call_args[0][0]
+        assert "42" in call_args
+
+
+# ---------------------------------------------------------------------------
+# _check_slug_paused_state() -- direct tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSlugPausedState:
+    """Direct tests for _check_slug_paused_state() -- legacy slug-level paused state.
+
+    Previously tested only indirectly via check_paused_state() fallback.
+    These tests exercise the function directly for edge case coverage.
+    """
+
+    def _write_state(self, sessions_dir, slug, state):
+        """Helper: write paused-state.json."""
+        import json
+
+        slug_dir = Path(sessions_dir) / slug
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        state_file = slug_dir / "paused-state.json"
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        return state_file
+
+    def test_returns_formatted_context_for_valid_state(self, tmp_path):
+        """Returns formatted context string for valid paused-state.json."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_slug_paused_state
+
+        state = {
+            "pr_number": 42,
+            "branch": "feat/test",
+            "worktree_path": "/tmp/wt",
+            "paused_at": _RECENT_PAUSED_AT,
+            "consolidation_completed": True,
+        }
+        self._write_state(tmp_path, "my-project", state)
+
+        with mock_patch(
+            "shared.session_resume.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            result = _check_slug_paused_state("my-project", str(tmp_path))
+
+        assert result is not None
+        assert "PR #42" in result
+        assert "feat/test" in result
+        assert "Paused work detected" in result
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        """Returns None when paused-state.json doesn't exist."""
+        from shared.session_resume import _check_slug_paused_state
+
+        result = _check_slug_paused_state("my-project", str(tmp_path))
+        assert result is None
+
+    def test_returns_none_for_empty_slug(self):
+        """Returns None when project_slug is empty."""
+        from shared.session_resume import _check_slug_paused_state
+
+        result = _check_slug_paused_state("")
+        assert result is None
+
+    def test_returns_none_for_corrupt_json(self, tmp_path):
+        """Returns None for corrupt/invalid JSON (fail-open)."""
+        from shared.session_resume import _check_slug_paused_state
+
+        slug_dir = tmp_path / "my-project"
+        slug_dir.mkdir(parents=True)
+        (slug_dir / "paused-state.json").write_text("not valid json{{{")
+
+        result = _check_slug_paused_state("my-project", str(tmp_path))
+        assert result is None
+
+    def test_returns_none_when_pr_number_missing(self, tmp_path):
+        """Returns None when pr_number field is absent."""
+        from shared.session_resume import _check_slug_paused_state
+
+        state = {"branch": "feat/test", "worktree_path": "/tmp/wt"}
+        self._write_state(tmp_path, "my-project", state)
+
+        result = _check_slug_paused_state("my-project", str(tmp_path))
+        assert result is None
+
+    def test_stale_state_returns_message_and_deletes_file(self, tmp_path):
+        """Returns stale message and deletes file for >14 day old state."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_slug_paused_state
+
+        old_ts = (
+            datetime.now(timezone.utc) - _timedelta(days=15)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        state = {
+            "pr_number": 55,
+            "branch": "feat/old",
+            "worktree_path": "/tmp/old",
+            "paused_at": old_ts,
+        }
+        state_file = self._write_state(tmp_path, "my-project", state)
+        assert state_file.exists()
+
+        result = _check_slug_paused_state("my-project", str(tmp_path))
+
+        assert result is not None
+        assert "Stale" in result
+        assert "PR #55" in result
+        assert "older than 14 days" in result
+        # File should be deleted
+        assert not state_file.exists()
+
+    def test_merged_pr_returns_message_and_deletes_file(self, tmp_path):
+        """Returns merged message and deletes file for MERGED PR."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_slug_paused_state
+
+        state = {
+            "pr_number": 77,
+            "branch": "feat/done",
+            "worktree_path": "/tmp/done",
+            "paused_at": _RECENT_PAUSED_AT,
+        }
+        state_file = self._write_state(tmp_path, "my-project", state)
+
+        mock_result = MagicMock(returncode=0, stdout="MERGED\n")
+        with mock_patch(
+            "shared.session_resume.subprocess.run", return_value=mock_result
+        ):
+            result = _check_slug_paused_state("my-project", str(tmp_path))
+
+        assert result is not None
+        assert "merged" in result.lower()
+        assert "PR #77" in result
+        assert "Cleaned up" in result
+        # File should be deleted
+        assert not state_file.exists()
+
+    def test_closed_pr_returns_message_and_deletes_file(self, tmp_path):
+        """Returns closed message and deletes file for CLOSED PR."""
+        from unittest.mock import patch as mock_patch, MagicMock
+        from shared.session_resume import _check_slug_paused_state
+
+        state = {
+            "pr_number": 88,
+            "branch": "feat/abandoned",
+            "worktree_path": "/tmp/abandoned",
+            "paused_at": _RECENT_PAUSED_AT,
+        }
+        state_file = self._write_state(tmp_path, "my-project", state)
+
+        mock_result = MagicMock(returncode=0, stdout="CLOSED\n")
+        with mock_patch(
+            "shared.session_resume.subprocess.run", return_value=mock_result
+        ):
+            result = _check_slug_paused_state("my-project", str(tmp_path))
+
+        assert result is not None
+        assert "closed" in result.lower()
+        assert not state_file.exists()
+
+    def test_includes_consolidation_warning_when_not_completed(self, tmp_path):
+        """Includes consolidation warning when consolidation_completed is False."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_slug_paused_state
+
+        state = {
+            "pr_number": 99,
+            "branch": "feat/test",
+            "worktree_path": "/tmp/wt",
+            "paused_at": _RECENT_PAUSED_AT,
+            "consolidation_completed": False,
+        }
+        self._write_state(tmp_path, "my-project", state)
+
+        with mock_patch(
+            "shared.session_resume.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            result = _check_slug_paused_state("my-project", str(tmp_path))
+
+        assert result is not None
+        assert "Memory consolidation did NOT complete" in result
+
+    def test_returns_none_on_ioerror(self, tmp_path):
+        """Returns None on IOError during read (fail-open)."""
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_slug_paused_state
+
+        # Create the file so existence check passes, then mock read to fail
+        slug_dir = tmp_path / "my-project"
+        slug_dir.mkdir(parents=True)
+        state_file = slug_dir / "paused-state.json"
+        state_file.write_text('{"pr_number": 42}')
+
+        with mock_patch.object(Path, "read_text", side_effect=IOError("disk error")):
+            result = _check_slug_paused_state("my-project", str(tmp_path))
+
+        assert result is None
