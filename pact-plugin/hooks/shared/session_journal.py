@@ -75,8 +75,10 @@ def append_event(event: dict[str, Any], team_name: str) -> bool:
         True if write succeeded, False on any error (fail-open).
     """
     try:
-        # Validate required fields
-        if not isinstance(event.get("v"), int):
+        # Validate required fields.
+        # Reject bool explicitly — Python bool is a subclass of int.
+        v = event.get("v")
+        if not isinstance(v, int) or isinstance(v, bool):
             return False
         if not isinstance(event.get("type"), str) or not event["type"]:
             return False
@@ -167,9 +169,9 @@ def read_last_event(
     """
     Read the most recent event of a given type from the journal.
 
-    Reads the full journal and returns the last matching event.
-    For 'checkpoint' events during recovery, this is the primary
-    entry point (O(n) scan but typically <200 lines).
+    Scans lines in reverse for efficiency — returns as soon as the
+    first (most recent) match is found. O(n) in lines but O(1) in
+    parsed events for the common case where the target is near the end.
 
     Args:
         team_name: Team name for journal path resolution.
@@ -178,8 +180,25 @@ def read_last_event(
     Returns:
         The last matching event dict, or None if not found.
     """
-    events = read_events(team_name, event_type=event_type)
-    return events[-1] if events else None
+    try:
+        journal = _journal_path(team_name)
+        if not journal.exists():
+            return None
+
+        for line in reversed(journal.read_text(encoding="utf-8").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == event_type:
+                    return event
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return None
+
+    except Exception:
+        return None
 
 
 def get_journal_path(team_name: str) -> str:

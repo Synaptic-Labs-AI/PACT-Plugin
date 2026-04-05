@@ -181,8 +181,10 @@ def _extract_prev_team_name(project_dir: str) -> str | None:
             return None
 
         content = claude_md.read_text(encoding="utf-8")
-        # Match "- Team: `pact-XXXXXXXX`" in the Current Session block
-        match = re.search(r'- Team:\s*`(pact-[a-f0-9]+)`', content)
+        # Match "- Team: `pact-XXXXXXXX`" in the Current Session block.
+        # Uses [^`]+ (any non-backtick) to be format-agnostic — works even
+        # if generate_team_name() changes its suffix format.
+        match = re.search(r'- Team:\s*`(pact-[^`]+)`', content)
         if match:
             return match.group(1)
     except (IOError, OSError):

@@ -280,14 +280,8 @@ def main():
         if team_name:
             append_event(make_event("session_end"), team_name)
 
-        # Write last-session snapshot from task states for cross-session continuity
-        tasks = get_task_list()
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug=project_slug,
-        )
-
         # Safety-net: warn if open PR detected but pause-mode wasn't run
+        tasks = get_task_list()
         check_unpaused_pr(
             tasks=tasks,
             project_slug=project_slug,
