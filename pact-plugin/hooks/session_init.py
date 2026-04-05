@@ -31,6 +31,7 @@ Output: JSON with `hookSpecificOutput.additionalContext` for status
 
 import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -61,6 +62,7 @@ from staleness import (  # noqa: F401
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
 from shared.pact_context import write_context
+from shared.session_journal import append_event, make_event
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -153,6 +155,41 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     return f"pact-{suffix}"
 
 
+def _extract_prev_team_name(project_dir: str) -> str | None:
+    """
+    Extract the previous session's team name from the project CLAUDE.md.
+
+    Reads the "## Current Session" block written by update_session_info()
+    and extracts the team name from lines like "- Team: `pact-abc12345`".
+
+    This is used to locate the previous session's journal for resume context
+    and pause state detection. Returns None if CLAUDE.md doesn't exist or
+    the team name can't be extracted.
+
+    Args:
+        project_dir: CLAUDE_PROJECT_DIR path
+
+    Returns:
+        Previous team name string, or None if not found
+    """
+    if not project_dir:
+        return None
+
+    try:
+        claude_md = Path(project_dir) / "CLAUDE.md"
+        if not claude_md.exists():
+            return None
+
+        content = claude_md.read_text(encoding="utf-8")
+        # Match "- Team: `pact-XXXXXXXX`" in the Current Session block
+        match = re.search(r'- Team:\s*`(pact-[a-f0-9]+)`', content)
+        if match:
+            return match.group(1)
+    except (IOError, OSError):
+        pass
+    return None
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -239,6 +276,22 @@ def main():
 
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
+
+        # Write session_start event to journal (before team existence check).
+        # append_event creates the teams directory via mkdir -p if needed.
+        raw_session_id = input_data.get("session_id")
+        _journal_session_id = str(raw_session_id) if raw_session_id else ""
+        append_event(
+            make_event(
+                "session_start",
+                team=team_name,
+                session_id=_journal_session_id,
+                project_dir=project_dir,
+                worktree="",  # Not yet created at this point
+            ),
+            team_name,
+        )
+
         try:
             team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"
             team_exists = team_config.exists()
@@ -338,13 +391,21 @@ def main():
                     context_parts.append(resumption_msg)
 
         # 7. Restore last session snapshot for cross-session continuity
+        # Locate previous session's team name from project CLAUDE.md for journal access
         project_slug = Path(project_dir).name if project_dir else ""
-        session_snapshot = restore_last_session(project_slug=project_slug)
+        prev_team = _extract_prev_team_name(project_dir)
+        session_snapshot = restore_last_session(
+            project_slug=project_slug,
+            prev_team_name=prev_team,
+        )
         if session_snapshot:
             context_parts.append(session_snapshot)
 
         # 8. Check for paused work from previous session's /PACT:pause
-        paused_msg = check_paused_state(project_slug=project_slug)
+        paused_msg = check_paused_state(
+            project_slug=project_slug,
+            prev_team_name=prev_team,
+        )
         if paused_msg:
             context_parts.append(paused_msg)
 
