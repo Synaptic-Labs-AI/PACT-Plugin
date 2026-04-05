@@ -31,6 +31,10 @@ REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration"
 
 BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
 
+# Schema version for enriched completed_handoffs.jsonl entries.
+# Enables future format migration without breaking backward-compat readers.
+ENRICHED_SCHEMA_VERSION = 1
+
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
@@ -281,7 +285,7 @@ def append_pending_handoff(
         # extra fields. task_subject is only useful alongside metadata context.
         # "v": 1 is a schema version for enriched entries (enables future format migration).
         if task_metadata:
-            entry_dict["v"] = 1
+            entry_dict["v"] = ENRICHED_SCHEMA_VERSION
             handoff = task_metadata.get("handoff")
             if handoff:
                 entry_dict["handoff"] = handoff

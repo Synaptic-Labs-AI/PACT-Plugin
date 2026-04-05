@@ -61,7 +61,7 @@ Focus on:
 
 ### Step 5: Capture Organizational State
 
-Alongside institutional knowledge, snapshot the current workflow state for session recovery. Read `TaskList` and extract:
+Alongside institutional knowledge, snapshot the current workflow state for session recovery. Read `TaskList` (`TaskList` is authoritative for current workflow state; `completed_handoffs.jsonl` is primary for HANDOFF content) and extract:
 - Current phase statuses (which phases are completed, in-progress, pending)
 - Active agents and their roles/task assignments
 - Key decisions extracted from the HANDOFFs being processed (the "why" behind implementation choices)

@@ -40,7 +40,9 @@ Tests cover:
 34. Enriched: truthy non-dict handoff (string) embedded verbatim
 35. Enriched: non-serializable metadata fails open (TypeError caught)
 36. Enriched: 100+ enriched entries (~2KB each) dedup at scale
-37. Enriched: version field (v=1) present on enriched, absent on legacy
+37. Enriched: version field (v=ENRICHED_SCHEMA_VERSION) present on enriched, absent on legacy
+38. ValueError: circular reference metadata fails open (no crash, no entry)
+39. read_task_owner: corrupted JSON returns None gracefully
 """
 import threading
 import json
@@ -53,6 +55,8 @@ from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+
+from handoff_gate import ENRICHED_SCHEMA_VERSION
 
 
 VALID_HANDOFF = {
@@ -934,7 +938,7 @@ class TestEnrichedHandoffEntry:
         assert entry["task_id"] == "42"
         assert entry["teammate_name"] == "backend-coder"
         assert "timestamp" in entry
-        assert entry["v"] == 1
+        assert entry["v"] == ENRICHED_SCHEMA_VERSION
         assert entry["handoff"] == VALID_HANDOFF
         assert entry["task_subject"] == "CODE: auth"
 
@@ -1021,7 +1025,7 @@ class TestEnrichedHandoffEntry:
         # (not handoff presence). metadata={"memory_saved": True} is truthy, so the
         # enrichment block runs and adds task_subject even though handoff is absent.
         assert entry.get("task_subject") == "CODE: auth"
-        assert entry["v"] == 1  # version field present on all enriched entries
+        assert entry["v"] == ENRICHED_SCHEMA_VERSION  # version field present on all enriched entries
 
     def test_enriched_entry_without_task_subject(self, tmp_path):
         """P1: Handoff present but no task_subject -> entry has handoff only."""
@@ -1161,7 +1165,7 @@ class TestEnrichedHandoffEntry:
         assert "handoff" not in entry, f"handoff={label} should not appear in entry"
         # task_subject IS included because metadata is truthy (has memory_saved key)
         assert entry["task_subject"] == "CODE: auth"
-        assert entry["v"] == 1
+        assert entry["v"] == ENRICHED_SCHEMA_VERSION
 
     def test_task_subject_special_characters_roundtrip(self, tmp_path):
         """task_subject with quotes, newlines, unicode survives JSON roundtrip."""
@@ -1354,7 +1358,7 @@ class TestEnrichedHandoffEntry:
 
         filepath = completed_handoffs_path(teams_dir)
         entry = json.loads(filepath.read_text().strip())
-        assert entry["v"] == 1
+        assert entry["v"] == ENRICHED_SCHEMA_VERSION
         assert entry["handoff"] == "not a dict"
         assert entry["task_subject"] == "CODE: auth"
 
@@ -1716,7 +1720,7 @@ class TestMainCompletedHandoffsIntegration:
         assert entry["task_id"] == "5"
         assert entry["teammate_name"] == "backend-coder"
         # Verify enriched content from main() passthrough
-        assert entry["v"] == 1
+        assert entry["v"] == ENRICHED_SCHEMA_VERSION
         assert entry["handoff"] == VALID_HANDOFF
         assert entry["task_subject"] == "CODE: auth"
 
@@ -2134,3 +2138,47 @@ class TestCompletedHandoffsLifecycle:
         lines = [l for l in filepath.read_text().strip().split("\n") if l.strip()]
         assert len(lines) == 1
         assert json.loads(lines[0])["task_id"] == "20"
+
+
+class TestValueErrorFailOpen:
+    """append_pending_handoff fails open on ValueError from json.dumps (e.g., circular ref)."""
+
+    def test_circular_reference_metadata_fails_open(self, tmp_path):
+        """Circular reference in metadata triggers ValueError in json.dumps — no crash, no entry."""
+        from handoff_gate import append_pending_handoff
+
+        teams_dir = tmp_path / "teams" / "pact-test"
+        teams_dir.mkdir(parents=True)
+
+        # Create circular reference that json.dumps cannot serialize
+        circular = {}
+        circular["self"] = circular
+        metadata = {"handoff": circular}
+
+        with patch("handoff_gate.Path.home", return_value=tmp_path / "teams" / ".."):
+            # Should not raise — fails open via except (OSError, TypeError, ValueError)
+            append_pending_handoff(
+                "99", "coder", "pact-test",
+                task_metadata=metadata,
+                task_subject="circular test",
+            )
+
+        filepath = teams_dir / "completed_handoffs.jsonl"
+        # No entry written (json.dumps raised ValueError before write)
+        assert not filepath.exists()
+
+
+class TestReadTaskOwnerCorruptedJson:
+    """read_task_owner returns None gracefully on corrupted JSON."""
+
+    def test_corrupted_json_returns_none(self, tmp_path):
+        """Corrupted JSON in task file -> returns None (not crash)."""
+        from handoff_gate import read_task_owner
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "42.json").write_text("{corrupted json!!!")
+
+        result = read_task_owner("42", "pact-test", tasks_base_dir=str(tmp_path))
+
+        assert result is None
