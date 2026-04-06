@@ -53,6 +53,27 @@ WORK_TRANSCRIPT = "Some discussion about the feature... " + "x" * 450 + ' "Edit"
 CHAT_TRANSCRIPT = "x" * 600  # Long but no "Edit"/"Write" evidence
 
 
+@pytest.fixture(autouse=True)
+def _autoinit_pact_context(monkeypatch):
+    """Treat pact_context as initialized for all tests in this file.
+
+    AdvF2 Approach 3 added a `pact_context.is_initialized()` guard at the top
+    of `get_reminder_type` to skip the journal probe when the surrounding
+    hook never called `pact_context.init()`. The existing tests in this file
+    monkeypatch `_get_session_dir` / `get_session_dir` to simulate session
+    state without going through `pact_context.init()`, so the guard would
+    short-circuit them. This fixture sets `pact_context._context_path` to a
+    sentinel non-None value so `is_initialized()` returns True for the
+    duration of each test, mirroring production where the hook entry point
+    has already called `pact_context.init(input_data)` before any other
+    function runs. Tests that want to exercise the uninitialized branch
+    explicitly can set `_context_path = None` inside the test body.
+    """
+    import shared.pact_context as pact_context
+
+    monkeypatch.setattr(pact_context, "_context_path", Path("/fake/init"))
+
+
 def _write_task(task_dir, task_id, status, owner=None, subject=None):
     """Helper to write a task JSON file for testing."""
     data = {"status": status}
@@ -483,6 +504,40 @@ class TestGetReminderType:
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "unprocessed_handoffs"
+
+    def test_returns_none_when_pact_context_uninit(self, tmp_path, monkeypatch):
+        """AdvF2 Approach 3: explicit guard short-circuits before journal probe.
+
+        When pact_context was never initialized in this hook process, the
+        implicit `read_events()` call would silently return [] -- and the
+        function would route to "adhoc_save" instead of "unprocessed_handoffs",
+        masking workflow HANDOFFs that exist on disk but cannot be reached.
+        Returning None preserves the conservative "no reminder" outcome and
+        avoids surfacing the wrong reminder branch.
+        """
+        import shared.pact_context as pact_context
+        from memory_adhoc_reminder import get_reminder_type
+
+        # Override the autouse _autoinit_pact_context fixture to simulate the
+        # uninitialized state we need to exercise.
+        monkeypatch.setattr(pact_context, "_context_path", None)
+
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        # Write a real handoff event so we can prove the guard short-circuits
+        # BEFORE the journal probe (otherwise the test would also pass if the
+        # guard were absent and read_events legitimately found nothing).
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
+
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(session_dir)), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(session_dir)):
+            result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
+
+        # Without the guard, this would return "unprocessed_handoffs" because
+        # the journal HAS the event AND _get_session_dir is monkeypatched.
+        # With the guard, we short-circuit on uninit before the journal probe.
+        assert result is None
 
 
 class TestMain:

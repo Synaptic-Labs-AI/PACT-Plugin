@@ -270,6 +270,23 @@ def append_event(event: dict[str, Any]) -> bool:
         # Derive path from session context (implicit — current session)
         journal = _journal_path()
         if journal is None:
+            # AdvF2 Approach 4: warn (but do not fail) when the implicit API
+            # is invoked before pact_context.init(). The return value still
+            # honors the existing fail-open contract — the warning is purely
+            # additive so a missing init() in a hook surfaces as a visible
+            # signal during development instead of a silent no-op in
+            # production. The is_initialized() check pinpoints the missing
+            # init root cause; if pact_context IS initialized but the path is
+            # still unavailable, that's a different failure mode (e.g.
+            # missing session_id) and we leave the existing silent fail-open
+            # in place to avoid noise.
+            if not _pact_context_is_initialized():
+                print(
+                    "session_journal: append_event called before "
+                    "pact_context.init() — returning False (this may "
+                    "indicate a hook missing session_id)",
+                    file=sys.stderr,
+                )
             return False
 
         # Ensure directory exists (mkdir -p with 0o700)
@@ -318,6 +335,16 @@ def read_events(
     try:
         journal = _journal_path()
         if journal is None:
+            # AdvF2 Approach 4: see append_event for rationale. Warns only
+            # when the path is unavailable AND pact_context was never
+            # initialized — the canonical "hook forgot to call init()" bug.
+            if not _pact_context_is_initialized():
+                print(
+                    "session_journal: read_events called before "
+                    "pact_context.init() — returning [] (this may indicate "
+                    "a hook missing session_id)",
+                    file=sys.stderr,
+                )
             return []
         return _read_events_at(journal, event_type)
     except Exception:
@@ -395,6 +422,16 @@ def read_last_event(
     try:
         journal = _journal_path()
         if journal is None:
+            # AdvF2 Approach 4: see append_event for rationale. Warns only
+            # when the path is unavailable AND pact_context was never
+            # initialized — the canonical "hook forgot to call init()" bug.
+            if not _pact_context_is_initialized():
+                print(
+                    "session_journal: read_last_event called before "
+                    "pact_context.init() — returning None (this may "
+                    "indicate a hook missing session_id)",
+                    file=sys.stderr,
+                )
             return None
         return _read_last_event_at(journal, event_type)
     except Exception:
@@ -489,6 +526,31 @@ def _get_session_dir() -> str:
     except ImportError:
         from pact_context import get_session_dir  # type: ignore[no-redef]
     return get_session_dir()
+
+
+def _pact_context_is_initialized() -> bool:
+    """
+    Return True iff pact_context.init() has been called for this process.
+
+    AdvF2 Approach 4 (universal visibility): the implicit-API entry points
+    use this to print a stderr warning when a caller invokes them BEFORE
+    the surrounding hook has called `pact_context.init(input_data)`. The
+    warning is purely additive — the existing fail-open semantics (return
+    [], None, or False) are preserved so a missed init() never crashes a
+    hook. The signal lets maintainers find the missing init() during
+    development instead of debugging silent empty results in production.
+
+    Lazy import mirrors `_get_session_dir` so tests that monkeypatch the
+    helper at the session_journal level continue to work.
+
+    Returns:
+        True if pact_context._context_path is set, False otherwise.
+    """
+    try:
+        from shared.pact_context import is_initialized
+    except ImportError:
+        from pact_context import is_initialized  # type: ignore[no-redef]
+    return is_initialized()
 
 
 def _journal_path() -> Path | None:

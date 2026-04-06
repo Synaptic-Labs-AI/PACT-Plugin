@@ -1436,6 +1436,9 @@ class TestCheckJournalPausedState:
         unparseable ts must not bubble up as an exception or short-circuit to
         None.
         """
+        from unittest.mock import MagicMock
+
+        import shared.session_resume as session_resume
         from shared.session_resume import _check_journal_paused_state
 
         # Write a paused event directly (bypasses make_event so we control ts).
@@ -1451,9 +1454,28 @@ class TestCheckJournalPausedState:
         journal_file.parent.mkdir(parents=True, exist_ok=True)
         journal_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
 
-        with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
+        # Spy on datetime.fromisoformat so we can EXPLICITLY assert the catch
+        # path was exercised. Without this, the test only proves the function
+        # *eventually* falls through to the PR check -- it does not prove the
+        # `(ValueError, TypeError, OverflowError)` clause was the route taken.
+        # We can't patch attrs on the immutable datetime C type directly, so
+        # we replace the module-level `datetime` symbol in session_resume with
+        # a MagicMock whose `fromisoformat` raises ValueError. The catch block
+        # short-circuits before any other datetime usage in the same `try`,
+        # so the mock only needs to provide `fromisoformat`.
+        mock_dt = MagicMock()
+        mock_dt.fromisoformat.side_effect = ValueError("simulated parse failure")
+        with patch.object(session_resume, "datetime", mock_dt), patch(
+            "shared.session_resume._check_pr_state", return_value="OPEN"
+        ):
             result = _check_journal_paused_state(session_dir)
 
+        # Explicit catch verification: fromisoformat must have been called
+        # exactly once (with the corrupt ts; .replace("Z", "+00:00") is a
+        # no-op here because the string contains no "Z"), and the function
+        # must still have returned the post-catch fall-through message.
+        assert mock_dt.fromisoformat.call_count == 1
+        assert mock_dt.fromisoformat.call_args.args[0] == "not-a-timestamp"
         assert result is not None
         assert "Paused work detected" in result
         assert "PR #123" in result
@@ -1490,6 +1512,113 @@ class TestCheckJournalPausedState:
         assert result is not None
         assert "Paused work detected" in result
         assert "PR #456" in result
+
+
+# ---------------------------------------------------------------------------
+# AdvF2 Approach 4: implicit-API stderr warnings on missing pact_context.init()
+# ---------------------------------------------------------------------------
+
+
+class TestImplicitApiUninitWarnings:
+    """The implicit API (append_event/read_events/read_last_event) prints a
+    stderr warning -- without changing return values -- when called before
+    pact_context.init() AND the journal path cannot be derived. The warning
+    only fires on the path-unavailable fail-open branch, so it doesn't add
+    noise to in-process tests that monkeypatch _get_session_dir to a real
+    path.
+
+    Each test overrides the autouse mock_get_session_dir fixture by
+    re-monkeypatching _get_session_dir to return "" inside the test body.
+    """
+
+    def test_append_event_warns_when_uninit(self, monkeypatch, capsys):
+        import shared.session_journal as sj
+        from shared.session_journal import append_event, make_event
+
+        # Override autouse fixture: simulate "no session dir" so _journal_path
+        # returns None and we land on the fail-open branch.
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
+        monkeypatch.setattr(sj, "_pact_context_is_initialized", lambda: False)
+
+        result = append_event(
+            make_event(
+                "session_start",
+                session_id="s1",
+                project_dir="/tmp/p",
+            ),
+        )
+
+        # Fail-open semantics preserved: returns False, no exception.
+        assert result is False
+        captured = capsys.readouterr()
+        assert "append_event called before pact_context.init()" in captured.err
+        assert "returning False" in captured.err
+
+    def test_read_events_warns_when_uninit(self, monkeypatch, capsys):
+        import shared.session_journal as sj
+        from shared.session_journal import read_events
+
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
+        monkeypatch.setattr(sj, "_pact_context_is_initialized", lambda: False)
+
+        result = read_events()
+
+        # Fail-open semantics preserved: empty list, no exception.
+        assert result == []
+        captured = capsys.readouterr()
+        assert "read_events called before pact_context.init()" in captured.err
+        assert "returning []" in captured.err
+
+    def test_read_last_event_warns_when_uninit(self, monkeypatch, capsys):
+        import shared.session_journal as sj
+        from shared.session_journal import read_last_event
+
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
+        monkeypatch.setattr(sj, "_pact_context_is_initialized", lambda: False)
+
+        result = read_last_event("agent_handoff")
+
+        # Fail-open semantics preserved: None, no exception.
+        assert result is None
+        captured = capsys.readouterr()
+        assert "read_last_event called before pact_context.init()" in captured.err
+        assert "returning None" in captured.err
+
+    def test_no_warning_when_path_resolves(self, capsys):
+        """When _get_session_dir returns a real path (autouse fixture), the
+        functions must NOT emit the warning even if pact_context._context_path
+        is technically None -- the test suite has thousands of in-process
+        callers that monkeypatch the path resolver instead of init()ing
+        pact_context, and Approach 4's warning is intentionally scoped to
+        the actual fail-open branch to avoid noise."""
+        from shared.session_journal import read_events
+
+        # The autouse mock_get_session_dir fixture is in effect: path resolves
+        # to a (non-existent on disk, but non-empty) session dir. read_events
+        # should return [] (file doesn't exist) without emitting any warning.
+        result = read_events()
+        assert result == []
+        captured = capsys.readouterr()
+        assert "called before pact_context.init()" not in captured.err
+
+    def test_no_warning_when_init_present_but_path_empty(
+        self, monkeypatch, capsys
+    ):
+        """If pact_context IS initialized but the path is still unavailable
+        (different failure mode -- e.g. session_id missing from input_data),
+        the warning must NOT fire. The init-missing warning is scoped to its
+        specific root cause; other path-unavailable failures stay silent to
+        preserve the existing fail-open contract."""
+        import shared.session_journal as sj
+        from shared.session_journal import read_events
+
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
+        monkeypatch.setattr(sj, "_pact_context_is_initialized", lambda: True)
+
+        result = read_events()
+        assert result == []
+        captured = capsys.readouterr()
+        assert "called before pact_context.init()" not in captured.err
 
 
 # ---------------------------------------------------------------------------

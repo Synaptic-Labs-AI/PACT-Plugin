@@ -124,6 +124,18 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
     if find_uncompleted_tasks(team_name):
         return REMINDER_UNCOMPLETED_TASKS
 
+    # AdvF2 Approach 3: explicit guard for the journal-backed reminder paths.
+    # The implicit `read_events()` call below silently returns [] when
+    # pact_context was not initialized in this hook process — that empty list
+    # is indistinguishable from "session ran but had no agent_handoff events",
+    # which would route us to the ad-hoc save reminder instead of the
+    # unprocessed-handoffs reminder. Skip the journal probe entirely when we
+    # have no session context, so we don't trip the wrong reminder branch on
+    # a missing init(). Approach 4's stderr warning still fires inside
+    # read_events() if a future caller bypasses this guard.
+    if not pact_context.is_initialized():
+        return None
+
     # Path 1: session journal has agent_handoff events → unprocessed HANDOFFs
     if read_events(event_type="agent_handoff"):
         return REMINDER_UNPROCESSED_HANDOFFS
