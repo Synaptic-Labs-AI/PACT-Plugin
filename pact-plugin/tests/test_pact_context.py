@@ -288,6 +288,26 @@ class TestGetProjectDir:
         assert get_project_dir() == "/Users/test/my-project"
 
 
+class TestGetPluginRoot:
+    """Tests for get_plugin_root() — convenience accessor for installed plugin path."""
+
+    def test_returns_plugin_root_from_context(self, pact_context):
+        """Should return plugin_root when set in context file."""
+        from shared.pact_context import get_plugin_root
+
+        pact_context(plugin_root="/Users/me/.claude/plugins/cache/PACT/3.16.0")
+
+        assert get_plugin_root() == "/Users/me/.claude/plugins/cache/PACT/3.16.0"
+
+    def test_returns_empty_when_plugin_root_missing(self, pact_context):
+        """Should return empty string when plugin_root is not in context."""
+        from shared.pact_context import get_plugin_root
+
+        pact_context()  # plugin_root defaults to ""
+
+        assert get_plugin_root() == ""
+
+
 class TestGetSessionDir:
     """Tests for get_session_dir() — session-scoped directory path."""
 
@@ -538,6 +558,41 @@ class TestWriteContext:
         assert data["session_id"] == "abc12345-0000-1111-2222-333344445555"
         assert data["project_dir"] == "/Users/test/project"
         assert "started_at" in data  # ISO timestamp, not empty
+
+    def test_writes_plugin_root_when_provided(self, monkeypatch, tmp_path):
+        """Should include plugin_root in context file when passed."""
+        import shared.pact_context as ctx_module
+
+        ctx_file = tmp_path / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        ctx_module.write_context(
+            team_name="pact-pr1",
+            session_id="pr1-session",
+            project_dir="/test/proj",
+            plugin_root="/Users/me/.claude/plugins/cache/PACT/3.16.0",
+        )
+
+        data = json.loads(ctx_file.read_text(encoding="utf-8"))
+        assert data["plugin_root"] == "/Users/me/.claude/plugins/cache/PACT/3.16.0"
+
+    def test_plugin_root_defaults_to_empty(self, monkeypatch, tmp_path):
+        """Should write empty plugin_root when not provided."""
+        import shared.pact_context as ctx_module
+
+        ctx_file = tmp_path / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+
+        ctx_module.write_context(
+            team_name="pact-pr2",
+            session_id="pr2-session",
+            project_dir="/test/proj",
+        )
+
+        data = json.loads(ctx_file.read_text(encoding="utf-8"))
+        assert data["plugin_root"] == ""
 
     def test_sets_file_permissions_0600(self, monkeypatch, tmp_path):
         """Should set file permissions to 0o600 (user-only read/write)."""
@@ -977,6 +1032,7 @@ class TestWriteReadRoundTrip:
             team_name="PACT-UpperCase",
             session_id="session-abc",
             project_dir="/my/project",
+            plugin_root="/plugins/PACT/3.16.0",
         )
 
         assert ctx_module.get_team_name() == "pact-uppercase"  # lowercased
@@ -985,6 +1041,8 @@ class TestWriteReadRoundTrip:
         assert ctx_module.get_session_id() == "session-abc"
         monkeypatch.setattr(ctx_module, "_cache", None)
         assert ctx_module.get_project_dir() == "/my/project"
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        assert ctx_module.get_plugin_root() == "/plugins/PACT/3.16.0"
 
 
 class TestCategoryC_MemoryScriptFallback:

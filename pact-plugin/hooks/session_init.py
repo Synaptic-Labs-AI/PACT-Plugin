@@ -306,8 +306,9 @@ def main():
         # immediately, enabling append_event() to derive the journal path.
         raw_id = input_data.get("session_id")
         session_id = str(raw_id) if raw_id else ""
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
         try:
-            write_context(team_name, session_id, project_dir)
+            write_context(team_name, session_id, project_dir, plugin_root)
         except Exception as e:
             # Fail-open: context file is best-effort; hooks fall back to empty strings
             print(f"session_init: could not write context file: {e}", file=sys.stderr)
@@ -330,16 +331,27 @@ def main():
             # Fail-open: if filesystem check fails, assume fresh session
             team_exists = False
 
+        # Resolve session_dir early so substitution instructions can include it.
+        # get_session_dir() works here because write_context() populated _cache above.
+        session_dir = get_session_dir()
+
         # Build context message based on source × team_exists (5 paths)
+        # Template variable substitution instructions tell the orchestrator how to
+        # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
+        _substitutions = (
+            f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+            f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
+            f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+        )
         _team_reuse = (
             f'Your team is `{team_name}` (existing — resumed session). '
             f'Do not call TeamCreate — the team already exists. '
-            f'Use the name `{team_name}` wherever {{team_name}} appears in commands.'
+            f'{_substitutions}'
         )
         _team_create = (
             f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). '
             f'Do not read files, explore code, or respond to the user until the team is created. '
-            f'Use the name `{team_name}` wherever {{team_name}} appears in commands.'
+            f'{_substitutions}'
         )
 
         if source == "compact" and team_exists:
@@ -392,9 +404,9 @@ def main():
             ))
 
         # 5b. Write session resume info to project CLAUDE.md
-        session_dir = get_session_dir()
+        # (session_dir already resolved above for substitution instructions)
         if session_id:
-            session_msg = update_session_info(session_id, team_name, session_dir)
+            session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
                 if "failed" in session_msg.lower():
                     system_messages.append(session_msg)

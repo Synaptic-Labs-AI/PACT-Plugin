@@ -62,7 +62,7 @@ Before deleting the team (step 7), ensure all journal entries have been processe
 
 **Journal event**: Write a `session_end` event after confirmation:
 ```bash
-python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
+python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_end --session-dir '{session_dir}'
 ```
 

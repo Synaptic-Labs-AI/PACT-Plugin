@@ -98,6 +98,18 @@ Reconstruct state:
 - **Session journal** (durable): Workflow state persisted as JSONL events at `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`. Survives compaction and task GC. Primary source for HANDOFFs, phase progress, and cross-session recovery.
 - **Task system** (ephemeral coordination): Status, blocking, assignment. `TaskList` summaries survive compaction, but task FILES (containing metadata) may be GC'd by the platform in long sessions. Use journal events as the authoritative source when task metadata is unavailable.
 
+### Command Template Variables
+
+Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as template variables. Substitute from the Current Session block above. If a value is missing, read from `pact-session-context.json` in the current session directory.
+
+| Variable | CLAUDE.md line | Context JSON key | Description |
+|----------|---------------|-----------------|-------------|
+| `{team_name}` | `- Team:` | `team_name` | Session team name |
+| `{session_dir}` | `- Session dir:` | Derived from `session_id` + `project_dir` | Session journal directory |
+| `{plugin_root}` | `- Plugin root:` | `plugin_root` | Installed plugin root for CLI paths |
+
+**Fallback for `{plugin_root}`**: If both sources are unavailable, use `$HOME/.claude/protocols/pact-plugin/../` (symlink traversal).
+
 Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the journal does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.
 
 ### Communication

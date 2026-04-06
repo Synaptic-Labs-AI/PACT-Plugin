@@ -153,6 +153,52 @@ class TestUpdateSessionInfo:
         extracted = _extract_prev_session_dir(str(tmp_path))
         assert extracted == session_dir
 
+    def test_plugin_root_written_when_provided(self, tmp_path, monkeypatch):
+        """Plugin root line should appear in CLAUDE.md when plugin_root is passed."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# Project\n\n## Retrieved Context\n")
+
+        result = update_session_info(
+            "sess-pr1", "pact-pr1", plugin_root="/Users/me/.claude/plugins/cache/PACT/1.0"
+        )
+        assert result is not None
+
+        content = target.read_text()
+        assert "- Plugin root: `/Users/me/.claude/plugins/cache/PACT/1.0`" in content
+
+    def test_plugin_root_not_abbreviated_with_tilde(self, tmp_path, monkeypatch):
+        """Plugin root must NOT be tilde-abbreviated (Bash needs the literal path)."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# Project\n\n## Retrieved Context\n")
+
+        home = str(Path.home())
+        pr = f"{home}/.claude/plugins/cache/PACT/2.0"
+        update_session_info("sess-pr2", "pact-pr2", plugin_root=pr)
+
+        content = target.read_text()
+        # The full absolute path must appear, NOT a ~-abbreviated version
+        assert f"- Plugin root: `{pr}`" in content
+        assert "- Plugin root: `~/" not in content
+
+    def test_plugin_root_omitted_when_none(self, tmp_path, monkeypatch):
+        """Plugin root line should be absent when plugin_root is not passed."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# Project\n\n## Retrieved Context\n")
+
+        update_session_info("sess-pr3", "pact-pr3")
+
+        content = target.read_text()
+        assert "Plugin root:" not in content
+
 
 class TestRestoreLastSession:
     """Tests for restore_last_session() -- journal-only path."""

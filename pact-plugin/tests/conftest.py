@@ -879,12 +879,14 @@ def pact_context(tmp_path, monkeypatch):
         team_name="test-team",
         session_id="test-session",
         project_dir="/test/project",
+        plugin_root="",
         started_at="2026-01-01T00:00:00Z",
     ):
         context_file.write_text(json.dumps({
             "team_name": team_name,
             "session_id": session_id,
             "project_dir": project_dir,
+            "plugin_root": plugin_root,
             "started_at": started_at,
         }), encoding="utf-8")
         # Patch the resolved context path to point to our test file

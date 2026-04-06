@@ -963,6 +963,7 @@ class TestWriteContextIntegration:
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/mj/Sites/test-project",
+            "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
         )
 
     def test_write_context_gets_empty_session_id_when_stdin_lacks_it(self, monkeypatch, tmp_path):

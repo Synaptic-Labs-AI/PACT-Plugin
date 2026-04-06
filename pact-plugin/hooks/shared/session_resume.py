@@ -29,13 +29,14 @@ def update_session_info(
     session_id: str,
     team_name: str,
     session_dir: str | None = None,
+    plugin_root: str | None = None,
 ) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
 
     Inserts (or overwrites) a managed section containing the session resume
-    command, team name, session directory, and start timestamp. Uses
-    <!-- SESSION_START --> / <!-- SESSION_END --> comment markers for
+    command, team name, session directory, plugin root, and start timestamp.
+    Uses <!-- SESSION_START --> / <!-- SESSION_END --> comment markers for
     reliable replacement across sessions.
 
     Args:
@@ -44,6 +45,9 @@ def update_session_info(
         session_dir: Absolute path to the session directory (optional).
             When provided, written as "- Session dir:" line for next-session
             journal access.
+        plugin_root: Absolute path to the installed plugin directory (optional).
+            When provided, written as "- Plugin root:" line so the orchestrator
+            can locate hook scripts without symlink traversal.
 
     Returns:
         Status message or None if no action taken.
@@ -70,6 +74,11 @@ def update_session_info(
             display_dir = "~" + display_dir[len(home):]
         session_dir_line = f"- Session dir: `{display_dir}`\n"
 
+    # Build plugin root line (no abbreviation — needs to be usable as-is in Bash)
+    plugin_root_line = ""
+    if plugin_root:
+        plugin_root_line = f"- Plugin root: `{plugin_root}`\n"
+
     session_block = (
         f"{SESSION_START}\n"
         f"## Current Session\n"
@@ -77,6 +86,7 @@ def update_session_info(
         f"- Resume: `claude --resume {session_id}`\n"
         f"- Team: `{team_name}`\n"
         f"{session_dir_line}"
+        f"{plugin_root_line}"
         f"- Started: {timestamp}\n"
         f"{SESSION_END}"
     )
