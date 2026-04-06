@@ -93,6 +93,18 @@ def resolver_memory_api(tmp: Path, monkeypatch) -> str:
 
     Must be loaded via `scripts.` package path -- memory_api uses relative
     imports (`from .database import ...`) that break under standalone load.
+
+    ⚠ Walk-up environment dependency: `_find_project_root` walks upward from
+    `tmp` searching parent directories for `.git`, `.claude/`, or `CLAUDE.md`.
+    This test relies on pytest's `tmp_path` resolving OUTSIDE the real project
+    tree -- on macOS that's typically `/var/folders/...` and on Linux usually
+    `/tmp/...`, neither of which has any of those markers, so the walk falls
+    through harmlessly and `root` ends up at the filesystem root (or `tmp`
+    itself depending on the helper's exact return shape). If pytest is ever
+    reconfigured with `--basetemp` pointing INSIDE the project root, the walk
+    will hit the real `.git` and silently start exercising a different code
+    path -- the parity assertion may still pass for the wrong reason. Keep
+    pytest's basetemp outside the project tree.
     """
     from scripts.memory_api import PACTMemory
 
