@@ -204,6 +204,19 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
                 return str(Path.home() / raw[2:])
             return raw
 
+        # The primary regex missed even though CLAUDE.md is on disk. This is
+        # usually benign (older sessions wrote only the Resume line, not the
+        # Session dir line — handled by the fallback just below), but it is
+        # also how a silent format regression would present. Log a one-line
+        # stderr warning so future drift in the SESSION_START block surfaces
+        # during testing instead of silently degrading to the fallback.
+        print(
+            "session_init: _extract_prev_session_dir regex failed on existing "
+            "CLAUDE.md, falling back to Resume-line; file may have unexpected "
+            "format",
+            file=sys.stderr,
+        )
+
         # Fallback: derive from Resume line session_id + project root basename.
         # Resume line format: "- Resume: `claude --resume <session_id>`"
         resume_match = re.search(

@@ -1330,6 +1330,99 @@ class TestExtractPrevSessionDirDualLocation:
         )
         assert result == expected
 
+    def test_regex_miss_on_existing_claude_md_logs_warning(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """A1: log a stderr warning when CLAUDE.md exists but the primary regex misses.
+
+        The fallback-to-Resume-line path is intentional and benign for older
+        sessions that never wrote the `- Session dir:` line. But it is also
+        how a silent format regression would present — future changes to
+        session_resume.update_session_info could drop or rename the Session
+        dir line and the test suite would not notice because the fallback
+        quietly succeeds. The fix adds a one-line stderr warning on the
+        regex-miss path so any format drift becomes visible.
+
+        This test:
+          (a) writes a CLAUDE.md where the primary `- Session dir:` regex
+              will miss (only a Resume line is present),
+          (b) asserts the fallback still succeeds (behavior unchanged), and
+          (c) asserts the stderr warning fired with the diagnostic message.
+        """
+        from session_init import _extract_prev_session_dir
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        project_dir = tmp_path / "MyProject"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        session_id = "abcdef01-2345-6789-abcd-ef0123456789"
+        # CLAUDE.md exists but lacks the `- Session dir:` line — the primary
+        # regex must miss while the Resume-line fallback still resolves.
+        (dot_claude / "CLAUDE.md").write_text(
+            "# Project\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {session_id}`\n"
+            "- Team: `pact-abcdef01`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        # (a) Fallback path still resolves the session dir — behavior unchanged.
+        expected = str(
+            (tmp_path / "home") / ".claude" / "pact-sessions"
+            / "MyProject" / session_id
+        )
+        assert result == expected
+
+        # (b) The stderr warning message fires so format drift is visible.
+        captured = capsys.readouterr()
+        assert "_extract_prev_session_dir regex failed" in captured.err
+        assert "falling back to Resume-line" in captured.err
+
+    def test_regex_match_does_not_log_warning(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """A1 happy path: no warning when the primary regex matches.
+
+        Negative companion to the regex-miss test above. Pins that the
+        warning is not spuriously emitted on the common case where the
+        Session dir line IS present — a regression there would add noise
+        to every SessionStart hook run.
+        """
+        from session_init import _extract_prev_session_dir
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        project_dir = tmp_path / "MyProject"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        expected = "/tmp/sessions/happy"
+        (dot_claude / "CLAUDE.md").write_text(
+            "# Project\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume aaaaaaaa-0000-0000-0000-000000000000`\n"
+            "- Team: `pact-aaaaaaaa`\n"
+            f"- Session dir: `{expected}`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        assert result == expected
+        captured = capsys.readouterr()
+        # The warning must NOT fire on the happy path.
+        assert "_extract_prev_session_dir regex failed" not in captured.err
+
 
 # =============================================================================
 # CLAUDE_PLUGIN_ROOT env-set wiring tests (M6)
@@ -1352,6 +1445,29 @@ class TestPluginRootEnvWiring:
       (a) write_context() -> pact-session-context.json
       (b) update_session_info() -> `- Plugin root:` line in CLAUDE.md
     """
+
+    @pytest.fixture(autouse=True)
+    def _reset_pact_context_cache(self, monkeypatch):
+        """T2: reset pact_context module state before every test in this class.
+
+        `write_context()` caches the computed session directory path in
+        `pact_context._cache` and `pact_context._context_path` on first
+        call. Because pytest loads `shared.pact_context` once per process
+        and tests in this class exercise `main()` against different
+        project dirs / tmp_paths, a stale cache from a prior test can
+        leak into the next one — the second test's `write_context` short-
+        circuits on the cached state and writes to the old path.
+
+        Previously only M6c reset these via inline `monkeypatch.setattr`;
+        M6a and M6b were incidentally safe because their assertions were
+        on mock call args or CLAUDE.md file contents rather than on
+        `pact-session-context.json` contents. Promoting the reset to a
+        class-scoped autouse fixture hardens all three tests and any
+        future additions to the class against cache leakage.
+        """
+        import shared.pact_context as pact_context
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
 
     def test_plugin_root_env_flows_to_write_context(self, monkeypatch, tmp_path):
         """M6a: CLAUDE_PLUGIN_ROOT in env is passed as write_context's 4th arg."""
@@ -1473,11 +1589,9 @@ class TestPluginRootEnvWiring:
         session_id = "ccdd3344-0000-0000-0000-000000000000"
         stdin_data = json.dumps({"session_id": session_id})
 
-        # Reset pact_context module state so write_context computes the path
-        # fresh from session_id + project_dir (no leakage from prior tests).
-        import shared.pact_context as pact_context
-        monkeypatch.setattr(pact_context, "_context_path", None)
-        monkeypatch.setattr(pact_context, "_cache", None)
+        # pact_context._cache / _context_path reset handled by the class's
+        # autouse _reset_pact_context_cache fixture (T2) — no inline reset
+        # needed here.
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.update_claude_md", return_value=None), \
