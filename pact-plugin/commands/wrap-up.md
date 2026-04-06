@@ -63,7 +63,7 @@ Before deleting the team (step 7), ensure all journal entries have been processe
 **Journal event**: Write a `session_end` event after confirmation:
 ```bash
 set -e
-trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_end --session-dir '{session_dir}'
 ```

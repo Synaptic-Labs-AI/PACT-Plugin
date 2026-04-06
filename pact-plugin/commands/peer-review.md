@@ -152,7 +152,7 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
 ```bash
 set -e
-trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type review_dispatch --session-dir '{session_dir}' \
   --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}'
@@ -204,7 +204,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 2. **Journal events**: Write a `review_finding` event for each synthesized finding:
    ```bash
    set -e
-   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    # Repeat for each finding:
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type review_finding --session-dir '{session_dir}' \
@@ -230,7 +230,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
      - **Journal event**: Write a `remediation` event when dispatching fixes:
        ```bash
        set -e
-       trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
+       trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
        python3 "{plugin_root}/hooks/shared/session_journal.py" write \
          --type remediation --session-dir '{session_dir}' \
          --data '{"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}"}'
@@ -284,7 +284,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
    **Journal event**: When merge-ready, write a `pr_ready` event:
    ```bash
    set -e
-   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type pr_ready --session-dir '{session_dir}' \
      --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}'
