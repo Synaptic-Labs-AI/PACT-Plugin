@@ -60,6 +60,8 @@ Report task summary without deleting any tasks:
 Persist session state as a `session_paused` event in the session journal. The event contains PR number, branch, worktree path, and consolidation status — detected by `session_init.py` on resume. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery protocol.
 
 ```bash
+set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_paused --session-dir '{session_dir}' \
   --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}'

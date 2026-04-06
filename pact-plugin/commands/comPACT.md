@@ -172,6 +172,8 @@ For each specialist needed:
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning each specialist:
    ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
@@ -197,6 +199,8 @@ Use a single specialist agent only when:
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}'
@@ -246,6 +250,8 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
 - [ ] **Journal events**: After each commit, write a `commit` event:
   ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
     --type commit --session-dir '{session_dir}' \
     --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
@@ -260,6 +266,8 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
 - [ ] **Journal event**: Write `phase_transition` to mark comPACT completion:
   ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
     --type phase_transition --session-dir '{session_dir}' \
     --data '{"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}'

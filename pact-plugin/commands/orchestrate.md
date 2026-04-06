@@ -136,6 +136,8 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 
 **Journal event**: After persisting variety, write a `variety_assessed` event:
 ```bash
+set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' \
   --data '{"task_id": "{feature_task_id}", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}'
@@ -196,6 +198,8 @@ Lead monitors for phase completion via `SendMessage` from teammates (completion 
 **Journal events at every phase transition**: Write a `phase_transition` event when a phase starts, completes, or is skipped. Write a `checkpoint` event immediately after each phase completion.
 
 ```bash
+set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
 
 # Phase started:
@@ -367,6 +371,8 @@ When a phase is skipped but a coder encounters a decision that would have been h
 2. `TaskUpdate(taskId, owner="preparer")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}'
@@ -446,6 +452,8 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 2. `TaskUpdate(taskId, owner="architect")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}'
@@ -532,6 +540,8 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 
 **Journal event**: After persisting S2 boundaries for concurrent dispatch, write an `s2_state_seeded` event:
 ```bash
+set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type s2_state_seeded --session-dir '{session_dir}' \
   --data '{"worktree": "{worktree_path}", "agents": ["{agent1}", "{agent2}"], "boundaries": {"{agent1}": ["path/"], "{agent2}": ["path/"]}}'
@@ -554,6 +564,8 @@ For each coder needed:
 2. `TaskUpdate(taskId, owner="{coder-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning each coder:
    ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
@@ -588,6 +600,8 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment)
 - [ ] **Journal event**: After each commit, write a `commit` event:
   ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
     --type commit --session-dir '{session_dir}' \
     --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
@@ -655,6 +669,8 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 2. `TaskUpdate(taskId, owner="test-engineer")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"$BASH_COMMAND\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
      --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}'
