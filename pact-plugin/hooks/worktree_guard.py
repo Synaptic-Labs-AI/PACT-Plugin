@@ -133,11 +133,14 @@ def _suggest_worktree_path(file_path: str, worktree_path: str) -> str | None:
 
         if common_len > 1:  # Must share more than just "/" root
             common_ancestor = Path(*file_parts[:common_len])
-            # Validate: common ancestor looks like a project directory
+            # Validate: common ancestor looks like a project directory.
+            # Accepts CLAUDE.md at either supported location (.claude/ is the
+            # new default, ./CLAUDE.md is legacy).
             is_project_dir = (
                 (common_ancestor / ".git").exists()
                 or (common_ancestor / ".worktrees").exists()
                 or (common_ancestor / "CLAUDE.md").exists()
+                or (common_ancestor / ".claude" / "CLAUDE.md").exists()
             )
             if is_project_dir:
                 relative = str(Path(*file_parts[common_len:]))

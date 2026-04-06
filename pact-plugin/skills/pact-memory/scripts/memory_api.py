@@ -165,6 +165,42 @@ class PACTMemory:
         )
 
     @staticmethod
+    def _find_project_root(start: Path) -> Path:
+        """
+        Walk UP from `start` looking for a project marker; return the first
+        marker-containing directory.
+
+        Markers (any of):
+        - `.git` (file or dir — submodules use a file)
+        - `.claude/` directory
+        - `CLAUDE.md` at either supported location (./ or .claude/)
+
+        If no marker is found walking to the filesystem root, returns `start`
+        unchanged (fallback to original CWD-basename behavior).
+
+        Args:
+            start: Path to begin the walk from (typically Path.cwd()).
+
+        Returns:
+            First ancestor (inclusive of `start`) containing a project marker,
+            or `start` if none found.
+        """
+        try:
+            current = start.resolve()
+        except (OSError, RuntimeError):
+            return start
+        for parent in [current] + list(current.parents):
+            if (parent / ".git").exists():
+                return parent
+            if (parent / ".claude").is_dir():
+                return parent
+            if (parent / "CLAUDE.md").exists():
+                return parent
+            if (parent / ".claude" / "CLAUDE.md").exists():
+                return parent
+        return start  # fallback: use original
+
+    @staticmethod
     def _detect_project_id() -> Optional[str]:
         """
         Detect project ID from environment with multiple fallback strategies.
@@ -172,7 +208,9 @@ class PACTMemory:
         Detection order:
         1. CLAUDE_PROJECT_DIR environment variable (original behavior)
         2. Git repository root via 'git rev-parse --git-common-dir' (worktree-safe)
-        3. Current working directory basename
+        3. Current working directory — walked UP to the nearest project marker
+           (.git, .claude/, or CLAUDE.md at either location). This handles the
+           case where the user runs the CLI from a subdirectory.
 
         Returns:
             Project ID string (directory basename), or None if all methods fail.
@@ -207,9 +245,12 @@ class PACTMemory:
             # git not installed, not a repo, or command timed out
             logger.debug("Git detection failed, falling back to cwd")
 
-        # Strategy 3: Current working directory
+        # Strategy 3: Current working directory — walk UP to nearest project marker.
+        # Fixes subdirectory invocation (e.g., running CLI from .claude/ or src/
+        # would previously return the subdirectory basename as the project_id).
         try:
-            cwd_name = Path.cwd().name
+            cwd_root = PACTMemory._find_project_root(Path.cwd())
+            cwd_name = cwd_root.name
             if cwd_name:
                 logger.debug("project_id detected from cwd: %s", cwd_name)
                 return cwd_name

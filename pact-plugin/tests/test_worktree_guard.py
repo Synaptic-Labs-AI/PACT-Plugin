@@ -167,6 +167,57 @@ class TestSuggestWorktreePath:
         )
         assert result is None
 
+    def test_accepts_common_ancestor_with_dot_claude_claude_md(self, tmp_path):
+        """Common-prefix fallback accepts `.claude/CLAUDE.md` as a project signal.
+
+        This is the new default location — a project with only .claude/CLAUDE.md
+        (no .git, .worktrees, or legacy ./CLAUDE.md) should still be recognized
+        as a valid project directory by the common-ancestor validation step.
+        """
+        from worktree_guard import _suggest_worktree_path
+
+        workspace = tmp_path / "workspace"
+        dir_a = workspace / "main" / "src"
+        dir_b = workspace / "branch"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        (dir_a / "app.py").touch()
+        # ONLY marker: .claude/CLAUDE.md at the common ancestor (new default)
+        (workspace / ".claude").mkdir()
+        (workspace / ".claude" / "CLAUDE.md").write_text("# project memory\n")
+
+        result = _suggest_worktree_path(
+            str(dir_a / "app.py"),
+            str(dir_b)
+        )
+        # .claude/CLAUDE.md should count — suggestion must be non-None
+        assert result is not None
+        assert str(dir_b) in result
+
+    def test_rejects_common_ancestor_with_only_dot_claude_dir(self, tmp_path):
+        """`.claude/` directory alone (without CLAUDE.md inside) is NOT a signal.
+
+        We intentionally require the full `.claude/CLAUDE.md` path, not just
+        the `.claude/` directory, to reduce false positives (e.g., a random
+        `.claude` dir in a non-PACT project).
+        """
+        from worktree_guard import _suggest_worktree_path
+
+        workspace = tmp_path / "workspace"
+        dir_a = workspace / "main" / "src"
+        dir_b = workspace / "branch"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        (dir_a / "app.py").touch()
+        # An empty .claude/ dir — no CLAUDE.md inside
+        (workspace / ".claude").mkdir()
+
+        result = _suggest_worktree_path(
+            str(dir_a / "app.py"),
+            str(dir_b)
+        )
+        assert result is None
+
     def test_returns_none_on_path_error(self):
         from worktree_guard import _suggest_worktree_path
 
