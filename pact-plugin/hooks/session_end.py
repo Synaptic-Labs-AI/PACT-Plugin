@@ -9,7 +9,7 @@ Actions:
 1. Write session_end event to the session journal
 2. Detect open PRs that were not paused (append warning to journal)
 3. Clean up teachback warning markers (session-scoped + legacy slug-level)
-4. Clean up stale session directories older than 30 days (preserving paused sessions)
+4. Clean up stale session directories using a dual TTL (30 days active, 180 days paused)
 
 Purely observational — no destructive operations on project files. Session
 directory cleanup is best-effort and never blocks session termination.
@@ -183,46 +183,55 @@ _UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 )
 
-# Default threshold for stale session directory cleanup.
+# Default threshold for active (non-paused) session directory cleanup.
 # 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
-# cross-session recovery value. Paused sessions are preserved regardless.
+# cross-session recovery value.
 _SESSION_MAX_AGE_DAYS = 30
+
+# Extended threshold for paused session directories. Paused state is
+# in-progress user work that has not been consolidated to memory or merged,
+# so it gets a longer TTL than active sessions to protect the pause→resume
+# workflow across long gaps. The extended TTL is protection, not permanent
+# retention — paused sessions still age out past this threshold.
+_PAUSED_SESSION_MAX_AGE_DAYS = 180
 
 
 def _is_paused_session(session_dir: str) -> bool:
     """
-    Check if a session directory contains a paused session that hasn't ended.
+    Return True iff this session has ever recorded a session_paused event.
 
-    A session is considered "paused" when the most recent session_paused
-    event is strictly newer than the most recent session_end event (or no
-    session_end event exists). Sessions that were paused, then resumed and
-    completed are NOT preserved. Sessions that were ended and then paused
-    again (a paused→ended→paused sequence) ARE preserved.
+    This is a pure "has-ever-been-paused" existence predicate — it does NOT
+    compare timestamps against session_end events. A session that was paused
+    and later ended still counts as paused from the cleanup policy's
+    perspective; the caller (`cleanup_old_sessions`) then applies the
+    extended paused TTL (`_PAUSED_SESSION_MAX_AGE_DAYS`, default 180 days)
+    to such sessions.
 
-    Timestamp comparison uses string ordering. Journal timestamps are
-    written in ISO `%Y-%m-%dT%H:%M:%SZ` format (see session_journal.py),
-    which sorts lexicographically in chronological order — no datetime
-    parsing needed. Missing `ts` fields default to "" (oldest), which
-    biases toward preserving the session.
+    Splitting the predicate from the policy closes two data-loss bugs that
+    existed in the older timestamp-comparison form:
 
-    Fail-open: if the journal is unreadable, returns False (allow cleanup).
+    - AdvF1 (pause→quit race): `/PACT:pause` writes `session_paused`, then
+      quitting Claude Code fires `session_end` ~1s later. Any ordering where
+      `session_end.ts >= session_paused.ts` used to return False and delete
+      the paused state at the 30-day TTL.
+    - BugF2 (equal-timestamp tie): journal timestamps have 1-Hz ISO
+      precision, so pause and end events landing in the same wall-clock
+      second produced equal `ts` fields and hit the old `>=` comparison.
+
+    By dropping the timestamp comparison entirely, neither race nor tie can
+    produce a wrong answer.
+
+    Fail-open: if the journal is missing, empty, or unreadable,
+    `read_last_event_from` returns None and this predicate returns False so
+    the caller is free to apply the standard active-session TTL.
 
     Args:
         session_dir: Absolute path to the session directory.
 
     Returns:
-        True if the session is paused and should be preserved.
+        True iff a `session_paused` event exists in the session's journal.
     """
-    paused = read_last_event_from(session_dir, "session_paused")
-    if not paused:
-        return False
-
-    # Compare timestamps: paused must be strictly newer than ended.
-    ended = read_last_event_from(session_dir, "session_end")
-    if ended and ended.get("ts", "") >= paused.get("ts", ""):
-        return False
-
-    return True
+    return read_last_event_from(session_dir, "session_paused") is not None
 
 
 def cleanup_old_sessions(
@@ -230,19 +239,31 @@ def cleanup_old_sessions(
     current_session_id: str,
     sessions_dir: str | None = None,
     max_age_days: int = _SESSION_MAX_AGE_DAYS,
+    paused_max_age_days: int = _PAUSED_SESSION_MAX_AGE_DAYS,
 ) -> None:
     """
-    Remove session directories older than max_age_days.
+    Remove stale session directories, applying a dual TTL.
+
+    Each candidate session directory is checked against a TTL selected per
+    entry: paused sessions (those whose journal contains any
+    `session_paused` event) use the extended `paused_max_age_days`
+    threshold (default 180 days), while active sessions use
+    `max_age_days` (default 30 days). The extended threshold protects
+    in-progress user work across the pause→resume workflow without
+    retaining paused state forever — paused sessions still age out past
+    180 days.
 
     Best-effort cleanup — never raises. Skips the current session's
-    directory, any entry that doesn't look like a UUID directory, and
-    paused sessions (session_paused without session_end).
+    directory and any entry that doesn't look like a UUID directory.
 
     Args:
         project_slug: Project identifier (basename of project_dir)
         current_session_id: Current session's UUID (never deleted)
         sessions_dir: Override for base directory (testing)
-        max_age_days: Threshold in days (default: 30)
+        max_age_days: TTL for active sessions in days (default: 30)
+        paused_max_age_days: TTL for paused sessions in days (default: 180).
+            Exposed as a kwarg so tests can inject smaller values for
+            boundary verification; production call sites use the default.
     """
     if not project_slug or not current_session_id:
         return
@@ -264,10 +285,14 @@ def cleanup_old_sessions(
                 continue
             try:
                 age_days = (time.time() - entry.stat().st_mtime) / 86400
-                if age_days > max_age_days:
-                    # Preserve paused sessions (no session_end after pause)
-                    if _is_paused_session(str(entry)):
-                        continue
+                # Select TTL per entry: paused sessions get the extended
+                # threshold; active sessions get the standard one.
+                threshold = (
+                    paused_max_age_days
+                    if _is_paused_session(str(entry))
+                    else max_age_days
+                )
+                if age_days > threshold:
                     shutil.rmtree(entry, ignore_errors=True)
             except OSError:
                 continue
@@ -303,7 +328,7 @@ def main():
             session_dir=session_dir,
         )
 
-        # Clean up stale session directories (older than 30 days, preserving paused)
+        # Clean up stale session directories (dual TTL: 30d active, 180d paused)
         cleanup_old_sessions(
             project_slug=project_slug,
             current_session_id=current_session_id,
