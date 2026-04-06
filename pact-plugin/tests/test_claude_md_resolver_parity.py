@@ -133,51 +133,42 @@ ALL_RESOLVERS = [
 ]
 
 
-# -----------------------------------------------------------------------------
-# Scenario builders
-# -----------------------------------------------------------------------------
+# --- Scenario builders --------------------------------------------------------
 
 
 def _scenario_empty(tmp: Path) -> None:
     """No CLAUDE.md anywhere."""
-    pass
 
 
 def _scenario_legacy_only(tmp: Path) -> None:
-    """Only ./CLAUDE.md exists."""
     (tmp / "CLAUDE.md").write_text("# legacy")
 
 
 def _scenario_dot_claude_only(tmp: Path) -> None:
-    """Only ./.claude/CLAUDE.md exists."""
-    dot_claude_dir = tmp / ".claude"
-    dot_claude_dir.mkdir()
-    (dot_claude_dir / "CLAUDE.md").write_text("# dot-claude")
+    (tmp / ".claude").mkdir()
+    (tmp / ".claude" / "CLAUDE.md").write_text("# dot-claude")
 
 
 def _scenario_both(tmp: Path) -> None:
-    """Both files exist -- .claude/CLAUDE.md should win."""
-    dot_claude_dir = tmp / ".claude"
-    dot_claude_dir.mkdir()
-    (dot_claude_dir / "CLAUDE.md").write_text("# preferred")
+    """Priority check: .claude/CLAUDE.md must win."""
+    (tmp / ".claude").mkdir()
+    (tmp / ".claude" / "CLAUDE.md").write_text("# preferred")
     (tmp / "CLAUDE.md").write_text("# legacy")
 
 
 def _scenario_bare_dot_claude(tmp: Path) -> None:
-    """Bare .claude/ directory exists but contains no CLAUDE.md."""
+    """Bare .claude/ directory, no CLAUDE.md inside."""
     (tmp / ".claude").mkdir()
 
 
 def _scenario_symlink(tmp: Path) -> None:
-    """.claude/CLAUDE.md is a symlink to a real file elsewhere."""
-    real_dir = tmp / "external"
-    real_dir.mkdir()
-    real_file = real_dir / "real_claude.md"
+    """.claude/CLAUDE.md as a symlink to a real file elsewhere."""
+    external = tmp / "external"
+    external.mkdir()
+    real_file = external / "real_claude.md"
     real_file.write_text("# symlinked content")
-
-    dot_claude_dir = tmp / ".claude"
-    dot_claude_dir.mkdir()
-    (dot_claude_dir / "CLAUDE.md").symlink_to(real_file)
+    (tmp / ".claude").mkdir()
+    (tmp / ".claude" / "CLAUDE.md").symlink_to(real_file)
 
 
 SCENARIOS = [
@@ -190,16 +181,11 @@ SCENARIOS = [
 ]
 
 
-# -----------------------------------------------------------------------------
-# Parity tests
-# -----------------------------------------------------------------------------
+# --- Parity tests -------------------------------------------------------------
 
 
 class TestClaudeMdResolverParity:
-    """
-    Drive all 5 resolvers against the same tmp project for each scenario
-    and assert they all produce the same classification.
-    """
+    """All 5 resolvers must agree on each scenario."""
 
     @pytest.mark.parametrize(
         "scenario_name,build_scenario,expected",
@@ -207,38 +193,25 @@ class TestClaudeMdResolverParity:
         ids=[s[0] for s in SCENARIOS],
     )
     def test_all_resolvers_agree(
-        self,
-        scenario_name,
-        build_scenario,
-        expected,
-        tmp_path,
-        monkeypatch,
+        self, scenario_name, build_scenario, expected, tmp_path, monkeypatch
     ):
-        """All 5 resolvers must agree on the classification for each scenario."""
-        # Isolate from any ambient CLAUDE_PROJECT_DIR set by the harness.
+        # Isolate from any ambient CLAUDE_PROJECT_DIR. Per-resolver wrappers
+        # re-set it as needed; without this, staleness and working_memory's
+        # git fallback would escape tmp_path and find the real project.
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-        # Isolate from the real git repo -- otherwise staleness and
-        # working_memory's git fallback will escape tmp_path and find the
-        # actual project's CLAUDE.md. Setting CLAUDE_PROJECT_DIR to tmp_path
-        # short-circuits the git fallback in those resolvers.
-        # (The per-resolver wrappers re-set the env var as needed.)
-
         build_scenario(tmp_path)
 
-        classifications = {}
-        for name, wrapper in ALL_RESOLVERS:
-            classifications[name] = wrapper(tmp_path, monkeypatch)
-
-        # Assert every resolver matches the expected classification.
-        # A single failure message listing all 5 results makes drift obvious.
+        classifications = {
+            name: wrapper(tmp_path, monkeypatch) for name, wrapper in ALL_RESOLVERS
+        }
         mismatches = {
             name: result
             for name, result in classifications.items()
             if result != expected
         }
         assert not mismatches, (
-            f"Scenario {scenario_name!r}: expected all resolvers to return "
-            f"{expected!r}, but got divergent results:\n"
-            f"  All results: {classifications}\n"
-            f"  Mismatches:  {mismatches}"
+            f"Scenario {scenario_name!r}: expected {expected!r}, "
+            f"got divergent results:\n"
+            f"  All:        {classifications}\n"
+            f"  Mismatches: {mismatches}"
         )
