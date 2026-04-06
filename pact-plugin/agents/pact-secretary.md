@@ -69,7 +69,7 @@ You are the team's go-to source for historical context. The lead and specialists
 
 You are **exempted from the standard teachback** at spawn. There is no task to teach back about. Instead, immediately:
 
-1. **Clean stale Working Memory entries**: Read the Working Memory section of the project's CLAUDE.md. Evaluate each entry against these stale criteria (any one triggers removal):
+1. **Clean stale Working Memory entries**: Read the Working Memory section of the project's CLAUDE.md. The file may be at `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy) — use whichever exists, matching the detection logic in `resolve_project_claude_md_path()`. Evaluate each entry against these stale criteria (any one triggers removal):
    - **Age**: Entry older than 7 days (using the `YYYY-MM-DD` date in the Working Memory header)
    - **Content**: Entry contains test artifacts, debugging notes, or temporary context markers (patterns like `test_`, `debug_`, `temp_`, `WIP:`)
    - **Orphaned references**: Entry references a memory ID that no longer exists in pact-memory (verify via `get` CLI command)
