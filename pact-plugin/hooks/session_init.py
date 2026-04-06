@@ -336,10 +336,10 @@ def main():
         session_dir = get_session_dir()
 
         # Build context message based on source × team_exists (5 paths)
-        # Session placeholder substitution instructions tell the orchestrator how to
+        # Session placeholder variable substitution instructions tell the orchestrator how to
         # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
         _substitutions = (
-            f'Session placeholders (substitute before running commands): '
+            f'Session placeholder variables (substitute before running commands): '
             f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
             f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
             f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
