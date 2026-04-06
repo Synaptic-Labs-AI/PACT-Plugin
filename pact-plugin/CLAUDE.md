@@ -72,12 +72,12 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 6. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
 7. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
 
-## Command Template Variables
+## Session Placeholder Variables
 
-Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as template variables. Substitute from the Current Session block above. If a value is missing, read from `pact-session-context.json` in the current session directory.
+Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholders. Substitute from the Current Session block above. If a value is missing, read from `pact-session-context.json` in the current session directory.
 
-| Variable | CLAUDE.md line | Context JSON key | Description |
-|----------|---------------|-----------------|-------------|
+| Placeholder | CLAUDE.md line | Context JSON key | Description |
+|-------------|---------------|-----------------|-------------|
 | `{team_name}` | `- Team:` | `team_name` | Session team name |
 | `{session_dir}` | `- Session dir:` | Derived from `session_id` + `project_dir` | Session journal directory |
 | `{plugin_root}` | `- Plugin root:` | `plugin_root` | Installed plugin root for CLI paths |
