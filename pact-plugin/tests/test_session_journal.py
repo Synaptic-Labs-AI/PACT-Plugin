@@ -238,7 +238,12 @@ class TestAppendEvent:
 
         assert not journal_file.parent.exists()
 
-        event = make_event("session_start", team="test")
+        event = make_event(
+            "session_start",
+            team="test",
+            session_id="test-session",
+            project_dir="/tmp/test-project",
+        )
         result = append_event(event)
 
         assert result is True
@@ -405,8 +410,23 @@ class TestReadEvents:
         """P0: Returns all events when no type filter."""
         from shared.session_journal import append_event, make_event, read_events
 
-        append_event(make_event("session_start", team="t1"))
-        append_event(make_event("agent_handoff", agent="coder"))
+        append_event(
+            make_event(
+                "session_start",
+                team="t1",
+                session_id="sid1",
+                project_dir="/tmp/p1",
+            ),
+        )
+        append_event(
+            make_event(
+                "agent_handoff",
+                agent="coder",
+                task_id="1",
+                task_subject="s",
+                handoff={},
+            ),
+        )
         append_event(make_event("session_end"))
 
         events = read_events()
@@ -419,10 +439,35 @@ class TestReadEvents:
         """P0: Returns only matching events when type filter applied."""
         from shared.session_journal import append_event, make_event, read_events
 
-        append_event(make_event("session_start", team="t1"))
-        append_event(make_event("agent_handoff", agent="coder1"))
-        append_event(make_event("phase_transition", phase="CODE"))
-        append_event(make_event("agent_handoff", agent="coder2"))
+        append_event(
+            make_event(
+                "session_start",
+                team="t1",
+                session_id="sid1",
+                project_dir="/tmp/p1",
+            ),
+        )
+        append_event(
+            make_event(
+                "agent_handoff",
+                agent="coder1",
+                task_id="1",
+                task_subject="s",
+                handoff={},
+            ),
+        )
+        append_event(
+            make_event("phase_transition", phase="CODE", status="started"),
+        )
+        append_event(
+            make_event(
+                "agent_handoff",
+                agent="coder2",
+                task_id="2",
+                task_subject="s",
+                handoff={},
+            ),
+        )
 
         handoffs = read_events(event_type="agent_handoff")
         assert len(handoffs) == 2
@@ -526,9 +571,17 @@ class TestReadLastEvent:
         """P0: Returns the last matching event."""
         from shared.session_journal import append_event, make_event, read_last_event
 
-        append_event(make_event("checkpoint", data="old"))
-        append_event(make_event("agent_handoff", agent="coder"))
-        append_event(make_event("checkpoint", data="new"))
+        append_event(make_event("checkpoint", phase="PREPARE", data="old"))
+        append_event(
+            make_event(
+                "agent_handoff",
+                agent="coder",
+                task_id="1",
+                task_subject="s",
+                handoff={},
+            ),
+        )
+        append_event(make_event("checkpoint", phase="CODE", data="new"))
 
         last = read_last_event("checkpoint")
         assert last is not None
@@ -932,6 +985,7 @@ class TestConcurrentAppends:
             "agent_handoff",
             agent="backend-coder",
             task_id="42",
+            task_subject="CODE: large payload",
             handoff=large_handoff,
         )
 
@@ -979,6 +1033,7 @@ class TestBuildJournalResume:
             make_event(
                 "agent_handoff",
                 agent="backend-coder",
+                task_id="1",
                 task_subject="CODE: implement auth",
                 handoff={"decisions": ["Used JWT for token-based auth"]},
             ),
@@ -1004,6 +1059,7 @@ class TestBuildJournalResume:
             make_event(
                 "agent_handoff",
                 agent="coder",
+                task_id="1",
                 task_subject="CODE: test",
                 handoff={"decisions": [long_decision]},
             ),
@@ -1062,6 +1118,7 @@ class TestBuildJournalResume:
             make_event(
                 "agent_handoff",
                 agent="preparer",
+                task_id="1",
                 task_subject="PREPARE: research",
                 handoff={"produced": ["docs/prep.md"]},
             ),
@@ -1076,11 +1133,12 @@ class TestBuildJournalResume:
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
 
-        for agent in ["preparer", "architect", "backend-coder"]:
+        for idx, agent in enumerate(["preparer", "architect", "backend-coder"]):
             append_event(
                 make_event(
                     "agent_handoff",
                     agent=agent,
+                    task_id=str(idx + 1),
                     task_subject=f"Task for {agent}",
                     handoff={"decisions": [f"{agent} decision"]},
                 ),
@@ -1128,6 +1186,7 @@ class TestCheckJournalPausedState:
             make_event(
                 "session_paused",
                 pr_number=42,
+                pr_url="https://github.com/owner/repo/pull/42",
                 branch="feat/my-feature",
                 worktree_path="/Users/dev/project/.worktrees/feat/my-feature",
                 consolidation_completed=True,
@@ -1151,6 +1210,7 @@ class TestCheckJournalPausedState:
             make_event(
                 "session_paused",
                 pr_number=99,
+                pr_url="https://github.com/owner/repo/pull/99",
                 branch="feat/test",
                 worktree_path="/tmp/wt",
                 consolidation_completed=False,
@@ -1172,6 +1232,7 @@ class TestCheckJournalPausedState:
             make_event(
                 "session_paused",
                 pr_number=99,
+                pr_url="https://github.com/owner/repo/pull/99",
                 branch="feat/test",
                 worktree_path="/tmp/wt",
                 consolidation_completed=True,
@@ -1234,8 +1295,10 @@ class TestCheckJournalPausedState:
             make_event(
                 "session_paused",
                 pr_number=77,
+                pr_url="https://github.com/owner/repo/pull/77",
                 branch="feat/done",
                 worktree_path="/tmp/done",
+                consolidation_completed=True,
             ),
         )
 
@@ -1255,8 +1318,10 @@ class TestCheckJournalPausedState:
             make_event(
                 "session_paused",
                 pr_number=88,
+                pr_url="https://github.com/owner/repo/pull/88",
                 branch="feat/abandoned",
                 worktree_path="/tmp/abandoned",
+                consolidation_completed=True,
             ),
         )
 
@@ -1349,6 +1414,7 @@ class TestJournalPreference:
             make_event(
                 "agent_handoff",
                 agent="coder",
+                task_id="1",
                 task_subject="CODE: feature",
                 handoff={"decisions": ["Built feature X"]},
             ),
@@ -1375,6 +1441,7 @@ class TestJournalPreference:
             make_event(
                 "session_paused",
                 pr_number=42,
+                pr_url="https://github.com/owner/repo/pull/42",
                 branch="feat/test",
                 worktree_path="/tmp/wt",
                 consolidation_completed=True,
@@ -1842,4 +1909,188 @@ class TestCLI:
         assert result.returncode != 0
         assert "invalid event schema" in result.stderr
         # The journal must NOT have been written.
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-type schema validation (BugF1 primary defense — validator at write time)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateEventSchemaPerType:
+    """Per-type schema validation tests for BugF1 fix.
+
+    Every event type in _REQUIRED_FIELDS_BY_TYPE must pass validation when
+    all required fields are present, and must be rejected when any single
+    required field is missing. This class is the bulwark that prevents
+    malformed events from reaching disk where _build_journal_resume would
+    have to defend against them at read time.
+
+    The dict _REQUIRED_FIELDS_BY_TYPE is the authoritative schema; tests
+    here mirror it so adding a new event type requires a test to land with
+    it (see the comment on _REQUIRED_FIELDS_BY_TYPE in session_journal.py).
+    """
+
+    # Known event types and one valid sample of required fields. Mirrors
+    # _REQUIRED_FIELDS_BY_TYPE — when adding a new entry to the source dict,
+    # add the matching sample here so the happy-path test and missing-field
+    # test both cover it.
+    _SAMPLES: dict = {
+        "session_start": {
+            "session_id": "test-session-id",
+            "project_dir": "/tmp/proj",
+        },
+        "variety_assessed": {
+            "task_id": "42",
+            "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},
+        },
+        "phase_transition": {"phase": "CODE", "status": "started"},
+        "checkpoint": {"phase": "CODE"},
+        "agent_dispatch": {"agent": "coder", "task_id": "1", "phase": "CODE"},
+        "agent_handoff": {
+            "agent": "coder",
+            "task_id": "1",
+            "task_subject": "CODE: thing",
+            "handoff": {"decisions": ["x"]},
+        },
+        "s2_state_seeded": {
+            "worktree": "/tmp/wt",
+            "agents": ["c1", "c2"],
+            "boundaries": {"c1": ["a/"], "c2": ["b/"]},
+        },
+        "commit": {"sha": "abc123", "message": "fix: thing", "phase": "CODE"},
+        "review_dispatch": {
+            "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42",
+            "reviewers": ["r1"],
+        },
+        "review_finding": {
+            "severity": "blocking",
+            "finding": "missing X",
+            "reviewer": "architect",
+        },
+        "remediation": {"cycle": 1, "items": ["F1"], "fixer": "coder"},
+        "pr_ready": {
+            "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42",
+            "commits": 7,
+        },
+        "session_paused": {
+            "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42",
+            "branch": "feat/x",
+            "worktree_path": "/tmp/wt",
+            "consolidation_completed": True,
+        },
+        "session_end": {},  # No required fields; baseline-only.
+    }
+
+    def test_samples_mirror_required_fields_dict(self):
+        """Meta-test: _SAMPLES must cover every key in _REQUIRED_FIELDS_BY_TYPE.
+
+        If this test fails, a new event type was added to the source dict
+        without adding a matching sample here — guards against the per-type
+        check silently skipping coverage of new types.
+        """
+        from shared.session_journal import _REQUIRED_FIELDS_BY_TYPE
+
+        assert set(self._SAMPLES.keys()) == set(_REQUIRED_FIELDS_BY_TYPE.keys())
+
+    @pytest.mark.parametrize("event_type", list(_SAMPLES.keys()))
+    def test_happy_path_all_required_fields_present(self, event_type):
+        """Validation passes when all required fields are present."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(event_type, **self._SAMPLES[event_type])
+        assert _validate_event_schema(event) is True
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [t for t, f in _SAMPLES.items() if f],  # Skip session_end (no required fields).
+    )
+    def test_missing_single_required_field_rejected(self, event_type):
+        """Validation rejects when ANY single required field is missing.
+
+        Iterates through each required field, removes it, and verifies the
+        validator returns False. This catches schema drift where a writer
+        stops passing a load-bearing field.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        sample = self._SAMPLES[event_type]
+        for missing_field in sample:
+            partial = {k: v for k, v in sample.items() if k != missing_field}
+            event = make_event(event_type, **partial)
+            assert _validate_event_schema(event) is False, (
+                f"{event_type} with missing {missing_field!r} should be rejected"
+            )
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [t for t, f in _SAMPLES.items() if f],
+    )
+    def test_none_required_field_rejected(self, event_type):
+        """Validation rejects when a required field is present but None.
+
+        The validator's check is `field not in event or event[field] is None`
+        — this covers the explicit-None case. Without this guard a writer
+        that passes `phase=None` would slip through.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        sample = self._SAMPLES[event_type]
+        for none_field in sample:
+            with_none = {**sample, none_field: None}
+            event = make_event(event_type, **with_none)
+            assert _validate_event_schema(event) is False, (
+                f"{event_type} with {none_field}=None should be rejected"
+            )
+
+    def test_unknown_event_type_passes_per_type(self):
+        """Unknown event types pass per-type validation (opt-in whitelist).
+
+        The validator's whitelist is opt-in — unknown event types bypass
+        per-type checks so unit tests using made-up "test" types still
+        work. Only baseline v/type/ts are enforced for unknowns.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("some_unit_test_type_not_in_dict", payload="anything")
+        assert _validate_event_schema(event) is True
+
+    def test_append_event_rejects_missing_required_field(self, journal_home):
+        """append_event returns False (fail-open) when required field missing.
+
+        End-to-end check that the write path enforces per-type schema — the
+        event never lands on disk. Uses `phase_transition` (the BugF1 crash
+        site) as the canary.
+        """
+        from shared.session_journal import append_event, make_event
+
+        # Missing `phase` — the field _build_journal_resume subscripts.
+        bad_event = make_event("phase_transition", status="started")
+        assert append_event(bad_event) is False
+
+    def test_cli_write_rejects_missing_required_field(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """CLI write path exits 1 and writes stderr on missing required field.
+
+        Dual-API check: validation must fire in both append_event (hooks)
+        and the CLI write subcommand (orchestrator commands). This test
+        catches a regression where only one path applied per-type checks.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "phase_transition",
+                "--session-dir", session_dir,
+                "--data", '{"status": "started"}',  # missing `phase`
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid event schema" in result.stderr
+        # Journal must not have been written.
         assert not journal_file.exists() or journal_file.read_text() == ""

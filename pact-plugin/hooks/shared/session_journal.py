@@ -39,6 +39,68 @@ from typing import Any
 _SCHEMA_VERSION = 1
 
 
+# Per-type required fields, derived from actual writer call sites. Every
+# entry here reflects what a production writer ACTUALLY produces (grep
+# `make_event("{type}"` in hooks/ and `write --type {type}` in commands/),
+# not an aspirational schema. Unknown types (e.g. "test" in unit tests)
+# bypass per-type validation and only get baseline v/type/ts checks — this
+# preserves test ergonomics without loosening production safety.
+#
+# When adding a new event type, add it here with its required fields AND
+# add a test to TestValidateEventSchemaPerType in test_session_journal.py.
+_REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
+    # hooks/session_init.py:326 writes session_start with team, session_id,
+    # project_dir, worktree. Of these, session_id and project_dir are the
+    # load-bearing fields downstream consumers depend on; team is redundant
+    # with CLAUDE.md and worktree is empty at write time.
+    "session_start": ("session_id", "project_dir"),
+    # commands/orchestrate.md writes variety_assessed with task_id + variety.
+    "variety_assessed": ("task_id", "variety"),
+    # commands/orchestrate.md + comPACT.md write phase_transition with
+    # phase + status. session_resume._build_journal_resume subscripts
+    # `p["phase"]` — this schema check is the defensive bulwark against F1.
+    "phase_transition": ("phase", "status"),
+    # commands/orchestrate.md writes checkpoint with phase + completed_phases
+    # + active_agents + variety + pending_phases + safe_to_retry. Only
+    # `phase` is universally required; the rest vary per checkpoint context.
+    "checkpoint": ("phase",),
+    # commands/orchestrate.md + comPACT.md write agent_dispatch with agent,
+    # task_id, phase, scope.
+    "agent_dispatch": ("agent", "task_id", "phase"),
+    # hooks/handoff_gate.py:261 writes agent_handoff with agent, task_id,
+    # task_subject, handoff. All four are load-bearing for the secretary.
+    "agent_handoff": ("agent", "task_id", "task_subject", "handoff"),
+    # commands/orchestrate.md writes s2_state_seeded with worktree, agents,
+    # boundaries. No hook-based writer; CLI-only event.
+    "s2_state_seeded": ("worktree", "agents", "boundaries"),
+    # commands/orchestrate.md + comPACT.md write commit with sha, message, phase.
+    "commit": ("sha", "message", "phase"),
+    # commands/peer-review.md writes review_dispatch with pr_number, pr_url, reviewers.
+    "review_dispatch": ("pr_number", "pr_url", "reviewers"),
+    # commands/peer-review.md writes review_finding with severity, finding,
+    # reviewer, task_id.
+    "review_finding": ("severity", "finding", "reviewer"),
+    # commands/peer-review.md writes remediation with cycle, items, fixer.
+    "remediation": ("cycle", "items", "fixer"),
+    # commands/peer-review.md writes pr_ready with pr_number, pr_url, commits.
+    "pr_ready": ("pr_number", "pr_url", "commits"),
+    # commands/pause.md writes session_paused with pr_number, pr_url, branch,
+    # worktree_path, consolidation_completed, team_name.
+    "session_paused": (
+        "pr_number",
+        "pr_url",
+        "branch",
+        "worktree_path",
+        "consolidation_completed",
+    ),
+    # hooks/session_end.py writes session_end with NO required fields — one
+    # writer passes an optional `warning` (line 119), the other passes
+    # nothing (line 291). commands/wrap-up.md CLI also writes session_end
+    # with no --data. Baseline v/type/ts validation is the only requirement.
+    "session_end": (),
+}
+
+
 # --- Write API ---
 
 
@@ -68,8 +130,22 @@ def _validate_event_schema(event: dict[str, Any]) -> bool:
     """
     Validate that an event dict has the required schema fields.
 
-    Required: 'v' is an int (and NOT a bool — Python bool is a subclass
-    of int, so it must be rejected explicitly), 'type' is a non-empty str.
+    Baseline (all event types):
+    - 'v' is an int (and NOT a bool — Python bool is a subclass of int,
+      so it must be rejected explicitly)
+    - 'type' is a non-empty str
+
+    Per-type (only for types in _REQUIRED_FIELDS_BY_TYPE):
+    - Every required field is present and not None. Unknown event types
+      (e.g. free-form "test" used in unit tests) pass per-type validation
+      by default — the whitelist is opt-in enforcement for known types.
+
+    This is the bulwark that prevents BugF1: a malformed `phase_transition`
+    event (missing `phase` field) from any writer causes `append_event` or
+    the CLI write path to return False BEFORE the bad line reaches disk,
+    so `_build_journal_resume` in the next session never has to deal with
+    a missing-field event. The defensive consumer is still a backstop for
+    anything that slips past this (e.g. events from prior schema versions).
 
     Returns:
         True if the event is schema-valid, False otherwise.
@@ -77,8 +153,16 @@ def _validate_event_schema(event: dict[str, Any]) -> bool:
     v = event.get("v")
     if not isinstance(v, int) or isinstance(v, bool):
         return False
-    if not isinstance(event.get("type"), str) or not event["type"]:
+    event_type = event.get("type")
+    if not isinstance(event_type, str) or not event_type:
         return False
+    required = _REQUIRED_FIELDS_BY_TYPE.get(event_type)
+    if required is None:
+        # Unknown event type — opt-in enforcement, pass through.
+        return True
+    for field in required:
+        if field not in event or event[field] is None:
+            return False
     return True
 
 

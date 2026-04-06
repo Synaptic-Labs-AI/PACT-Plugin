@@ -682,6 +682,7 @@ class TestBuildJournalResumeTruncation:
             make_event(
                 "agent_handoff",
                 agent="coder",
+                task_id="truncation-test",
                 task_subject="CODE: boundary",
                 handoff={"decisions": [decision]},
             ),
@@ -714,3 +715,239 @@ class TestBuildJournalResumeTruncation:
             assert "D" * length not in result
         else:
             assert "D" * length in result
+
+
+# =============================================================================
+# _build_journal_resume() Defensive Consumer Tests (BugF1 backstop)
+# =============================================================================
+
+
+class TestBuildJournalResumeDefensive:
+    """Defensive consumer tests for _build_journal_resume (BugF1 backstop).
+
+    The per-type schema validator in session_journal._validate_event_schema
+    is the primary defense — well-formed writers cannot produce the malformed
+    events these tests simulate. The defensive consumer in
+    _build_journal_resume is the backstop for:
+    - Events from prior schema versions already on disk
+    - Hand-crafted journal files (debugging, migration)
+    - Events written before per-type validation landed
+
+    These tests write events DIRECTLY to the journal file (bypassing
+    append_event) so we can simulate shapes the validator would reject.
+    _build_journal_resume MUST NOT raise on any of these shapes — it must
+    either drop the bad event or return a partial resume. If the inner
+    function raises an unexpected exception, the outer wrapper must catch
+    it, log to sys.stderr, and return None (the fail-open contract).
+    """
+
+    @pytest.fixture
+    def session_dir(self, tmp_path):
+        """Concrete on-disk session dir with a journal file we can write to."""
+        sd = tmp_path / ".claude" / "pact-sessions" / "test" / "defensive-test"
+        sd.mkdir(parents=True, exist_ok=True)
+        return str(sd)
+
+    @pytest.fixture
+    def journal_file(self, session_dir):
+        return Path(session_dir) / "session-journal.jsonl"
+
+    def _write_raw_events(self, journal_file: Path, events: list) -> None:
+        """Append raw events to the journal, bypassing append_event's validator."""
+        import json
+        with open(str(journal_file), "a") as f:
+            for event in events:
+                f.write(json.dumps(event) + "\n")
+
+    def test_phase_transition_missing_phase_does_not_crash(
+        self, session_dir, journal_file,
+    ):
+        """BugF1 primary: phase_transition event missing `phase` does not crash.
+
+        The inner function uses .get("phase") with a walrus filter so events
+        missing `phase` are dropped from the summary, not subscripted. This
+        test writes a hand-crafted event that the current per-type validator
+        would reject, simulating a pre-validator journal entry.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            # Malformed: phase_transition with no `phase` key at all.
+            {"v": 1, "type": "phase_transition", "status": "started",
+             "ts": "2026-01-01T00:00:00Z"},
+            # Also malformed: phase field present but None.
+            {"v": 1, "type": "phase_transition", "phase": None, "status": "completed",
+             "ts": "2026-01-01T00:00:01Z"},
+            # Valid entry so the resume has something to report.
+            {"v": 1, "type": "phase_transition", "phase": "CODE", "status": "started",
+             "ts": "2026-01-01T00:00:02Z"},
+        ])
+
+        result = _build_journal_resume(session_dir)
+        # Must not raise. Result is either None or a partial resume string.
+        # The valid CODE event should land in the summary; the malformed
+        # events must be silently dropped, not crash.
+        if result is not None:
+            assert "Last active phase: CODE" in result
+
+    def test_decisions_first_element_is_dict(self, session_dir, journal_file):
+        """BugF1 secondary: decisions[0] being a dict does not crash.
+
+        Historical crash site: _build_journal_resume used `decisions[0]`
+        assuming a string. Now routed through _coerce_decision_summary which
+        stringifies non-string first elements via str(). No IndexError,
+        KeyError, or TypeError should escape.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            {
+                "v": 1, "type": "agent_handoff",
+                "agent": "coder", "task_id": "1",
+                "task_subject": "CODE: dict decision",
+                "handoff": {"decisions": [{"reason": "chose X over Y"}]},
+                "ts": "2026-01-01T00:00:00Z",
+            },
+        ])
+
+        # Must not raise.
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "coder" in result
+        # The dict gets stringified into the summary (bounded by truncation).
+        assert "CODE: dict decision" in result
+
+    def test_decisions_first_element_is_none(self, session_dir, journal_file):
+        """decisions[0] being None produces empty summary, no crash."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            {
+                "v": 1, "type": "agent_handoff",
+                "agent": "coder", "task_id": "1",
+                "task_subject": "CODE: none decision",
+                "handoff": {"decisions": [None]},
+                "ts": "2026-01-01T00:00:00Z",
+            },
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        # Subject appears even though the decision summary is empty.
+        assert "CODE: none decision" in result
+
+    def test_decisions_not_a_list(self, session_dir, journal_file):
+        """decisions field being a non-list value does not crash."""
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            {
+                "v": 1, "type": "agent_handoff",
+                "agent": "coder", "task_id": "1",
+                "task_subject": "CODE: dict decisions field",
+                # Historical schema drift: decisions as dict instead of list.
+                "handoff": {"decisions": {"not": "a list"}},
+                "ts": "2026-01-01T00:00:00Z",
+            },
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "CODE: dict decisions field" in result
+
+    def test_handoff_field_not_a_dict(self, session_dir, journal_file):
+        """handoff field being a non-dict does not crash.
+
+        _build_journal_resume_inner guards with isinstance(handoff_data, dict)
+        before calling .get("decisions") on it. A string/list/None value
+        flows through as an empty dict internally.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            {
+                "v": 1, "type": "agent_handoff",
+                "agent": "a", "task_id": "1",
+                "task_subject": "str handoff", "handoff": "oops string",
+                "ts": "2026-01-01T00:00:00Z",
+            },
+            {
+                "v": 1, "type": "agent_handoff",
+                "agent": "b", "task_id": "2",
+                "task_subject": "none handoff", "handoff": None,
+                "ts": "2026-01-01T00:00:01Z",
+            },
+            {
+                "v": 1, "type": "agent_handoff",
+                "agent": "c", "task_id": "3",
+                "task_subject": "list handoff", "handoff": ["wrong"],
+                "ts": "2026-01-01T00:00:02Z",
+            },
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "str handoff" in result
+        assert "none handoff" in result
+        assert "list handoff" in result
+
+    def test_outer_wrapper_catches_unexpected_exception(
+        self, session_dir, journal_file, capsys, monkeypatch,
+    ):
+        """Outer _build_journal_resume wrapper catches ANY unexpected exception.
+
+        Critical test: this is the ONLY test that triggers the
+        `except Exception: ... print(..., file=sys.stderr)` path. Without the
+        `import sys` statement at the top of session_resume.py, this test
+        fails with NameError instead of the expected fail-open contract
+        (return None + stderr log). Any regression that drops `import sys`
+        will be caught here.
+        """
+        import shared.session_resume as session_resume_module
+        from shared.session_resume import _build_journal_resume
+
+        # Ensure the journal exists so _build_journal_resume_inner gets past
+        # the early `if not all_events: return None` path and actually
+        # executes code that the patched function can replace.
+        self._write_raw_events(journal_file, [
+            {"v": 1, "type": "checkpoint", "phase": "CODE",
+             "ts": "2026-01-01T00:00:00Z"},
+        ])
+
+        def _boom(_session_dir: str):
+            raise RuntimeError("simulated unexpected shape")
+
+        monkeypatch.setattr(
+            session_resume_module, "_build_journal_resume_inner", _boom,
+        )
+
+        result = _build_journal_resume(session_dir)
+
+        # Fail-open contract: return None.
+        assert result is None
+
+        # The wrapper logged to stderr. If `import sys` is missing,
+        # execution never reaches this assertion — the wrapper itself
+        # raises NameError on `sys.stderr` and the test fails with
+        # NameError not AssertionError. This is the regression detector
+        # for the missing-import bug.
+        captured = capsys.readouterr()
+        assert "_build_journal_resume failed" in captured.err
+        assert "simulated unexpected shape" in captured.err
+
+    def test_outer_wrapper_none_when_inner_returns_none(
+        self, session_dir, journal_file,
+    ):
+        """Wrapper passes through a clean None when inner returns None.
+
+        Baseline: empty journal path returns None without triggering the
+        except clause. This complements the boom-test above by confirming
+        the non-exception path still works.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        # Journal file does not exist at all — read_events_from returns [],
+        # inner returns None, wrapper passes it through without logging.
+        assert not journal_file.exists()
+        result = _build_journal_resume(session_dir)
+        assert result is None

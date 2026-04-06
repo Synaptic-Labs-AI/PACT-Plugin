@@ -15,6 +15,7 @@ Manages:
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,40 @@ def restore_last_session(
     return _build_journal_resume(prev_session_dir)
 
 
+def _coerce_decision_summary(decisions: Any) -> str:
+    """
+    Extract a short summary string from a handoff's `decisions` field.
+
+    The `decisions` field is nominally a list of strings, but historical
+    journal data and future schema drift can produce:
+    - non-list values (dict, None, scalar)
+    - empty lists
+    - lists whose first element is not a string (dict, list, None)
+
+    This helper returns an empty string for any of those shapes rather
+    than raising IndexError/TypeError. When the first element is a
+    non-string, it is stringified via str() so callers still get a
+    useful, bounded summary.
+
+    Truncation to _DECISION_TRUNCATION_LIMIT happens here so every caller
+    gets consistent behavior.
+    """
+    if not isinstance(decisions, list) or not decisions:
+        return ""
+    first = decisions[0]
+    if isinstance(first, str):
+        summary = first
+    elif first is None:
+        return ""
+    else:
+        # Best-effort stringify for dict/list/number/other — bounded by
+        # truncation below so even a giant dict becomes a readable stub.
+        summary = str(first)
+    if len(summary) > _DECISION_TRUNCATION_LIMIT:
+        summary = summary[:_DECISION_TRUNCATION_LIMIT - 3] + "..."
+    return summary
+
+
 def _build_journal_resume(session_dir: str) -> str | None:
     """
     Build resume context from a previous session's journal events.
@@ -188,11 +223,46 @@ def _build_journal_resume(session_dir: str) -> str | None:
     (progress), and checkpoint events (state snapshot) to produce a
     concise resume summary.
 
+    Defensive consumer: this function MUST NOT raise on malformed events.
+    Any KeyError/IndexError/TypeError propagates through restore_last_session
+    into session_init.main()'s outer except, which replaces the entire
+    constructed hook output dict (team-create instructions, working memory,
+    retrieved context) with an error JSON — losing critical SessionStart
+    context for one bad journal line. Per-type schema validation at write
+    time (see session_journal._validate_event_schema) is the primary
+    defense; this consumer is the backstop for events that slipped past
+    an older validator, prior schema versions, or hand-crafted files.
+
+    Failure mode: on any unexpected exception, log to stderr and return
+    None so the caller continues with an empty resume.
+
     Args:
         session_dir: The previous session's directory path
 
     Returns:
-        Formatted resume string, or None if journal is empty/missing
+        Formatted resume string, or None if journal is empty/missing/unreadable
+    """
+    try:
+        return _build_journal_resume_inner(session_dir)
+    except Exception as e:
+        # Last-resort catch so one malformed event cannot nuke session_init's
+        # hook output. Log so the bug is visible but fail-open.
+        print(
+            f"session_resume: _build_journal_resume failed "
+            f"(fail-open, returning None): {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _build_journal_resume_inner(session_dir: str) -> str | None:
+    """
+    Inner implementation of _build_journal_resume.
+
+    Separated so the outer wrapper can catch any unexpected exception
+    without cluttering the main flow. Each field access uses `.get()`
+    with safe defaults so normal missing-field cases don't raise —
+    the outer try/except is defense-in-depth for unforeseen shapes.
     """
     all_events = read_events_from(session_dir)
     if not all_events:
@@ -200,31 +270,45 @@ def _build_journal_resume(session_dir: str) -> str | None:
 
     lines = ["Previous session summary (from journal -- read-only reference):", ""]
 
-    # Extract completed handoffs
+    # Extract completed handoffs. Every field access is guarded with
+    # .get() and type checks — `decisions[0]` is the single historical
+    # crash site (BugF1 secondary), now funneled through the helper.
     handoffs = [e for e in all_events if e.get("type") == "agent_handoff"]
     if handoffs:
         lines.append("## Completed Work")
         for h in handoffs:
             agent = h.get("agent", "unknown")
             subject = h.get("task_subject", "")
-            handoff_data = h.get("handoff", {})
-            decisions = handoff_data.get("decisions", [])
-            summary = decisions[0] if decisions else ""
-            if len(summary) > _DECISION_TRUNCATION_LIMIT:
-                summary = summary[:_DECISION_TRUNCATION_LIMIT - 3] + "..."
+            handoff_data = h.get("handoff")
+            if not isinstance(handoff_data, dict):
+                handoff_data = {}
+            summary = _coerce_decision_summary(handoff_data.get("decisions"))
             if summary:
                 lines.append(f"- {agent}: {subject} -> {summary}")
             else:
                 lines.append(f"- {agent}: {subject}")
         lines.append("")
 
-    # Extract phase progress
+    # Extract phase progress. Use .get("phase") with a safe default so a
+    # malformed phase_transition event (missing `phase`) does not raise
+    # KeyError — this is the BugF1 primary crash site. Events that lack
+    # a phase field are dropped from the summary via the `if phase` filter.
     phases = [e for e in all_events if e.get("type") == "phase_transition"]
     if phases:
-        completed = [p["phase"] for p in phases if p.get("status") == "completed"]
-        in_progress = [p["phase"] for p in phases if p.get("status") == "started"]
+        completed = [
+            phase
+            for p in phases
+            if p.get("status") == "completed"
+            and (phase := p.get("phase")) is not None
+        ]
+        in_progress = [
+            phase
+            for p in phases
+            if p.get("status") == "started"
+            and (phase := p.get("phase")) is not None
+        ]
         if completed:
-            lines.append(f"Completed phases: {', '.join(completed)}")
+            lines.append(f"Completed phases: {', '.join(str(c) for c in completed)}")
         if in_progress:
             lines.append(f"Last active phase: {in_progress[-1]}")
         lines.append("")
