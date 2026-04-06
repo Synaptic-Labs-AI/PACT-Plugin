@@ -5,19 +5,19 @@ Used by: session_init.py, session_end.py, handoff_gate.py (hooks);
          orchestrate.md, comPACT.md, peer-review.md, wrap-up.md, pause.md
          (commands invoke via CLI: python3 session_journal.py write|read|read-last).
 
-Write path: O_APPEND append, safe for concurrent writers (hooks +
-orchestrator commands) on Linux local filesystems. Linux O_APPEND on
-regular files atomically advances the file offset and writes up to
-PIPE_BUF bytes (typically 4096) in one kernel call; POSIX itself only
-guarantees that the seek+write PAIR is not interleaved with other
-appenders, not that the write of arbitrary sizes is atomic. NFS does
-not honor this at all. Current event sizes are well under PIPE_BUF
-(events are small JSONL lines), so interleaving is not a practical
-concern on the supported platforms — but maintainers should not rely
-on the broader "POSIX atomic regardless of size" claim if event sizes
-grow or the journal ever lands on NFS. The short-write loop in
-`_atomic_write` is the belt-and-braces guard against partial writes
-from signal interruption even within the PIPE_BUF bound.
+Write path: O_APPEND append, protected by an exclusive advisory lock
+(`fcntl.flock(LOCK_EX)`) around the short-write loop in `_atomic_write`.
+POSIX only guarantees `os.write` atomicity up to PIPE_BUF (512 bytes on
+macOS, 4096 on Linux); for larger events the short-write loop would
+otherwise open an interleaving window between iterations where another
+O_APPEND writer could splice its bytes into the middle of ours. The
+flock closes that window, so concurrent writers (hooks + orchestrator
+CLI calls) are safe for events of any size on single-host local
+filesystems. The guarantee is single-host only — advisory locks do not
+cross machine boundaries and NFS flock semantics are unreliable — which
+is fine because pact-sessions is per-host already. The short-write
+loop itself remains the guard against partial writes from signal
+interruption.
 
 Read path: Sequential scan with type filtering. For typical sessions
 (<200 events, <80KB), full scan completes in <5ms. For crash recovery,
@@ -34,6 +34,7 @@ Permissions: 0o600 (owner read/write only)
 Directory permissions: 0o700 (owner only)
 """
 
+import fcntl
 import json
 import os
 import sys
@@ -380,13 +381,25 @@ def _read_events_at(
     journal: Path,
     event_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Shared read implementation for both implicit and explicit APIs."""
+    """Shared read implementation for both implicit and explicit APIs.
+
+    Reads with `errors="replace"` so a single invalid byte sequence
+    (e.g., from a botched write or a truncated multibyte character)
+    substitutes U+FFFD for the bad bytes instead of raising
+    UnicodeDecodeError. A malformed byte range corrupts at most its
+    own line; the per-line `json.loads` then drops that line and every
+    other event in the file is still returned. Without this, one bad
+    byte would cause the outer `except Exception` to drop the whole
+    file and hide all of its otherwise-valid events.
+    """
     try:
         if not journal.exists():
             return []
 
         events: list[dict[str, Any]] = []
-        for line in journal.read_text(encoding="utf-8").splitlines():
+        for line in journal.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -573,20 +586,28 @@ def _journal_path_from(session_dir: str) -> Path:
 
 def _atomic_write(path: Path, data: bytes) -> bool:
     """
-    Append *data* to *path* using O_APPEND, looping over short writes.
+    Append *data* to *path* under an exclusive advisory lock.
 
     Returns True on success, False on OSError or a non-progressing write.
     File is created with 0o600 if it does not exist. The caller is
     responsible for ensuring the parent directory exists before calling.
 
-    Short-write loop rationale: `os.write` can return fewer bytes than
-    requested when (a) the write is interrupted by a signal, or (b) the
-    request exceeds PIPE_BUF on platforms where only the first PIPE_BUF
-    bytes of an O_APPEND write are guaranteed atomic. The caller handles
-    (a) by retrying from where we left off; (b) is not our concern for
-    current event sizes but the loop makes the primitive correct in
-    principle. A non-positive return from os.write indicates a failure we
-    cannot recover from — bail out and let the caller see False.
+    Concurrency guarantee: `fcntl.flock(LOCK_EX)` serializes the entire
+    write block against other writers that honor the same lock. POSIX
+    only guarantees `os.write` atomicity up to PIPE_BUF (512 bytes on
+    macOS, 4096 on Linux); for larger payloads the short-write loop
+    below would otherwise leave a window between iterations where an
+    interleaving O_APPEND from another process could splice bytes into
+    the middle of our event and produce a malformed JSONL line. The
+    lock closes that window for any event size. Single-host only
+    (advisory locks do not cross machines, and NFS flock semantics
+    are unreliable) — fine because pact-sessions is per-host.
+
+    Short-write loop rationale: `os.write` can still return fewer bytes
+    than requested when interrupted by a signal even while the lock is
+    held; the loop retries from where we left off. A non-positive
+    return from os.write indicates a failure we cannot recover from —
+    bail out and let the caller see False.
     """
     try:
         fd = os.open(
@@ -594,22 +615,38 @@ def _atomic_write(path: Path, data: bytes) -> bool:
             os.O_WRONLY | os.O_APPEND | os.O_CREAT,
             0o600,
         )
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            return False
         try:
             view = memoryview(data)
             total = 0
             while total < len(view):
-                n = os.write(fd, view[total:])
+                try:
+                    n = os.write(fd, view[total:])
+                except OSError:
+                    return False
                 if n <= 0:
                     # Non-progressing write — treat as failure so the
                     # caller can log and return False up the stack rather
                     # than spin forever.
                     return False
                 total += n
+            return True
         finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
             os.close(fd)
-        return True
-    except OSError:
-        return False
+        except OSError:
+            pass
 
 
 # --- CLI ---

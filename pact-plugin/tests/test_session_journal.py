@@ -99,6 +99,7 @@ CLI (main()):
 49. read-last with no matching events outputs "null"
 """
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -110,6 +111,49 @@ from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+
+
+# Module-level worker for multi-process concurrency tests.
+# Must be picklable (i.e. top-level) so multiprocessing.Process can spawn it
+# on macOS where the default start method is "spawn" (not "fork").
+def _concurrent_large_writer_worker(
+    worker_id: int,
+    num_events: int,
+    payload_size: int,
+    journal_path: str,
+    hooks_path: str,
+) -> None:
+    import sys as _sys
+    if hooks_path not in _sys.path:
+        _sys.path.insert(0, hooks_path)
+    from pathlib import Path as _Path
+    from shared.session_journal import _atomic_write
+
+    # Each event is a JSON-shaped line well above macOS PIPE_BUF (512 B).
+    # Use a distinctive payload the reader can validate per-event.
+    filler = "x" * max(0, payload_size - 200)
+    for seq in range(num_events):
+        event = {
+            "v": 1,
+            "type": "test",
+            "ts": "2026-04-06T00:00:00Z",
+            "worker": worker_id,
+            "seq": seq,
+            "filler": filler,
+        }
+        line = (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
+        # Guardrail: the test is only meaningful above PIPE_BUF. If the
+        # filler calculation is ever tuned wrong, fail loudly in the worker.
+        if len(line) <= 512:
+            raise AssertionError(
+                f"worker {worker_id}: line too small "
+                f"({len(line)} bytes) — test would not exercise "
+                f"the PIPE_BUF interleaving window"
+            )
+        if not _atomic_write(_Path(journal_path), line):
+            raise RuntimeError(
+                f"worker {worker_id} seq {seq}: _atomic_write returned False"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +697,44 @@ class TestReadEvents:
         events = read_events(event_type="nonexistent_type")
         assert events == []
 
+    def test_invalid_utf8_does_not_drop_whole_file(
+        self, journal_home, team_name, journal_file,
+    ):
+        """A bad byte on one line must not hide every other event.
+
+        Previously `_read_events_at` used `path.read_text(encoding="utf-8")`,
+        which raises UnicodeDecodeError on a single invalid byte. The
+        outer `except Exception: return []` then dropped the *entire*
+        file. Linked to the flock fix: if concurrency (or anything else)
+        ever produces a malformed byte range, we must still surface the
+        surrounding valid events so the journal stays recoverable.
+
+        The fix switches to `errors="replace"` so invalid bytes become
+        U+FFFD, the bad line fails `json.loads` (and is skipped), and
+        every other event is still returned.
+        """
+        from shared.session_journal import read_events
+
+        # Write two valid JSON lines sandwiching an invalid UTF-8 byte
+        # sequence. Use raw bytes because Python's text mode would refuse
+        # to encode the invalid bytes.
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        valid1 = b'{"v":1,"type":"test","seq":1,"ts":"2026-01-01T00:00:00Z"}\n'
+        bad_line = b"\xff\xfe garbage bytes that are not valid utf-8\n"
+        valid2 = b'{"v":1,"type":"test","seq":2,"ts":"2026-01-01T00:00:00Z"}\n'
+        journal_file.write_bytes(valid1 + bad_line + valid2)
+
+        events = read_events()
+
+        # Both valid events survive; the invalid-byte line is silently
+        # dropped (json.loads rejects it after errors="replace" leaves
+        # U+FFFD in place of the bad bytes).
+        assert len(events) == 2, (
+            f"expected 2 surviving events, got {len(events)}"
+        )
+        assert events[0]["seq"] == 1
+        assert events[1]["seq"] == 2
+
 
 # ---------------------------------------------------------------------------
 # read_last_event()
@@ -1095,6 +1177,213 @@ class TestConcurrentAppends:
         assert len(events) == 1
         assert events[0]["handoff"]["produced"] == large_handoff["produced"]
         assert len(events[0]["handoff"]["decisions"]) == 20
+
+    def test_atomic_write_holds_exclusive_lock_around_write_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """P0 (mutation test): `_atomic_write` must call `fcntl.flock`
+        with `LOCK_EX` before the write loop and `LOCK_UN` after.
+
+        This is the primary regression test for r7-bughunter-final's
+        finding. It is a structural / white-box test on purpose:
+        behavioral concurrent-writer tests are unreliable as mutation
+        tests because the underlying POSIX guarantee ("atomic only up
+        to PIPE_BUF") is a *lower bound* — modern macOS and Linux
+        kernels often accept much larger single `os.write` calls
+        atomically in practice. A test that spawns processes and
+        relies on the race to fire would silently stop catching the
+        bug as soon as it runs on a kernel whose short-write behavior
+        does not happen to surface the interleave.
+
+        Instead, pin the invariant at the source: the lock MUST be
+        acquired exclusive before any write iteration, and MUST be
+        released after the last iteration. A spy on `fcntl.flock`
+        verifies both, and the ordering spy verifies the lock is held
+        across the entire write window (not acquired/released between
+        iterations). If a future refactor removes either call, or
+        narrows the lock scope, this test fails immediately.
+        """
+        import fcntl as _fcntl
+        import shared.session_journal as sj
+
+        events_seen: list[tuple[str, int]] = []
+        real_flock = _fcntl.flock
+        real_write = os.write
+
+        def spy_flock(fd: int, op: int) -> None:
+            if op == _fcntl.LOCK_EX:
+                events_seen.append(("lock_ex", fd))
+            elif op == _fcntl.LOCK_UN:
+                events_seen.append(("unlock", fd))
+            else:
+                events_seen.append(("lock_other", op))
+            return real_flock(fd, op)
+
+        def spy_write(fd: int, data):
+            events_seen.append(("write", fd))
+            return real_write(fd, data)
+
+        monkeypatch.setattr(sj.fcntl, "flock", spy_flock)
+        monkeypatch.setattr(sj.os, "write", spy_write)
+
+        path = tmp_path / "spied-journal.jsonl"
+        data = b'{"v":1,"type":"test","ts":"2026-04-06T00:00:00Z"}\n'
+
+        result = sj._atomic_write(path, data)
+        assert result is True
+        assert path.read_bytes() == data
+
+        # Structural invariants:
+        #   1. Exactly one LOCK_EX before any write(s)
+        #   2. At least one write
+        #   3. Exactly one LOCK_UN after the last write
+        #   4. LOCK_EX precedes every write, LOCK_UN follows every write
+        ex_indices = [i for i, e in enumerate(events_seen) if e[0] == "lock_ex"]
+        un_indices = [i for i, e in enumerate(events_seen) if e[0] == "unlock"]
+        write_indices = [i for i, e in enumerate(events_seen) if e[0] == "write"]
+
+        assert len(ex_indices) == 1, (
+            f"expected exactly one LOCK_EX, got {len(ex_indices)}: {events_seen}"
+        )
+        assert len(un_indices) == 1, (
+            f"expected exactly one LOCK_UN, got {len(un_indices)}: {events_seen}"
+        )
+        assert len(write_indices) >= 1, (
+            f"expected at least one os.write call: {events_seen}"
+        )
+        assert ex_indices[0] < min(write_indices), (
+            f"LOCK_EX must precede all writes: {events_seen}"
+        )
+        assert un_indices[0] > max(write_indices), (
+            f"LOCK_UN must follow all writes: {events_seen}"
+        )
+        # Lock is held across the entire write window, not
+        # acquired/released between iterations.
+        assert ex_indices[0] < un_indices[0], (
+            f"LOCK_EX must precede LOCK_UN: {events_seen}"
+        )
+
+    def test_atomic_write_releases_lock_on_write_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """A mid-loop `os.write` failure must still release the lock.
+
+        Companion mutation test: if a refactor drops the `try/finally`
+        wrapper around the lock/unlock pair, a failing write would
+        leave the lock held until the fd is closed — which works by
+        accident today but silently regresses if any future change
+        reuses the fd or the release semantics change. Pin the
+        explicit unlock by forcing a write failure and asserting both
+        the return value and the unlock event.
+        """
+        import fcntl as _fcntl
+        import shared.session_journal as sj
+
+        events_seen: list[str] = []
+        real_flock = _fcntl.flock
+
+        def spy_flock(fd: int, op: int) -> None:
+            if op == _fcntl.LOCK_EX:
+                events_seen.append("lock_ex")
+            elif op == _fcntl.LOCK_UN:
+                events_seen.append("unlock")
+            return real_flock(fd, op)
+
+        def failing_write(fd: int, data) -> int:
+            events_seen.append("write_fail")
+            return 0  # non-progressing, triggers `n <= 0` branch
+
+        monkeypatch.setattr(sj.fcntl, "flock", spy_flock)
+        monkeypatch.setattr(sj.os, "write", failing_write)
+
+        path = tmp_path / "fail-journal.jsonl"
+        result = sj._atomic_write(path, b"some payload\n")
+
+        assert result is False, "non-progressing write must return False"
+        # Lock acquired, write attempted, lock released — in that order.
+        assert events_seen == ["lock_ex", "write_fail", "unlock"], (
+            f"expected lock_ex → write_fail → unlock, got {events_seen}"
+        )
+
+    def test_concurrent_writers_with_large_events_no_interleaving(self, tmp_path):
+        """P1 (behavioral): with flock in place, N processes writing
+        M large events each must produce valid JSONL with every event
+        accounted for.
+
+        Caveat: this is a *behavioral* corroboration of the structural
+        flock tests above, not a mutation test. Modern macOS and Linux
+        kernels often accept large (hundreds of KB) single `os.write`
+        calls atomically for regular files under moderate load, so
+        removing flock may not cause this test to fail on every
+        kernel. The primary mutation tests are the two
+        `test_atomic_write_holds_*` tests above; this one catches
+        behavioral regressions (e.g., writes silently dropped, file
+        corruption, wrong line count) under realistic concurrent
+        load.
+
+        Invariants asserted:
+          1. The total line count equals `num_workers * events_per_worker`.
+          2. Every line parses as valid JSON.
+          3. Every (worker, seq) tuple appears exactly once.
+        """
+        num_workers = 8
+        events_per_worker = 20
+        payload_size = 8 * 1024  # 8 KiB — realistic agent_handoff size
+
+        journal_path = tmp_path / "session-journal.jsonl"
+        hooks_path = str(Path(__file__).parent.parent / "hooks")
+
+        # Use "spawn" so the test behaves identically on macOS and
+        # Linux and forces fresh interpreters per worker.
+        ctx = multiprocessing.get_context("spawn")
+        procs = [
+            ctx.Process(
+                target=_concurrent_large_writer_worker,
+                args=(
+                    worker_id,
+                    events_per_worker,
+                    payload_size,
+                    str(journal_path),
+                    hooks_path,
+                ),
+            )
+            for worker_id in range(num_workers)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+            assert p.exitcode == 0, (
+                f"worker pid={p.pid} exitcode={p.exitcode}"
+            )
+
+        # Invariant 1: correct line count (no lost events).
+        raw_lines = journal_path.read_text(encoding="utf-8").splitlines()
+        expected = num_workers * events_per_worker
+        assert len(raw_lines) == expected, (
+            f"expected {expected} lines, got {len(raw_lines)}"
+        )
+
+        # Invariant 2: every line parses as valid JSON.
+        malformed: list[str] = []
+        parsed: list[dict] = []
+        for line in raw_lines:
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                malformed.append(line[:80])
+        assert not malformed, (
+            f"{len(malformed)} malformed line(s); first few: {malformed[:3]}"
+        )
+
+        # Invariant 3: every (worker, seq) pair appears exactly once.
+        seen = {(e["worker"], e["seq"]) for e in parsed}
+        expected_pairs = {
+            (w, s) for w in range(num_workers) for s in range(events_per_worker)
+        }
+        assert seen == expected_pairs, (
+            f"missing: {expected_pairs - seen}; extra: {seen - expected_pairs}"
+        )
 
 
 # ---------------------------------------------------------------------------
