@@ -11,8 +11,7 @@ Tests cover:
 5. Skipped task (metadata.skipped: true) -> allow (bypass)
 6. Blocker task (metadata.type: "blocker") -> allow (bypass)
 7. Algedonic task (metadata.type: "algedonic") -> allow (bypass)
-8. Subject starts with "BLOCKER:" -> allow (bypass)
-9. No teammate_name in input -> allow (non-agent completion)
+8. No teammate_name in input -> allow (non-agent completion)
 10. memory_saved blocking enforcement (exit 2)
 11. main() integration tests for exit codes and teammate resolution
 12. read_task_owner: corrupted JSON returns None gracefully
@@ -145,28 +144,6 @@ class TestHandoffGate:
             task_subject="Feature: auth system",
             task_metadata={},
             teammate_name=None
-        )
-        assert result is None
-
-    def test_bypasses_alert_subject(self):
-        """ALERT: prefix should also bypass validation."""
-        from handoff_gate import validate_task_handoff
-
-        result = validate_task_handoff(
-            task_subject="ALERT: quality issue",
-            task_metadata={},
-            teammate_name="test-engineer"
-        )
-        assert result is None
-
-    def test_bypasses_halt_subject(self):
-        """HALT: prefix should bypass validation."""
-        from handoff_gate import validate_task_handoff
-
-        result = validate_task_handoff(
-            task_subject="HALT: data breach",
-            task_metadata={},
-            teammate_name="backend-coder"
         )
         assert result is None
 

@@ -27,8 +27,6 @@ from shared.session_journal import append_event, make_event
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
 
-BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
-
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
@@ -59,10 +57,6 @@ def validate_task_handoff(
 
     # Bypass: signal tasks (blocker, algedonic)
     if task_metadata.get("type") in ("blocker", "algedonic"):
-        return None
-
-    # Bypass: subject-based signal tasks (legacy format)
-    if task_subject and any(task_subject.startswith(p) for p in BYPASS_SUBJECT_PREFIXES):
         return None
 
     # Check: handoff exists
