@@ -273,7 +273,15 @@ def main():
         print(memory_feedback, file=sys.stderr)
         sys.exit(2)  # Block completion — feedback goes to agent
 
-    # Both gates passed — write agent_handoff event to session journal (GC-proof).
+    # Signal-task carve-out: blocker/algedonic completions bypass handoff
+    # validation (lines 56-58) and must NOT emit a phantom agent_handoff event.
+    # Writing one would pollute `read_events("agent_handoff")` and mis-route
+    # secretary harvest + memory_adhoc_reminder gating with empty handoff dicts.
+    if task_metadata.get("type") in ("blocker", "algedonic"):
+        print(_SUPPRESS_OUTPUT)
+        sys.exit(0)
+
+    # All gates passed — write agent_handoff event to session journal (GC-proof).
     # This is the sole HANDOFF persistence path. The secretary reads HANDOFFs from
     # journal events via read_events("agent_handoff").
     append_event(

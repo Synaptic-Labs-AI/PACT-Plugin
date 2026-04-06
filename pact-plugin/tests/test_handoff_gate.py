@@ -295,6 +295,82 @@ class TestSubjectPrefixBypassRegression:
             "handoff gate (this is the authoritative signal-task path)."
         )
 
+    def test_blocker_does_not_emit_phantom_agent_handoff_event(self):
+        """Regression: blocker tasks must NOT write a phantom agent_handoff event.
+
+        Bug (r9 MEDIUM finding): blocker/algedonic tasks correctly bypass
+        validate_task_handoff and check_memory_saved, but used to fall through
+        to append_event(make_event("agent_handoff", ..., handoff={})), writing
+        a phantom event with an empty handoff dict. This polluted
+        read_events("agent_handoff") and mis-routed
+        memory_adhoc_reminder.py:140 (which gates on the presence of any
+        agent_handoff event).
+
+        Contract: signal-task completions are NOT agent handoffs and must
+        not appear in the journal as such.
+        """
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "44",
+            "task_subject": "BLOCKER: schema migration reverts on rollback",
+            "teammate_name": "database-engineer",
+            "team_name": "pact-test",
+        })
+
+        task_data = {
+            "owner": "database-engineer",
+            "metadata": {"type": "blocker"},
+        }
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_event", return_value=True) as mock_append, \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert not mock_append.called, (
+            "Blocker task must NOT emit an agent_handoff journal event. "
+            "If this fails, the phantom-event regression has returned and "
+            "the secretary harvest will be polluted with empty handoffs. "
+            f"append_event was called with: {mock_append.call_args}"
+        )
+
+    def test_algedonic_does_not_emit_phantom_agent_handoff_event(self):
+        """Regression: algedonic tasks must NOT write a phantom agent_handoff event.
+
+        Companion to the blocker regression test — algedonic signal tasks
+        share the same bypass path and the same phantom-event risk.
+        """
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "99",
+            "task_subject": "[HALT]: SECURITY — credentials in source",
+            "teammate_name": "security-engineer",
+            "team_name": "pact-test",
+        })
+
+        task_data = {
+            "owner": "security-engineer",
+            "metadata": {
+                "type": "algedonic",
+                "level": "halt",
+                "category": "SECURITY",
+            },
+        }
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_event", return_value=True) as mock_append, \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert not mock_append.called, (
+            "Algedonic task must NOT emit an agent_handoff journal event. "
+            f"append_event was called with: {mock_append.call_args}"
+        )
+
 
 class TestCheckMemorySaved:
     """Tests for handoff_gate.check_memory_saved() — blocking enforcement."""
