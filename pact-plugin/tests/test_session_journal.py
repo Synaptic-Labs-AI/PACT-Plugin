@@ -231,15 +231,28 @@ class TestMakeEvent:
         assert event["agent"] == "backend-coder"
         assert event["task_id"] == "7"
 
-    def test_ts_is_set_last(self):
-        """Timestamp should not be overridden by user-provided ts in kwargs."""
+    def test_caller_ts_is_honored(self):
+        """A caller-supplied ts in kwargs is preserved (setdefault semantics).
+
+        Previous behavior unconditionally overwrote any caller ts, which
+        contradicted the docstring claim that ts is only auto-set when
+        missing. The new contract honors a caller-supplied ts so test
+        fixtures and backfill tooling can stamp deterministic timestamps.
+        """
         from shared.session_journal import make_event
 
-        # Even if caller passes ts, make_event overwrites it with current time
-        event = make_event("test", ts="user-provided")
-        assert event["ts"] != "user-provided"
-        # ts should be a valid ISO 8601 string
+        event = make_event("test", ts="2026-04-06T12:00:00Z")
+        assert event["ts"] == "2026-04-06T12:00:00Z"
+
+    def test_ts_auto_set_when_caller_omits(self):
+        """When the caller does not supply ts, make_event fills it in."""
+        from shared.session_journal import make_event
+
+        event = make_event("test")
+        # ts should be a valid ISO 8601 UTC string
         assert event["ts"].endswith("Z")
+        # And it must look like the documented format
+        assert "T" in event["ts"]
 
 
 # ---------------------------------------------------------------------------
@@ -2517,6 +2530,118 @@ class TestCLI:
         assert result.returncode == 1
         assert "invalid event schema" in result.stderr
         assert "type must be non-empty str" in result.stderr
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+    def test_write_stdin_preserves_apostrophes_in_payload(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """r12-fix: --stdin path preserves apostrophes verbatim (HIGH r9).
+
+        Round-9 review found that command files (orchestrate/peer-review/
+        comPACT/pause) built CLI calls of the shape:
+
+            python3 session_journal.py write ... --data '{"message": "..."}'
+
+        When the orchestrator template-substituted a value containing an
+        apostrophe (e.g. commit message `fix: don't crash` or branch
+        `feat/o'connor-fix`), the apostrophe closed the bash single-quoted
+        --data argument prematurely. With `set -e` + ERR trap the call
+        failed silently and the journal event was dropped — a workflow
+        state-loss bug.
+
+        The fix introduces a `--stdin` flag so call sites can pipe JSON via
+        a quoted heredoc (`<<'JSON' ... JSON`), which is immune to shell
+        quoting. This test pins that pinky-promise: when JSON containing
+        apostrophes is fed via stdin, the event lands on disk with every
+        apostrophe preserved character-for-character.
+        """
+        # Mirror the exact shape of a `commit` event the orchestrator builds.
+        payload = {
+            "sha": "abc1234",
+            "message": "fix: don't crash on o'connor's edge case",
+            "phase": "CODE",
+            "branch": "feat/o'connor-fix",
+        }
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "commit",
+                "--session-dir", session_dir,
+                "--stdin",
+            ],
+            input=json.dumps(payload),
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 0, result.stderr
+
+        # Verify the event was written and apostrophes round-tripped intact.
+        assert journal_file.exists()
+        event = json.loads(journal_file.read_text().strip())
+        assert event["type"] == "commit"
+        assert event["sha"] == "abc1234"
+        assert event["message"] == "fix: don't crash on o'connor's edge case"
+        assert event["branch"] == "feat/o'connor-fix"
+        # Sanity: every apostrophe survived (3 in message, 1 in branch).
+        assert event["message"].count("'") == 3
+        assert event["branch"].count("'") == 1
+
+    def test_write_stdin_and_data_are_mutually_exclusive(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """r12-fix: --stdin and --data cannot be combined.
+
+        The argparse mutually-exclusive group should reject any invocation
+        that supplies both flags, since the resulting precedence would be
+        ambiguous. argparse rejects mutex violations with exit code 2.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "test_event",
+                "--session-dir", session_dir,
+                "--data", '{"k": "v"}',
+                "--stdin",
+            ],
+            input='{"k": "v"}',
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        # argparse rejects mutex violations with exit 2 and "not allowed with"
+        # in stderr. Pin both so a future argparse upgrade that changes the
+        # exit code surfaces here instead of in production.
+        assert result.returncode == 2
+        assert "not allowed with" in result.stderr
+        # Journal must not have been written.
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+    def test_write_stdin_invalid_json_reports_stdin_source(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """r12-fix: --stdin error message names `stdin`, not `--data`.
+
+        Operators reading the error must be able to tell which input channel
+        produced the malformed JSON. The CLI branches the error message on
+        the data source so a stdin-pipe failure surfaces as
+        `invalid stdin JSON`, not the legacy `invalid --data JSON` (which
+        would mislead during debugging).
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "test_event",
+                "--session-dir", session_dir,
+                "--stdin",
+            ],
+            input="not-json",
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid stdin JSON" in result.stderr
+        # And it must NOT mention --data, since that wasn't the source.
+        assert "--data" not in result.stderr
+        # Journal must not have been written.
         assert not journal_file.exists() or journal_file.read_text() == ""
 
 

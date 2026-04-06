@@ -23,6 +23,16 @@ Read path: Sequential scan with type filtering. For typical sessions
 (<200 events, <80KB), full scan completes in <5ms. For crash recovery,
 read from end to find last checkpoint, then replay forward.
 
+Durability: Best-effort. The write+rename+lock cycle protects against
+interleaving and partial writes from concurrent writers, but `_atomic_write`
+does NOT call `fsync` after the write. After a hard crash (power loss,
+kernel panic), the most recent event may be lost even though
+`append_event` returned True. This is intentional — the journal lives on
+the orchestrate hot path (every checkpoint, phase transition, dispatch)
+and a per-write fsync is too expensive there. Durability "to OS buffers"
+is the contract; cross-process visibility is immediate after the lock
+releases.
+
 Dual API pattern:
 - Implicit API (hooks): append_event(), read_events(), read_last_event(),
   get_journal_path() — derive path via pact_context.get_session_dir().
@@ -51,8 +61,13 @@ _SCHEMA_VERSION = 1
 # entry here reflects what a production writer ACTUALLY produces (grep
 # `make_event("{type}"` in hooks/ and `write --type {type}` in commands/),
 # not an aspirational schema. Unknown types (e.g. "test" in unit tests)
-# bypass per-type validation and only get baseline v/type/ts checks — this
-# preserves test ergonomics without loosening production safety.
+# bypass per-type validation by design and only get baseline v/type/ts
+# checks — this preserves test ergonomics without loosening production
+# safety. Note the trade-off: a typo in `event_type` at a writer call site
+# (e.g. `make_event("phse_transition", ...)`) will silently bypass per-type
+# validation rather than raise. The mitigation is the test in
+# TestValidateEventSchemaPerType — every production type MUST have a test
+# entry, which catches typos in tests rather than at runtime.
 #
 # Each required field maps to its expected Python type. At validate time,
 # the validator checks presence AND `isinstance(value, expected_type)` AND
@@ -138,10 +153,15 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
     Construct a journal event dict with common fields pre-filled.
 
     Sets v=1 and ts=current UTC time. Caller provides type-specific fields.
+    A caller-supplied `ts` (in **fields) is honored — it is only auto-set
+    when the caller does not provide one. This lets test fixtures and
+    backfill tooling stamp deterministic timestamps without round-tripping
+    through the journal.
 
     Args:
         event_type: Event type string (e.g., "agent_handoff", "session_start")
-        **fields: Type-specific fields to include in the event
+        **fields: Type-specific fields to include in the event. May include
+            an explicit `ts` to override the auto-set timestamp.
 
     Returns:
         Complete event dict ready for append_event()
@@ -151,7 +171,12 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
         "type": event_type,
     }
     event.update(fields)
-    event["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Use setdefault so a caller-supplied ts in **fields is preserved.
+    # Without setdefault, the previous unconditional assignment silently
+    # discarded any caller ts and contradicted the docstring.
+    event.setdefault(
+        "ts", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
     return event
 
 
@@ -174,8 +199,10 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
       missing for every downstream consumer, and the baseline `type` check
       already uses the same semantics for consistency.
     - Unknown event types (e.g. free-form "test" used in unit tests) pass
-      per-type validation by default — the whitelist is opt-in enforcement
-      for known types.
+      per-type validation by design — the whitelist is opt-in enforcement
+      for known types. The trade-off: a typo in a production
+      `make_event("…")` call site silently bypasses per-type checks. The
+      TestValidateEventSchemaPerType suite catches that at test time.
 
     This is the bulwark that prevents BugF1: a malformed `phase_transition`
     event (missing `phase` field, or `phase=""`, or `phase=42`) from any
@@ -372,6 +399,15 @@ def read_events_from(
         Empty list if journal doesn't exist or on any error.
     """
     if not session_dir:
+        # AdvF2 Approach 4 (parity with implicit API): emit a stderr
+        # warning before the silent fallback so an unset/empty
+        # session_dir at the call site surfaces as a visible signal
+        # rather than a mute empty result. The empty list is preserved
+        # so callers see the same return contract.
+        print(
+            "session_journal: read_events_from called with empty session_dir",
+            file=sys.stderr,
+        )
         return []
     journal = _journal_path_from(session_dir)
     return _read_events_at(journal, event_type)
@@ -469,6 +505,16 @@ def read_last_event_from(
         The last matching event dict, or None if not found.
     """
     if not session_dir:
+        # AdvF2 Approach 4 (parity with implicit API): emit a stderr
+        # warning before the silent fallback so an unset/empty
+        # session_dir at the call site surfaces as a visible signal
+        # rather than a mute None result. The None is preserved so
+        # callers see the same return contract.
+        print(
+            "session_journal: read_last_event_from called with "
+            "empty session_dir",
+            file=sys.stderr,
+        )
         return None
     journal = _journal_path_from(session_dir)
     return _read_last_event_at(journal, event_type)
@@ -478,12 +524,23 @@ def _read_last_event_at(
     journal: Path,
     event_type: str,
 ) -> dict[str, Any] | None:
-    """Shared reverse-scan implementation for both implicit and explicit APIs."""
+    """Shared reverse-scan implementation for both implicit and explicit APIs.
+
+    Reads with `errors="replace"` symmetric with `_read_events_at`. A single
+    invalid byte sequence (e.g., from a botched write or truncated multibyte
+    character) would otherwise raise `UnicodeDecodeError` and poison the
+    entire reverse scan — `read_last_event_from(session_dir, "session_paused")`
+    would then return None and `session_end.py` would conclude the session
+    was never paused. The replacement substitutes U+FFFD for bad bytes, so
+    at most the corrupted line is dropped by the per-line `json.loads`.
+    """
     try:
         if not journal.exists():
             return None
 
-        for line in reversed(journal.read_text(encoding="utf-8").splitlines()):
+        for line in reversed(
+            journal.read_text(encoding="utf-8", errors="replace").splitlines()
+        ):
             line = line.strip()
             if not line:
                 continue
@@ -584,6 +641,42 @@ def _journal_path_from(session_dir: str) -> Path:
     return Path(session_dir) / "session-journal.jsonl"
 
 
+def _validate_cli_session_dir(session_dir: str) -> int:
+    """
+    Validate the CLI `--session-dir` flag, returning a non-zero exit code
+    on failure (and printing the reason to stderr) or 0 on success.
+
+    Two checks, applied to write/read/read-last alike:
+
+    1. Empty string — argparse `required=True` only catches a missing
+       flag; an explicit `--session-dir ""` slips past it. Without this
+       guard the path silently resolves to `./session-journal.jsonl`
+       in the caller's CWD and creates a stray journal file.
+
+    2. Non-absolute path — relative paths are also caller-CWD-relative
+       and equally surprising. The journal MUST live under
+       `~/.claude/pact-sessions/{slug}/{session_id}/`, so requiring an
+       absolute path eliminates an entire class of stray-file bugs.
+
+    Returns exit code 1 (matching the prior empty-string regression test
+    contract — non-zero is the load-bearing property; hooks watch for it
+    rather than discriminating on the specific code).
+    """
+    if not session_dir:
+        print(
+            "session_journal: --session-dir must be non-empty",
+            file=sys.stderr,
+        )
+        return 1
+    if not Path(session_dir).is_absolute():
+        print(
+            "session_journal: --session-dir must be an absolute path",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _atomic_write(path: Path, data: bytes) -> bool:
     """
     Append *data* to *path* under an exclusive advisory lock.
@@ -608,6 +701,18 @@ def _atomic_write(path: Path, data: bytes) -> bool:
     held; the loop retries from where we left off. A non-positive
     return from os.write indicates a failure we cannot recover from —
     bail out and let the caller see False.
+
+    Durability semantics — best-effort, NO fsync. The function returns
+    True once the bytes have been handed to the kernel, but does not
+    invoke `os.fsync` or `os.fdatasync`. After a hard crash (power loss,
+    kernel panic) the most recent event(s) may be lost even though the
+    caller saw True. This is intentional: the journal sits on the
+    orchestrate hot path (every checkpoint, phase transition, dispatch)
+    and a per-write fsync is too expensive — observed write rates would
+    drop by 1-2 orders of magnitude on rotational disks. Cross-process
+    visibility is immediate after the lock releases; only post-crash
+    durability is sacrificed. Callers that need stronger durability
+    should fsync at a coarser granularity (e.g., session_end).
     """
     try:
         fd = os.open(
@@ -678,8 +783,22 @@ def main() -> int:
                          help="Event type string (e.g. phase_transition)")
     write_p.add_argument("--session-dir", required=True,
                          help="Session directory path")
-    write_p.add_argument("--data", default="{}",
-                         help="JSON object of extra event fields")
+    # --data and --stdin are mutually exclusive ways to supply event fields.
+    # --data accepts a JSON object as a CLI argument; --stdin reads the same
+    # JSON object from standard input. The stdin path exists so that command
+    # files can pipe JSON via heredoc — eliminating shell quoting bugs where
+    # an apostrophe in a template-substituted value (e.g., a commit message
+    # like "fix: don't crash") would otherwise close the bash single-quoted
+    # --data argument and silently drop the journal event under set -e + ERR
+    # trap. See r9 HIGH "template injection" finding (PR #350).
+    data_group = write_p.add_mutually_exclusive_group()
+    data_group.add_argument("--data", default=None,
+                            help="JSON object of extra event fields "
+                                 "(mutually exclusive with --stdin)")
+    data_group.add_argument("--stdin", action="store_true",
+                            help="Read the JSON object of extra event "
+                                 "fields from standard input "
+                                 "(mutually exclusive with --data)")
 
     # --- read ---
     read_p = sub.add_parser("read", help="Read events (JSON array to stdout)")
@@ -699,15 +818,32 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "write":
+        # Resolve the JSON payload from either --stdin or --data. The
+        # mutually-exclusive group above guarantees both cannot be set
+        # simultaneously; if neither is set we default to "{}" so writers
+        # that pass no extra fields (e.g., wrap-up's session_end) keep
+        # working unchanged.
+        if args.stdin:
+            data_source = "stdin"
+            try:
+                raw = sys.stdin.read()
+            except OSError as exc:
+                print(f"session_journal: failed to read --stdin: {exc}",
+                      file=sys.stderr)
+                return 1
+        else:
+            data_source = "--data"
+            raw = args.data if args.data is not None else "{}"
+
         try:
-            extra = json.loads(args.data)
+            extra = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
-            print(f"session_journal: invalid --data JSON: {exc}",
+            print(f"session_journal: invalid {data_source} JSON: {exc}",
                   file=sys.stderr)
             return 1
 
         if not isinstance(extra, dict):
-            print("session_journal: --data must be a JSON object",
+            print(f"session_journal: {data_source} must be a JSON object",
                   file=sys.stderr)
             return 1
 
@@ -727,17 +863,13 @@ def main() -> int:
             )
             return 1
 
-        # AdvF4: mirror the empty-session-dir guard from read_events_from /
-        # read_last_event_from. Without this, an empty `--session-dir`
-        # silently resolves to "./session-journal.jsonl" and creates a
-        # stray journal file in the caller's CWD. Argparse's `required=True`
-        # catches a missing flag, but the empty-string case slips past it.
-        if not args.session_dir:
-            print(
-                "session_journal: --session-dir must be non-empty",
-                file=sys.stderr,
-            )
-            return 1
+        # AdvF4 + AdvF5: validate --session-dir up front. Helper enforces
+        # both the empty-string guard and the absolute-path requirement,
+        # mirroring the read/read-last subcommands so all three share one
+        # contract.
+        rc = _validate_cli_session_dir(args.session_dir)
+        if rc != 0:
+            return rc
 
         journal = _journal_path_from(args.session_dir)
         journal.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -748,11 +880,17 @@ def main() -> int:
         return 0
 
     elif args.command == "read":
+        rc = _validate_cli_session_dir(args.session_dir)
+        if rc != 0:
+            return rc
         events = read_events_from(args.session_dir, event_type=args.event_type)
         print(json.dumps(events))
         return 0
 
     elif args.command == "read-last":
+        rc = _validate_cli_session_dir(args.session_dir)
+        if rc != 0:
+            return rc
         event = read_last_event_from(args.session_dir, args.event_type)
         if event is None:
             print("null")
