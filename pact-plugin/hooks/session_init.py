@@ -412,6 +412,14 @@ def main():
                 f'Check TaskList for recovery context.'
             ))
 
+        # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
+        # before step 5b overwrites the Current Session block with THIS
+        # session's info. READ-BEFORE-WRITE invariant: _extract_prev_session_dir
+        # must run before update_session_info, otherwise it reads back the
+        # just-written current session dir and silently breaks cross-session
+        # resume (step 7) and paused-work detection (step 8).
+        prev_session_dir = _extract_prev_session_dir(project_dir)
+
         # 5b. Write session resume info to project CLAUDE.md
         # (session_dir already resolved above for substitution instructions)
         if session_id:
@@ -434,8 +442,8 @@ def main():
                     context_parts.append(resumption_msg)
 
         # 7. Restore last session snapshot for cross-session continuity
-        # Locate previous session's directory from project CLAUDE.md for journal access
-        prev_session_dir = _extract_prev_session_dir(project_dir)
+        # (prev_session_dir was captured in step 5a, before step 5b overwrote
+        # the Current Session block.)
         session_snapshot = restore_last_session(prev_session_dir=prev_session_dir)
         if session_snapshot:
             context_parts.append(session_snapshot)

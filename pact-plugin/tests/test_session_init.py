@@ -43,6 +43,7 @@ import io
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -588,6 +589,156 @@ class TestMainPausedStateIntegration:
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert "Paused work" not in additional
+
+
+class TestMainPrevSessionDirOrdering:
+    """Regression: _extract_prev_session_dir must run BEFORE update_session_info.
+
+    Bug: in an earlier revision, main() called update_session_info() (which
+    overwrites the Current Session block in CLAUDE.md with THIS session's info)
+    before calling _extract_prev_session_dir(). That caused _extract_prev_session_dir
+    to read back the just-written current session dir, silently breaking:
+      - restore_last_session(prev_session_dir=...) -> reads current (empty) journal
+      - check_paused_state(prev_session_dir=...)   -> never finds paused events
+
+    Invariant: READ prior CLAUDE.md BEFORE OVERWRITING it.
+
+    This test drives main() end-to-end (no mocking of update_session_info,
+    _extract_prev_session_dir, restore_last_session, or check_paused_state).
+    It pre-seeds a prior session with a session_paused event in its journal and
+    asserts the paused-state message appears in the hook output — which can
+    only happen if prev_session_dir was captured before the block rewrite.
+    """
+
+    def test_prev_session_dir_captured_before_claude_md_rewrite(
+        self, monkeypatch, tmp_path
+    ):
+        """End-to-end: paused state from prior session is detected despite
+        update_session_info() overwriting CLAUDE.md in the same main() call."""
+        from session_init import main
+
+        # --- Arrange: tmp home + tmp project dir ---
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        # --- Arrange: prior session dir with a session_paused event in its journal ---
+        prior_session_id = "deadbeef-1111-2222-3333-444455556666"
+        prior_session_dir = (
+            tmp_path / ".claude" / "pact-sessions" / "project" / prior_session_id
+        )
+        prior_session_dir.mkdir(parents=True)
+        prior_journal = prior_session_dir / "session-journal.jsonl"
+        paused_event = {
+            "v": 1,
+            "type": "session_paused",
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "pr_number": 9999,
+            "pr_url": "https://github.com/example/repo/pull/9999",
+            "branch": "feat/prior-session-branch",
+            "worktree_path": str(tmp_path / "wt" / "prior"),
+            "consolidation_completed": True,
+            "team_name": "pact-deadbeef",
+        }
+        prior_journal.write_text(json.dumps(paused_event) + "\n", encoding="utf-8")
+
+        # --- Arrange: project CLAUDE.md with a Session dir line pointing at the prior dir ---
+        # Use an absolute path (not ~) so _extract_prev_session_dir returns it verbatim
+        # and we can assert against it below.
+        prior_session_dir_str = str(prior_session_dir)
+        claude_md_dir = project_dir / ".claude"
+        claude_md_dir.mkdir()
+        claude_md = claude_md_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {prior_session_id}`\n"
+            "- Team: `pact-deadbeef`\n"
+            f"- Session dir: `{prior_session_dir_str}`\n"
+            "- Started: 2025-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        # --- Arrange: current session id (different from the prior one) ---
+        current_session_id = "aabb1122-0000-0000-0000-000000000000"
+        stdin_data = json.dumps({"session_id": current_session_id})
+
+        # Spies so we can assert exactly which prev_session_dir the downstream
+        # calls received. We wrap rather than replace so the real implementations
+        # still run (end-to-end coverage).
+        from session_init import (
+            check_paused_state as real_check_paused_state,
+            restore_last_session as real_restore_last_session,
+        )
+
+        restore_calls: list[str | None] = []
+        paused_calls: list[str | None] = []
+
+        def spy_restore_last_session(prev_session_dir=None):
+            restore_calls.append(prev_session_dir)
+            return real_restore_last_session(prev_session_dir=prev_session_dir)
+
+        def spy_check_paused_state(prev_session_dir=None):
+            paused_calls.append(prev_session_dir)
+            return real_check_paused_state(prev_session_dir=prev_session_dir)
+
+        # Patch boundary side effects that are unrelated to the ordering invariant:
+        #   - setup_plugin_symlinks / update_claude_md / ensure_project_memory_md /
+        #     check_pinned_staleness: touch user home / plugin root — not under test
+        #   - _check_pr_state: shells out to `gh pr view`; patch to OPEN so the
+        #     paused_msg path is exercised instead of being suppressed.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch(
+                 "shared.session_resume._check_pr_state",
+                 return_value="OPEN",
+             ), \
+             patch(
+                 "session_init.restore_last_session",
+                 side_effect=spy_restore_last_session,
+             ), \
+             patch(
+                 "session_init.check_paused_state",
+                 side_effect=spy_check_paused_state,
+             ), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        # --- Assert: both downstream calls saw the PRIOR session dir, not the current one ---
+        assert restore_calls == [prior_session_dir_str], (
+            f"restore_last_session should have received the prior session dir "
+            f"({prior_session_dir_str!r}), but got {restore_calls!r}. "
+            f"This indicates update_session_info() ran before "
+            f"_extract_prev_session_dir() and clobbered the CLAUDE.md block."
+        )
+        assert paused_calls == [prior_session_dir_str], (
+            f"check_paused_state should have received the prior session dir "
+            f"({prior_session_dir_str!r}), but got {paused_calls!r}."
+        )
+
+        # --- Assert: the paused-work message made it into the hook output ---
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Paused work detected: PR #9999" in additional
+        assert "feat/prior-session-branch" in additional
+
+        # --- Assert: update_session_info DID in fact rewrite the block to the current session ---
+        # (confirms the ordering fix didn't accidentally skip the write)
+        rewritten = claude_md.read_text(encoding="utf-8")
+        assert f"claude --resume {current_session_id}" in rewritten
+        assert f"claude --resume {prior_session_id}" not in rewritten
 
 
 class TestCompactSummaryCleanup:
