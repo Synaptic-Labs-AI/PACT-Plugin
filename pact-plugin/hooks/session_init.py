@@ -328,15 +328,26 @@ def main():
         # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
         # rejects empty strings for str-typed required fields, so an empty
         # session_id would cause append_event() to silently drop the
-        # session_start event — the journal's anchor event. Substitute a
-        # non-empty fallback and emit a stderr warning so the substitution is
-        # visible. Reachable in production via the malformed-stdin fallback
-        # above (input_data = {} on JSONDecodeError); latent otherwise because
-        # Claude Code reliably provides session_id. Mirrors bundle 4's
-        # handoff_gate.py fix (commit 2b0ee90) for the same bug class.
-        # The fallback is per-process unique (mirrors generate_team_name above)
-        # so concurrent malformed-stdin sessions don't collide on the same
-        # `pact-sessions/.../unknown/` directory.
+        # session_start event. Substitute a non-empty per-process-unique
+        # sentinel so downstream code paths that require a non-empty string
+        # (e.g., team name derivation, log formatting) still function.
+        # Reachable in production via the malformed-stdin fallback above
+        # (input_data = {} on JSONDecodeError); latent otherwise because
+        # Claude Code reliably provides session_id.
+        #
+        # R3 (MEDIUM, 2026-04-06): The sentinel must NOT touch disk. The
+        # per-process unique suffix (`unknown-{token_hex(4)}`) means every
+        # malformed-stdin session generates a unique path like
+        # `~/.claude/pact-sessions/{slug}/unknown-a3f9b2c4/`. session_end's
+        # cleanup_old_sessions filters by strict _UUID_PATTERN, which
+        # "unknown-*" never matches — so these directories accumulate
+        # indefinitely. Gate BOTH persistence call sites (write_context and
+        # append_event) on session_id_was_missing to prevent the leak. The
+        # existing CLAUDE.md guard at step 5b handles its own persistence.
+        # The session_start journal anchor event is intentionally dropped on
+        # the malformed-stdin path: without a valid session_id, we cannot
+        # durably record the session, and creating an orphaned journal file
+        # in an unreapable directory is worse than the missing anchor.
         raw_id = input_data.get("session_id")
         session_id_was_missing = not raw_id
         if raw_id:
@@ -345,26 +356,27 @@ def main():
             session_id = f"unknown-{secrets.token_hex(4)}"
             print(
                 f"session_init: missing session_id in stdin payload; "
-                f"using fallback {session_id} to preserve session_start event",
+                f"using fallback {session_id} (no disk persistence)",
                 file=sys.stderr,
             )
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-        try:
-            write_context(team_name, session_id, project_dir, plugin_root)
-        except Exception as e:
-            # Fail-open: context file is best-effort; hooks fall back to empty strings
-            print(f"session_init: could not write context file: {e}", file=sys.stderr)
+        if not session_id_was_missing:
+            try:
+                write_context(team_name, session_id, project_dir, plugin_root)
+            except Exception as e:
+                # Fail-open: context file is best-effort; hooks fall back to empty strings
+                print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
-        # Write session_start event to journal (after write_context so path is available).
-        append_event(
-            make_event(
-                "session_start",
-                team=team_name,
-                session_id=session_id,
-                project_dir=project_dir,
-                worktree="",  # Not yet created at this point
-            ),
-        )
+            # Write session_start event to journal (after write_context so path is available).
+            append_event(
+                make_event(
+                    "session_start",
+                    team=team_name,
+                    session_id=session_id,
+                    project_dir=project_dir,
+                    worktree="",  # Not yet created at this point
+                ),
+            )
 
         try:
             team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"

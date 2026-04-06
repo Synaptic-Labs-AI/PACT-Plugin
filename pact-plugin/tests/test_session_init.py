@@ -1119,13 +1119,18 @@ class TestWriteContextIntegration:
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
         """When stdin lacks session_id, fall back to a per-process unique
-        "unknown-XXXXXXXX" sentinel and emit a stderr warning so the
-        substitution is visible. The fallback value is passed to
-        write_context() so the context file and the journal anchor event
-        stay consistent. The unique suffix mirrors generate_team_name() and
-        prevents concurrent malformed-stdin sessions from colliding on the
-        same `pact-sessions/.../unknown/` directory. Mirrors the bundle 4
-        defensive-substitution pattern in handoff_gate.py.
+        "unknown-XXXXXXXX" sentinel so downstream code paths that require a
+        non-empty string (team name derivation, log formatting) still
+        function, and emit a stderr warning so the substitution is visible.
+
+        R3 (2026-04-06): The sentinel must NOT be passed to write_context or
+        append_event — those calls would create an unreapable directory at
+        `~/.claude/pact-sessions/{slug}/unknown-xxxx/` because
+        cleanup_old_sessions filters by strict _UUID_PATTERN and "unknown-*"
+        never matches. Gate both persistence calls on session_id_was_missing.
+        The anchor event is intentionally dropped on this path: a dropped
+        event is observable in stderr, while a disk leak is silent and
+        unbounded.
         """
         from session_init import main
 
@@ -1143,44 +1148,53 @@ class TestWriteContextIntegration:
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
              patch("session_init.write_context") as mock_write_ctx, \
+             patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit):
                 main()
 
-        # write_context receives the per-process unique "unknown-XXXXXXXX"
-        # fallback, keeping the fallback value consistent between the
-        # context file and the journal anchor event. The 8-hex suffix
-        # comes from secrets.token_hex(4), mirroring generate_team_name().
-        call_args = mock_write_ctx.call_args[0]
-        passed_session_id = call_args[1]
-        assert passed_session_id.startswith("unknown-")
-        # token_hex(4) -> 8 hex chars; full sentinel is "unknown-" + 8 chars = 16
-        assert len(passed_session_id) == len("unknown-") + 8
-        suffix = passed_session_id[len("unknown-"):]
-        assert all(c in "0123456789abcdef" for c in suffix)
+        # R3: write_context and append_event must NOT be called on the
+        # malformed-stdin path — they would create an unreapable
+        # `pact-sessions/.../unknown-xxxx/` directory.
+        mock_write_ctx.assert_not_called()
+        session_start_calls = [
+            call for call in mock_append.call_args_list
+            if call.args and call.args[0].get("type") == "session_start"
+        ]
+        assert session_start_calls == [], (
+            "append_event must not be called for session_start on the "
+            "malformed-stdin path (R3: would create unreapable directory)"
+        )
 
-        # The stderr warning makes the substitution visible in logs
-        # (same visibility pattern as handoff_gate.py's bundle 4 fix).
+        # The stderr warning makes the fallback visible in logs and
+        # explicitly names the trade-off: no disk persistence.
         captured = capsys.readouterr()
         assert "missing session_id" in captured.err
         assert "fallback" in captured.err
-        assert "to preserve session_start event" in captured.err
+        assert "no disk persistence" in captured.err
         # The warning includes the unique sentinel value so logs show
-        # which fallback was used.
-        assert passed_session_id in captured.err
+        # which fallback was used. Extract it from the warning line.
+        # Format: "... using fallback unknown-XXXXXXXX (no disk persistence)"
+        import re as _re
+        m = _re.search(r"unknown-([0-9a-f]{8})", captured.err)
+        assert m is not None, f"expected unknown-XXXXXXXX in stderr: {captured.err}"
 
-    def test_session_start_event_journaled_with_unknown_when_stdin_lacks_session_id(
+    def test_session_start_event_dropped_when_stdin_lacks_session_id(
         self, monkeypatch, tmp_path
     ):
-        """Regression: the session_start event — the journal's anchor
-        event — must be written with a non-empty session_id even when
-        stdin lacks one. The RA1+RG2 schema validator rejects empty
-        session_id for session_start events; without the "unknown-XXXXXXXX"
-        fallback, append_event() would silently drop the anchor event
-        (Finding A from r6-audit-producer-defaults). Mirrors the
-        handoff_gate.py bundle 4 regression test for agent_handoff
-        event integrity.
+        """R3 regression: when stdin lacks session_id, the session_start
+        event MUST NOT be written to the journal. Writing it would call
+        append_event, which calls mkdir on
+        `~/.claude/pact-sessions/{slug}/unknown-xxxx/` — a directory that
+        cleanup_old_sessions will never reap (filters by strict UUID).
+
+        This supersedes the Finding A priority (preserve the anchor event
+        via sentinel) because R3 shows the preservation was creating an
+        unbounded disk leak. The trade-off is explicit: a dropped anchor
+        event is observable via the stderr warning in
+        test_missing_session_id_falls_back_to_unknown_and_warns; a disk
+        leak is silent and grows without bound.
         """
         from session_init import main
 
@@ -1205,26 +1219,75 @@ class TestWriteContextIntegration:
             with pytest.raises(SystemExit):
                 main()
 
-        # Find the session_start event in the append_event calls.
+        # No session_start event may be appended on the malformed-stdin path.
         session_start_calls = [
             call for call in mock_append.call_args_list
             if call.args and call.args[0].get("type") == "session_start"
         ]
-        assert len(session_start_calls) == 1, (
-            f"Expected exactly one session_start event, got "
-            f"{len(session_start_calls)}"
+        assert session_start_calls == [], (
+            f"Expected zero session_start events on malformed-stdin path, "
+            f"got {len(session_start_calls)}"
         )
-        session_start_event = session_start_calls[0].args[0]
 
-        # The session_id must be the non-empty "unknown-XXXXXXXX" fallback
-        # so the schema validator accepts the event. An empty string here
-        # is the Finding A bug — the anchor event is silently dropped.
-        # The unique suffix prevents directory collisions across concurrent
-        # malformed-stdin sessions.
-        journaled_id = session_start_event["session_id"]
-        assert journaled_id != ""
-        assert journaled_id.startswith("unknown-")
-        assert len(journaled_id) == len("unknown-") + 8
+    def test_unknown_session_id_does_not_create_disk_artifacts(
+        self, monkeypatch, tmp_path
+    ):
+        """R3 regression (2026-04-06): when stdin lacks session_id, no
+        `unknown-*` directory may be created under
+        `~/.claude/pact-sessions/`. This is an integration-level test —
+        it runs main() WITHOUT patching write_context or append_event and
+        then inspects the real filesystem under tmp_path.
+
+        The bug r11-fixer-init introduced: the `unknown-{token_hex(4)}`
+        sentinel format sidesteps cleanup_old_sessions (which filters by
+        strict _UUID_PATTERN), so every malformed-stdin session leaves a
+        permanent directory behind. The fix gates both persistence calls
+        on session_id_was_missing.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+
+        # Intentionally do NOT patch write_context or append_event — we
+        # want to verify the real call sites are gated, not mocked.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        # Fail-open: session_init should still complete cleanly (code 0).
+        # Then inspect the real filesystem: no `unknown-*` directory may
+        # exist anywhere under `~/.claude/pact-sessions/`.
+        pact_sessions = tmp_path / ".claude" / "pact-sessions"
+        if pact_sessions.exists():
+            leaked = [
+                p for p in pact_sessions.rglob("unknown-*")
+                if p.is_dir()
+            ]
+            assert leaked == [], (
+                f"R3 regression: session_init created unreapable "
+                f"unknown-* directories: {leaked}"
+            )
+            # Also check there's no session-journal.jsonl or
+            # pact-session-context.json under any unknown-* path.
+            leaked_files = list(pact_sessions.rglob("unknown-*/session-journal.jsonl"))
+            leaked_files += list(pact_sessions.rglob("unknown-*/pact-session-context.json"))
+            assert leaked_files == [], (
+                f"R3 regression: session_init created unreapable files: {leaked_files}"
+            )
 
     def test_unknown_session_id_does_not_pollute_claude_md(
         self, monkeypatch, tmp_path
