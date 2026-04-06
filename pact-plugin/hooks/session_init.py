@@ -377,6 +377,20 @@ def main():
         # the malformed-stdin path: without a valid session_id, we cannot
         # durably record the session, and creating an orphaned journal file
         # in an unreapable directory is worse than the missing anchor.
+        #
+        # DESIGN DECISION (2026-04-06, user-authorized): on the malformed-stdin
+        # path, BOTH the journal session_start anchor AND the CLAUDE.md
+        # Current Session block are intentionally skipped. This reverses the
+        # earlier "Finding A" priority that preserved the anchor in the
+        # journal for visibility. The reversal was authorized after the
+        # trade-off was surfaced explicitly: R3 (silent unbounded disk leak
+        # from the unreapable `unknown-{hex}/` directory) is a strictly worse
+        # failure mode than Finding A (visible-in-stderr dropped anchor). The
+        # two are mutually exclusive because append_event() is what creates
+        # the leaked directory in the first place — preserving the anchor
+        # IS what causes the leak. The dropped-anchor outcome is observable
+        # via the stderr warning emitted below, so the loss of visibility
+        # is bounded; the disk leak is not.
         raw_id = input_data.get("session_id")
         # Single canonical predicate (R-1+R-2): rejects None, non-strings,
         # empty strings, whitespace-only strings, and any "unknown-*" sentinel.
