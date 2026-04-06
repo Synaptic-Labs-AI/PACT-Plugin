@@ -23,6 +23,8 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ## Process
 
+**Target file**: The project CLAUDE.md may be at either `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Use `.claude/CLAUDE.md` if it exists, otherwise use `./CLAUDE.md`. If neither exists, create at `.claude/CLAUDE.md`. This matches the detection logic used by the `resolve_project_claude_md_path()` helper.
+
 ### With Arguments (targeted pin)
 
 1. Read existing CLAUDE.md

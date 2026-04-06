@@ -31,6 +31,7 @@ Output: JSON with `hookSpecificOutput.additionalContext` for status
 
 import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -45,26 +46,31 @@ if str(_hooks_dir) not in sys.path:
 from shared.task_utils import get_task_list
 
 # Import staleness detection (extracted to staleness.py for maintainability).
-# Public names are get_project_claude_md_path / estimate_tokens in staleness.py.
-# Re-exported here with underscore aliases so existing consumers and tests
-# that patch "session_init._get_project_claude_md_path" continue to work.
+# Underscore aliases (_get_project_claude_md_path, _estimate_tokens) and the
+# uppercase constants are re-exported here so test_staleness.py can keep
+# importing them via `from session_init import ...`. Removing these would
+# break the staleness test suite, even though pyright flags them as unused
+# inside session_init itself — they form the module's public interface.
 from staleness import (  # noqa: F401
     check_pinned_staleness as _staleness_check,
     PINNED_STALENESS_DAYS,
     PINNED_CONTEXT_TOKEN_BUDGET,
-    get_project_claude_md_path,
-    estimate_tokens,
     _get_project_claude_md_path,
     _estimate_tokens,
 )
 
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
-from shared.pact_context import write_context
+from shared.pact_context import get_session_dir, write_context
+from shared.session_journal import append_event, make_event
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
-from shared.claude_md_manager import update_claude_md, ensure_project_memory_md
+from shared.claude_md_manager import (
+    update_claude_md,
+    ensure_project_memory_md,
+    resolve_project_claude_md_path,
+)
 from shared.session_resume import (
     update_session_info,
     restore_last_session,
@@ -153,6 +159,111 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     return f"pact-{suffix}"
 
 
+def _extract_prev_session_dir(project_dir: str) -> str | None:
+    """
+    Extract the previous session's directory path from the project CLAUDE.md.
+
+    Reads the "## Current Session" block written by update_session_info()
+    and extracts the session dir from lines like
+    "- Session dir: `~/.claude/pact-sessions/PACT-prompt/abc12345-...`".
+
+    Honors both supported project CLAUDE.md locations
+    ($project_dir/.claude/CLAUDE.md preferred, $project_dir/CLAUDE.md legacy).
+
+    Falls back to deriving the path from the Resume line's session_id +
+    project root basename if the Session dir line is absent (backward compat
+    with sessions that wrote team name but not session dir).
+
+    This is used to locate the previous session's journal for resume context
+    and pause state detection. Returns None if neither CLAUDE.md exists or
+    the session dir can't be extracted.
+
+    Args:
+        project_dir: CLAUDE_PROJECT_DIR path
+
+    Returns:
+        Previous session directory path string, or None if not found
+    """
+    if not project_dir:
+        return None
+
+    try:
+        claude_md, source = resolve_project_claude_md_path(project_dir)
+        # source == "new_default" means neither location exists -- nothing to read
+        if source == "new_default":
+            return None
+
+        content = claude_md.read_text(encoding="utf-8")
+
+        # Primary: match "- Session dir: `<path>`" in the Current Session block.
+        match = re.search(r'- Session dir:\s*`([^`]+)`', content)
+        if match:
+            raw = match.group(1)
+            # Expand ~ to actual home directory
+            if raw.startswith("~/"):
+                return str(Path.home() / raw[2:])
+            return raw
+
+        # The primary regex missed even though CLAUDE.md is on disk. This is
+        # usually benign (older sessions wrote only the Resume line, not the
+        # Session dir line — handled by the fallback just below), but it is
+        # also how a silent format regression would present. Log a one-line
+        # stderr warning so future drift in the SESSION_START block surfaces
+        # during testing instead of silently degrading to the fallback.
+        print(
+            "session_init: _extract_prev_session_dir regex failed on existing "
+            "CLAUDE.md, falling back to Resume-line; file may have unexpected "
+            "format",
+            file=sys.stderr,
+        )
+
+        # Fallback: derive from Resume line session_id + project root basename.
+        # Resume line format: "- Resume: `claude --resume <session_id>`"
+        resume_match = re.search(
+            r'- Resume:\s*`claude --resume\s+([0-9a-f-]+)`', content
+        )
+        if resume_match:
+            session_id = resume_match.group(1)
+            # Use project root basename (not worktree) for slug
+            slug = Path(project_dir).name
+            return str(
+                Path.home() / ".claude" / "pact-sessions" / slug / session_id
+            )
+
+    except (IOError, OSError):
+        pass
+    return None
+
+
+def _is_unknown_or_missing_session(raw_id: object) -> bool:
+    """Return True if the session_id is missing, blank, or already a sentinel.
+
+    Single canonical predicate for the malformed-stdin gate. Both the
+    persistence call sites at the top of main() (write_context + append_event)
+    and the CLAUDE.md write at step 5b consult this helper so the two gates
+    can never drift. Drift previously allowed two corruption classes:
+
+    * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
+      `not raw_id`, leaking through to write_context as a literal directory
+      name.
+    * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
+      the string is non-empty, then later passed `startswith("unknown")`
+      and was written into CLAUDE.md anyway via a different code path.
+
+    The unified helper rejects all of: None, non-strings, empty strings,
+    whitespace-only strings, and any string already shaped like the
+    `unknown-*` sentinel.
+    """
+    if not raw_id:
+        return True
+    if not isinstance(raw_id, str):
+        return True
+    stripped = raw_id.strip()
+    if not stripped:
+        return True
+    return stripped.startswith("unknown")
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -239,6 +350,81 @@ def main():
 
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
+
+        # 5a. Write session context file FIRST so get_session_dir() works for
+        # subsequent journal writes. write_context() populates the _cache
+        # immediately, enabling append_event() to derive the journal path.
+        # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
+        # rejects empty strings for str-typed required fields, so an empty
+        # session_id would cause append_event() to silently drop the
+        # session_start event. Substitute a non-empty per-process-unique
+        # sentinel so downstream code paths that require a non-empty string
+        # (e.g., team name derivation, log formatting) still function.
+        # Reachable in production via the malformed-stdin fallback above
+        # (input_data = {} on JSONDecodeError); latent otherwise because
+        # Claude Code reliably provides session_id.
+        #
+        # R3 (MEDIUM, 2026-04-06): The sentinel must NOT touch disk. The
+        # per-process unique suffix (`unknown-{token_hex(4)}`) means every
+        # malformed-stdin session generates a unique path like
+        # `~/.claude/pact-sessions/{slug}/unknown-a3f9b2c4/`. session_end's
+        # cleanup_old_sessions filters by strict _UUID_PATTERN, which
+        # "unknown-*" never matches — so these directories accumulate
+        # indefinitely. Gate BOTH persistence call sites (write_context and
+        # append_event) on session_id_was_missing to prevent the leak. The
+        # existing CLAUDE.md guard at step 5b handles its own persistence.
+        # The session_start journal anchor event is intentionally dropped on
+        # the malformed-stdin path: without a valid session_id, we cannot
+        # durably record the session, and creating an orphaned journal file
+        # in an unreapable directory is worse than the missing anchor.
+        #
+        # DESIGN DECISION (2026-04-06, user-authorized): on the malformed-stdin
+        # path, BOTH the journal session_start anchor AND the CLAUDE.md
+        # Current Session block are intentionally skipped. This reverses the
+        # earlier "Finding A" priority that preserved the anchor in the
+        # journal for visibility. The reversal was authorized after the
+        # trade-off was surfaced explicitly: R3 (silent unbounded disk leak
+        # from the unreapable `unknown-{hex}/` directory) is a strictly worse
+        # failure mode than Finding A (visible-in-stderr dropped anchor). The
+        # two are mutually exclusive because append_event() is what creates
+        # the leaked directory in the first place — preserving the anchor
+        # IS what causes the leak. The dropped-anchor outcome is observable
+        # via the stderr warning emitted below, so the loss of visibility
+        # is bounded; the disk leak is not.
+        raw_id = input_data.get("session_id")
+        # Single canonical predicate (R-1+R-2): rejects None, non-strings,
+        # empty strings, whitespace-only strings, and any "unknown-*" sentinel.
+        # The CLAUDE.md write gate at step 5b consults the same helper so the
+        # two predicates can never drift.
+        session_id_was_missing = _is_unknown_or_missing_session(raw_id)
+        if not session_id_was_missing:
+            session_id = str(raw_id)
+        else:
+            session_id = f"unknown-{secrets.token_hex(4)}"
+            print(
+                f"session_init: missing session_id in stdin payload; "
+                f"using fallback {session_id} (no disk persistence)",
+                file=sys.stderr,
+            )
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+        if not session_id_was_missing:
+            try:
+                write_context(team_name, session_id, project_dir, plugin_root)
+            except Exception as e:
+                # Fail-open: context file is best-effort; hooks fall back to empty strings
+                print(f"session_init: could not write context file: {e}", file=sys.stderr)
+
+            # Write session_start event to journal (after write_context so path is available).
+            append_event(
+                make_event(
+                    "session_start",
+                    team=team_name,
+                    session_id=session_id,
+                    project_dir=project_dir,
+                    worktree="",  # Not yet created at this point
+                ),
+            )
+
         try:
             team_config = Path.home() / ".claude" / "teams" / team_name / "config.json"
             team_exists = team_config.exists()
@@ -246,16 +432,42 @@ def main():
             # Fail-open: if filesystem check fails, assume fresh session
             team_exists = False
 
+        # Resolve session_dir early so substitution instructions can include it.
+        # get_session_dir() works here because write_context() populated _cache above.
+        # Suppress session_dir for the unknown-* sentinel so the literal
+        # `.../unknown-xxxx/` path never leaks into the substitution instructions
+        # block — otherwise the orchestrator would obediently mkdir that path
+        # for any command that uses {session_dir}, bypassing the CLAUDE.md guard
+        # below.
+        session_dir = get_session_dir() if not session_id_was_missing else ""
+
         # Build context message based on source × team_exists (5 paths)
+        # Session placeholder variable substitution instructions tell the orchestrator how to
+        # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
+        if session_dir:
+            _substitutions = (
+                f'Session placeholder variables (substitute before running commands): '
+                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+                f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
+                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            )
+        else:
+            _substitutions = (
+                f'Session placeholder variables (substitute before running commands): '
+                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+                f'Session dir unavailable (session_id missing from stdin) — '
+                f'do not run commands that depend on {{session_dir}} until next clean start. '
+                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            )
         _team_reuse = (
             f'Your team is `{team_name}` (existing — resumed session). '
             f'Do not call TeamCreate — the team already exists. '
-            f'Use the name `{team_name}` wherever {{team_name}} appears in commands.'
+            f'{_substitutions}'
         )
         _team_create = (
             f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). '
             f'Do not read files, explore code, or respond to the user until the team is created. '
-            f'Use the name `{team_name}` wherever {{team_name}} appears in commands.'
+            f'{_substitutions}'
         )
 
         if source == "compact" and team_exists:
@@ -284,8 +496,7 @@ def main():
             # Normal resume: model retains context, team exists
             context_parts.insert(0, (
                 f'{_team_reuse} '
-                f'Check for paused-state.json at ~/.claude/pact-sessions/ '
-                f'for session state from /PACT:pause.'
+                f'Check session journal for paused state from /PACT:pause.'
             ))
         elif source == "startup" and not team_exists:
             # Fresh session: full initialization
@@ -308,18 +519,28 @@ def main():
                 f'Check TaskList for recovery context.'
             ))
 
-        # 5a. Write session context file for all subsequent hooks
-        raw_id = input_data.get("session_id")
-        session_id = str(raw_id) if raw_id else ""
-        try:
-            write_context(team_name, session_id, project_dir)
-        except Exception as e:
-            # Fail-open: context file is best-effort; hooks fall back to empty strings
-            print(f"session_init: could not write context file: {e}", file=sys.stderr)
+        # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
+        # before step 5b overwrites the Current Session block with THIS
+        # session's info. READ-BEFORE-WRITE invariant: _extract_prev_session_dir
+        # must run before update_session_info, otherwise it reads back the
+        # just-written current session dir and silently breaks cross-session
+        # resume (step 7) and paused-work detection (step 8).
+        prev_session_dir = _extract_prev_session_dir(project_dir)
 
         # 5b. Write session resume info to project CLAUDE.md
-        if session_id:
-            session_msg = update_session_info(session_id, team_name)
+        # (session_dir already resolved above for substitution instructions)
+        # Skip the CLAUDE.md write when session_id is an "unknown-*" sentinel
+        # (bundle 5 fallback for missing stdin; per-process unique suffix).
+        # On the malformed-stdin path BOTH the journal session_start event and
+        # the CLAUDE.md Current Session block are skipped (see the gate above
+        # around append_event and the rationale at step 5 intro): writing
+        # `- Session dir: .../unknown-xxxx/` into CLAUDE.md pollutes state
+        # recovery: session_resume.py:199 would feed `.../unknown-xxxx/` into
+        # _extract_prev_session_dir, and session_end.py:cleanup_old_sessions
+        # filters by _UUID_PATTERN (which "unknown-*" never matches), so the
+        # directory would accumulate indefinitely.
+        if not _is_unknown_or_missing_session(session_id):
+            session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
                 if "failed" in session_msg.lower():
                     system_messages.append(session_msg)
@@ -338,13 +559,14 @@ def main():
                     context_parts.append(resumption_msg)
 
         # 7. Restore last session snapshot for cross-session continuity
-        project_slug = Path(project_dir).name if project_dir else ""
-        session_snapshot = restore_last_session(project_slug=project_slug)
+        # (prev_session_dir was captured in step 5a, before step 5b overwrote
+        # the Current Session block.)
+        session_snapshot = restore_last_session(prev_session_dir=prev_session_dir)
         if session_snapshot:
             context_parts.append(session_snapshot)
 
         # 8. Check for paused work from previous session's /PACT:pause
-        paused_msg = check_paused_state(project_slug=project_slug)
+        paused_msg = check_paused_state(prev_session_dir=prev_session_dir)
         if paused_msg:
             context_parts.append(paused_msg)
 

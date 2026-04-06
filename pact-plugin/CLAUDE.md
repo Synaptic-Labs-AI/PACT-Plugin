@@ -72,6 +72,22 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 6. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
 7. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
 
+## Session Placeholder Variables
+
+Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholder variables. **Substitution is manual — there is no template engine.** Command files contain literal brace-wrapped strings; the orchestrator reads the resolved values and performs textual replacement before invoking shell commands. Read the values from the Current Session block in the project's `CLAUDE.md`. PACT honors both supported locations: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred / new default) and `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Whichever exists wins; when neither exists, `session_init` creates the file at the new default `.claude/CLAUDE.md`.
+
+**Source precedence**: when the `session_init` hook delivers substitution instructions inline (in the SessionStart system reminder at the top of the session), **those hook-delivered values are authoritative** and take precedence over the Current Session block in `CLAUDE.md`. The `CLAUDE.md` block is the fallback source, used only when the hook context has been lost — for example, after conversation compaction drops the initial system reminder. Always prefer the hook-delivered values when they are still visible in context. If the hook reported that `{session_dir}` is unavailable for this session, honor that notice and do not fabricate a path from `CLAUDE.md`.
+
+**Fallback is per-field**: if an individual variable is missing from `CLAUDE.md` (for example, a session block written by an older `session_init` that didn't record `- Plugin root:`), fall back to `pact-session-context.json` in the current session directory for that one variable. Do not re-read the whole set from JSON when a single field is missing.
+
+| Placeholder | CLAUDE.md line | Context JSON key | Description |
+|-------------|---------------|-----------------|-------------|
+| `{team_name}` | `- Team:` | `team_name` | Session team name |
+| `{session_dir}` | `- Session dir:` | Derived from `session_id` + `project_dir` | Session journal directory |
+| `{plugin_root}` | `- Plugin root:` | `plugin_root` | Installed plugin root for CLI paths |
+
+**Last-resort fallback for `{plugin_root}`**: if both `CLAUDE.md` and `pact-session-context.json` are unavailable, use `$HOME/.claude/protocols/pact-plugin/../` (symlink traversal). ⚠️ This fallback is fragile — if the plugin symlink has been deleted or the plugin was reinstalled mid-session, the path may resolve to a missing directory. If you detect that the resolved path does not exist, stop and report the issue to the user rather than continuing with a broken path.
+
 ## GUIDELINES
 
 ### 🧠 Context Economy (The Sacred Window)
@@ -89,13 +105,16 @@ When waiting for teammates to complete their tasks, **do not narrate waiting** �
 
 Reconstruct state:
 1. `git worktree list` — identify active feature work
-2. `TaskList` — tasks, status, owners, blockers
-3. `TaskGet` on priority tasks: in-progress first, then recent completed
-4. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
+2. Read session journal (`~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`) — durable record of HANDOFFs, phase transitions, variety scores, and commits
+3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
+4. `TaskGet` on priority tasks: in-progress first, then recent completed (fallback for metadata not yet in journal)
+5. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
-**State persistence**: Computed state is persisted in task metadata (`TaskUpdate`/`TaskGet`). Keys: `variety`, `impact_cycle_count`, `scope_detection` (Feature task); `s2_boundaries`, `established_conventions` (CODE phase); `remediation_cycle_count` (Review); `scope_contract`, `worktree_path`, `nesting_depth` (per-scope). Workflow commands handle recovery automatically.
+**Two-tier state model**:
+- **Session journal** (durable): Workflow state persisted as JSONL events at `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`. Survives compaction and task GC. Primary source for HANDOFFs, phase progress, and cross-session recovery.
+- **Task system** (ephemeral coordination): Status, blocking, assignment. `TaskList` summaries survive compaction, but task FILES (containing metadata) may be GC'd by the platform in long sessions. Use journal events as the authoritative source when task metadata is unavailable.
 
-The Task system survives compaction. Your context window doesn't.
+Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the journal does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.
 
 ### Communication
 - Start every response with "🛠️:" to maintain consistent identity
@@ -159,7 +178,7 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 - After comPACT specialist completes → Standard Harvest
 - During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
-These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via `completed_handoffs.jsonl` (primary source) and cross-references with `TaskList` (supplementary). `TaskList` may be incomplete in long sessions due to platform garbage collection of older task files.
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via session journal `agent_handoff` events (primary source) and cross-references with `TaskList` (supplementary). `TaskList` may be incomplete in long sessions due to platform garbage collection of older task files.
 
 NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
@@ -365,8 +384,8 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
 | Reading agent's full HANDOFF | `TaskGet(taskId).metadata.handoff` (on-demand, not automatic) |
 | Creating downstream phase task | Include upstream task IDs in description for chain-read |
-| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
-| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
+| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — the `handoff_gate` hook only bypasses handoff validation for tasks where `metadata.type in ("blocker", "algedonic")`; the subject prefix has no special meaning. |
+| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. **`metadata.type` is required** for handoff-gate bypass (see blocker row). |
 
 **Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals, progress signals). The orchestrator creates tasks and monitors via `TaskList` and incoming `SendMessage` signals. Agents can send brief mid-task status updates (`[sender→lead] Progress: {done}/{remaining}, {status}`) when requested.
 

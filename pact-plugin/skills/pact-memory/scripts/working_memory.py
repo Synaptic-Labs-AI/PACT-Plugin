@@ -46,15 +46,42 @@ RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 # Note: PINNED_CONTEXT_TOKEN_BUDGET is defined solely in hooks/staleness.py
 
 
+def _find_existing_claude_md(base: Path) -> Optional[Path]:
+    """
+    Return the first existing CLAUDE.md under `base`, checking both
+    supported locations in priority order.
+
+    Claude Code accepts project memory at either `.claude/CLAUDE.md` (new
+    default) or `./CLAUDE.md` (legacy). This helper checks `.claude/CLAUDE.md`
+    first, then falls back to `./CLAUDE.md`, returning the first match or
+    None if neither exists.
+
+    Args:
+        base: Directory to probe for CLAUDE.md.
+
+    Returns:
+        Path to the existing CLAUDE.md, or None if neither location exists.
+    """
+    dot_claude = base / ".claude" / "CLAUDE.md"
+    if dot_claude.exists():
+        return dot_claude
+    legacy = base / "CLAUDE.md"
+    if legacy.exists():
+        return legacy
+    return None
+
+
 def _get_claude_md_path() -> Optional[Path]:
     """
     Get the path to CLAUDE.md in the project root.
 
     Uses CLAUDE_PROJECT_DIR environment variable if set, then falls back
     to git worktree/repo root detection, then to current working directory.
+    At each level, checks both `.claude/CLAUDE.md` (new default) and
+    `./CLAUDE.md` (legacy) in priority order.
 
     Note: This mirrors the resolution strategy in hooks/staleness.py
-    (_get_project_claude_md_path). Kept as a local copy because this
+    (get_project_claude_md_path). Kept as a local copy because this
     module lives in skills/ and cannot import from hooks/.
 
     Returns:
@@ -62,9 +89,9 @@ def _get_claude_md_path() -> Optional[Path]:
     """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
-        claude_md = Path(project_dir) / "CLAUDE.md"
-        if claude_md.exists():
-            return claude_md
+        found = _find_existing_claude_md(Path(project_dir))
+        if found is not None:
+            return found
 
     # Fallback: detect git root (worktree-safe)
     # Uses --git-common-dir instead of --show-toplevel because the latter
@@ -83,18 +110,14 @@ def _get_claude_md_path() -> Optional[Path]:
         if result.returncode == 0 and result.stdout.strip():
             git_common_dir = result.stdout.strip()
             repo_root = Path(git_common_dir).resolve().parent
-            claude_md = repo_root / "CLAUDE.md"
-            if claude_md.exists():
-                return claude_md
+            found = _find_existing_claude_md(repo_root)
+            if found is not None:
+                return found
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
     # Last resort: current working directory
-    claude_md = Path.cwd() / "CLAUDE.md"
-    if claude_md.exists():
-        return claude_md
-
-    return None
+    return _find_existing_claude_md(Path.cwd())
 
 
 def _estimate_tokens(text: str) -> int:

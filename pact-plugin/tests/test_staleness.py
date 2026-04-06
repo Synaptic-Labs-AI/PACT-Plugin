@@ -313,6 +313,78 @@ class TestGetProjectClaudeMdPath:
 
         assert result is None
 
+    def test_finds_dot_claude_via_env_var(self, tmp_path):
+        """Should find .claude/CLAUDE.md when CLAUDE_PROJECT_DIR is set."""
+        from session_init import _get_project_claude_md_path
+
+        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
+        dot_claude.parent.mkdir()
+        dot_claude.write_text("# Test", encoding="utf-8")
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
+            result = _get_project_claude_md_path()
+
+        assert result == dot_claude
+
+    def test_prefers_dot_claude_over_legacy_via_env_var(self, tmp_path):
+        """When both files exist under env var path, .claude/CLAUDE.md wins."""
+        from session_init import _get_project_claude_md_path
+
+        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
+        dot_claude.parent.mkdir()
+        dot_claude.write_text("# preferred", encoding="utf-8")
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# legacy", encoding="utf-8")
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
+            result = _get_project_claude_md_path()
+
+        assert result == dot_claude
+        assert result != legacy
+
+    def test_finds_dot_claude_via_git_root(self, tmp_path, clean_env_no_claude_project_dir):
+        """Should find .claude/CLAUDE.md under the git root when env var unset."""
+        from session_init import _get_project_claude_md_path
+
+        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
+        dot_claude.parent.mkdir()
+        dot_claude.write_text("# Test", encoding="utf-8")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = str(tmp_path / ".git") + "\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _get_project_claude_md_path()
+
+        assert result == dot_claude
+
+    def test_finds_dot_claude_via_cwd(self, tmp_path, clean_env_no_claude_project_dir):
+        """Should find .claude/CLAUDE.md under the current working directory as last resort."""
+        from session_init import _get_project_claude_md_path
+
+        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
+        dot_claude.parent.mkdir()
+        dot_claude.write_text("# Test", encoding="utf-8")
+
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
+            result = _get_project_claude_md_path()
+
+        assert result == dot_claude
+
+    def test_finds_legacy_when_only_legacy_exists_via_env_var(self, tmp_path):
+        """Falls back to legacy ./CLAUDE.md when only it exists."""
+        from session_init import _get_project_claude_md_path
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# Test", encoding="utf-8")
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
+            result = _get_project_claude_md_path()
+
+        assert result == legacy
+
 
 class TestSessionInitEstimateTokens:
     """Tests for _estimate_tokens() in session_init.py (separate copy)."""

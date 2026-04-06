@@ -7,9 +7,9 @@ Used by: hooks.json Stop hook
 Non-blocking (always exit 0). Three reminder paths (checked in priority order):
 1. "uncompleted_tasks" — agent-owned tasks still in_progress at session end.
    Last-resort safety net for agents that crashed or missed the TeammateIdle gate.
-2. "unprocessed_handoffs" — completed_handoffs.jsonl exists at session end,
-   meaning workflow HANDOFFs were captured but never processed by the secretary.
-3. "adhoc_save" — no completed_handoffs.jsonl but session had substantive ad-hoc work
+2. "unprocessed_handoffs" — session journal contains agent_handoff events at session
+   end, meaning workflow HANDOFFs were captured but never processed by the secretary.
+3. "adhoc_save" — no agent_handoff events but session had substantive ad-hoc work
    outside formal PACT workflows.
 
 Uses a file-based reentrancy guard (~/.claude/teams/{team_name}/.adhoc_reminded)
@@ -27,7 +27,8 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name
+from shared.pact_context import get_session_dir, get_team_name
+from shared.session_journal import read_events
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -97,8 +98,8 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
 
     Returns:
         REMINDER_UNCOMPLETED_TASKS — agent tasks still in_progress at session end
-        REMINDER_UNPROCESSED_HANDOFFS — completed_handoffs.jsonl exists (workflow ran but memory not processed)
-        REMINDER_ADHOC_SAVE — no completed_handoffs.jsonl but substantive ad-hoc work detected
+        REMINDER_UNPROCESSED_HANDOFFS — session journal has agent_handoff events (workflow ran but memory not processed)
+        REMINDER_ADHOC_SAVE — no agent_handoff events but substantive ad-hoc work detected
         None — no reminder needed
 
     Args:
@@ -108,21 +109,38 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
     if not team_name:
         return None
 
-    teams_dir = Path.home() / ".claude" / "teams" / team_name
+    # Guard file lives in session dir (survives independently of team dir)
+    session_dir = get_session_dir()
+    if session_dir:
+        guard_dir = Path(session_dir)
+    else:
+        guard_dir = Path.home() / ".claude" / "teams" / team_name
 
     # If already reminded this session, skip
-    if (teams_dir / ".adhoc_reminded").exists():
+    if (guard_dir / ".adhoc_reminded").exists():
         return None
 
     # Path 0: Agent-owned tasks still in_progress (highest priority)
     if find_uncompleted_tasks(team_name):
         return REMINDER_UNCOMPLETED_TASKS
 
-    # Path 1: completed_handoffs.jsonl exists → unprocessed HANDOFFs
-    if (teams_dir / "completed_handoffs.jsonl").exists():
+    # AdvF2 Approach 3: explicit guard for the journal-backed reminder paths.
+    # The implicit `read_events()` call below silently returns [] when
+    # pact_context was not initialized in this hook process — that empty list
+    # is indistinguishable from "session ran but had no agent_handoff events",
+    # which would route us to the ad-hoc save reminder instead of the
+    # unprocessed-handoffs reminder. Skip the journal probe entirely when we
+    # have no session context, so we don't trip the wrong reminder branch on
+    # a missing init(). Approach 4's stderr warning still fires inside
+    # read_events() if a future caller bypasses this guard.
+    if not pact_context.is_initialized():
+        return None
+
+    # Path 1: session journal has agent_handoff events → unprocessed HANDOFFs
+    if read_events(event_type="agent_handoff"):
         return REMINDER_UNPROCESSED_HANDOFFS
 
-    # Path 2: No completed_handoffs.jsonl but substantive ad-hoc work
+    # Path 2: No agent_handoff events but substantive ad-hoc work
     if len(transcript) < MIN_TRANSCRIPT_LENGTH:
         return None
 
@@ -137,10 +155,14 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
 
 def _write_guard_file(team_name: str) -> None:
     """Write the .adhoc_reminded guard file to prevent duplicate reminders."""
-    teams_dir = Path.home() / ".claude" / "teams" / team_name
-    if not teams_dir.exists():
+    session_dir = get_session_dir()
+    if session_dir:
+        guard_dir = Path(session_dir)
+    else:
+        guard_dir = Path.home() / ".claude" / "teams" / team_name
+    if not guard_dir.exists():
         return
-    guard_path = teams_dir / ".adhoc_reminded"
+    guard_path = guard_dir / ".adhoc_reminded"
     try:
         fd = os.open(str(guard_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)

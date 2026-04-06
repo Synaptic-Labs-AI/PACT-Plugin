@@ -13,9 +13,13 @@ update_claude_md():
 
 ensure_project_memory_md():
 8. Returns None when CLAUDE_PROJECT_DIR not set
-9. Returns None when project CLAUDE.md already exists
-10. Creates project CLAUDE.md with memory sections
+9. Returns None when project CLAUDE.md already exists (legacy ./CLAUDE.md)
+10. Creates project CLAUDE.md (.claude/CLAUDE.md, new default) with memory sections
 11. Created file contains session markers
+12. Returns None when .claude/CLAUDE.md already exists (no overwrite)
+13. Returns None when only legacy ./CLAUDE.md exists (no migration)
+14. .claude/CLAUDE.md takes precedence when both locations exist
+15. Created .claude/CLAUDE.md has 0o600 permissions; .claude/ dir 0o700
 """
 
 import sys
@@ -153,6 +157,80 @@ class TestUpdateClaudeMd:
         assert result is not None
         assert "unmanaged" in result
 
+    def test_handles_multiple_pact_start_markers_gracefully(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Corrupted CLAUDE.md with multiple PACT_START markers must not silently
+        drop intermediate content. The manager should warn to stderr, replace
+        only the LAST PACT block, and preserve everything before it verbatim.
+
+        Regression: prior implementation used `split(START_MARKER)` and only
+        kept parts[0] and parts[1], silently dropping parts[2:] (any user
+        content between the second start marker and the trailing end marker).
+        """
+        from shared.claude_md_manager import update_claude_md
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        (plugin_root / "CLAUDE.md").write_text("# PACT v2\nNew content")
+
+        start = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
+        end = "<!-- PACT_END -->"
+
+        # Construct a corrupted CLAUDE.md with THREE PACT_START markers.
+        # The intermediate "stale orphan block" + "user notes" between blocks
+        # must survive the update; only the final block should be rewritten.
+        corrupted = (
+            "User preamble\n"
+            f"{start}\n"
+            "# Stale PACT v0\nFirst orphan body\n"
+            f"{end}\n"
+            "Important user notes between blocks\n"
+            f"{start}\n"
+            "# Stale PACT v0.5\nSecond orphan body\n"
+            f"{end}\n"
+            "More user notes\n"
+            f"{start}\n"
+            "# PACT v1\nMost recent body\n"
+            f"{end}\n"
+            "User trailing content"
+        )
+
+        claude_dir = tmp_path / "home" / ".claude"
+        claude_dir.mkdir(parents=True)
+        target = claude_dir / "CLAUDE.md"
+        target.write_text(corrupted)
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        result = update_claude_md()
+
+        assert result == "PACT Orchestrator updated"
+
+        content = target.read_text()
+
+        # New content replaced the LAST block
+        assert "# PACT v2" in content
+        assert "New content" in content
+        # The most recent stale body must be gone (it was the one replaced)
+        assert "Most recent body" not in content
+        # All surrounding user content must survive verbatim
+        assert "User preamble" in content
+        assert "Important user notes between blocks" in content
+        assert "More user notes" in content
+        assert "User trailing content" in content
+        # Intermediate orphan blocks are preserved (not silently dropped)
+        assert "# Stale PACT v0" in content
+        assert "First orphan body" in content
+        assert "# Stale PACT v0.5" in content
+        assert "Second orphan body" in content
+
+        # A warning was emitted to stderr identifying the corruption
+        captured = capsys.readouterr()
+        assert "PACT warning" in captured.err
+        assert "3 PACT_START markers" in captured.err
+
     def test_appends_when_no_markers_no_conflict(self, tmp_path, monkeypatch):
         """Should append PACT block when no markers and no PACT content."""
         from shared.claude_md_manager import update_claude_md
@@ -205,7 +283,7 @@ class TestEnsureProjectMemoryMd:
         assert (tmp_path / "CLAUDE.md").read_text() == "existing content"
 
     def test_creates_project_claude_md(self, tmp_path, monkeypatch):
-        """Should create project CLAUDE.md with memory sections."""
+        """Should create .claude/CLAUDE.md (new default) with memory sections."""
         from shared.claude_md_manager import ensure_project_memory_md
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
@@ -213,7 +291,11 @@ class TestEnsureProjectMemoryMd:
         result = ensure_project_memory_md()
 
         assert result == "Created project CLAUDE.md with memory sections"
-        content = (tmp_path / "CLAUDE.md").read_text()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        legacy = tmp_path / "CLAUDE.md"
+        assert new_default.exists()
+        assert not legacy.exists()
+        content = new_default.read_text()
         assert "# Project Memory" in content
         assert "## Retrieved Context" in content
         assert "## Working Memory" in content
@@ -226,9 +308,74 @@ class TestEnsureProjectMemoryMd:
 
         ensure_project_memory_md()
 
-        content = (tmp_path / "CLAUDE.md").read_text()
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content
+
+    def test_returns_none_when_dot_claude_exists(self, tmp_path, monkeypatch):
+        """Should return None and not overwrite when .claude/CLAUDE.md already exists."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        dot_claude_file = dot_claude_dir / "CLAUDE.md"
+        dot_claude_file.write_text("existing dot-claude content")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = ensure_project_memory_md()
+
+        assert result is None
+        assert dot_claude_file.read_text() == "existing dot-claude content"
+        # Legacy was not created as a side effect
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+    def test_returns_none_when_legacy_exists(self, tmp_path, monkeypatch):
+        """Should return None when only the legacy ./CLAUDE.md exists (no migration)."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("existing legacy content")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = ensure_project_memory_md()
+
+        assert result is None
+        # Legacy file is preserved as-is; no migration to .claude/
+        assert legacy.read_text() == "existing legacy content"
+        assert not (tmp_path / ".claude").exists()
+
+    def test_dot_claude_takes_precedence_over_legacy(self, tmp_path, monkeypatch):
+        """When both exist, .claude/CLAUDE.md is preferred (return None, no edit)."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        dot_claude_file = dot_claude_dir / "CLAUDE.md"
+        dot_claude_file.write_text("preferred")
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("legacy")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = ensure_project_memory_md()
+
+        assert result is None
+        assert dot_claude_file.read_text() == "preferred"
+        assert legacy.read_text() == "legacy"
+
+    def test_created_file_has_secure_permissions(self, tmp_path, monkeypatch):
+        """Newly created .claude/CLAUDE.md should be 0o600; .claude/ dir should be 0o700."""
+        import stat
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        ensure_project_memory_md()
+
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        assert new_default.exists()
+        file_mode = stat.S_IMODE(new_default.stat().st_mode)
+        assert file_mode == 0o600, f"Expected 0o600, got {oct(file_mode)}"
+        dir_mode = stat.S_IMODE(new_default.parent.stat().st_mode)
+        assert dir_mode == 0o700, f"Expected 0o700, got {oct(dir_mode)}"
 
 
 class TestUpdateClaudeMdErrorPaths:
@@ -289,3 +436,115 @@ class TestEnsureProjectMemoryMdErrorPaths:
 
         assert result is not None
         assert "Project CLAUDE.md failed:" in result
+
+
+class TestResolveProjectClaudeMdPath:
+    """Direct tests for resolve_project_claude_md_path() helper.
+
+    The resolver returns (path, source) where source is one of:
+      - "dot_claude": existing .claude/CLAUDE.md
+      - "legacy": existing ./CLAUDE.md
+      - "new_default": neither exists; path points to .claude/CLAUDE.md
+    """
+
+    def test_returns_dot_claude_when_only_dot_claude_exists(self, tmp_path):
+        """Returns .claude/CLAUDE.md path with 'dot_claude' source."""
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
+        dot_claude.parent.mkdir()
+        dot_claude.write_text("# dot-claude")
+
+        path, source = resolve_project_claude_md_path(tmp_path)
+
+        assert path == dot_claude
+        assert source == "dot_claude"
+
+    def test_returns_legacy_when_only_legacy_exists(self, tmp_path):
+        """Returns ./CLAUDE.md path with 'legacy' source."""
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# legacy")
+
+        path, source = resolve_project_claude_md_path(tmp_path)
+
+        assert path == legacy
+        assert source == "legacy"
+
+    def test_prefers_dot_claude_when_both_exist(self, tmp_path):
+        """When both files exist, .claude/CLAUDE.md wins."""
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        dot_claude = tmp_path / ".claude" / "CLAUDE.md"
+        dot_claude.parent.mkdir()
+        dot_claude.write_text("# preferred")
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# legacy")
+
+        path, source = resolve_project_claude_md_path(tmp_path)
+
+        assert path == dot_claude
+        assert source == "dot_claude"
+        assert path != legacy
+
+    def test_returns_new_default_when_neither_exists(self, tmp_path):
+        """When neither file exists, points to .claude/CLAUDE.md as the new default."""
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        path, source = resolve_project_claude_md_path(tmp_path)
+
+        assert path == tmp_path / ".claude" / "CLAUDE.md"
+        assert source == "new_default"
+        # No filesystem side effects -- resolver only inspects, never creates
+        assert not path.exists()
+        assert not (tmp_path / ".claude").exists()
+
+    def test_accepts_string_project_dir(self, tmp_path):
+        """Accepts string paths in addition to Path objects."""
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        path, source = resolve_project_claude_md_path(str(tmp_path))
+
+        assert source == "new_default"
+        assert path == tmp_path / ".claude" / "CLAUDE.md"
+
+
+class TestEnsureDotClaudeParent:
+    """Tests for ensure_dot_claude_parent() helper."""
+
+    def test_creates_dot_claude_dir_with_secure_mode(self, tmp_path):
+        """Creates the parent directory with mode 0o700."""
+        import stat
+        from shared.claude_md_manager import ensure_dot_claude_parent
+
+        target = tmp_path / ".claude" / "CLAUDE.md"
+        assert not target.parent.exists()
+
+        ensure_dot_claude_parent(target)
+
+        assert target.parent.exists()
+        mode = stat.S_IMODE(target.parent.stat().st_mode)
+        assert mode == 0o700, f"Expected 0o700, got {oct(mode)}"
+
+    def test_no_op_when_parent_exists(self, tmp_path):
+        """Does not raise when the parent directory already exists."""
+        from shared.claude_md_manager import ensure_dot_claude_parent
+
+        # Pre-create the parent (legacy path -- no .claude/ subdir)
+        target = tmp_path / "CLAUDE.md"
+        # tmp_path always exists; nothing to create
+        ensure_dot_claude_parent(target)  # Should not raise
+
+        assert tmp_path.exists()
+
+    def test_creates_nested_parents(self, tmp_path):
+        """Creates intermediate directories if needed (parents=True)."""
+        from shared.claude_md_manager import ensure_dot_claude_parent
+
+        # Simulate a deeper-than-expected layout (defensive)
+        target = tmp_path / "outer" / ".claude" / "CLAUDE.md"
+
+        ensure_dot_claude_parent(target)
+
+        assert target.parent.exists()

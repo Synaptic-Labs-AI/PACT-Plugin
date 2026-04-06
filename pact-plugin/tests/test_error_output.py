@@ -946,7 +946,6 @@ class TestSessionEndSuppressOutput:
         with patch("sys.stdin", io.StringIO("{}")), \
              patch.dict(os.environ, env, clear=False), \
              patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -987,7 +986,7 @@ class TestHandoffGateSuppressOutput:
         _assert_suppress_output(captured.out)
 
     def test_success_path_suppress(self, capsys):
-        """All gates passed, completed_handoffs entry written -> suppressOutput."""
+        """All gates passed, journal entry written -> suppressOutput."""
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -1008,7 +1007,7 @@ class TestHandoffGateSuppressOutput:
             },
         }
         with patch("handoff_gate._read_task_json", return_value=task_data), \
-             patch("handoff_gate.append_pending_handoff"), \
+             patch("handoff_gate.append_event"), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()

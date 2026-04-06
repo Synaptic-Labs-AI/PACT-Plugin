@@ -3,8 +3,8 @@ Location: pact-plugin/hooks/shared/pact_context.py
 
 Shared session context module for PACT hooks.
 
-Provides session identity (team_name, session_id, project_dir) and agent
-name resolution for all hooks. Context is written once at SessionStart
+Provides session identity (team_name, session_id, project_dir, plugin_root)
+and agent name resolution for all hooks. Context is written once at SessionStart
 by session_init.py and read by subsequent hooks via init() + accessors.
 
 See: docs/architecture/pact-context-module.md for full design rationale.
@@ -34,6 +34,7 @@ _EMPTY_CONTEXT = {
     "team_name": "",
     "session_id": "",
     "project_dir": "",
+    "plugin_root": "",
     "started_at": "",
 }
 
@@ -57,6 +58,19 @@ def _get_context_file_path() -> Path | None:
     a session-scoped path established by init().
     """
     return _context_path
+
+
+def is_initialized() -> bool:
+    """Return True iff init() (or write_context()) has set _context_path.
+
+    Used by callers (notably session_journal's implicit API and
+    memory_adhoc_reminder) to detect the "hook ran before pact_context was
+    initialized" failure mode without coupling to the private module
+    attribute. False means subsequent reads/writes derived from session
+    context will silently fail-open (empty list, None, False) and the
+    caller may want to take an alternate path.
+    """
+    return _context_path is not None
 
 
 def init(input_data: dict) -> None:
@@ -106,7 +120,7 @@ def get_pact_context() -> dict:
     """
     Read session context from the context file.
 
-    Returns dict with keys: team_name, session_id, project_dir, started_at.
+    Returns dict with keys: team_name, session_id, project_dir, plugin_root, started_at.
     All values are strings. Returns empty strings for all keys on any error
     (file missing, malformed JSON, permission denied).
 
@@ -132,6 +146,7 @@ def get_pact_context() -> dict:
             "team_name": str(data.get("team_name", "")),
             "session_id": str(data.get("session_id", "")),
             "project_dir": str(data.get("project_dir", "")),
+            "plugin_root": str(data.get("plugin_root", "")),
             "started_at": str(data.get("started_at", "")),
         }
         return _cache
@@ -176,6 +191,11 @@ def get_session_dir() -> str:
         return ""
     slug = Path(project_dir).name
     return str(_build_session_path(slug, session_id))
+
+
+def get_plugin_root() -> str:
+    """Convenience: return plugin_root from context. Empty string on error."""
+    return get_pact_context().get("plugin_root", "")
 
 
 def resolve_agent_name(
@@ -271,6 +291,10 @@ def _lookup_agent_in_team_config(
                 return str(member.get("name", ""))
 
         return ""
+    except FileNotFoundError:
+        # Normal fall-back path in resolve_agent_name (step 3 of 5);
+        # silent because team config is not always present.
+        return ""
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
         print(
             f"pact_context: could not read team config: {e}",
@@ -283,6 +307,7 @@ def write_context(
     team_name: str,
     session_id: str,
     project_dir: str,
+    plugin_root: str = "",
 ) -> None:
     """
     Write the session context file. Called ONLY by session_init.py.
@@ -302,6 +327,7 @@ def write_context(
         team_name: The generated team name (e.g., "pact-0001639f")
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
+        plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
     """
     global _context_path, _cache
 
@@ -309,6 +335,7 @@ def write_context(
         "team_name": team_name,
         "session_id": session_id,
         "project_dir": project_dir,
+        "plugin_root": plugin_root,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -329,10 +356,6 @@ def write_context(
             file=sys.stderr,
         )
         return
-
-    # Update module state so reads in the same process find the file
-    _context_path = target
-    _cache = None
 
     context_dir = target.parent
     try:
@@ -356,6 +379,14 @@ def write_context(
             except OSError:
                 pass
             raise
+
+        # Only after successful rename: update module state so reads in the
+        # same process find the file. Populate _cache so get_session_dir()
+        # works right after write_context() within the same process (e.g.,
+        # session_init.py). On rename failure, the cache stays unset and the
+        # in-memory state matches the on-disk state (no file).
+        _context_path = target
+        _cache = context
     except Exception as e:
         print(
             f"pact_context: could not write context file: {e}",

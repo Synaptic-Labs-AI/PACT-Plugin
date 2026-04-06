@@ -87,6 +87,8 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | **Format** | Checklist: finding → resolved / not resolved / new issue | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 
+> **New issue verification**: When a verify-only reviewer reports a "new issue" not in the original checklist, verify the finding against the actual file state before dispatching a fix agent. Verify-only reviewers see a narrow remediation diff and may flag issues that were already addressed in the original code or earlier commits. Check the file directly (`grep` or `Read`) before treating it as actionable.
+
 ### Post-Remediation Incremental Update
 
 After remediation fixes are verified, create an incremental update task for the secretary to process any new findings:
@@ -147,6 +149,18 @@ For each reviewer:
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
+**Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
+```bash
+set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+  --type review_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+{"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}
+JSON
+```
+
+> ⚠️ **Heredoc-stdin contract**: All journal-event writes use `--stdin <<'JSON' ... JSON` (quoted delimiter). This disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g. `{first_line}`, `{finding}`, `{branch}`) pass through verbatim — fixing the silent journal-drop bug where commit messages with `don't` would close the bash quote and abort the write under `set -e`. The orchestrator must still produce JSON-valid string content (escape `\"` and `\\` and control chars when constructing the body).
+
 **HANDOFF review** (dispatched parallel with reviewers — PRIMARY memory trigger):
 ```
 TaskCreate(subject="secretary: harvest pending HANDOFFs (primary trigger, pre-merge)",
@@ -190,7 +204,17 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 
 **After all reviews complete**:
 1. Synthesize findings into a unified review summary with consolidated recommendations
-2. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
+2. **Journal events**: Write a `review_finding` event for each synthesized finding:
+   ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+   # Repeat for each finding:
+   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+     --type review_finding --session-dir '{session_dir}' --stdin <<'JSON'
+   {"severity": "{blocking|suggestion|nitpick}", "finding": "{one-line description}", "reviewer": "{reviewer-name}", "task_id": "{reviewer_task_id}"}
+JSON
+   ```
+3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
 
    | Recommendation | Severity | Reviewer |
    |----------------|----------|----------|
@@ -207,6 +231,15 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        - Independent items (no shared files) → `/PACT:comPACT` (invoke concurrently, same or mixed domain)
        - Items with shared-file dependencies or needing PREPARE/ARCHITECT → `/PACT:orchestrate`
        - Mixed (both independent and dependent) → Use `/PACT:comPACT` for the independent batch AND `/PACT:orchestrate` for the dependent batch (can run in parallel if non-overlapping)
+     - **Journal event**: Write a `remediation` event when dispatching fixes:
+       ```bash
+       set -e
+       trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+       python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+         --type remediation --session-dir '{session_dir}' --stdin <<'JSON'
+       {"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}"}
+JSON
+       ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
      - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
    - **Minor + Future**:
@@ -252,6 +285,16 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        - If any items fixed (minor or future addressed now) → re-run review to verify fixes only (see Verify-Only Re-Review above)
 
 4. State merge readiness (only after ALL blocking fixes complete AND minor/future item handling is done): "Ready to merge" or "Changes requested: [specifics]"
+
+   **Journal event**: When merge-ready, write a `pr_ready` event:
+   ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] peer-review.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+     --type pr_ready --session-dir '{session_dir}' --stdin <<'JSON'
+   {"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}
+JSON
+   ```
 
 5. **Calibration save**:
 

@@ -44,6 +44,29 @@ _MEMORY_API_PATH = (
 )
 
 
+def _find_project_root_under_test(start: Path) -> Path:
+    """
+    Replica of PACTMemory._find_project_root() for isolated testing.
+
+    Walks UP from `start` looking for project markers; returns first match
+    or `start` unchanged if none found.
+    """
+    try:
+        current = start.resolve()
+    except (OSError, RuntimeError):
+        return start
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").exists():
+            return parent
+        if (parent / ".claude").is_dir():
+            return parent
+        if (parent / "CLAUDE.md").exists():
+            return parent
+        if (parent / ".claude" / "CLAUDE.md").exists():
+            return parent
+    return start  # fallback: use original
+
+
 def _detect_project_id_under_test():
     """
     Replica of PACTMemory._detect_project_id() for isolated testing.
@@ -85,9 +108,12 @@ def _detect_project_id_under_test():
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
 
-    # Strategy 3: Current working directory
+    # Strategy 3: Current working directory — walk UP to nearest project marker.
+    # Fixes subdirectory invocation (e.g., running CLI from .claude/ or src/
+    # would previously return the subdirectory basename as the project_id).
     try:
-        cwd_name = Path.cwd().name
+        cwd_root = _find_project_root_under_test(Path.cwd())
+        cwd_name = cwd_root.name
         if cwd_name:
             logger.debug("project_id detected from cwd: %s", cwd_name)
             return cwd_name
@@ -141,13 +167,14 @@ class TestSourceEquivalence:
         assert '["git", "rev-parse", "--git-common-dir"]' in real_source
         assert "timeout=5" in real_source
         assert "(subprocess.TimeoutExpired, FileNotFoundError, OSError)" in real_source
-        assert "Path.cwd().name" in real_source
+        # Strategy 3 now walks up from cwd to find the nearest project marker.
+        assert "_find_project_root(Path.cwd())" in real_source
 
         # Verify strategy ordering in the CODE (not docstring).
         # Use code-specific markers that won't appear in the docstring.
         pos_env = real_source.index('os.environ.get("CLAUDE_PROJECT_DIR")')
         pos_git = real_source.index('["git", "rev-parse", "--git-common-dir"]')
-        pos_cwd = real_source.index("Path.cwd()")
+        pos_cwd = real_source.index("_find_project_root(Path.cwd())")
 
         assert pos_env < pos_git, (
             f"Strategy ordering violation: env var (pos {pos_env}) should appear "
@@ -157,6 +184,20 @@ class TestSourceEquivalence:
             f"Strategy ordering violation: git (pos {pos_git}) should appear "
             f"before cwd (pos {pos_cwd})"
         )
+
+    def test_find_project_root_exists_in_source(self):
+        """The real memory_api.py must define _find_project_root as a class method."""
+        content = _MEMORY_API_PATH.read_text(encoding="utf-8")
+        assert "def _find_project_root(" in content, (
+            "_find_project_root helper must exist in memory_api.py"
+        )
+        # Verify it walks upward from the start path via .parents
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "_find_project_root")
+        assert helper_body is not None
+        assert ".parents" in helper_body, "_find_project_root must walk upward"
+        assert '".git"' in helper_body
+        assert '".claude"' in helper_body
+        assert '"CLAUDE.md"' in helper_body
 
 
 class TestDetectProjectId:
@@ -291,3 +332,176 @@ class TestDetectProjectId:
             text=True,
             timeout=5,
         )
+
+
+class TestFindProjectRoot:
+    """Tests for PACTMemory._find_project_root() walk-up helper."""
+
+    def test_returns_start_when_no_markers(self, tmp_path):
+        """No markers anywhere on the path → returns start unchanged."""
+        nested = tmp_path / "a" / "b" / "c"
+        nested.mkdir(parents=True)
+        # tmp_path is a clean isolated directory — no .git, .claude, CLAUDE.md
+        result = _find_project_root_under_test(nested)
+        # Walk-up found nothing → falls back to start
+        assert result == nested
+
+    def test_finds_git_ancestor(self, tmp_path):
+        """Walk-up finds a .git marker on an ancestor."""
+        project = tmp_path / "my-project"
+        nested = project / "src" / "lib"
+        nested.mkdir(parents=True)
+        (project / ".git").mkdir()
+
+        result = _find_project_root_under_test(nested)
+        assert result == project.resolve()
+        assert result.name == "my-project"
+
+    def test_finds_dot_claude_ancestor(self, tmp_path):
+        """Walk-up finds a .claude/ dir on an ancestor."""
+        project = tmp_path / "cool-repo"
+        nested = project / "docs"
+        nested.mkdir(parents=True)
+        (project / ".claude").mkdir()
+
+        result = _find_project_root_under_test(nested)
+        assert result == project.resolve()
+        assert result.name == "cool-repo"
+
+    def test_finds_legacy_claude_md_ancestor(self, tmp_path):
+        """Walk-up finds ./CLAUDE.md on an ancestor (legacy location)."""
+        project = tmp_path / "legacy-proj"
+        nested = project / "scripts"
+        nested.mkdir(parents=True)
+        (project / "CLAUDE.md").write_text("# project memory\n")
+
+        result = _find_project_root_under_test(nested)
+        assert result == project.resolve()
+        assert result.name == "legacy-proj"
+
+    def test_finds_dot_claude_claude_md_ancestor(self, tmp_path):
+        """Walk-up finds .claude/CLAUDE.md on an ancestor (new default).
+
+        This case matters when .claude/ is a FILE (edge case) or when the
+        .claude/ directory hasn't been created but a CLAUDE.md was placed
+        directly at the expected path — neither of which the earlier
+        .claude/ dir check would catch.
+        """
+        # Construct a case where .claude/ exists but is only meaningful
+        # through its CLAUDE.md child. The .is_dir() check on .claude/
+        # already catches this path, so the explicit .claude/CLAUDE.md
+        # check is defence-in-depth. Verify both routes work.
+        project = tmp_path / "new-default-proj"
+        nested = project / "src"
+        nested.mkdir(parents=True)
+        (project / ".claude").mkdir()
+        (project / ".claude" / "CLAUDE.md").write_text("# new default\n")
+
+        result = _find_project_root_under_test(nested)
+        assert result == project.resolve()
+
+    def test_returns_nearest_ancestor_not_farthest(self, tmp_path):
+        """When multiple ancestors have markers, returns the NEAREST."""
+        outer = tmp_path / "outer"
+        inner = outer / "inner-project"
+        nested = inner / "src"
+        nested.mkdir(parents=True)
+        # Both outer and inner have .git markers
+        (outer / ".git").mkdir()
+        (inner / ".git").mkdir()
+
+        result = _find_project_root_under_test(nested)
+        # Should return the nearest (inner), not the farthest (outer)
+        assert result == inner.resolve()
+        assert result.name == "inner-project"
+
+    def test_start_itself_has_marker(self, tmp_path):
+        """When the start directory itself has a marker, return start."""
+        project = tmp_path / "self-marked"
+        project.mkdir()
+        (project / ".git").mkdir()
+
+        result = _find_project_root_under_test(project)
+        assert result == project.resolve()
+
+
+class TestCwdSubdirectoryDetection:
+    """Tests for Strategy 3 (CWD) subdirectory detection via walk-up.
+
+    These exercise the real bug fix: running the CLI from a subdirectory
+    of a project should return the PROJECT's basename, not the subdirectory's.
+    """
+
+    def test_cwd_from_subdirectory_returns_project_basename(
+        self, clean_env_no_claude_project_dir, tmp_path
+    ):
+        """Running from project/.claude/ should return 'project', not '.claude'."""
+        project = tmp_path / "my-real-project"
+        subdir = project / ".claude"
+        subdir.mkdir(parents=True)
+        (project / ".git").mkdir()
+
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=subdir):
+            result = _detect_project_id_under_test()
+
+        assert result == "my-real-project"
+
+    def test_cwd_from_nested_subdirectory(
+        self, clean_env_no_claude_project_dir, tmp_path
+    ):
+        """Running from project/src/deeply/nested/ still resolves to project."""
+        project = tmp_path / "deep-project"
+        nested = project / "src" / "deeply" / "nested"
+        nested.mkdir(parents=True)
+        (project / "CLAUDE.md").write_text("# project memory\n")
+
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=nested):
+            result = _detect_project_id_under_test()
+
+        assert result == "deep-project"
+
+    def test_cwd_from_project_root_unchanged(
+        self, clean_env_no_claude_project_dir, tmp_path
+    ):
+        """Running from project root returns project root basename."""
+        project = tmp_path / "root-project"
+        project.mkdir()
+        (project / ".git").mkdir()
+
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=project):
+            result = _detect_project_id_under_test()
+
+        assert result == "root-project"
+
+    def test_cwd_no_markers_falls_back_to_cwd_basename(
+        self, clean_env_no_claude_project_dir, tmp_path
+    ):
+        """No markers found walking up → fall back to cwd basename (legacy behavior)."""
+        # tmp_path is clean: no .git, .claude, CLAUDE.md anywhere
+        leaf = tmp_path / "orphan-dir"
+        leaf.mkdir()
+
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=leaf):
+            result = _detect_project_id_under_test()
+
+        # Walk-up finds nothing → returns start → .name == "orphan-dir"
+        assert result == "orphan-dir"
+
+    def test_cwd_dot_claude_detection(
+        self, clean_env_no_claude_project_dir, tmp_path
+    ):
+        """Walk-up triggers on .claude/ directory at ancestor."""
+        project = tmp_path / "claude-dir-proj"
+        subdir = project / "work" / "nested"
+        subdir.mkdir(parents=True)
+        (project / ".claude").mkdir()  # only marker is .claude/
+
+        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=subdir):
+            result = _detect_project_id_under_test()
+
+        assert result == "claude-dir-proj"

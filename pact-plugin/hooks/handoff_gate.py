@@ -15,32 +15,23 @@ Output: stderr message on block (exit 2), nothing on allow (exit 0)
 """
 
 import json
-import os
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from shared.handoff_example import format_handoff_example
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
+from shared.session_journal import append_event, make_event
 
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
-
-BYPASS_SUBJECT_PREFIXES = ("BLOCKER:", "HALT:", "ALERT:")
-
-# Schema version for enriched completed_handoffs.jsonl entries.
-# Enables future format migration without breaking backward-compat readers.
-ENRICHED_SCHEMA_VERSION = 1
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def validate_task_handoff(
-    task_subject: str,
     task_metadata: dict,
     teammate_name: str | None,
 ) -> str | None:
@@ -48,7 +39,6 @@ def validate_task_handoff(
     Validate that a task has complete handoff metadata.
 
     Args:
-        task_subject: Task subject line
         task_metadata: Task metadata dict (from task file)
         teammate_name: Name of completing teammate (None for non-agent)
 
@@ -65,10 +55,6 @@ def validate_task_handoff(
 
     # Bypass: signal tasks (blocker, algedonic)
     if task_metadata.get("type") in ("blocker", "algedonic"):
-        return None
-
-    # Bypass: subject-based signal tasks (legacy format)
-    if task_subject and any(task_subject.startswith(p) for p in BYPASS_SUBJECT_PREFIXES):
         return None
 
     # Check: handoff exists
@@ -220,86 +206,6 @@ def read_task_owner(task_id: str, team_name: str | None, tasks_base_dir: str | N
     return _read_task_json(task_id, team_name, tasks_base_dir).get("owner")
 
 
-def append_pending_handoff(
-    task_id: str,
-    teammate_name: str,
-    team_name: str,
-    task_metadata: dict | None = None,
-    task_subject: str = "",
-) -> None:
-    """
-    Append a completed handoff entry to completed_handoffs.jsonl for secretary consumption.
-
-    Writes a single JSONL line to ~/.claude/teams/{team_name}/completed_handoffs.jsonl
-    so the secretary can discover completed tasks without the orchestrator needing
-    to enumerate task IDs. Uses POSIX atomic append (O_WRONLY|O_APPEND|O_CREAT) with
-    0o600 permissions for concurrent safety and security.
-
-    When task_metadata is provided, the entry is enriched with the full HANDOFF
-    content and task_subject. This makes the entry garbage-collection-proof — the
-    secretary can read HANDOFFs directly from completed_handoffs.jsonl without
-    needing TaskGet (which fails for garbage-collected tasks). Old-format entries
-    (without handoff) remain valid; the secretary falls back to TaskGet for those.
-
-    Dedup guard: reads the file before appending and skips if task_id is already
-    present. This prevents cascade duplicates when TaskCompleted fires for multiple
-    tasks owned by the same agent. Fails open — if the read fails, appends anyway.
-
-    Fails silently — entry loss is acceptable; blocking task completion is not.
-    """
-    if not teammate_name or not team_name:
-        return
-    teams_dir = Path.home() / ".claude" / "teams" / team_name
-    if not teams_dir.exists():
-        return
-    filepath = teams_dir / "completed_handoffs.jsonl"
-
-    # Dedup guard: check if task_id already recorded (fail-open on read error).
-    # Uses POSIX fd read for consistency with the append path below.
-    try:
-        rfd = os.open(str(filepath), os.O_RDONLY)
-        try:
-            size = os.fstat(rfd).st_size
-            content = os.read(rfd, size).decode("utf-8") if size > 0 else ""
-        finally:
-            os.close(rfd)
-        for line in content.strip().splitlines():
-            if line.strip():
-                try:
-                    if json.loads(line).get("task_id") == task_id:
-                        return  # Already captured — skip
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass  # Can't read or file missing? Proceed with append (fail-open)
-
-    try:
-        entry_dict: dict[str, Any] = {
-            "task_id": task_id,
-            "teammate_name": teammate_name,
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        # Enrich with HANDOFF content when available (GC-proof completed_handoffs entry).
-        # task_subject is nested inside `if task_metadata` intentionally:
-        # when metadata is None/empty, we produce a legacy-format entry with no
-        # extra fields. task_subject is only useful alongside metadata context.
-        # "v": 1 is a schema version for enriched entries (enables future format migration).
-        if task_metadata:
-            entry_dict["v"] = ENRICHED_SCHEMA_VERSION
-            handoff = task_metadata.get("handoff")
-            if handoff:
-                entry_dict["handoff"] = handoff
-            if task_subject:
-                entry_dict["task_subject"] = task_subject
-        entry = json.dumps(entry_dict) + "\n"
-        fd = os.open(str(filepath), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, entry.encode())
-        finally:
-            os.close(fd)
-    except (OSError, TypeError, ValueError):
-        pass  # Fail-open: TypeError/ValueError from json.dumps on non-serializable data
-
 
 def main():
     try:
@@ -309,8 +215,27 @@ def main():
         sys.exit(0)
 
     pact_context.init(input_data)
-    task_id = input_data.get("task_id", "")
-    task_subject = input_data.get("task_subject", "")
+    # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
+    # rejects empty strings for str-typed required fields. If the platform
+    # ever omits task_id/task_subject from the TaskCompleted payload, the
+    # downstream agent_handoff event would be silently dropped by
+    # append_event() (which is fail-open). Substitute fallback values and
+    # emit a stderr warning so the substitution is visible — preserving the
+    # HANDOFF event is more important than rejecting it on missing metadata.
+    raw_task_id = input_data.get("task_id")
+    raw_task_subject = input_data.get("task_subject")
+    task_id_was_missing = not raw_task_id
+    task_subject_was_missing = not raw_task_subject
+    task_id = raw_task_id or "unknown"
+    task_subject = raw_task_subject or "(no subject)"
+    if task_id_was_missing or task_subject_was_missing:
+        print(
+            f"handoff_gate: missing required field(s) in TaskCompleted payload "
+            f"(task_id={'MISSING' if task_id_was_missing else 'present'}, "
+            f"task_subject={'MISSING' if task_subject_was_missing else 'present'}); "
+            f"using fallback values to preserve agent_handoff event",
+            file=sys.stderr,
+        )
     team_name = (input_data.get("team_name") or get_team_name()).lower()
 
     # Read task file once — used for both owner resolution and metadata.
@@ -328,7 +253,6 @@ def main():
     task_metadata = task_data.get("metadata", {})
 
     error = validate_task_handoff(
-        task_subject=task_subject,
         task_metadata=task_metadata,
         teammate_name=teammate_name,
     )
@@ -349,12 +273,25 @@ def main():
         print(memory_feedback, file=sys.stderr)
         sys.exit(2)  # Block completion — feedback goes to agent
 
-    # Both gates passed — append to completed_handoffs.jsonl for secretary consumption.
-    # This is the LAST action before exit: every entry = fully complete task.
-    append_pending_handoff(
-        task_id, teammate_name, team_name,
-        task_metadata=task_metadata,
-        task_subject=task_subject,
+    # Signal-task carve-out: blocker/algedonic completions bypass handoff
+    # validation (lines 56-58) and must NOT emit a phantom agent_handoff event.
+    # Writing one would pollute `read_events("agent_handoff")` and mis-route
+    # secretary harvest + memory_adhoc_reminder gating with empty handoff dicts.
+    if task_metadata.get("type") in ("blocker", "algedonic"):
+        print(_SUPPRESS_OUTPUT)
+        sys.exit(0)
+
+    # All gates passed — write agent_handoff event to session journal (GC-proof).
+    # This is the sole HANDOFF persistence path. The secretary reads HANDOFFs from
+    # journal events via read_events("agent_handoff").
+    append_event(
+        make_event(
+            "agent_handoff",
+            agent=teammate_name,
+            task_id=task_id,
+            task_subject=task_subject,
+            handoff=task_metadata.get("handoff", {}),
+        ),
     )
 
     print(_SUPPRESS_OUTPUT)

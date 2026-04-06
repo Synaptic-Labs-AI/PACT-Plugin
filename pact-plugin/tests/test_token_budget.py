@@ -685,3 +685,241 @@ class TestParseRetrievedContextSection:
         assert "# Project" in before
         assert "## Working Memory" in after
         assert "working memory stuff" in after
+
+
+# =============================================================================
+# Dual-location CLAUDE.md resolution tests for _get_claude_md_path()
+# =============================================================================
+
+class TestFindExistingClaudeMd:
+    """Tests for _find_existing_claude_md() dual-location helper."""
+
+    def test_returns_none_when_neither_exists(self, tmp_path):
+        """Empty directory -> None."""
+        from working_memory import _find_existing_claude_md
+
+        result = _find_existing_claude_md(tmp_path)
+        assert result is None
+
+    def test_finds_legacy_claude_md(self, tmp_path):
+        """Legacy ./CLAUDE.md at base -> returns it."""
+        from working_memory import _find_existing_claude_md
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# legacy\n")
+
+        result = _find_existing_claude_md(tmp_path)
+        assert result == legacy
+
+    def test_finds_new_default_claude_md(self, tmp_path):
+        """New default .claude/CLAUDE.md at base -> returns it."""
+        from working_memory import _find_existing_claude_md
+
+        (tmp_path / ".claude").mkdir()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+
+        result = _find_existing_claude_md(tmp_path)
+        assert result == new_default
+
+    def test_prefers_new_default_when_both_exist(self, tmp_path):
+        """When both locations exist, .claude/CLAUDE.md wins."""
+        from working_memory import _find_existing_claude_md
+
+        (tmp_path / ".claude").mkdir()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        legacy = tmp_path / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+        legacy.write_text("# legacy\n")
+
+        result = _find_existing_claude_md(tmp_path)
+        assert result == new_default, ".claude/CLAUDE.md should take priority"
+
+
+class TestGetClaudeMdPathDualLocation:
+    """Dual-location support tests for _get_claude_md_path() across all 3 fallbacks.
+
+    Verifies that each resolution strategy (env var, git root, cwd) checks
+    .claude/CLAUDE.md before ./CLAUDE.md.
+    """
+
+    # --- Strategy 1: CLAUDE_PROJECT_DIR env var ---
+
+    def test_env_var_finds_legacy_claude_md(self, tmp_path):
+        """Env var strategy finds legacy ./CLAUDE.md."""
+        from working_memory import _get_claude_md_path
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# legacy\n")
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
+            result = _get_claude_md_path()
+        assert result == legacy
+
+    def test_env_var_finds_new_default_claude_md(self, tmp_path):
+        """Env var strategy finds .claude/CLAUDE.md (new default)."""
+        from working_memory import _get_claude_md_path
+
+        (tmp_path / ".claude").mkdir()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
+            result = _get_claude_md_path()
+        assert result == new_default
+
+    def test_env_var_prefers_new_default_over_legacy(self, tmp_path):
+        """Env var strategy: .claude/CLAUDE.md wins over ./CLAUDE.md."""
+        from working_memory import _get_claude_md_path
+
+        (tmp_path / ".claude").mkdir()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        legacy = tmp_path / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+        legacy.write_text("# legacy\n")
+
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
+            result = _get_claude_md_path()
+        assert result == new_default
+
+    def test_env_var_without_claude_md_falls_through(self, tmp_path):
+        """Env var set but no CLAUDE.md at either location -> fall through to
+        next strategy (which will either find git root or fall back to cwd).
+        """
+        from working_memory import _get_claude_md_path
+
+        # Neither location exists under tmp_path -> env var strategy returns None
+        # -> falls through to git/cwd strategies.
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
+            result = _get_claude_md_path()
+        # Nothing found anywhere -> None
+        assert result is None
+
+    # --- Strategy 2: git root ---
+
+    def test_git_root_finds_new_default_claude_md(self, tmp_path):
+        """Git root strategy finds .claude/CLAUDE.md (new default)."""
+        from working_memory import _get_claude_md_path
+
+        repo_root = tmp_path / "myrepo"
+        (repo_root / ".claude").mkdir(parents=True)
+        new_default = repo_root / ".claude" / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+        git_dir = repo_root / ".git"
+        git_dir.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = f"{git_dir}\n"
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _get_claude_md_path()
+        assert result == new_default
+
+    def test_git_root_finds_legacy_claude_md(self, tmp_path):
+        """Git root strategy finds legacy ./CLAUDE.md."""
+        from working_memory import _get_claude_md_path
+
+        repo_root = tmp_path / "myrepo"
+        repo_root.mkdir()
+        legacy = repo_root / "CLAUDE.md"
+        legacy.write_text("# legacy\n")
+        git_dir = repo_root / ".git"
+        git_dir.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = f"{git_dir}\n"
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _get_claude_md_path()
+        assert result == legacy
+
+    def test_git_root_prefers_new_default_over_legacy(self, tmp_path):
+        """Git root strategy: .claude/CLAUDE.md wins over ./CLAUDE.md."""
+        from working_memory import _get_claude_md_path
+
+        repo_root = tmp_path / "myrepo"
+        (repo_root / ".claude").mkdir(parents=True)
+        new_default = repo_root / ".claude" / "CLAUDE.md"
+        legacy = repo_root / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+        legacy.write_text("# legacy\n")
+        git_dir = repo_root / ".git"
+        git_dir.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = f"{git_dir}\n"
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", return_value=mock_result):
+            result = _get_claude_md_path()
+        assert result == new_default
+
+    # --- Strategy 3: cwd ---
+
+    def test_cwd_finds_legacy_claude_md(self, tmp_path):
+        """CWD strategy finds legacy ./CLAUDE.md."""
+        from working_memory import _get_claude_md_path
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# legacy\n")
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
+            result = _get_claude_md_path()
+        assert result == legacy
+
+    def test_cwd_finds_new_default_claude_md(self, tmp_path):
+        """CWD strategy finds .claude/CLAUDE.md (new default)."""
+        from working_memory import _get_claude_md_path
+
+        (tmp_path / ".claude").mkdir()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
+            result = _get_claude_md_path()
+        assert result == new_default
+
+    def test_cwd_prefers_new_default_over_legacy(self, tmp_path):
+        """CWD strategy: .claude/CLAUDE.md wins over ./CLAUDE.md."""
+        from working_memory import _get_claude_md_path
+
+        (tmp_path / ".claude").mkdir()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        legacy = tmp_path / "CLAUDE.md"
+        new_default.write_text("# new default\n")
+        legacy.write_text("# legacy\n")
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
+            result = _get_claude_md_path()
+        assert result == new_default
+
+    def test_cwd_returns_none_when_nothing_found(self, tmp_path):
+        """All strategies fail -> returns None."""
+        from working_memory import _get_claude_md_path
+
+        # tmp_path is empty -- no CLAUDE.md at either location
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
+             patch("pathlib.Path.cwd", return_value=tmp_path):
+            result = _get_claude_md_path()
+        assert result is None

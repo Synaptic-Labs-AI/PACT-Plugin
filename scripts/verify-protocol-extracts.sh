@@ -72,6 +72,7 @@ verify "pact-scope-detection.md" "Scope Detection (lines 1378-1512)" "1378,1512"
 verify "pact-scope-contract.md" "Scope Contract (lines 1514-1672)" "1514,1672"
 verify "pact-scope-phases.md" "Scoped Phases (lines 1674-1755)" "1674,1755"
 verify "pact-audit.md" "Concurrent Audit (lines 1757-1898)" "1757,1898"
+verify "pact-state-recovery.md" "State Recovery (lines 1916-1996)" "1916,1996"
 
 echo ""
 echo "=== Summary ==="

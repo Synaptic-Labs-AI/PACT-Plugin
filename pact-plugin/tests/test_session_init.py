@@ -43,6 +43,7 @@ import io
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -355,7 +356,7 @@ class TestSourceAwareness:
         assert "existing — resumed session" in additional
         assert "Do not call TeamCreate" in additional
         assert "pact-aabb1122" in additional
-        assert "paused-state.json" in additional
+        assert "paused state" in additional
         # Should NOT have recovery instructions for context resets
         assert "compact-summary.txt" not in additional
         assert "CONTEXT CLEARED" not in additional
@@ -558,7 +559,7 @@ class TestMainPausedStateIntegration:
                 main()
 
         assert exc_info.value.code == 0
-        mock_paused.assert_called_once_with(project_slug="test-project")
+        mock_paused.assert_called_once_with(prev_session_dir=None)
 
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
@@ -588,6 +589,156 @@ class TestMainPausedStateIntegration:
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert "Paused work" not in additional
+
+
+class TestMainPrevSessionDirOrdering:
+    """Regression: _extract_prev_session_dir must run BEFORE update_session_info.
+
+    Bug: in an earlier revision, main() called update_session_info() (which
+    overwrites the Current Session block in CLAUDE.md with THIS session's info)
+    before calling _extract_prev_session_dir(). That caused _extract_prev_session_dir
+    to read back the just-written current session dir, silently breaking:
+      - restore_last_session(prev_session_dir=...) -> reads current (empty) journal
+      - check_paused_state(prev_session_dir=...)   -> never finds paused events
+
+    Invariant: READ prior CLAUDE.md BEFORE OVERWRITING it.
+
+    This test drives main() end-to-end (no mocking of update_session_info,
+    _extract_prev_session_dir, restore_last_session, or check_paused_state).
+    It pre-seeds a prior session with a session_paused event in its journal and
+    asserts the paused-state message appears in the hook output — which can
+    only happen if prev_session_dir was captured before the block rewrite.
+    """
+
+    def test_prev_session_dir_captured_before_claude_md_rewrite(
+        self, monkeypatch, tmp_path
+    ):
+        """End-to-end: paused state from prior session is detected despite
+        update_session_info() overwriting CLAUDE.md in the same main() call."""
+        from session_init import main
+
+        # --- Arrange: tmp home + tmp project dir ---
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        # --- Arrange: prior session dir with a session_paused event in its journal ---
+        prior_session_id = "deadbeef-1111-2222-3333-444455556666"
+        prior_session_dir = (
+            tmp_path / ".claude" / "pact-sessions" / "project" / prior_session_id
+        )
+        prior_session_dir.mkdir(parents=True)
+        prior_journal = prior_session_dir / "session-journal.jsonl"
+        paused_event = {
+            "v": 1,
+            "type": "session_paused",
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "pr_number": 9999,
+            "pr_url": "https://github.com/example/repo/pull/9999",
+            "branch": "feat/prior-session-branch",
+            "worktree_path": str(tmp_path / "wt" / "prior"),
+            "consolidation_completed": True,
+            "team_name": "pact-deadbeef",
+        }
+        prior_journal.write_text(json.dumps(paused_event) + "\n", encoding="utf-8")
+
+        # --- Arrange: project CLAUDE.md with a Session dir line pointing at the prior dir ---
+        # Use an absolute path (not ~) so _extract_prev_session_dir returns it verbatim
+        # and we can assert against it below.
+        prior_session_dir_str = str(prior_session_dir)
+        claude_md_dir = project_dir / ".claude"
+        claude_md_dir.mkdir()
+        claude_md = claude_md_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {prior_session_id}`\n"
+            "- Team: `pact-deadbeef`\n"
+            f"- Session dir: `{prior_session_dir_str}`\n"
+            "- Started: 2025-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        # --- Arrange: current session id (different from the prior one) ---
+        current_session_id = "aabb1122-0000-0000-0000-000000000000"
+        stdin_data = json.dumps({"session_id": current_session_id})
+
+        # Spies so we can assert exactly which prev_session_dir the downstream
+        # calls received. We wrap rather than replace so the real implementations
+        # still run (end-to-end coverage).
+        from session_init import (
+            check_paused_state as real_check_paused_state,
+            restore_last_session as real_restore_last_session,
+        )
+
+        restore_calls: list[str | None] = []
+        paused_calls: list[str | None] = []
+
+        def spy_restore_last_session(prev_session_dir=None):
+            restore_calls.append(prev_session_dir)
+            return real_restore_last_session(prev_session_dir=prev_session_dir)
+
+        def spy_check_paused_state(prev_session_dir=None):
+            paused_calls.append(prev_session_dir)
+            return real_check_paused_state(prev_session_dir=prev_session_dir)
+
+        # Patch boundary side effects that are unrelated to the ordering invariant:
+        #   - setup_plugin_symlinks / update_claude_md / ensure_project_memory_md /
+        #     check_pinned_staleness: touch user home / plugin root — not under test
+        #   - _check_pr_state: shells out to `gh pr view`; patch to OPEN so the
+        #     paused_msg path is exercised instead of being suppressed.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch(
+                 "shared.session_resume._check_pr_state",
+                 return_value="OPEN",
+             ), \
+             patch(
+                 "session_init.restore_last_session",
+                 side_effect=spy_restore_last_session,
+             ), \
+             patch(
+                 "session_init.check_paused_state",
+                 side_effect=spy_check_paused_state,
+             ), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        # --- Assert: both downstream calls saw the PRIOR session dir, not the current one ---
+        assert restore_calls == [prior_session_dir_str], (
+            f"restore_last_session should have received the prior session dir "
+            f"({prior_session_dir_str!r}), but got {restore_calls!r}. "
+            f"This indicates update_session_info() ran before "
+            f"_extract_prev_session_dir() and clobbered the CLAUDE.md block."
+        )
+        assert paused_calls == [prior_session_dir_str], (
+            f"check_paused_state should have received the prior session dir "
+            f"({prior_session_dir_str!r}), but got {paused_calls!r}."
+        )
+
+        # --- Assert: the paused-work message made it into the hook output ---
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "Paused work detected: PR #9999" in additional
+        assert "feat/prior-session-branch" in additional
+
+        # --- Assert: update_session_info DID in fact rewrite the block to the current session ---
+        # (confirms the ordering fix didn't accidentally skip the write)
+        rewritten = claude_md.read_text(encoding="utf-8")
+        assert f"claude --resume {current_session_id}" in rewritten
+        assert f"claude --resume {prior_session_id}" not in rewritten
 
 
 class TestCompactSummaryCleanup:
@@ -963,10 +1114,24 @@ class TestWriteContextIntegration:
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/mj/Sites/test-project",
+            "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
         )
 
-    def test_write_context_gets_empty_session_id_when_stdin_lacks_it(self, monkeypatch, tmp_path):
-        """write_context should receive empty session_id when stdin has none."""
+    def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
+        """When stdin lacks session_id, fall back to a per-process unique
+        "unknown-XXXXXXXX" sentinel so downstream code paths that require a
+        non-empty string (team name derivation, log formatting) still
+        function, and emit a stderr warning so the substitution is visible.
+
+        R3 (2026-04-06): The sentinel must NOT be passed to write_context or
+        append_event — those calls would create an unreapable directory at
+        `~/.claude/pact-sessions/{slug}/unknown-xxxx/` because
+        cleanup_old_sessions filters by strict _UUID_PATTERN and "unknown-*"
+        never matches. Gate both persistence calls on session_id_was_missing.
+        The anchor event is intentionally dropped on this path: a dropped
+        event is observable in stderr, while a disk leak is silent and
+        unbounded.
+        """
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
@@ -983,14 +1148,300 @@ class TestWriteContextIntegration:
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
              patch("session_init.write_context") as mock_write_ctx, \
+             patch("session_init.append_event") as mock_append, \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit):
                 main()
 
-        # session_id should be empty string — no env var fallback
-        call_args = mock_write_ctx.call_args[0]
-        assert call_args[1] == ""
+        # R3: write_context and append_event must NOT be called on the
+        # malformed-stdin path — they would create an unreapable
+        # `pact-sessions/.../unknown-xxxx/` directory.
+        mock_write_ctx.assert_not_called()
+        session_start_calls = [
+            call for call in mock_append.call_args_list
+            if call.args and call.args[0].get("type") == "session_start"
+        ]
+        assert session_start_calls == [], (
+            "append_event must not be called for session_start on the "
+            "malformed-stdin path (R3: would create unreapable directory)"
+        )
+
+        # The stderr warning makes the fallback visible in logs and
+        # explicitly names the trade-off: no disk persistence.
+        captured = capsys.readouterr()
+        assert "missing session_id" in captured.err
+        assert "fallback" in captured.err
+        assert "no disk persistence" in captured.err
+        # The warning includes the unique sentinel value so logs show
+        # which fallback was used. Extract it from the warning line.
+        # Format: "... using fallback unknown-XXXXXXXX (no disk persistence)"
+        import re as _re
+        m = _re.search(r"unknown-([0-9a-f]{8})", captured.err)
+        assert m is not None, f"expected unknown-XXXXXXXX in stderr: {captured.err}"
+
+    def test_substitution_instructions_warn_when_session_dir_unavailable(
+        self, monkeypatch, tmp_path
+    ):
+        """R-3 regression (2026-04-06): when session_id is missing from stdin,
+        the substitution-instructions block in the SessionStart system
+        reminder MUST explicitly warn the orchestrator that {session_dir} is
+        unavailable for this session.
+
+        Without this warning, an orchestrator on the malformed-stdin path
+        would silently fall back to whatever {session_dir} value it can
+        construct (e.g. from `pact-session-context.json` or CLAUDE.md),
+        bypassing the R3 disk-leak gate by writing into a path that
+        session_init deliberately refused to materialize. The warning text
+        is the user-facing half of the R3 contract: persistence is skipped
+        AND the orchestrator is told not to use {session_dir} commands.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+        captured_stdout = io.StringIO()
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", captured_stdout), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # The hook emits a JSON envelope on stdout with the additionalContext
+        # field containing the substitution instructions. Parse it and assert
+        # the warning text is present.
+        hook_output = captured_stdout.getvalue()
+        envelope = json.loads(hook_output)
+        additional_context = (
+            envelope.get("hookSpecificOutput", {}).get("additionalContext", "")
+        )
+
+        # The "session_dir unavailable" warning must appear in the
+        # substitution instructions block.
+        assert "Session dir unavailable" in additional_context, (
+            f"expected substitution-instructions warning about unavailable "
+            f"session_dir, got: {additional_context!r}"
+        )
+        assert "session_id missing from stdin" in additional_context, (
+            f"expected explicit cause in warning, got: {additional_context!r}"
+        )
+        assert "do not run commands that depend on {session_dir}" in additional_context, (
+            f"expected directive to avoid {{session_dir}} commands, got: "
+            f"{additional_context!r}"
+        )
+
+    def test_session_start_event_dropped_when_stdin_lacks_session_id(
+        self, monkeypatch, tmp_path
+    ):
+        """R3 regression: when stdin lacks session_id, the session_start
+        event MUST NOT be written to the journal. Writing it would call
+        append_event, which calls mkdir on
+        `~/.claude/pact-sessions/{slug}/unknown-xxxx/` — a directory that
+        cleanup_old_sessions will never reap (filters by strict UUID).
+
+        This supersedes the Finding A priority (preserve the anchor event
+        via sentinel) because R3 shows the preservation was creating an
+        unbounded disk leak. The trade-off is explicit: a dropped anchor
+        event is observable via the stderr warning in
+        test_missing_session_id_falls_back_to_unknown_and_warns; a disk
+        leak is silent and grows without bound.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event") as mock_append, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # No session_start event may be appended on the malformed-stdin path.
+        session_start_calls = [
+            call for call in mock_append.call_args_list
+            if call.args and call.args[0].get("type") == "session_start"
+        ]
+        assert session_start_calls == [], (
+            f"Expected zero session_start events on malformed-stdin path, "
+            f"got {len(session_start_calls)}"
+        )
+
+    def test_unknown_session_id_does_not_create_disk_artifacts(
+        self, monkeypatch, tmp_path
+    ):
+        """R3 regression (2026-04-06): when stdin lacks session_id, no
+        `unknown-*` directory may be created under
+        `~/.claude/pact-sessions/`. This is an integration-level test —
+        it runs main() WITHOUT patching write_context or append_event and
+        then inspects the real filesystem under tmp_path.
+
+        The bug r11-fixer-init introduced: the `unknown-{token_hex(4)}`
+        sentinel format sidesteps cleanup_old_sessions (which filters by
+        strict _UUID_PATTERN), so every malformed-stdin session leaves a
+        permanent directory behind. The fix gates both persistence calls
+        on session_id_was_missing.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+
+        # Intentionally do NOT patch write_context or append_event — we
+        # want to verify the real call sites are gated, not mocked.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+
+        # Fail-open: session_init should still complete cleanly (code 0).
+        # Then inspect the real filesystem: no `unknown-*` directory may
+        # exist anywhere under `~/.claude/pact-sessions/`.
+        pact_sessions = tmp_path / ".claude" / "pact-sessions"
+        if pact_sessions.exists():
+            leaked = [
+                p for p in pact_sessions.rglob("unknown-*")
+                if p.is_dir()
+            ]
+            assert leaked == [], (
+                f"R3 regression: session_init created unreapable "
+                f"unknown-* directories: {leaked}"
+            )
+            # Also check there's no session-journal.jsonl or
+            # pact-session-context.json under any unknown-* path.
+            leaked_files = list(pact_sessions.rglob("unknown-*/session-journal.jsonl"))
+            leaked_files += list(pact_sessions.rglob("unknown-*/pact-session-context.json"))
+            assert leaked_files == [], (
+                f"R3 regression: session_init created unreapable files: {leaked_files}"
+            )
+
+    def test_unknown_session_id_does_not_pollute_claude_md(
+        self, monkeypatch, tmp_path
+    ):
+        """When the session_id is an "unknown-XXXXXXXX" sentinel, the
+        CLAUDE.md Current Session block must NOT be written.
+
+        The "unknown-*" fallback (bundle 5, with bundle 11 unique suffix)
+        exists so the hook can complete without crashing when stdin lacks
+        session_id. But writing
+        `- Session dir: ~/.claude/pact-sessions/{slug}/unknown-xxxx/`
+        into CLAUDE.md would pollute state recovery:
+
+        * `session_resume.py:199` regex-matches the path and would feed
+          `.../unknown-xxxx/` into `_extract_prev_session_dir`, which
+          corrupts cross-session resume.
+        * `session_end.py:cleanup_old_sessions` filters by
+          `_UUID_PATTERN`, which "unknown-*" never matches — so the
+          `.../unknown-xxxx/` directory is never cleaned up and
+          pollution accumulates indefinitely.
+
+        Fix: `session_init.main` short-circuits the `update_session_info`
+        call when `session_id.startswith("unknown")`. Under R3 the journal
+        session_start event is also dropped on this path (see
+        test_session_start_event_dropped_when_stdin_lacks_session_id),
+        so neither the journal anchor nor the CLAUDE.md write happens.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info") as mock_update_info, \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=True), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # The critical assertion: update_session_info must NOT be called
+        # when session_id is an "unknown-*" sentinel. If it were called,
+        # the CLAUDE.md Current Session block would contain
+        # `- Session dir: .../unknown-xxxx/` and pollute state recovery.
+        mock_update_info.assert_not_called()
+
+    def test_valid_session_id_still_updates_claude_md(
+        self, monkeypatch, tmp_path
+    ):
+        """Positive complement to the unknown-sentinel short-circuit: a
+        real session_id must still flow through to update_session_info.
+        This pins the bundle-6 guard so a future refactor cannot
+        accidentally short-circuit the happy path too.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        real_session_id = "aabb1122-0000-0000-0000-000000000000"
+        stdin_data = json.dumps({"session_id": real_session_id})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None) as mock_update_info, \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=True), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # A real session_id flows through to update_session_info.
+        mock_update_info.assert_called_once()
+        assert mock_update_info.call_args[0][0] == real_session_id
 
     def test_write_context_failure_does_not_block_session(self, monkeypatch, tmp_path):
         """write_context failure should not prevent session_init from completing."""
@@ -1025,3 +1476,447 @@ class TestWriteContextIntegration:
         output = json.loads(mock_stdout.getvalue())
         # Should still have team instruction in output
         assert "pact-aabb1122" in output["hookSpecificOutput"]["additionalContext"]
+
+
+# =============================================================================
+# _extract_prev_session_dir() Dual-Location Tests
+# =============================================================================
+
+
+class TestExtractPrevSessionDirDualLocation:
+    """Tests for _extract_prev_session_dir() honoring both project CLAUDE.md
+    locations.
+
+    Claude Code accepts the project memory file at either:
+      - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md   (preferred / new default)
+      - $CLAUDE_PROJECT_DIR/CLAUDE.md           (legacy)
+
+    _extract_prev_session_dir must locate the previous session's journal
+    regardless of which location is in use, with .claude/CLAUDE.md taking
+    priority when both exist.
+    """
+
+    _CONTENT_TEMPLATE = (
+        "# Project\n"
+        "<!-- SESSION_START -->\n"
+        "## Current Session\n"
+        "- Resume: `claude --resume {sid}`\n"
+        "- Team: `pact-{sid_short}`\n"
+        "- Session dir: `{session_dir}`\n"
+        "<!-- SESSION_END -->\n"
+    )
+
+    def _make_content(self, session_id: str, session_dir: str) -> str:
+        return self._CONTENT_TEMPLATE.format(
+            sid=session_id,
+            sid_short=session_id[:8],
+            session_dir=session_dir,
+        )
+
+    def test_returns_none_when_neither_location_exists(self, tmp_path):
+        """Returns None when neither .claude/CLAUDE.md nor ./CLAUDE.md exists."""
+        from session_init import _extract_prev_session_dir
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result is None
+
+    def test_returns_none_when_project_dir_empty(self):
+        """Returns None when project_dir is the empty string."""
+        from session_init import _extract_prev_session_dir
+
+        assert _extract_prev_session_dir("") is None
+
+    def test_reads_dot_claude_when_only_dot_claude_exists(self, tmp_path):
+        """Reads .claude/CLAUDE.md when it is the only location present."""
+        from session_init import _extract_prev_session_dir
+
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        expected = "/tmp/sessions/dot-claude-only"
+        (dot_claude_dir / "CLAUDE.md").write_text(
+            self._make_content("aaaaaaaa-1111-2222-3333-444444444444", expected),
+            encoding="utf-8",
+        )
+        # Legacy must NOT exist for this case
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result == expected
+
+    def test_reads_legacy_when_only_legacy_exists(self, tmp_path):
+        """Reads ./CLAUDE.md when it is the only location present."""
+        from session_init import _extract_prev_session_dir
+
+        expected = "/tmp/sessions/legacy-only"
+        (tmp_path / "CLAUDE.md").write_text(
+            self._make_content("bbbbbbbb-1111-2222-3333-444444444444", expected),
+            encoding="utf-8",
+        )
+        # .claude/ must NOT exist for this case
+        assert not (tmp_path / ".claude").exists()
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result == expected
+
+    def test_prefers_dot_claude_when_both_exist(self, tmp_path):
+        """When both files exist, .claude/CLAUDE.md is the source of truth."""
+        from session_init import _extract_prev_session_dir
+
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        preferred = "/tmp/sessions/dot-claude-preferred"
+        legacy = "/tmp/sessions/legacy-ignored"
+
+        (dot_claude_dir / "CLAUDE.md").write_text(
+            self._make_content(
+                "cccccccc-1111-2222-3333-444444444444", preferred
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "CLAUDE.md").write_text(
+            self._make_content(
+                "dddddddd-1111-2222-3333-444444444444", legacy
+            ),
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result == preferred
+        assert result != legacy
+
+    def test_resume_line_fallback_when_session_dir_missing(self, tmp_path, monkeypatch):
+        """M3: derives session dir from Resume line + project basename when
+        the `- Session dir:` line is absent.
+
+        Targets the fallback branch at session_init.py:207-218. Backward-compat
+        path for sessions written before the Session dir line existed: when only
+        the `- Resume:` line is present, the function reconstructs the path as
+        ~/.claude/pact-sessions/<project-basename>/<session-id>.
+        """
+        from session_init import _extract_prev_session_dir
+
+        # Pin Path.home() so the asserted path is deterministic.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        # Build a project dir whose basename is the slug used in the fallback.
+        project_dir = tmp_path / "MyProject"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        # No "- Session dir:" line — only the Resume line.
+        (dot_claude / "CLAUDE.md").write_text(
+            "# Project\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {session_id}`\n"
+            "- Team: `pact-12345678`\n"
+            "- Started: 2026-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        expected = str(
+            (tmp_path / "home") / ".claude" / "pact-sessions"
+            / "MyProject" / session_id
+        )
+        assert result == expected
+
+    def test_regex_miss_on_existing_claude_md_logs_warning(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """A1: log a stderr warning when CLAUDE.md exists but the primary regex misses.
+
+        The fallback-to-Resume-line path is intentional and benign for older
+        sessions that never wrote the `- Session dir:` line. But it is also
+        how a silent format regression would present — future changes to
+        session_resume.update_session_info could drop or rename the Session
+        dir line and the test suite would not notice because the fallback
+        quietly succeeds. The fix adds a one-line stderr warning on the
+        regex-miss path so any format drift becomes visible.
+
+        This test:
+          (a) writes a CLAUDE.md where the primary `- Session dir:` regex
+              will miss (only a Resume line is present),
+          (b) asserts the fallback still succeeds (behavior unchanged), and
+          (c) asserts the stderr warning fired with the diagnostic message.
+        """
+        from session_init import _extract_prev_session_dir
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        project_dir = tmp_path / "MyProject"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        session_id = "abcdef01-2345-6789-abcd-ef0123456789"
+        # CLAUDE.md exists but lacks the `- Session dir:` line — the primary
+        # regex must miss while the Resume-line fallback still resolves.
+        (dot_claude / "CLAUDE.md").write_text(
+            "# Project\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {session_id}`\n"
+            "- Team: `pact-abcdef01`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        # (a) Fallback path still resolves the session dir — behavior unchanged.
+        expected = str(
+            (tmp_path / "home") / ".claude" / "pact-sessions"
+            / "MyProject" / session_id
+        )
+        assert result == expected
+
+        # (b) The stderr warning message fires so format drift is visible.
+        captured = capsys.readouterr()
+        assert "_extract_prev_session_dir regex failed" in captured.err
+        assert "falling back to Resume-line" in captured.err
+
+    def test_regex_match_does_not_log_warning(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """A1 happy path: no warning when the primary regex matches.
+
+        Negative companion to the regex-miss test above. Pins that the
+        warning is not spuriously emitted on the common case where the
+        Session dir line IS present — a regression there would add noise
+        to every SessionStart hook run.
+        """
+        from session_init import _extract_prev_session_dir
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        project_dir = tmp_path / "MyProject"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        expected = "/tmp/sessions/happy"
+        (dot_claude / "CLAUDE.md").write_text(
+            "# Project\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume aaaaaaaa-0000-0000-0000-000000000000`\n"
+            "- Team: `pact-aaaaaaaa`\n"
+            f"- Session dir: `{expected}`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        assert result == expected
+        captured = capsys.readouterr()
+        # The warning must NOT fire on the happy path.
+        assert "_extract_prev_session_dir regex failed" not in captured.err
+
+
+# =============================================================================
+# CLAUDE_PLUGIN_ROOT env-set wiring tests (M6)
+# =============================================================================
+
+
+class TestPluginRootEnvWiring:
+    """M6: Verify that main() honors CLAUDE_PLUGIN_ROOT when already set in env.
+
+    The happy-path tests (TestWriteContextIntegration) cover the case where
+    CLAUDE_PLUGIN_ROOT is unset (empty string is passed through). These tests
+    cover the complementary case where the Claude Code plugin loader sets
+    CLAUDE_PLUGIN_ROOT BEFORE session_init runs. session_init.py:317 reads
+    the env var directly:
+
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+
+    So the test merely needs to assert that when the env var is set, the
+    value flows through to:
+      (a) write_context() -> pact-session-context.json
+      (b) update_session_info() -> `- Plugin root:` line in CLAUDE.md
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_pact_context_cache(self, monkeypatch):
+        """T2: reset pact_context module state before every test in this class.
+
+        `write_context()` caches the computed session directory path in
+        `pact_context._cache` and `pact_context._context_path` on first
+        call. Because pytest loads `shared.pact_context` once per process
+        and tests in this class exercise `main()` against different
+        project dirs / tmp_paths, a stale cache from a prior test can
+        leak into the next one — the second test's `write_context` short-
+        circuits on the cached state and writes to the old path.
+
+        Previously only M6c reset these via inline `monkeypatch.setattr`;
+        M6a and M6b were incidentally safe because their assertions were
+        on mock call args or CLAUDE.md file contents rather than on
+        `pact-session-context.json` contents. Promoting the reset to a
+        class-scoped autouse fixture hardens all three tests and any
+        future additions to the class against cache leakage.
+        """
+        import shared.pact_context as pact_context
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+
+    def test_plugin_root_env_flows_to_write_context(self, monkeypatch, tmp_path):
+        """M6a: CLAUDE_PLUGIN_ROOT in env is passed as write_context's 4th arg."""
+        from session_init import main
+
+        plugin_root_value = "/some/custom/plugin/root"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context") as mock_write_ctx, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # 4th positional arg of write_context is plugin_root
+        mock_write_ctx.assert_called_once_with(
+            "pact-aabb1122",
+            "aabb1122-0000-0000-0000-000000000000",
+            str(tmp_path / "proj"),
+            plugin_root_value,
+        )
+
+    def test_plugin_root_env_flows_to_update_session_info(
+        self, monkeypatch, tmp_path
+    ):
+        """M6b: CLAUDE_PLUGIN_ROOT value is passed to update_session_info
+        and lands in the `- Plugin root:` line of the CLAUDE.md SESSION_START
+        block.
+
+        This test does NOT mock update_session_info so the real function
+        actually writes CLAUDE.md -- the assertion is on file contents.
+        """
+        from session_init import main
+
+        plugin_root_value = "/opt/pact-plugin/installed/2.0.0"
+
+        # Set up a real project dir so update_session_info can write to it.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        # Intentionally NOT mocking update_session_info — we want it to run
+        # for real against the tmp_path project dir. Everything else that
+        # touches ~/.claude or the plugin root is mocked.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        # update_session_info should have created/updated the project CLAUDE.md
+        # at the preferred .claude/CLAUDE.md location with the Plugin root line.
+        claude_md = project_dir / ".claude" / "CLAUDE.md"
+        assert claude_md.exists(), (
+            "update_session_info should have created .claude/CLAUDE.md"
+        )
+        content = claude_md.read_text(encoding="utf-8")
+        assert "<!-- SESSION_START -->" in content
+        assert f"- Plugin root: `{plugin_root_value}`" in content, (
+            f"CLAUDE_PLUGIN_ROOT env value should have been written to the "
+            f"Plugin root line, but got:\n{content}"
+        )
+
+        # Also assert the Plugin root line is inside the SESSION_START block
+        # (not appended elsewhere).
+        start = content.index("<!-- SESSION_START -->")
+        end = content.index("<!-- SESSION_END -->")
+        session_block = content[start:end]
+        assert f"- Plugin root: `{plugin_root_value}`" in session_block
+
+    def test_plugin_root_env_flows_to_pact_session_context_json(
+        self, monkeypatch, tmp_path
+    ):
+        """M6c: CLAUDE_PLUGIN_ROOT lands in pact-session-context.json on disk.
+
+        Unlike M6a (which mocks write_context to assert call args), this test
+        lets write_context actually run and reads the JSON back off disk to
+        verify the plugin_root field is persisted.
+        """
+        from session_init import main
+
+        plugin_root_value = "/my/plugin/root/for/persistence/check"
+
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_id = "ccdd3344-0000-0000-0000-000000000000"
+        stdin_data = json.dumps({"session_id": session_id})
+
+        # pact_context._cache / _context_path reset handled by the class's
+        # autouse _reset_pact_context_cache fixture (T2) — no inline reset
+        # needed here.
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        # Context JSON lives at
+        # ~/.claude/pact-sessions/<project-basename>/<session-id>/pact-session-context.json
+        context_file = (
+            tmp_path / ".claude" / "pact-sessions" / "proj" / session_id
+            / "pact-session-context.json"
+        )
+        assert context_file.exists(), (
+            f"pact-session-context.json not found at {context_file}"
+        )
+        data = json.loads(context_file.read_text(encoding="utf-8"))
+        assert data["plugin_root"] == plugin_root_value
+        assert data["session_id"] == session_id
+        assert data["team_name"] == "pact-ccdd3344"

@@ -1,47 +1,23 @@
 # pact-plugin/tests/test_session_end.py
 """
-Tests for session_end.py — SessionEnd hook that writes last-session snapshots.
+Tests for session_end.py — SessionEnd hook for session lifecycle management.
 
-session_end.py is purely observational — no destructive operations.
+session_end.py is purely observational — no destructive operations on project files.
 
 Tests cover:
-1. Writes structured markdown snapshot
-2. Creates sessions directory if missing
-3. Includes completed task summaries with handoff decisions
-4. Includes incomplete tasks with status
-5. Handles empty task list gracefully
-6. Handles None task list gracefully
-7. main() entry point: exit codes and error handling
-
-check_unpaused_pr() — safety-net for unpaused PRs:
-8. Detects PR number in task metadata → appends warning to snapshot
-9. Detects PR URL in handoff values → appends warning
-10. No warning when paused-state.json exists (consolidation already done)
-11. No warning when no PR detected in tasks
-12. No warning when tasks is None
-13. No warning when project_slug is empty
-14. No warning when snapshot file missing
-15. Skips warning when tasks is empty list
-16. Handles malformed handoff PR URL gracefully
-17. Best-effort: no crash on IOError during append
-18. main() calls check_unpaused_pr after write_session_snapshot
-19. main() call ordering: write_session_snapshot -> check_unpaused_pr
-20. Non-string handoff values (dict/list) are skipped without error
-21. Full github.com PR URL is detected by regex
-22. Non-URL "/pull/" text is NOT detected by regex
-23. metadata: None in task dict does not crash check_unpaused_pr (or {} guard)
-
-write_session_snapshot() — metadata None guard:
-24. metadata: None in task dict does not crash write_session_snapshot
-
-File permission hardening:
-25. write_session_snapshot creates directory with 0o700
-26. write_session_snapshot creates file with 0o600
-27. check_unpaused_pr re-applies 0o600 after appending warning
+1. main() entry point: exit codes, error handling, journal event emission
+2. check_unpaused_pr() — journal-based safety-net for unpaused PRs:
+   - Reads session_paused events from journal (skip warning if paused)
+   - Reads review_dispatch events from journal (primary PR detection)
+   - Falls back to task metadata/handoff scanning for PR number
+   - Writes warning to journal via append_event
+3. cleanup_teachback_markers() — session-scoped marker cleanup
+4. cleanup_old_sessions() — stale session directory removal
 """
 import io
 import json
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,270 +42,47 @@ class TestGetProjectSlug:
             assert get_project_slug() == ""
 
 
-class TestWriteSessionSnapshot:
-    """Tests for session_end.write_session_snapshot()."""
-
-    def test_writes_markdown_snapshot(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        tasks = [
-            {
-                "id": "1",
-                "subject": "Implement auth",
-                "status": "completed",
-                "metadata": {
-                    "handoff": {
-                        "produced": ["src/auth.ts"],
-                        "decisions": ["Used JWT for stateless auth"],
-                        "uncertainty": [],
-                        "integration": [],
-                        "open_questions": [],
-                    }
-                },
-            }
-        ]
-
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug="my-project",
-            sessions_dir=str(tmp_path),
-        )
-
-        snapshot_file = tmp_path / "my-project" / "last-session.md"
-        assert snapshot_file.exists()
-        content = snapshot_file.read_text()
-        assert "# Last Session:" in content
-        assert "## Completed Tasks" in content
-        assert "#1 Implement auth" in content
-        assert "Used JWT" in content
-
-    def test_creates_directory_if_missing(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        sessions_dir = tmp_path / "deep" / "nested"
-
-        write_session_snapshot(
-            tasks=[],
-            project_slug="new-project",
-            sessions_dir=str(sessions_dir),
-        )
-
-        snapshot_file = sessions_dir / "new-project" / "last-session.md"
-        assert snapshot_file.exists()
-
-    def test_includes_completed_tasks_with_decisions(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        tasks = [
-            {
-                "id": "2",
-                "subject": "PREPARE: research",
-                "status": "completed",
-                "metadata": {
-                    "handoff": {
-                        "produced": ["docs/prep.md"],
-                        "decisions": ["Chose REST over GraphQL", "Use PostgreSQL"],
-                        "uncertainty": [],
-                        "integration": [],
-                        "open_questions": [],
-                    }
-                },
-            },
-            {
-                "id": "3",
-                "subject": "ARCHITECT: design",
-                "status": "completed",
-                "metadata": {},
-            },
-        ]
-
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug="test-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "test-proj" / "last-session.md").read_text()
-        assert "#2 PREPARE: research -> Chose REST over GraphQL" in content
-        assert "#3 ARCHITECT: design" in content
-        assert "Chose REST over GraphQL" in content
-        assert "Use PostgreSQL" in content
-
-    def test_includes_incomplete_tasks(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        tasks = [
-            {
-                "id": "5",
-                "subject": "CODE: implement API",
-                "status": "in_progress",
-                "metadata": {},
-            },
-            {
-                "id": "6",
-                "subject": "TEST: write tests",
-                "status": "pending",
-                "metadata": {},
-            },
-        ]
-
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug="test-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "test-proj" / "last-session.md").read_text()
-        assert "## Incomplete Tasks" in content
-        assert "#5 CODE: implement API -- in_progress" in content
-        assert "#6 TEST: write tests -- pending" in content
-
-    def test_handles_empty_task_list(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[],
-            project_slug="empty-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "empty-proj" / "last-session.md").read_text()
-        assert "## Completed Tasks" in content
-        assert "- (none)" in content
-
-    def test_handles_none_task_list(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=None,
-            project_slug="none-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "none-proj" / "last-session.md").read_text()
-        assert "## Completed Tasks" in content
-        assert "- (none)" in content
-
-    def test_skips_when_no_project_slug(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[{"id": "1", "subject": "test", "status": "completed", "metadata": {}}],
-            project_slug="",
-            sessions_dir=str(tmp_path),
-        )
-
-        # No file should be created
-        assert not list(tmp_path.iterdir())
-
-    def test_includes_unresolved_blockers(self, tmp_path):
-        from session_end import write_session_snapshot
-
-        tasks = [
-            {
-                "id": "10",
-                "subject": "BLOCKER: missing API key",
-                "status": "in_progress",
-                "metadata": {"type": "blocker"},
-            },
-        ]
-
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug="blocker-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "blocker-proj" / "last-session.md").read_text()
-        assert "## Unresolved" in content
-        assert "#10 BLOCKER: missing API key" in content
-
-    def test_truncates_long_decision_summary(self, tmp_path):
-        """Decision strings longer than 80 chars should be truncated to 77 + '...'."""
-        from session_end import write_session_snapshot
-
-        long_decision = "A" * 100  # 100 chars, well over 80-char threshold
-
-        tasks = [
-            {
-                "id": "15",
-                "subject": "CODE: auth",
-                "status": "completed",
-                "metadata": {
-                    "handoff": {
-                        "produced": ["src/auth.py"],
-                        "decisions": [long_decision, "Short decision"],
-                        "uncertainty": [],
-                        "integration": [],
-                        "open_questions": [],
-                    }
-                },
-            }
-        ]
-
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug="trunc-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "trunc-proj" / "last-session.md").read_text()
-        # The first decision (used as summary) should be truncated
-        expected_summary = "A" * 77 + "..."
-        assert expected_summary in content
-        # The full 100-char string should NOT appear in the completed task line
-        assert long_decision not in content.split("## Key Decisions")[0]
-        # But the full decision DOES appear in Key Decisions section (not truncated there)
-        assert long_decision in content
-
-    def test_handles_metadata_none(self, tmp_path):
-        """Task with 'metadata': None should not crash (or {} guard handles it)."""
-        from session_end import write_session_snapshot
-
-        tasks = [
-            {
-                "id": "20",
-                "subject": "CODE: implement feature",
-                "status": "completed",
-                "metadata": None,
-            },
-            {
-                "id": "21",
-                "subject": "TEST: write tests",
-                "status": "in_progress",
-                "metadata": None,
-            },
-        ]
-
-        write_session_snapshot(
-            tasks=tasks,
-            project_slug="none-meta-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        content = (tmp_path / "none-meta-proj" / "last-session.md").read_text()
-        assert "## Completed Tasks" in content
-        assert "#20 CODE: implement feature" in content
-        assert "## Incomplete Tasks" in content
-        assert "#21 TEST: write tests -- in_progress" in content
-
-
 class TestMainEntryPoint:
-    """Tests for session_end.main() exit behavior."""
+    """Tests for session_end.main() exit behavior and call orchestration."""
+
+    def _patch_main_deps(self, **overrides):
+        """Return a combined context manager mocking main()'s dependencies.
+
+        Default mocks: pact_context.init, get_project_dir, get_session_dir,
+        get_session_id, get_team_name, get_task_list, append_event,
+        check_unpaused_pr, cleanup_teachback_markers, cleanup_old_sessions.
+
+        Pass keyword overrides to replace defaults (e.g., get_task_list=...).
+        """
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock, DEFAULT
+
+        defaults = {
+            "pact_context_init": patch("session_end.pact_context.init"),
+            "get_project_dir": patch("session_end.get_project_dir",
+                                     return_value="/Users/mj/Sites/my-project"),
+            "get_session_dir": patch("session_end.get_session_dir", return_value=""),
+            "get_session_id": patch("session_end.get_session_id", return_value=""),
+            "get_team_name": patch("session_end.get_team_name", return_value="pact-abc12345"),
+            "get_task_list": patch("session_end.get_task_list", return_value=[]),
+            "append_event": patch("session_end.append_event"),
+            "check_unpaused_pr": patch("session_end.check_unpaused_pr"),
+            "cleanup_teachback_markers": patch("session_end.cleanup_teachback_markers"),
+            "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
+        }
+        defaults.update(overrides)
+        return defaults
 
     def test_main_exits_0_on_success(self):
         from session_end import main
 
-        env = {
-            "CLAUDE_PROJECT_DIR": "/Users/mj/project",
-        }
-
-        with patch.dict("os.environ", env, clear=True), \
-             patch("sys.stdin", io.StringIO("{}")), \
-             patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
+        patches = self._patch_main_deps()
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                for p in patches.values():
+                    stack.enter_context(p)
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
 
         assert exc_info.value.code == 0
 
@@ -337,12 +90,9 @@ class TestMainEntryPoint:
         """main() should exit 0 even on errors (fire-and-forget)."""
         from session_end import main
 
-        env = {
-            "CLAUDE_PROJECT_DIR": "/Users/mj/project",
-        }
-
-        with patch.dict("os.environ", env, clear=True), \
-             patch("sys.stdin", io.StringIO("{}")), \
+        with patch("sys.stdin", io.StringIO("{}")), \
+             patch("session_end.pact_context.init"), \
+             patch("session_end.get_team_name", return_value=""), \
              patch("session_end.get_task_list", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -352,67 +102,156 @@ class TestMainEntryPoint:
     def test_main_exits_0_when_no_env_vars(self):
         from session_end import main
 
+        patches = self._patch_main_deps()
         with patch.dict("os.environ", {}, clear=True), \
-             patch("sys.stdin", io.StringIO("{}")), \
-             patch("session_end.get_task_list", return_value=None), \
-             patch("session_end.write_session_snapshot"):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
+             patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                for p in patches.values():
+                    stack.enter_context(p)
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
 
         assert exc_info.value.code == 0
 
-    def test_main_calls_write_snapshot_with_tasks(self):
+    def test_main_writes_session_end_journal_event(self):
+        """main() should write a session_end event to the journal."""
+        from session_end import main
+
+        patches = self._patch_main_deps()
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit):
+                    main()
+
+        # append_event should have been called with a session_end event
+        mock_append = mocks["append_event"]
+        mock_append.assert_called()
+        event_arg = mock_append.call_args[0][0]
+        assert event_arg["type"] == "session_end"
+
+    def test_main_passes_tasks_to_check_unpaused_pr(self):
         from session_end import main
 
         mock_tasks = [{"id": "1", "subject": "test", "status": "completed", "metadata": {}}]
 
-        with patch("session_end.pact_context.init"), \
-             patch("session_end.get_project_dir", return_value="/Users/mj/Sites/my-project"), \
-             patch("sys.stdin", io.StringIO("{}")), \
-             patch("session_end.get_task_list", return_value=mock_tasks), \
-             patch("session_end.write_session_snapshot") as mock_snapshot:
-            with pytest.raises(SystemExit):
-                main()
+        patches = self._patch_main_deps(
+            get_task_list=patch("session_end.get_task_list", return_value=mock_tasks),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit):
+                    main()
 
-        mock_snapshot.assert_called_once()
-        call_args = mock_snapshot.call_args
+        mock_unpaused = mocks["check_unpaused_pr"]
+        mock_unpaused.assert_called_once()
+        call_args = mock_unpaused.call_args
         assert call_args.kwargs["tasks"] == mock_tasks
         assert call_args.kwargs["project_slug"] == "my-project"
 
     def test_main_call_ordering(self):
         """main() must call functions in correct order:
-        write_session_snapshot -> check_unpaused_pr -> cleanup_teachback_markers
-        -> cleanup_old_sessions.
-
-        Ordering is critical: snapshot creates the file, check_unpaused_pr
-        appends to it. Cleanup runs last.
+        check_unpaused_pr -> cleanup_teachback_markers -> cleanup_old_sessions.
+        check_unpaused_pr now runs BEFORE the journal write so its return
+        value can be merged into the single session_end event.
         """
         from session_end import main
 
         call_order = []
 
-        env = {"CLAUDE_PROJECT_DIR": "/Users/mj/Sites/my-project"}
+        def _record(name):
+            def _side_effect(**kw):
+                call_order.append(name)
+                return None  # check_unpaused_pr now returns Optional[str]
+            return _side_effect
 
-        with patch.dict("os.environ", env, clear=True), \
-             patch("sys.stdin", io.StringIO("{}")), \
-             patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot",
-                   side_effect=lambda **kw: call_order.append("write_session_snapshot")), \
-             patch("session_end.check_unpaused_pr",
-                   side_effect=lambda **kw: call_order.append("check_unpaused_pr")), \
-             patch("session_end.cleanup_teachback_markers",
-                   side_effect=lambda **kw: call_order.append("cleanup_teachback_markers")), \
-             patch("session_end.cleanup_old_sessions",
-                   side_effect=lambda **kw: call_order.append("cleanup_old_sessions")):
-            with pytest.raises(SystemExit):
-                main()
+        patches = self._patch_main_deps(
+            check_unpaused_pr=patch("session_end.check_unpaused_pr",
+                side_effect=_record("check_unpaused_pr")),
+            cleanup_teachback_markers=patch("session_end.cleanup_teachback_markers",
+                side_effect=_record("cleanup_teachback_markers")),
+            cleanup_old_sessions=patch("session_end.cleanup_old_sessions",
+                side_effect=_record("cleanup_old_sessions")),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                for p in patches.values():
+                    stack.enter_context(p)
+                with pytest.raises(SystemExit):
+                    main()
 
         assert call_order == [
-            "write_session_snapshot",
             "check_unpaused_pr",
             "cleanup_teachback_markers",
             "cleanup_old_sessions",
         ]
+
+    def test_main_emits_single_session_end_event_when_warning(self):
+        """When check_unpaused_pr returns a warning, main() emits exactly
+        ONE session_end event with the warning attached (not two events)."""
+        from session_end import main
+
+        warning_text = "Session ended without memory consolidation. PR #99 is open."
+        patches = self._patch_main_deps(
+            check_unpaused_pr=patch("session_end.check_unpaused_pr",
+                                    return_value=warning_text),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit):
+                    main()
+
+        mock_append = mocks["append_event"]
+        # Exactly one session_end event — not two (regression test for
+        # the old "session_end then session_end+warning" double-write bug).
+        assert mock_append.call_count == 1
+        event_arg = mock_append.call_args[0][0]
+        assert event_arg["type"] == "session_end"
+        assert event_arg.get("warning") == warning_text
+
+    def test_main_emits_single_session_end_event_no_warning(self):
+        """When check_unpaused_pr returns None, main() emits exactly ONE
+        session_end event with NO warning field."""
+        from session_end import main
+
+        patches = self._patch_main_deps(
+            check_unpaused_pr=patch("session_end.check_unpaused_pr",
+                                    return_value=None),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit):
+                    main()
+
+        mock_append = mocks["append_event"]
+        assert mock_append.call_count == 1
+        event_arg = mock_append.call_args[0][0]
+        assert event_arg["type"] == "session_end"
+        assert "warning" not in event_arg
+
+    def test_main_continues_cleanup_when_journal_write_fails(self):
+        """If append_event raises, main() must still call cleanup functions
+        (regression test for the bare-write single-point-of-failure bug)."""
+        from session_end import main
+
+        patches = self._patch_main_deps(
+            append_event=patch("session_end.append_event",
+                               side_effect=RuntimeError("disk full")),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        # Exit 0 (fire-and-forget)
+        assert exc_info.value.code == 0
+        # Cleanup steps still ran despite the journal write failure
+        mocks["cleanup_teachback_markers"].assert_called_once()
+        mocks["cleanup_old_sessions"].assert_called_once()
 
 
 # =============================================================================
@@ -420,19 +259,19 @@ class TestMainEntryPoint:
 # =============================================================================
 
 class TestCheckUnpausedPr:
-    """Tests for session_end.check_unpaused_pr() — safety-net for unpaused PRs.
+    """Tests for session_end.check_unpaused_pr() — journal-based safety-net.
 
-    Detects open PRs that were NOT paused (no memory consolidation), appending
-    a warning to the last-session.md snapshot for next-session pickup.
+    Detects open PRs that were NOT paused (no memory consolidation), returning
+    a warning string that the caller attaches to the single session_end event.
+
+    Key behavior:
+    - Compares session_paused vs review_dispatch event timestamps:
+      pause covers PR only when last_pause_ts >= last_review_ts.
+    - Reads review_dispatch events (primary PR detection from journal)
+    - Falls back to task metadata scanning (safety net for non-journal PRs)
+    - Returns the warning string (or None) instead of writing the journal
+      directly — the caller emits the single session_end event.
     """
-
-    def _setup_snapshot(self, sessions_dir, project_slug, content="# Last Session\n"):
-        """Helper: create a last-session.md file."""
-        proj_dir = sessions_dir / project_slug
-        proj_dir.mkdir(parents=True, exist_ok=True)
-        snapshot = proj_dir / "last-session.md"
-        snapshot.write_text(content, encoding="utf-8")
-        return snapshot
 
     def _make_task_with_pr_number(self, pr_number):
         """Helper: task with pr_number in metadata."""
@@ -458,138 +297,131 @@ class TestCheckUnpausedPr:
             },
         }
 
-    def test_detects_pr_number_in_task_metadata(self, tmp_path):
-        """Should append warning when pr_number found in task metadata."""
+    def test_detects_pr_number_in_task_metadata(self):
+        """Should return warning string when pr_number found in task metadata."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [self._make_task_with_pr_number(288)]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        assert "## Pause-Mode Warning" in content
-        assert "PR #288" in content
-        assert "pause-mode was not run" in content
+        assert warning is not None
+        assert "PR #288" in warning
+        assert "pause-mode was not run" in warning
 
-    def test_detects_pr_url_in_handoff_values(self, tmp_path):
-        """Should extract PR number from /pull/ URL in handoff metadata."""
+    def test_detects_pr_url_in_handoff_values(self):
+        """Should extract PR number from github.com/pull/ URL in handoff metadata."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [self._make_task_with_pr_url("https://github.com/owner/repo/pull/42")]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        assert "## Pause-Mode Warning" in content
-        assert "PR #42" in content
+        assert warning is not None
+        assert "PR #42" in warning
 
-    def test_no_warning_when_paused_state_exists(self, tmp_path):
-        """Should skip warning when paused-state.json exists (already consolidated)."""
+    def test_no_warning_when_session_paused_event_exists(self):
+        """Should return None when journal has only session_paused (no review)."""
         from session_end import check_unpaused_pr
-
-        snapshot = self._setup_snapshot(tmp_path, "proj")
-        # Write a paused-state.json
-        import json
-        paused = tmp_path / "proj" / "paused-state.json"
-        paused.write_text(json.dumps({"pr_number": 288}), encoding="utf-8")
 
         tasks = [self._make_task_with_pr_number(288)]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 288, "ts": "2026-01-01T00:00:00Z"}]
+            return []
 
-        content = snapshot.read_text()
-        assert "## Pause-Mode Warning" not in content
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-    def test_no_warning_when_no_pr_detected(self, tmp_path):
-        """Should not append warning when no PR found in task metadata."""
+        assert warning is None
+
+    def test_detects_pr_from_review_dispatch_event(self):
+        """Should detect PR from review_dispatch journal event (primary path)."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return []
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 55, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,  # No tasks needed — journal has PR
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #55" in warning
+
+    def test_no_warning_when_no_pr_detected(self):
+        """Should return None when no PR found in journal or tasks."""
+        from session_end import check_unpaused_pr
+
         tasks = [
             {"id": "1", "subject": "CODE: auth", "status": "completed", "metadata": {}},
         ]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        assert "## Pause-Mode Warning" not in content
+        assert warning is None
 
-    def test_no_warning_when_tasks_is_none(self, tmp_path):
-        """Should return early when tasks is None."""
+    def test_no_warning_when_tasks_is_none_and_no_journal_pr(self):
+        """Should return None when tasks is None and no journal PR."""
         from session_end import check_unpaused_pr
 
-        self._setup_snapshot(tmp_path, "proj")
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
 
-        # Should not raise
-        check_unpaused_pr(
-            tasks=None,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        assert warning is None
 
-    def test_no_warning_when_project_slug_empty(self, tmp_path):
-        """Should return early when project_slug is empty."""
+    def test_no_warning_when_project_slug_empty(self):
+        """Should return None early when project_slug is empty."""
         from session_end import check_unpaused_pr
 
-        tasks = [self._make_task_with_pr_number(100)]
-
-        # Should not raise
-        check_unpaused_pr(
-            tasks=tasks,
+        warning = check_unpaused_pr(
+            tasks=[self._make_task_with_pr_number(100)],
             project_slug="",
-            sessions_dir=str(tmp_path),
         )
 
-    def test_no_warning_when_snapshot_file_missing(self, tmp_path):
-        """Should not crash when last-session.md doesn't exist."""
+        assert warning is None
+
+    def test_no_warning_when_tasks_empty_and_no_journal_pr(self):
+        """Should return None for empty task list and no journal PR."""
         from session_end import check_unpaused_pr
 
-        # Create project dir but NOT the snapshot file
-        (tmp_path / "proj").mkdir()
-        tasks = [self._make_task_with_pr_number(99)]
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=[],
+                project_slug="proj",
+            )
 
-        # Should not raise
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        assert warning is None
 
-    def test_no_warning_when_tasks_empty(self, tmp_path):
-        """Should return early for empty task list."""
+    def test_handles_malformed_pr_url(self):
+        """Bare /pull/ without github.com domain should not detect PR."""
         from session_end import check_unpaused_pr
 
-        self._setup_snapshot(tmp_path, "proj")
-
-        check_unpaused_pr(
-            tasks=[],
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
-
-    def test_handles_malformed_pr_url(self, tmp_path):
-        """Should handle handoff values with /pull/ but no valid number."""
-        from session_end import check_unpaused_pr
-
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {
                 "id": "1",
@@ -604,57 +436,18 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        # Should not crash; may or may not detect depending on parsing
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-    def test_best_effort_no_crash_on_ioerror(self, tmp_path):
-        """Should not crash when appending to snapshot raises IOError."""
+        assert warning is None
+
+    def test_pr_number_metadata_takes_priority_over_url(self):
+        """When task has both pr_number and URL, pr_number is used first."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
-        tasks = [self._make_task_with_pr_number(288)]
-
-        # Make the snapshot read-only to trigger IOError on write
-        import os
-        os.chmod(str(snapshot), 0o444)
-
-        # Should not raise
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        # Restore permissions for cleanup
-        os.chmod(str(snapshot), 0o644)
-
-    def test_main_calls_check_unpaused_pr(self):
-        """main() should call check_unpaused_pr after write_session_snapshot."""
-        from session_end import main
-
-        with patch("session_end.pact_context.init"), \
-             patch("session_end.get_project_dir", return_value="/Users/mj/Sites/my-project"), \
-             patch("sys.stdin", io.StringIO("{}")), \
-             patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
-             patch("session_end.check_unpaused_pr") as mock_check:
-            with pytest.raises(SystemExit):
-                main()
-
-        mock_check.assert_called_once()
-        call_args = mock_check.call_args
-        assert call_args.kwargs["tasks"] == []
-        assert call_args.kwargs["project_slug"] == "my-project"
-
-    def test_pr_number_metadata_takes_priority_over_url(self, tmp_path):
-        """When both pr_number and URL exist, pr_number in metadata should be used."""
-        from session_end import check_unpaused_pr
-
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {
                 "id": "1",
@@ -669,20 +462,19 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        assert "PR #100" in content
+        assert warning is not None
+        assert "PR #100" in warning
 
-    def test_non_string_handoff_values_skipped(self, tmp_path):
+    def test_non_string_handoff_values_skipped(self):
         """Non-string handoff values (dict/list) should be skipped without error."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {
                 "id": "1",
@@ -691,31 +483,28 @@ class TestCheckUnpausedPr:
                 "metadata": {
                     "pr_number": 42,
                     "handoff": {
-                        "produced": ["src/auth.py"],  # list value
-                        "decisions": {"key": "value"},  # dict value
-                        "integration": 12345,  # int value
-                        "notes": None,  # None value
+                        "produced": ["src/auth.py"],
+                        "decisions": {"key": "value"},
+                        "integration": 12345,
+                        "notes": None,
                     },
                 },
             }
         ]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        # Should detect PR via pr_number (primary path) despite non-string handoff values
-        assert "## Pause-Mode Warning" in content
-        assert "PR #42" in content
+        assert warning is not None
+        assert "PR #42" in warning
 
-    def test_detects_full_github_pr_url(self, tmp_path):
+    def test_detects_full_github_pr_url(self):
         """Should detect PR from full github.com/org/repo/pull/N URL."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {
                 "id": "1",
@@ -729,21 +518,19 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        assert "## Pause-Mode Warning" in content
-        assert "PR #123" in content
+        assert warning is not None
+        assert "PR #123" in warning
 
-    def test_non_url_pull_text_not_detected(self, tmp_path):
-        """Non-URL text containing '/pull/' should NOT be detected after regex change."""
+    def test_non_url_pull_text_not_detected(self):
+        """Non-URL text with '/pull/' should NOT trigger detection."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {
                 "id": "1",
@@ -757,21 +544,18 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        # After regex change (#11), bare "/pull/" without github.com URL should NOT match
-        assert "## Pause-Mode Warning" not in content
+        assert warning is None
 
-    def test_handles_metadata_none_in_task(self, tmp_path):
+    def test_handles_metadata_none_in_task(self):
         """Task with 'metadata': None should not crash (or {} guard handles it)."""
         from session_end import check_unpaused_pr
 
-        snapshot = self._setup_snapshot(tmp_path, "proj")
         tasks = [
             {
                 "id": "1",
@@ -781,100 +565,114 @@ class TestCheckUnpausedPr:
             },
         ]
 
-        # Should not raise
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="proj",
-            sessions_dir=str(tmp_path),
-        )
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="proj",
+            )
 
-        content = snapshot.read_text()
-        # No PR detected, so no warning
-        assert "## Pause-Mode Warning" not in content
+        assert warning is None
 
-
-# =============================================================================
-# File Permission Tests for session_end.py
-# =============================================================================
-
-class TestSessionEndFilePermissions:
-    """Tests for file permission hardening in session_end.py.
-
-    Verifies that:
-    - write_session_snapshot creates directory with 0o700
-    - write_session_snapshot creates file with 0o600
-    - check_unpaused_pr re-applies 0o600 after appending to snapshot
-    """
-
-    def test_write_snapshot_creates_directory_with_700(self, tmp_path):
-        """write_session_snapshot() should create project dir with mode 0o700."""
-        import stat
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[],
-            project_slug="perm-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        proj_dir = tmp_path / "perm-proj"
-        dir_mode = stat.S_IMODE(proj_dir.stat().st_mode)
-        assert dir_mode == 0o700, (
-            f"Directory should have mode 0o700, got {oct(dir_mode)}"
-        )
-
-    def test_write_snapshot_creates_file_with_600(self, tmp_path):
-        """write_session_snapshot() should set snapshot file to mode 0o600."""
-        import stat
-        from session_end import write_session_snapshot
-
-        write_session_snapshot(
-            tasks=[],
-            project_slug="perm-proj",
-            sessions_dir=str(tmp_path),
-        )
-
-        snapshot_file = tmp_path / "perm-proj" / "last-session.md"
-        file_mode = stat.S_IMODE(snapshot_file.stat().st_mode)
-        assert file_mode == 0o600, (
-            f"Snapshot file should have mode 0o600, got {oct(file_mode)}"
-        )
-
-    def test_check_unpaused_pr_reapplies_600_after_append(self, tmp_path):
-        """check_unpaused_pr() should re-apply 0o600 after appending warning."""
-        import stat
+    def test_no_journal_write_when_project_slug_empty(self):
+        """Should return None (no warning) when project_slug is empty."""
         from session_end import check_unpaused_pr
 
-        # Set up snapshot with known permissions
-        proj_dir = tmp_path / "perm-proj"
-        proj_dir.mkdir(parents=True)
-        snapshot = proj_dir / "last-session.md"
-        snapshot.write_text("# Last Session\n", encoding="utf-8")
+        tasks = [self._make_task_with_pr_number(42)]
 
-        tasks = [
-            {
-                "id": "1",
-                "subject": "Review: feature",
-                "status": "completed",
-                "metadata": {"pr_number": 288},
-            },
-        ]
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug="",
+            )
 
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug="perm-proj",
-            sessions_dir=str(tmp_path),
-        )
+        # Empty project_slug → early return, no warning
+        assert warning is None
 
-        # Verify warning was appended
-        content = snapshot.read_text()
-        assert "## Pause-Mode Warning" in content
+    # ========================================================================
+    # M2 — pause-vs-review timestamp reconciliation tests
+    # ========================================================================
 
-        # Verify permissions re-applied
-        file_mode = stat.S_IMODE(snapshot.stat().st_mode)
-        assert file_mode == 0o600, (
-            f"Snapshot file should have mode 0o600 after append, got {oct(file_mode)}"
-        )
+    def test_unpaused_pr_after_earlier_pause(self):
+        """pause→resume→new PR→quit: pause is OLDER than review → warn."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 10, "ts": "2026-01-01T00:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 20, "ts": "2026-01-02T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #20" in warning
+
+    def test_paused_after_review_no_warning(self):
+        """Pause after review covers the current PR → no warning."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 20, "ts": "2026-01-02T00:00:01Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 20, "ts": "2026-01-02T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_equal_timestamps_bias_toward_paused(self):
+        """Equal pause/review timestamps → bias toward paused (no warning).
+
+        ISO timestamps have 1-second precision; using `>=` means a tied
+        timestamp is treated as covered by the pause to avoid spurious
+        warnings.
+        """
+        from session_end import check_unpaused_pr
+
+        ts = "2026-01-02T00:00:00Z"
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 20, "ts": ts}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 20, "ts": ts}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_paused_only_no_review_no_warning(self):
+        """Paused but no review_dispatch → no warning (paused, no PRs)."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
 
 
 # =============================================================================
@@ -926,13 +724,13 @@ class TestCleanupTeachbackMarkers:
         assert not list(slug_dir.glob("teachback-warned-*"))
 
     def test_preserves_non_marker_files(self, tmp_path):
-        """Should not delete non-marker files (last-session.md, paused-state.json)."""
+        """Should not delete non-marker files in the slug directory."""
         from session_end import cleanup_teachback_markers
 
         slug_dir = tmp_path / "my-project"
         slug_dir.mkdir(parents=True)
-        (slug_dir / "last-session.md").write_text("# Session")
-        (slug_dir / "paused-state.json").write_text("{}")
+        (slug_dir / "notes.txt").write_text("keep me")
+        (slug_dir / "config.json").write_text("{}")
         self._create_markers(slug_dir, ["teachback-warned-agent-1"])
 
         cleanup_teachback_markers(
@@ -941,8 +739,8 @@ class TestCleanupTeachbackMarkers:
             sessions_dir=str(tmp_path),
         )
 
-        assert (slug_dir / "last-session.md").exists()
-        assert (slug_dir / "paused-state.json").exists()
+        assert (slug_dir / "notes.txt").exists()
+        assert (slug_dir / "config.json").exists()
         assert not (slug_dir / "teachback-warned-agent-1").exists()
 
     def test_skips_when_no_project_slug(self, tmp_path):
@@ -1094,9 +892,9 @@ class TestCleanupOldSessions:
         slug_dir.mkdir(parents=True)
         current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-        # Create slug-level files
-        (slug_dir / "last-session.md").write_text("# Session")
-        (slug_dir / "paused-state.json").write_text("{}")
+        # Create slug-level files (non-directory entries should be ignored)
+        (slug_dir / "notes.txt").write_text("keep me")
+        (slug_dir / "config.json").write_text("{}")
 
         self._create_session_dir(slug_dir, current_id, age_days=0)
 
@@ -1107,8 +905,8 @@ class TestCleanupOldSessions:
             max_age_days=7,
         )
 
-        assert (slug_dir / "last-session.md").exists()
-        assert (slug_dir / "paused-state.json").exists()
+        assert (slug_dir / "notes.txt").exists()
+        assert (slug_dir / "config.json").exists()
 
     def test_keeps_recent_sessions(self, tmp_path):
         from session_end import cleanup_old_sessions
@@ -1253,7 +1051,7 @@ class TestCleanupOldSessionsBoundary:
             "33333333-4444-5555-6666-777777777777",
         ]
         for oid in old_ids:
-            self._create_session_dir(slug_dir, oid, age_days=14)
+            self._create_session_dir(slug_dir, oid, age_days=31)
 
         cleanup_old_sessions(
             project_slug="my-project",
@@ -1283,7 +1081,7 @@ class TestCleanupOldSessionsBoundary:
         (old_dir / "teachback-warned-coder-1-42").touch()
         (old_dir / "some-other-artifact.json").write_text("{}")
         # Set mtime AFTER all writes (writing updates dir mtime on Unix)
-        old_time = _time.time() - (10 * 86400)
+        old_time = _time.time() - (31 * 86400)
         _os.utime(str(old_dir), (old_time, old_time))
 
         cleanup_old_sessions(
@@ -1393,7 +1191,7 @@ class TestCleanupMigrationScenario:
         # Session-scoped marker
         (session_dir / "teachback-warned-new-coder-42").touch()
         # Non-marker file at slug level
-        (slug_dir / "last-session.md").write_text("# Session")
+        (slug_dir / "notes.txt").write_text("keep me")
 
         cleanup_teachback_markers(
             project_slug="my-project",
@@ -1405,7 +1203,7 @@ class TestCleanupMigrationScenario:
         assert not (slug_dir / "teachback-warned-old-coder").exists()
         assert not (session_dir / "teachback-warned-new-coder-42").exists()
         # Non-marker preserved
-        assert (slug_dir / "last-session.md").exists()
+        assert (slug_dir / "notes.txt").exists()
 
     def test_session_dir_markers_not_affected_by_slug_sweep(self, tmp_path):
         """Slug-level sweep should not descend into session directories.
@@ -1475,7 +1273,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_session_dir", return_value="/tmp/session"), \
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_teachback_markers") as mock_cleanup, \
              patch("session_end.cleanup_old_sessions"), \
@@ -1502,7 +1299,6 @@ class TestMainIntegrationCleanup:
              patch("session_end.get_session_dir", return_value="/tmp/session"), \
              patch("session_end.get_session_id", return_value="test-session"), \
              patch("session_end.get_task_list", return_value=[]), \
-             patch("session_end.write_session_snapshot"), \
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_teachback_markers"), \
              patch("session_end.cleanup_old_sessions") as mock_cleanup, \
@@ -1515,3 +1311,477 @@ class TestMainIntegrationCleanup:
             project_slug="proj",
             current_session_id="test-session",
         )
+
+
+# =============================================================================
+# _is_paused_session() Tests
+# =============================================================================
+
+class TestIsPausedSession:
+    """Tests for session_end._is_paused_session() — paused-session detection.
+
+    Semantics: a session is "paused" iff its journal contains ANY
+    session_paused event, regardless of later session_end events. This
+    is a "has-ever-been-paused" predicate. The caller applies a longer
+    TTL (180 days) to paused sessions to preserve in-progress work
+    across the pause→quit→session_end race (AdvF1) and equal-timestamp
+    ties (BugF2).
+    """
+
+    def _write_journal(self, session_dir, events):
+        """Helper: write events to a session's journal file."""
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps(e) + "\n" for e in events]
+        journal.write_text("".join(lines))
+
+    def test_returns_true_for_paused_only(self, tmp_path):
+        """Session with session_paused but no session_end is paused."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-abc")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_true_for_paused_then_ended(self, tmp_path):
+        """Paused → ended: still counts as paused under new semantics.
+
+        Previously this returned False (old "is-currently-paused" predicate).
+        Under the new "has-ever-been-paused" semantics, the presence of
+        any session_paused event is sufficient — the subsequent
+        session_end does not un-pause the session from the cleanup
+        policy's perspective. The caller applies the 180-day paused
+        TTL to this session instead of the 30-day active TTL.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-abc")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_true_for_pause_quit_race(self, tmp_path):
+        """AdvF1: /PACT:pause then quit Claude Code ~1s later.
+
+        The real-world flow: user runs /PACT:pause (writes
+        session_paused), then quits Claude Code, which fires session_end
+        a moment later. Under the old semantics, session_end.ts >=
+        session_paused.ts caused _is_paused_session to return False and
+        the paused state was deleted at the 30-day TTL. Under the new
+        semantics, the session_paused event is sufficient.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-race")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            # session_end fires ~1s later when the CC process shuts down
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:01Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_true_for_equal_timestamp_tie(self, tmp_path):
+        """BugF2: equal-ts tie (paused.ts == ended.ts) due to 1-Hz ISO precision.
+
+        ISO timestamps have 1-second precision, so if /PACT:pause and
+        the subsequent session_end both land in the same wall-clock
+        second, their `ts` fields are equal. Under the old `>=` check
+        this caused _is_paused_session to return False (data loss).
+        Under the new semantics the session_paused event is sufficient.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-tie")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_true_for_paused_after_ended(self, tmp_path):
+        """Paused → ended → paused sequence: still paused (was F1 fix, still holds).
+
+        Under the new semantics this is trivially true — any
+        session_paused event is sufficient. Kept as a regression test
+        to ensure the read_last_event_from path still finds the latest
+        session_paused without being confused by intervening
+        session_end events.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-repaused")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 43, "ts": "2026-01-03T00:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_false_for_no_paused_event(self, tmp_path):
+        """Session without session_paused is not paused."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-abc")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_missing_journal(self, tmp_path):
+        """Session directory with no journal file — returns False (fail-open)."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-missing")
+        Path(session_dir).mkdir(parents=True, exist_ok=True)
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_malformed_journal(self, tmp_path):
+        """Malformed journal — returns False (fail-open, Scenario 10)."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-bad")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("this is not json\nanother bad line\n")
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_empty_journal(self, tmp_path):
+        """Empty journal file — returns False."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-empty")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("")
+
+        assert _is_paused_session(session_dir) is False
+
+
+# =============================================================================
+# cleanup_old_sessions() — Paused Session Preservation Tests
+# =============================================================================
+
+class TestCleanupPausedPreservation:
+    """Tests for paused-session preservation in cleanup_old_sessions().
+
+    Dual-TTL semantics (AdvF1/BugF2 fix): any session that has ever
+    recorded a session_paused event uses the extended paused TTL
+    (_PAUSED_SESSION_MAX_AGE_DAYS, default 180 days). Active sessions
+    use the standard TTL (_SESSION_MAX_AGE_DAYS, default 30 days).
+    The presence of a later session_end does NOT downgrade a paused
+    session to the active TTL — this closes the pause→quit race and
+    the equal-timestamp tie that previously caused silent data loss.
+
+    Note: _set_age() must be called AFTER writing journal files, because
+    writing into a directory updates its mtime on Unix/macOS.
+    """
+
+    def _create_session_dir(self, slug_dir, session_id):
+        """Helper: create a session directory (without setting age)."""
+        session_dir = slug_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text("{}")
+        return session_dir
+
+    def _set_age(self, session_dir, age_days):
+        """Set directory mtime to simulate age. Call AFTER writing all files."""
+        import os as _os
+        import time as _time
+        old_time = _time.time() - (age_days * 86400)
+        _os.utime(str(session_dir), (old_time, old_time))
+
+    def _write_journal(self, session_dir, events):
+        """Helper: write events to a session's journal."""
+        journal = session_dir / "session-journal.jsonl"
+        lines = [json.dumps(e) + "\n" for e in events]
+        journal.write_text("".join(lines))
+
+    def test_preserves_paused_session_beyond_ttl(self, tmp_path):
+        """Scenario 9: Paused session (no session_end) survives cleanup."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id)
+        paused_dir = self._create_session_dir(slug_dir, paused_id)
+        self._write_journal(paused_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+        ])
+        self._set_age(paused_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Paused session must survive despite being 35 days old
+        assert paused_dir.exists()
+
+    def test_preserves_paused_ended_session_at_35_days(self, tmp_path):
+        """AdvF1/BugF2 fix: paused→ended session survives the 30-day TTL.
+
+        Under the old semantics, a session that recorded session_paused
+        and then session_end was treated as "no longer paused" and
+        deleted at 30 days — the pause→quit race (AdvF1) and the
+        equal-ts tie (BugF2) both produced this state and silently
+        lost user data. Under dual-TTL semantics, any paused session
+        uses the 180-day TTL, so a 35-day-old paused+ended session
+        survives.
+        """
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_ended_id = "22222222-3333-4444-5555-666666666666"
+
+        self._create_session_dir(slug_dir, current_id)
+        paused_ended_dir = self._create_session_dir(slug_dir, paused_ended_id)
+        self._write_journal(paused_ended_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:01Z"},
+        ])
+        self._set_age(paused_ended_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Paused session (even if also ended) survives beyond 30-day TTL
+        assert paused_ended_dir.exists()
+
+    def test_preserves_paused_session_at_100_days(self, tmp_path):
+        """Dual-TTL: paused session 100 days old still survives.
+
+        100 days > 30-day active TTL but < 180-day paused TTL, so the
+        session must survive.
+        """
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_id = "33333333-4444-5555-6666-777777777777"
+
+        self._create_session_dir(slug_dir, current_id)
+        paused_dir = self._create_session_dir(slug_dir, paused_id)
+        self._write_journal(paused_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+        ])
+        self._set_age(paused_dir, 100)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert paused_dir.exists()
+
+    def test_cleans_paused_session_beyond_paused_ttl(self, tmp_path):
+        """Dual-TTL: paused sessions eventually age out past 180 days.
+
+        A 200-day-old paused session exceeds the paused TTL and must
+        be cleaned — the extended TTL is protection, not permanent
+        retention.
+        """
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ancient_id = "44444444-5555-6666-7777-888888888888"
+
+        self._create_session_dir(slug_dir, current_id)
+        ancient_dir = self._create_session_dir(slug_dir, ancient_id)
+        self._write_journal(ancient_dir, [
+            {"v": 1, "type": "session_start", "ts": "2025-06-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2025-06-01T01:00:00Z"},
+        ])
+        self._set_age(ancient_dir, 200)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not ancient_dir.exists()
+
+    def test_malformed_journal_allows_cleanup(self, tmp_path):
+        """Scenario 10: Malformed journal in old session — cleanup proceeds (fail-open)."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        bad_id = "33333333-4444-5555-6666-777777777777"
+
+        self._create_session_dir(slug_dir, current_id)
+        bad_dir = self._create_session_dir(slug_dir, bad_id)
+        # Write malformed journal
+        (bad_dir / "session-journal.jsonl").write_text("not json\ngarbage\n")
+        self._set_age(bad_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Malformed journal -> _is_paused_session returns False -> cleaned
+        assert not bad_dir.exists()
+
+    def test_preserves_paused_cleans_non_paused(self, tmp_path):
+        """Mixed cleanup: paused survives, non-paused cleaned."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_id = "11111111-2222-3333-4444-555555555555"
+        stale_id = "22222222-3333-4444-5555-666666666666"
+
+        self._create_session_dir(slug_dir, current_id)
+
+        # Paused session
+        paused_dir = self._create_session_dir(slug_dir, paused_id)
+        self._write_journal(paused_dir, [
+            {"v": 1, "type": "session_paused", "pr_number": 99, "ts": "2026-01-01T00:00:00Z"},
+        ])
+        self._set_age(paused_dir, 35)
+
+        # Non-paused stale session
+        stale_dir = self._create_session_dir(slug_dir, stale_id)
+        self._write_journal(stale_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"},
+        ])
+        self._set_age(stale_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert paused_dir.exists(), "Paused session should survive"
+        assert not stale_dir.exists(), "Stale non-paused session should be cleaned"
+
+    def test_no_journal_allows_cleanup(self, tmp_path):
+        """Session dir without journal file — cleanup proceeds."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        no_journal_id = "44444444-5555-6666-7777-888888888888"
+
+        self._create_session_dir(slug_dir, current_id)
+        no_journal_dir = self._create_session_dir(slug_dir, no_journal_id)
+        self._set_age(no_journal_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # No journal -> _is_paused_session returns False -> cleaned
+        assert not no_journal_dir.exists()
+
+
+# =============================================================================
+# TTL Constant Verification — 30 Days Default
+# =============================================================================
+
+class TestTTLDefault:
+    """Verify the 30-day default TTL constant (Scenario 8)."""
+
+    def test_session_max_age_days_is_30(self):
+        """The default TTL constant should be 30 days (changed from 7)."""
+        from session_end import _SESSION_MAX_AGE_DAYS
+
+        assert _SESSION_MAX_AGE_DAYS == 30
+
+    def test_29_day_session_kept_at_default(self, tmp_path):
+        """A 29-day-old session should be kept with default TTL."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        recent_id = "11111111-2222-3333-4444-555555555555"
+
+        # Create current session
+        current_dir = slug_dir / current_id
+        current_dir.mkdir(parents=True, exist_ok=True)
+        (current_dir / "context.json").write_text("{}")
+
+        # Create 29-day-old session
+        recent_dir = slug_dir / recent_id
+        recent_dir.mkdir(parents=True, exist_ok=True)
+        (recent_dir / "context.json").write_text("{}")
+        old_time = _time.time() - (29 * 86400)
+        _os.utime(str(recent_dir), (old_time, old_time))
+
+        # Use default max_age_days (should be 30)
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert recent_dir.exists(), "29-day-old session should survive with 30-day TTL"
+
+    def test_31_day_session_cleaned_at_default(self, tmp_path):
+        """A 31-day-old session should be cleaned with default TTL."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        old_id = "11111111-2222-3333-4444-555555555555"
+
+        # Create current session
+        current_dir = slug_dir / current_id
+        current_dir.mkdir(parents=True, exist_ok=True)
+        (current_dir / "context.json").write_text("{}")
+
+        # Create 31-day-old session
+        old_dir = slug_dir / old_id
+        old_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "context.json").write_text("{}")
+        old_time = _time.time() - (31 * 86400)
+        _os.utime(str(old_dir), (old_time, old_time))
+
+        # Use default max_age_days (should be 30)
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not old_dir.exists(), "31-day-old session should be cleaned with 30-day TTL"

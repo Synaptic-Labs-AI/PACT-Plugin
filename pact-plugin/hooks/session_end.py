@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/session_end.py
-Summary: SessionEnd hook that captures a last-session snapshot for cross-session
-         continuity and performs session directory cleanup.
+Summary: SessionEnd hook that writes a session_end journal event and performs
+         session directory cleanup.
 Used by: hooks.json SessionEnd hook
 
 Actions:
-1. Write last-session snapshot to ~/.claude/pact-sessions/{slug}/last-session.md
-2. Detect open PRs that were not paused (append warning to snapshot)
+1. Write session_end event to the session journal
+2. Detect open PRs that were not paused (append warning to journal)
 3. Clean up teachback warning markers (session-scoped + legacy slug-level)
-4. Clean up stale session directories older than 7 days
+4. Clean up stale session directories using a dual TTL (30 days active, 180 days paused)
 
 Purely observational — no destructive operations on project files. Session
 directory cleanup is best-effort and never blocks session termination.
@@ -19,12 +19,10 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
-import os
 import re
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Add hooks directory to path for shared package imports
@@ -34,7 +32,13 @@ if str(_hooks_dir) not in sys.path:
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_project_dir, get_session_dir, get_session_id
+from shared.pact_context import get_project_dir, get_session_dir, get_session_id, get_team_name
+from shared.session_journal import (
+    append_event,
+    make_event,
+    read_events,
+    read_last_event_from,
+)
 
 from shared.task_utils import get_task_list
 
@@ -50,181 +54,86 @@ def get_project_slug() -> str:
     return ""
 
 
-def write_session_snapshot(
-    tasks: list[dict] | None,
-    project_slug: str,
-    sessions_dir: str | None = None,
-) -> None:
-    """
-    Write a structured last-session snapshot from task states.
-
-    Reads completed and incomplete tasks to produce a markdown summary at
-    ~/.claude/pact-sessions/{project_slug}/last-session.md. This file is
-    read by session_init.py on the next session start to provide continuity.
-
-    Args:
-        tasks: List of task dicts from get_task_list(), or None
-        project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
-    """
-    if not project_slug:
-        return
-
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"# Last Session: {now}", ""]
-
-    completed_lines = []
-    incomplete_lines = []
-    decision_lines = []
-    unresolved_lines = []
-
-    if tasks:
-        for task in tasks:
-            task_id = task.get("id", "?")
-            subject = task.get("subject", "unknown")
-            status = task.get("status", "unknown")
-            metadata = task.get("metadata") or {}
-
-            if status == "completed":
-                # Extract 1-line summary from handoff decisions if present
-                handoff = metadata.get("handoff") or {}
-                decisions = handoff.get("decisions", [])
-                if decisions and isinstance(decisions, list):
-                    summary = decisions[0] if isinstance(decisions[0], str) else str(decisions[0])
-                    # Truncate long summaries
-                    if len(summary) > 80:
-                        summary = summary[:77] + "..."
-                    completed_lines.append(f"- #{task_id} {subject} -> {summary}")
-                else:
-                    completed_lines.append(f"- #{task_id} {subject}")
-
-            elif status in ("in_progress", "pending"):
-                incomplete_lines.append(f"- #{task_id} {subject} -- {status}")
-
-            # Collect decisions from all completed tasks with handoff metadata
-            if status == "completed":
-                handoff = metadata.get("handoff") or {}
-                for decision in handoff.get("decisions", []):
-                    if isinstance(decision, str) and decision not in decision_lines:
-                        decision_lines.append(decision)
-
-            # Collect unresolved blockers/algedonic signals
-            if metadata.get("type") in ("blocker", "algedonic") and status != "completed":
-                unresolved_lines.append(f"- #{task_id} {subject}")
-
-    # Build sections
-    lines.append("## Completed Tasks")
-    if completed_lines:
-        lines.extend(completed_lines)
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    lines.append("## Incomplete Tasks")
-    if incomplete_lines:
-        lines.extend(incomplete_lines)
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    lines.append("## Key Decisions")
-    if decision_lines:
-        for d in decision_lines[:10]:  # Cap at 10 decisions
-            lines.append(f"- {d}")
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    lines.append("## Unresolved")
-    if unresolved_lines:
-        lines.extend(unresolved_lines)
-    else:
-        lines.append("- (none)")
-    lines.append("")
-
-    # Write snapshot file
-    snapshot_dir = Path(sessions_dir) / project_slug
-    snapshot_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    snapshot_file = snapshot_dir / "last-session.md"
-    snapshot_file.write_text("\n".join(lines), encoding="utf-8")
-    os.chmod(str(snapshot_file), 0o600)
-
-
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
     sessions_dir: str | None = None,
-) -> None:
+) -> str | None:
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
 
-    If paused-state.json exists, consolidation already happened — no warning needed.
-    If no paused-state.json but task metadata indicates an open PR, append a warning
-    to the last-session.md snapshot so the next session can flag it.
+    Compares the session journal's most-recent `session_paused` event against
+    its most-recent `review_dispatch` event. The pause covers a PR only when
+    it occurred at-or-after that PR was dispatched; an older pause does NOT
+    cover a freshly-dispatched PR (e.g., pause→resume→new PR→quit). If the
+    current PR is unpaused, returns a warning string so the caller can attach
+    it to the single `session_end` journal event.
 
-    This is detection-only. SessionEnd is async fire-and-forget and cannot run agents
-    or memory operations.
+    Also checks task metadata as fallback for PRs not tracked through the normal
+    review workflow (preserves the existing safety-net regex detection).
+
+    This is detection-only. SessionEnd is async fire-and-forget and cannot run
+    agents or memory operations.
 
     Args:
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
         sessions_dir: Override for sessions base directory (for testing)
+
+    Returns:
+        Warning string if an unpaused PR is detected, otherwise None.
     """
-    if not project_slug or not tasks:
-        return
+    if not project_slug:
+        return None
 
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+    paused_events = read_events("session_paused")
+    review_events = read_events("review_dispatch")
 
-    slug_dir = Path(sessions_dir) / project_slug
+    # Reconcile pause vs review timing: a pause only "covers" a PR when it
+    # occurred at-or-after that PR's dispatch. Bias toward "paused" (silence)
+    # on equal timestamps via `>=` to avoid spurious warnings on the
+    # 1-second ISO precision tie.
+    if paused_events and review_events:
+        last_pause_ts = paused_events[-1].get("ts", "")
+        last_review_ts = review_events[-1].get("ts", "")
+        if last_pause_ts >= last_review_ts:
+            return None  # Most recent PR was paused; safe.
+        # else fall through — current PR is unpaused
+    elif paused_events:
+        return None  # Paused, no PRs at all — safe.
 
-    # If paused-state.json exists, consolidation already happened — no warning
-    if (slug_dir / "paused-state.json").exists():
-        return
-
-    # Scan task metadata for open PR indicators
+    # Check journal for PR creation
     pr_number = None
-    for task in tasks:
-        metadata = task.get("metadata") or {}
-        # Check for pr_number in task metadata (set by peer-review workflow)
-        if metadata.get("pr_number") is not None:
-            pr_number = metadata["pr_number"]
-            break
-        # Also check handoff metadata for pr_url patterns
-        handoff = metadata.get("handoff") or {}
-        for value in handoff.values():
-            if isinstance(value, str):
-                # Extract PR number from GitHub URL like "https://github.com/owner/repo/pull/288"
-                match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
-                if match:
-                    pr_number = match.group(1)
-                    break
-        if pr_number:
-            break
+    if review_events:
+        # Use the most recent review_dispatch event's PR number
+        pr_number = review_events[-1].get("pr_number")
+
+    # Fallback: scan task metadata for PR indicators (safety net for PRs
+    # not tracked through the review workflow journal events)
+    if not pr_number and tasks:
+        for task in tasks:
+            metadata = task.get("metadata") or {}
+            if metadata.get("pr_number") is not None:
+                pr_number = metadata["pr_number"]
+                break
+            handoff = metadata.get("handoff") or {}
+            for value in handoff.values():
+                if isinstance(value, str):
+                    match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
+                    if match:
+                        pr_number = match.group(1)
+                        break
+            if pr_number:
+                break
 
     if not pr_number:
-        return
+        return None
 
-    # Append warning to existing snapshot
-    snapshot_file = slug_dir / "last-session.md"
-    if not snapshot_file.exists():
-        return
-
-    try:
-        warning = (
-            f"\n## Pause-Mode Warning\n"
-            f"Session ended without memory consolidation. "
-            f"PR #{pr_number} is open but pause-mode was not run. "
-            f"Run /PACT:pause or /PACT:wrap-up in next session to capture session knowledge.\n"
-        )
-        existing = snapshot_file.read_text(encoding="utf-8")
-        snapshot_file.write_text(existing + warning, encoding="utf-8")
-        os.chmod(str(snapshot_file), 0o600)
-    except (IOError, OSError):
-        pass  # Best-effort — never block session end
+    return (
+        f"Session ended without memory consolidation. "
+        f"PR #{pr_number} is open but pause-mode was not run. "
+        f"Run /PACT:pause or /PACT:wrap-up in next session."
+    )
 
 
 def cleanup_teachback_markers(
@@ -283,8 +192,55 @@ _UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 )
 
-# Default threshold for stale session directory cleanup
-_SESSION_MAX_AGE_DAYS = 7
+# Default threshold for active (non-paused) session directory cleanup.
+# 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
+# cross-session recovery value.
+_SESSION_MAX_AGE_DAYS = 30
+
+# Extended threshold for paused session directories. Paused state is
+# in-progress user work that has not been consolidated to memory or merged,
+# so it gets a longer TTL than active sessions to protect the pause→resume
+# workflow across long gaps. The extended TTL is protection, not permanent
+# retention — paused sessions still age out past this threshold.
+_PAUSED_SESSION_MAX_AGE_DAYS = 180
+
+
+def _is_paused_session(session_dir: str) -> bool:
+    """
+    Return True iff this session has ever recorded a session_paused event.
+
+    This is a pure "has-ever-been-paused" existence predicate — it does NOT
+    compare timestamps against session_end events. A session that was paused
+    and later ended still counts as paused from the cleanup policy's
+    perspective; the caller (`cleanup_old_sessions`) then applies the
+    extended paused TTL (`_PAUSED_SESSION_MAX_AGE_DAYS`, default 180 days)
+    to such sessions.
+
+    Splitting the predicate from the policy closes two data-loss bugs that
+    existed in the older timestamp-comparison form:
+
+    - AdvF1 (pause→quit race): `/PACT:pause` writes `session_paused`, then
+      quitting Claude Code fires `session_end` ~1s later. Any ordering where
+      `session_end.ts >= session_paused.ts` used to return False and delete
+      the paused state at the 30-day TTL.
+    - BugF2 (equal-timestamp tie): journal timestamps have 1-Hz ISO
+      precision, so pause and end events landing in the same wall-clock
+      second produced equal `ts` fields and hit the old `>=` comparison.
+
+    By dropping the timestamp comparison entirely, neither race nor tie can
+    produce a wrong answer.
+
+    Fail-open: if the journal is missing, empty, or unreadable,
+    `read_last_event_from` returns None and this predicate returns False so
+    the caller is free to apply the standard active-session TTL.
+
+    Args:
+        session_dir: Absolute path to the session directory.
+
+    Returns:
+        True iff a `session_paused` event exists in the session's journal.
+    """
+    return read_last_event_from(session_dir, "session_paused") is not None
 
 
 def cleanup_old_sessions(
@@ -292,9 +248,19 @@ def cleanup_old_sessions(
     current_session_id: str,
     sessions_dir: str | None = None,
     max_age_days: int = _SESSION_MAX_AGE_DAYS,
+    paused_max_age_days: int = _PAUSED_SESSION_MAX_AGE_DAYS,
 ) -> None:
     """
-    Remove session directories older than max_age_days.
+    Remove stale session directories, applying a dual TTL.
+
+    Each candidate session directory is checked against a TTL selected per
+    entry: paused sessions (those whose journal contains any
+    `session_paused` event) use the extended `paused_max_age_days`
+    threshold (default 180 days), while active sessions use
+    `max_age_days` (default 30 days). The extended threshold protects
+    in-progress user work across the pause→resume workflow without
+    retaining paused state forever — paused sessions still age out past
+    180 days.
 
     Best-effort cleanup — never raises. Skips the current session's
     directory and any entry that doesn't look like a UUID directory.
@@ -303,7 +269,10 @@ def cleanup_old_sessions(
         project_slug: Project identifier (basename of project_dir)
         current_session_id: Current session's UUID (never deleted)
         sessions_dir: Override for base directory (testing)
-        max_age_days: Threshold in days (default: 7)
+        max_age_days: TTL for active sessions in days (default: 30)
+        paused_max_age_days: TTL for paused sessions in days (default: 180).
+            Exposed as a kwarg so tests can inject smaller values for
+            boundary verification; production call sites use the default.
     """
     if not project_slug or not current_session_id:
         return
@@ -325,7 +294,14 @@ def cleanup_old_sessions(
                 continue
             try:
                 age_days = (time.time() - entry.stat().st_mtime) / 86400
-                if age_days > max_age_days:
+                # Select TTL per entry: paused sessions get the extended
+                # threshold; active sessions get the standard one.
+                threshold = (
+                    paused_max_age_days
+                    if _is_paused_session(str(entry))
+                    else max_age_days
+                )
+                if age_days > threshold:
                     shutil.rmtree(entry, ignore_errors=True)
             except OSError:
                 continue
@@ -345,18 +321,23 @@ def main():
         session_dir = get_session_dir()
         current_session_id = get_session_id()
 
-        # Write last-session snapshot from task states for cross-session continuity
+        # Safety-net: warn if open PR detected but pause-mode wasn't run.
+        # Returns a warning string (or None) so we can emit a single
+        # session_end event with an optional `warning=` field.
         tasks = get_task_list()
-        write_session_snapshot(
+        warning = check_unpaused_pr(
             tasks=tasks,
             project_slug=project_slug,
         )
 
-        # Safety-net: warn if open PR detected but pause-mode wasn't run
-        check_unpaused_pr(
-            tasks=tasks,
-            project_slug=project_slug,
-        )
+        # Write a single session_end event to the journal (best-effort).
+        # Wrapped in its own try/except so a journal failure does not skip
+        # the cleanup steps that follow.
+        try:
+            event_kwargs = {"warning": warning} if warning else {}
+            append_event(make_event("session_end", **event_kwargs))
+        except Exception as e:
+            print(f"Hook warning (session_end journal): {e}", file=sys.stderr)
 
         # Clean up teachback warning markers (no longer needed after session)
         cleanup_teachback_markers(
@@ -364,7 +345,7 @@ def main():
             session_dir=session_dir,
         )
 
-        # Clean up stale session directories (older than 7 days)
+        # Clean up stale session directories (dual TTL: 30d active, 180d paused)
         cleanup_old_sessions(
             project_slug=project_slug,
             current_session_id=current_session_id,

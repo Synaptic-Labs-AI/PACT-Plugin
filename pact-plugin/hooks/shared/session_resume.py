@@ -7,32 +7,57 @@ Used by: session_init.py during SessionStart hook to write session info,
 
 Manages:
 1. Writing session resume info (team name, resume command) to project CLAUDE.md
-2. Restoring last session snapshots for cross-session continuity
+2. Restoring last session context from session journal
 3. Checking for in-progress tasks that indicate resumable work
-4. Detecting paused state from /PACT:pause for multi-session resume
+4. Detecting paused state from session journal
 """
 
-import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+from shared.claude_md_manager import (
+    ensure_dot_claude_parent,
+    resolve_project_claude_md_path,
+)
+from shared.session_journal import read_events_from, read_last_event_from
 
-def update_session_info(session_id: str, team_name: str) -> str | None:
+# Maximum characters for decision summaries in journal resume output
+_DECISION_TRUNCATION_LIMIT = 80
+
+# Maximum characters for phase strings rendered into journal resume output.
+# Phases are nominally short uppercase identifiers (CODE, TEST, etc.) but the
+# consumer must defend against historical or hand-crafted events that stashed
+# a long free-form string or a non-string type in the `phase` field.
+_PHASE_TRUNCATION_LIMIT = 80
+
+
+def update_session_info(
+    session_id: str,
+    team_name: str,
+    session_dir: str | None = None,
+    plugin_root: str | None = None,
+) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
 
     Inserts (or overwrites) a managed section containing the session resume
-    command, team name, and start timestamp. Uses <!-- SESSION_START --> /
-    <!-- SESSION_END --> comment markers for reliable replacement across
-    sessions.
+    command, team name, session directory, plugin root, and start timestamp.
+    Uses <!-- SESSION_START --> / <!-- SESSION_END --> comment markers for
+    reliable replacement across sessions.
 
     Args:
         session_id: Full session UUID (e.g. "93cf3da0-c792-4daa-888e-...")
         team_name: Generated team name (e.g. "PACT-93cf3da0")
+        session_dir: Absolute path to the session directory (optional).
+            When provided, written as "- Session dir:" line for next-session
+            journal access.
+        plugin_root: Absolute path to the installed plugin directory (optional).
+            When provided, written as "- Plugin root:" line so the orchestrator
+            can locate hook scripts without symlink traversal.
 
     Returns:
         Status message or None if no action taken.
@@ -41,14 +66,31 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
     if not project_dir:
         return None
 
-    target_file = Path(project_dir) / "CLAUDE.md"
-    if not target_file.exists():
-        return None
+    # Honor both supported project CLAUDE.md locations.
+    # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
+    # if neither exists, the resolver returns the new default
+    # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
+    target_file, _source = resolve_project_claude_md_path(project_dir)
 
     SESSION_START = "<!-- SESSION_START -->"
     SESSION_END = "<!-- SESSION_END -->"
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Build session dir line. MUST be written as an absolute path — command
+    # files read this value via bash single-quoted expansion which does NOT
+    # perform tilde expansion, and `session_journal._validate_cli_session_dir`
+    # rejects non-absolute paths via `Path(session_dir).is_absolute()`. A
+    # tilde-abbreviated path would break every journal write from command
+    # files (R4 regression). Mirrors `plugin_root` below.
+    session_dir_line = ""
+    if session_dir:
+        session_dir_line = f"- Session dir: `{session_dir}`\n"
+
+    # Build plugin root line (no abbreviation — needs to be usable as-is in Bash)
+    plugin_root_line = ""
+    if plugin_root:
+        plugin_root_line = f"- Plugin root: `{plugin_root}`\n"
 
     session_block = (
         f"{SESSION_START}\n"
@@ -56,11 +98,33 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
         f"<!-- Auto-managed by session_init hook. Overwritten each session. -->\n"
         f"- Resume: `claude --resume {session_id}`\n"
         f"- Team: `{team_name}`\n"
+        f"{session_dir_line}"
+        f"{plugin_root_line}"
         f"- Started: {timestamp}\n"
         f"{SESSION_END}"
     )
 
     try:
+        # Case 0: File doesn't exist -- create it with a minimal template
+        # so the orchestrator has a stable Current Session block to read on
+        # the very first session in a project. The resolver returns the
+        # preferred .claude/CLAUDE.md location in this case, so create the
+        # .claude/ parent directory if needed (no-op when target is legacy).
+        if not target_file.exists():
+            new_content = (
+                "# Project Memory\n"
+                "\n"
+                "<!-- PACT auto-creates this file on first session. "
+                "Safe to add your own content; the SESSION_START/SESSION_END "
+                "markers are auto-updated each session. -->\n"
+                "\n"
+                f"{session_block}\n"
+            )
+            ensure_dot_claude_parent(target_file)
+            target_file.write_text(new_content, encoding="utf-8")
+            os.chmod(str(target_file), 0o600)
+            return "Session info created in new project CLAUDE.md"
+
         content = target_file.read_text(encoding="utf-8")
 
         # Case 1: Markers already exist -- replace the block
@@ -101,55 +165,235 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
 
 
 def restore_last_session(
-    project_slug: str,
-    sessions_dir: str | None = None,
+    prev_session_dir: str | None = None,
 ) -> str | None:
     """
-    Restore the last session snapshot for cross-session continuity.
+    Restore the last session context for cross-session continuity.
 
-    Checks if ~/.claude/pact-sessions/{project_slug}/last-session.md exists.
-    If found, reads the content, rotates it to last-session.prev.md, and returns
-    the content with a header for injection as additionalContext.
+    Reads the previous session's journal (located by prev_session_dir) and
+    constructs a resume summary from agent_handoff, phase_transition, and
+    checkpoint events.
 
     Args:
-        project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
+        prev_session_dir: Previous session's directory path (from CLAUDE.md).
+            When provided, reads that session's journal for resume context.
 
     Returns:
-        Snapshot content with header if file exists, None otherwise
+        Resume context string if available, None otherwise
     """
-    if not project_slug:
+    if not prev_session_dir:
         return None
 
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+    return _build_journal_resume(prev_session_dir)
 
-    snapshot_file = Path(sessions_dir) / project_slug / "last-session.md"
-    if not snapshot_file.exists():
-        return None
 
+def _coerce_decision_summary(decisions: Any) -> str:
+    """
+    Extract a short summary string from a handoff's `decisions` field.
+
+    The `decisions` field is nominally a list of strings, but historical
+    journal data and future schema drift can produce:
+    - non-list values (dict, None, scalar)
+    - empty lists
+    - lists whose first element is not a string (dict, list, None)
+
+    This helper returns an empty string for any of those shapes rather
+    than raising IndexError/TypeError. When the first element is a
+    non-string, it is stringified via str() so callers still get a
+    useful, bounded summary.
+
+    Truncation to _DECISION_TRUNCATION_LIMIT happens here so every caller
+    gets consistent behavior.
+    """
+    if not isinstance(decisions, list) or not decisions:
+        return ""
+    first = decisions[0]
+    if isinstance(first, str):
+        summary = first
+    elif first is None:
+        return ""
+    else:
+        # Best-effort stringify for dict/list/number/other — bounded by
+        # truncation below so even a giant dict becomes a readable stub.
+        summary = str(first)
+    if len(summary) > _DECISION_TRUNCATION_LIMIT:
+        summary = summary[:_DECISION_TRUNCATION_LIMIT - 3] + "..."
+    return summary
+
+
+def _coerce_phase_string(phase: Any) -> str:
+    """
+    Stringify and bound a `phase` value drawn from a phase_transition event.
+
+    Parallel to `_coerce_decision_summary`: the per-type validator rejects
+    new writes that lack `phase`, but the defensive consumer backstop must
+    still handle:
+    - non-string phase values from older schema versions or hand-crafted
+      journal files (dict, list, None, number)
+    - pathologically long strings from a misconfigured writer that stashed
+      a whole error message in `phase`
+
+    Any of the above is stringified via ``str()`` and truncated at
+    ``_PHASE_TRUNCATION_LIMIT`` so a bad event can produce at worst a
+    readable 80-character stub in the resume output instead of flooding
+    the SessionStart hook context or raising a TypeError downstream.
+    """
+    rendered = str(phase)
+    if len(rendered) > _PHASE_TRUNCATION_LIMIT:
+        rendered = rendered[:_PHASE_TRUNCATION_LIMIT - 3] + "..."
+    return rendered
+
+
+def _build_journal_resume(session_dir: str) -> str | None:
+    """
+    Build resume context from a previous session's journal events.
+
+    Reads agent_handoff events (completed work), phase_transition events
+    (progress), and checkpoint events (state snapshot) to produce a
+    concise resume summary.
+
+    Defensive consumer: this function MUST NOT raise on malformed events.
+    Any KeyError/IndexError/TypeError propagates through restore_last_session
+    into session_init.main()'s outer except, which replaces the entire
+    constructed hook output dict (team-create instructions, working memory,
+    retrieved context) with an error JSON — losing critical SessionStart
+    context for one bad journal line. Per-type schema validation at write
+    time (see session_journal._validate_event_schema) is the primary
+    defense; this consumer is the backstop for events that slipped past
+    an older validator, prior schema versions, or hand-crafted files.
+
+    Failure mode: on any unexpected exception, log to stderr and return
+    None so the caller continues with an empty resume.
+
+    Args:
+        session_dir: The previous session's directory path
+
+    Returns:
+        Formatted resume string, or None if journal is empty/missing/unreadable
+    """
     try:
-        content = snapshot_file.read_text(encoding="utf-8")
-    except (IOError, UnicodeDecodeError):
+        return _build_journal_resume_inner(session_dir)
+    except Exception as e:
+        # Last-resort catch so one malformed event cannot nuke session_init's
+        # hook output. Log so the bug is visible but fail-open.
+        print(
+            f"session_resume: _build_journal_resume failed "
+            f"(fail-open, returning None): {e}",
+            file=sys.stderr,
+        )
         return None
 
-    if not content.strip():
+
+def _build_journal_resume_inner(session_dir: str) -> str | None:
+    """
+    Inner implementation of _build_journal_resume.
+
+    Separated so the outer wrapper can catch any unexpected exception
+    without cluttering the main flow. Each field access uses `.get()`
+    with safe defaults so normal missing-field cases don't raise —
+    the outer try/except is defense-in-depth for unforeseen shapes.
+    """
+    all_events = read_events_from(session_dir)
+    if not all_events:
         return None
 
-    # Rotate: move last-session.md to last-session.prev.md
-    prev_file = snapshot_file.parent / "last-session.prev.md"
-    try:
-        # Overwrite any existing prev file
-        prev_file.write_text(content, encoding="utf-8")
-        os.chmod(str(prev_file), 0o600)
-        snapshot_file.unlink()
-    except (IOError, OSError):
-        pass  # Best-effort rotation; don't fail the restore
+    lines = ["Previous session summary (from journal -- read-only reference):", ""]
 
-    return (
-        "Previous session summary (read-only reference -- not live tasks):\n"
-        + content
+    # Extract completed handoffs. Every field access is guarded with
+    # .get() and type checks — `decisions[0]` is the single historical
+    # crash site (BugF1 secondary), now funneled through the helper.
+    handoffs = [e for e in all_events if e.get("type") == "agent_handoff"]
+    if handoffs:
+        lines.append("## Completed Work")
+        for h in handoffs:
+            agent = h.get("agent", "unknown")
+            subject = h.get("task_subject", "")
+            handoff_data = h.get("handoff")
+            if not isinstance(handoff_data, dict):
+                handoff_data = {}
+            summary = _coerce_decision_summary(handoff_data.get("decisions"))
+            if summary:
+                lines.append(f"- {agent}: {subject} -> {summary}")
+            else:
+                lines.append(f"- {agent}: {subject}")
+        lines.append("")
+
+    # Extract phase progress. Use .get("phase") with a safe default so a
+    # malformed phase_transition event (missing `phase`) does not raise
+    # KeyError — this is the BugF1 primary crash site. The filter requires
+    # `phase` to be a non-empty string so dict/list/number/empty-string
+    # shapes from older schema versions do not render as garbled trailers
+    # (e.g. "Completed phases: " or "Completed phases: 0").
+    #
+    # Sort defensively by `ts` so we don't depend on the (currently true
+    # but undocumented) chronological-order contract of read_events_from.
+    phases = sorted(
+        [e for e in all_events if e.get("type") == "phase_transition"],
+        key=lambda e: e.get("ts", ""),
     )
+    if phases:
+        completed = [
+            phase
+            for p in phases
+            if p.get("status") == "completed"
+            and (phase := p.get("phase")) and isinstance(phase, str)
+        ]
+
+        # Track the latest event per phase name so we only report a phase
+        # as "active" if its most recent transition was `started` — a
+        # phase that started and then completed should not appear in the
+        # active list.
+        latest_per_phase: dict[str, tuple[str, str]] = {}
+        for p in phases:
+            name = p.get("phase")
+            status = p.get("status")
+            ts = p.get("ts", "")
+            if isinstance(name, str) and name and isinstance(status, str):
+                prev = latest_per_phase.get(name)
+                # Use `>=` so the later-seen event wins on ties: when two
+                # events for the same phase share the identical `ts`, the
+                # strict `>` comparator would keep the first-seen record
+                # and drop the second, causing a
+                # `started` + `completed` pair at the same timestamp to
+                # leave the phase visible as "active" (BugF2 territory).
+                if prev is None or ts >= prev[0]:
+                    latest_per_phase[name] = (ts, status)
+        # Pick the active phase by max ts among still-started entries.
+        # Dict insertion order does not match latest-ts order when multiple
+        # phases are concurrently active, so scanning `latest_per_phase` and
+        # taking the last insertion (R1 regression) could surface a stale
+        # phase on the "Last active phase:" line.
+        active_entries = [
+            (ts, name)
+            for name, (ts, status) in latest_per_phase.items()
+            if status == "started"
+        ]
+
+        if completed:
+            lines.append(
+                "Completed phases: "
+                + ", ".join(_coerce_phase_string(c) for c in completed)
+            )
+        if active_entries:
+            latest_active = max(active_entries)[1]
+            lines.append(
+                f"Last active phase: {_coerce_phase_string(latest_active)}"
+            )
+        lines.append("")
+
+    # Check for warnings in session_end events
+    end_events = [e for e in all_events if e.get("type") == "session_end"]
+    for end_event in end_events:
+        warning = end_event.get("warning")
+        if warning:
+            lines.append(f"**Warning**: {warning}")
+            lines.append("")
+
+    # Minimal output check
+    if len(lines) <= 2:
+        return None
+
+    return "\n".join(lines)
 
 
 def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
@@ -219,113 +463,75 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
     return None
 
 
-# paused-state.json schema (written by /PACT:pause command, read here):
-# {
-#   "pr_number": int,           -- GitHub PR number
-#   "pr_url": str,              -- Full GitHub PR URL
-#   "branch": str,              -- Git branch name
-#   "worktree_path": str,       -- Absolute path to .worktrees/ directory
-#   "paused_at": str,           -- ISO 8601 UTC timestamp
-#   "consolidation_completed": bool,  -- Whether memory consolidation ran
-#   "team_name": str            -- Session team name (e.g. "pact-d7ab1edb")
-# }
-
-
 def check_paused_state(
-    project_slug: str,
-    sessions_dir: str | None = None,
+    prev_session_dir: str | None = None,
 ) -> str | None:
     """
     Detect paused work from a previous session's /PACT:pause invocation.
 
-    Checks if ~/.claude/pact-sessions/{project_slug}/paused-state.json exists.
-    If found, validates the paused state and returns a formatted context string
-    for the orchestrator describing the paused PR, branch, and worktree so it
-    can offer to resume.
+    Reads the previous session's journal for session_paused events.
+    The event contains pr_number, pr_url, branch, worktree_path,
+    consolidation_completed, and team_name.
 
     Validation pipeline (ordered cheapest-first):
-    1. TTL check: paused_at older than 14 days → clean up stale file, return info
-    2. Active PR validation via `gh pr view`: if PR is MERGED/CLOSED → clean up,
-       return info. Fail-open: if gh is unavailable or network fails, skip this
-       check and fall through to existing behavior.
+    1. TTL check: timestamp older than 14 days → return informational message
+    2. Active PR validation via `gh pr view`: if MERGED/CLOSED → return info
+
+    The journal is immutable — no file deletion is performed.
 
     Args:
-        project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
+        prev_session_dir: Previous session's directory path (from CLAUDE.md).
+            When provided, reads that session's journal for pause state.
 
     Returns:
         Formatted context string if paused state exists, None otherwise
     """
-    if not project_slug:
+    if not prev_session_dir:
         return None
 
-    if sessions_dir is None:
-        sessions_dir = str(Path.home() / ".claude" / "pact-sessions")
+    return _check_journal_paused_state(prev_session_dir)
 
-    state_file = Path(sessions_dir) / project_slug / "paused-state.json"
-    if not state_file.exists():
+
+def _check_journal_paused_state(session_dir: str) -> str | None:
+    """Check for paused state in the previous session's journal."""
+    event = read_last_event_from(session_dir, "session_paused")
+    if not event:
         return None
 
-    try:
-        content = state_file.read_text(encoding="utf-8")
-        state = json.loads(content)
-    except (IOError, json.JSONDecodeError, UnicodeDecodeError):
+    pr_number = event.get("pr_number")
+    branch = event.get("branch", "unknown")
+    worktree_path = event.get("worktree_path", "unknown")
+
+    # Defensive type narrowing: bool is a subclass of int, so we must
+    # exclude it explicitly. 0/False/""/dict/list/None all fall through
+    # to None so the formatter never sees a junk PR number.
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
         return None
 
-    # Validate required fields
-    pr_number = state.get("pr_number")
-    branch = state.get("branch", "unknown")
-    worktree_path = state.get("worktree_path", "unknown")
-
-    if pr_number is None:
-        return None
-
-    # TTL check: clean up paused state older than 14 days (cheaper than gh call)
-    # Fail-open: if paused_at is missing or unparseable, skip TTL check
-    paused_at_str = state.get("paused_at")
-    if paused_at_str:
+    # TTL check: ts older than 14 days
+    ts_str = event.get("ts", "")
+    if ts_str:
         try:
-            paused_at = datetime.fromisoformat(paused_at_str.replace("Z", "+00:00"))
+            paused_at = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
             age_days = (datetime.now(timezone.utc) - paused_at).days
             if age_days > 14:
-                try:
-                    state_file.unlink()
-                except OSError:
-                    pass
                 paused_date = paused_at.strftime("%Y-%m-%d")
                 return (
-                    f"Stale paused state from {paused_date} cleaned up "
+                    f"Stale paused state from {paused_date} "
                     f"(older than 14 days). PR #{pr_number} on {branch}."
                 )
         except (ValueError, TypeError, OverflowError):
-            pass  # Fail-open: unparseable timestamp — skip TTL check
+            pass
 
-    # Active PR validation: check if the PR is still open.
-    # Only runs when paused-state.json exists (rare), so ~1s latency is acceptable.
-    # Fail-open: if gh is unavailable or network fails, fall through to existing behavior.
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", "state", "--jq", ".state"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+    # Active PR validation
+    pr_state = _check_pr_state(pr_number)
+    if pr_state in ("MERGED", "CLOSED"):
+        return (
+            f"Previously paused PR #{pr_number} has been "
+            f"{pr_state.lower()}."
         )
-        if result.returncode == 0:
-            pr_state = result.stdout.strip().upper()
-            if pr_state in ("MERGED", "CLOSED"):
-                # PR is no longer open — clean up stale paused state
-                try:
-                    state_file.unlink()
-                except OSError:
-                    pass
-                return (
-                    f"Previously paused PR #{pr_number} has been "
-                    f"{pr_state.lower()}. Cleaned up paused state."
-                )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass  # Fail-open: gh not available or network error — skip validation
 
-    consolidation = state.get("consolidation_completed", False)
+    consolidation = event.get("consolidation_completed", False)
     consolidation_note = ""
     if not consolidation:
         consolidation_note = (
@@ -338,3 +544,23 @@ def check_paused_state(
         f"Worktree at {worktree_path}. "
         f"Run /PACT:peer-review to resume review/merge.{consolidation_note}"
     )
+
+
+def _check_pr_state(pr_number: int | str) -> str:
+    """
+    Check PR state via gh CLI. Returns uppercase state string or empty on error.
+
+    Fail-open: returns "" if gh is unavailable, network fails, or timeout.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "state", "--jq", ".state"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().upper()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return ""

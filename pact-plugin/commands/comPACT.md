@@ -170,7 +170,18 @@ When the task contains multiple independent items, invoke multiple specialists t
 For each specialist needed:
 1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [this agent's specific sub-task]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. **Journal event**: Write `agent_dispatch` before spawning each specialist:
+   ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
+JSON
+   ```
+
+> ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
+4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all specialists in parallel (multiple `Task` calls in one response).
 
@@ -189,7 +200,16 @@ Use a single specialist agent only when:
 **Dispatch the specialist**:
 1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [user's task description]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. **Journal event**: Write `agent_dispatch` before spawning:
+   ```bash
+   set -e
+   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
+JSON
+   ```
+4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 ---
 
@@ -232,6 +252,15 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
 - [ ] **Create atomic commit(s)** — stage and commit before proceeding
+- [ ] **Journal events**: After each commit, write a `commit` event:
+  ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+  python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+    --type commit --session-dir '{session_dir}' --stdin <<'JSON'
+  {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
+JSON
+  ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Process specialist HANDOFFs** (non-blocking):
   ```
@@ -240,6 +269,15 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
   TaskUpdate(taskId, owner="secretary")
   ```
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
+- [ ] **Journal event**: Write `phase_transition` to mark comPACT completion:
+  ```bash
+  set -e
+  trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
+  python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+    --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+  {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
+JSON
+  ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 
 > ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.
