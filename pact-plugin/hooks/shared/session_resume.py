@@ -320,30 +320,52 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
 
     # Extract phase progress. Use .get("phase") with a safe default so a
     # malformed phase_transition event (missing `phase`) does not raise
-    # KeyError — this is the BugF1 primary crash site. Events that lack
-    # a phase field are dropped from the summary via the `if phase` filter.
-    phases = [e for e in all_events if e.get("type") == "phase_transition"]
+    # KeyError — this is the BugF1 primary crash site. The filter requires
+    # `phase` to be a non-empty string so dict/list/number/empty-string
+    # shapes from older schema versions do not render as garbled trailers
+    # (e.g. "Completed phases: " or "Completed phases: 0").
+    #
+    # Sort defensively by `ts` so we don't depend on the (currently true
+    # but undocumented) chronological-order contract of read_events_from.
+    phases = sorted(
+        [e for e in all_events if e.get("type") == "phase_transition"],
+        key=lambda e: e.get("ts", ""),
+    )
     if phases:
         completed = [
             phase
             for p in phases
             if p.get("status") == "completed"
-            and (phase := p.get("phase")) is not None
+            and (phase := p.get("phase")) and isinstance(phase, str)
         ]
-        in_progress = [
-            phase
-            for p in phases
-            if p.get("status") == "started"
-            and (phase := p.get("phase")) is not None
+
+        # Track the latest event per phase name so we only report a phase
+        # as "active" if its most recent transition was `started` — a
+        # phase that started and then completed should not appear in the
+        # active list.
+        latest_per_phase: dict[str, tuple[str, str]] = {}
+        for p in phases:
+            name = p.get("phase")
+            status = p.get("status")
+            ts = p.get("ts", "")
+            if isinstance(name, str) and name and isinstance(status, str):
+                prev = latest_per_phase.get(name)
+                if prev is None or ts > prev[0]:
+                    latest_per_phase[name] = (ts, status)
+        active = [
+            name
+            for name, (_, status) in latest_per_phase.items()
+            if status == "started"
         ]
+
         if completed:
             lines.append(
                 "Completed phases: "
                 + ", ".join(_coerce_phase_string(c) for c in completed)
             )
-        if in_progress:
+        if active:
             lines.append(
-                f"Last active phase: {_coerce_phase_string(in_progress[-1])}"
+                f"Last active phase: {_coerce_phase_string(active[-1])}"
             )
         lines.append("")
 
@@ -468,7 +490,10 @@ def _check_journal_paused_state(session_dir: str) -> str | None:
     branch = event.get("branch", "unknown")
     worktree_path = event.get("worktree_path", "unknown")
 
-    if pr_number is None:
+    # Defensive type narrowing: bool is a subclass of int, so we must
+    # exclude it explicitly. 0/False/""/dict/list/None all fall through
+    # to None so the formatter never sees a junk PR number.
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
         return None
 
     # TTL check: ts older than 14 days

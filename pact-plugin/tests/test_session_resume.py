@@ -531,6 +531,51 @@ class TestCheckPausedState:
         result = check_paused_state(prev_session_dir="")
         assert result is None
 
+    @pytest.mark.parametrize(
+        "bad_pr_number",
+        [
+            0,        # zero is falsy and a meaningless PR number
+            -5,       # negative integer
+            False,    # bool subclass of int — must be excluded explicitly
+            True,     # bool subclass of int — must be excluded explicitly
+            "42",     # string would format but is wrong shape
+            "",       # empty string
+            None,     # historically the only rejected case
+            {"x": 1}, # dict
+            [1, 2],   # list
+        ],
+        ids=["zero", "negative", "false", "true", "str", "empty_str",
+             "none", "dict", "list"],
+    )
+    def test_rejects_non_positive_int_pr_number(self, tmp_path, bad_pr_number):
+        """LOW: pr_number must be a positive int — bool/0/str/dict/etc rejected.
+
+        Prior bug: ``if pr_number is None`` only filtered None, letting
+        0/False/strings/dicts/lists fall through to the ``PR #{x}`` formatter.
+        The fix tightens to ``isinstance(pr_number, int) and not bool and > 0``.
+        """
+        import json
+        from shared.session_resume import _check_journal_paused_state
+
+        sd = tmp_path / ".claude" / "pact-sessions" / "test" / "pr-narrowing"
+        sd.mkdir(parents=True, exist_ok=True)
+        journal = sd / "session-journal.jsonl"
+
+        event = {
+            "v": 1,
+            "type": "session_paused",
+            "pr_number": bad_pr_number,
+            "branch": "feat/x",
+            "worktree_path": "/tmp/wt",
+            "ts": "2026-01-01T00:00:00Z",
+        }
+        with open(str(journal), "w") as f:
+            f.write(json.dumps(event) + "\n")
+
+        # All bad shapes must collapse to None — no formatted output.
+        result = _check_journal_paused_state(str(sd))
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # _check_pr_state() -- direct tests
@@ -934,24 +979,26 @@ class TestBuildJournalResumeDefensive:
     def test_phase_value_handles_non_string_type(
         self, session_dir, journal_file,
     ):
-        """RA3: dict/list phase values are stringified safely without crashing.
+        """RA3/H1: dict/list/number phase values are dropped without crashing.
 
         The per-type validator rejects new writes where `phase` is not a
-        scalar-ish value, but hand-crafted journal files and events from
+        non-empty string, but hand-crafted journal files and events from
         pre-validator sessions can carry a dict, list, or other non-string
-        shape. `_coerce_phase_string` routes through `str()` before
-        truncation, so the worst-case output is a readable stub rather
-        than an unhandled TypeError inside the SessionStart hook.
+        shape. The defensive consumer tightens its filter to require
+        `isinstance(phase, str)` so bad-shape events render NOTHING rather
+        than as garbled trailers like ``Completed phases: {'nested': 'dict'}``.
+        Without the filter, an integer phase would surface as
+        ``Last active phase: 42``, which is misleading noise in the
+        SessionStart hook context.
 
-        Writes three malformed phase values and asserts the function
-        returns normally (non-None) AND contains at least the stringified
-        forms — empirical evidence the render path was actually exercised.
+        Writes three malformed phase values plus one valid event so the
+        resume has something to render, and asserts:
+          (a) the function returns without raising,
+          (b) the valid event still renders, and
+          (c) none of the malformed sentinels appear in the output.
         """
         from shared.session_resume import _build_journal_resume
 
-        # Each of these would have worked in the decision-summary code path
-        # but would have crashed or produced `{'x': 1}` styled output in
-        # the phase path prior to this fix.
         self._write_raw_events(journal_file, [
             {"v": 1, "type": "phase_transition",
              "phase": {"nested": "dict"}, "status": "completed",
@@ -962,6 +1009,11 @@ class TestBuildJournalResumeDefensive:
             {"v": 1, "type": "phase_transition",
              "phase": 42, "status": "started",
              "ts": "2026-01-01T00:00:02Z"},
+            # Valid event so the resume does not collapse to None via the
+            # `len(lines) <= 2` early-return guard.
+            {"v": 1, "type": "phase_transition",
+             "phase": "CODE", "status": "started",
+             "ts": "2026-01-01T00:00:03Z"},
         ])
 
         # Must not raise TypeError, ValueError, or any other exception —
@@ -969,13 +1021,76 @@ class TestBuildJournalResumeDefensive:
         result = _build_journal_resume(session_dir)
         assert result is not None
 
-        # The str() of each sentinel should appear in the output so we
-        # know the coercion ran and nothing was silently dropped.
-        assert "{'nested': 'dict'}" in result
-        assert "[1, 2, 3]" in result
-        # Integer phase is in-progress, so it should show up on the
-        # "Last active phase:" line via its str() form.
-        assert "Last active phase: 42" in result
+        # Bad-shape sentinels must NOT appear in the output. Their str()
+        # forms would have leaked through prior to the H1 filter tightening.
+        assert "{'nested': 'dict'}" not in result
+        assert "[1, 2, 3]" not in result
+        assert "Last active phase: 42" not in result
+
+        # The valid CODE event still renders so we know the filter only
+        # drops bad shapes, not the entire phase block.
+        assert "Last active phase: CODE" in result
+
+    def test_completed_phase_not_reported_as_active(
+        self, session_dir, journal_file,
+    ):
+        """M5: a phase that started and then completed must NOT be 'active'.
+
+        Prior bug: the in-progress list was populated from any event with
+        status `started`, even when a later `completed` event for the same
+        phase superseded it. This caused stale phases to surface on the
+        ``Last active phase:`` line. The fix tracks the latest event per
+        phase name and only marks phases whose terminal event is `started`
+        as active.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            # PREPARE started, then completed — must NOT be active.
+            {"v": 1, "type": "phase_transition", "phase": "PREPARE",
+             "status": "started", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "phase_transition", "phase": "PREPARE",
+             "status": "completed", "ts": "2026-01-01T00:00:01Z"},
+            # CODE started, no completion yet — should be the active phase.
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "started", "ts": "2026-01-01T00:00:02Z"},
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "Completed phases: PREPARE" in result
+        assert "Last active phase: CODE" in result
+        assert "Last active phase: PREPARE" not in result
+
+    def test_phase_events_sorted_defensively_by_timestamp(
+        self, session_dir, journal_file,
+    ):
+        """M3: phase events out of chronological order are still ranked correctly.
+
+        Prior bug: the consumer relied on the (currently true but
+        undocumented) chronological-order contract of read_events_from.
+        The fix sorts phase_transition events by `ts` at the consumer
+        site, so a journal where lines were appended in the wrong order
+        (e.g. recovered from a crash + replay) still produces the correct
+        ``Last active phase`` line.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        # Write events out of order: the latest CODE start is appended
+        # FIRST, the older PREPARE start is appended LAST. Without the
+        # defensive sort, "Last active phase" would surface PREPARE.
+        self._write_raw_events(journal_file, [
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "started", "ts": "2026-01-01T00:00:05Z"},
+            {"v": 1, "type": "phase_transition", "phase": "PREPARE",
+             "status": "started", "ts": "2026-01-01T00:00:01Z"},
+            {"v": 1, "type": "phase_transition", "phase": "PREPARE",
+             "status": "completed", "ts": "2026-01-01T00:00:02Z"},
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        assert "Last active phase: CODE" in result
 
     def test_outer_wrapper_catches_unexpected_exception(
         self, session_dir, journal_file, capsys, monkeypatch,
