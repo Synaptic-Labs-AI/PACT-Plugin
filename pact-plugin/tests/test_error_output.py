@@ -986,7 +986,7 @@ class TestHandoffGateSuppressOutput:
         _assert_suppress_output(captured.out)
 
     def test_success_path_suppress(self, capsys):
-        """All gates passed, completed_handoffs entry written -> suppressOutput."""
+        """All gates passed, journal entry written -> suppressOutput."""
         from handoff_gate import main
 
         input_data = json.dumps({
