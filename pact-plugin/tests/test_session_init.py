@@ -1288,3 +1288,222 @@ class TestExtractPrevSessionDirDualLocation:
 
         assert result == preferred
         assert result != legacy
+
+    def test_resume_line_fallback_when_session_dir_missing(self, tmp_path, monkeypatch):
+        """M3: derives session dir from Resume line + project basename when
+        the `- Session dir:` line is absent.
+
+        Targets the fallback branch at session_init.py:207-218. Backward-compat
+        path for sessions written before the Session dir line existed: when only
+        the `- Resume:` line is present, the function reconstructs the path as
+        ~/.claude/pact-sessions/<project-basename>/<session-id>.
+        """
+        from session_init import _extract_prev_session_dir
+
+        # Pin Path.home() so the asserted path is deterministic.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        # Build a project dir whose basename is the slug used in the fallback.
+        project_dir = tmp_path / "MyProject"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        # No "- Session dir:" line — only the Resume line.
+        (dot_claude / "CLAUDE.md").write_text(
+            "# Project\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            f"- Resume: `claude --resume {session_id}`\n"
+            "- Team: `pact-12345678`\n"
+            "- Started: 2026-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        expected = str(
+            (tmp_path / "home") / ".claude" / "pact-sessions"
+            / "MyProject" / session_id
+        )
+        assert result == expected
+
+
+# =============================================================================
+# CLAUDE_PLUGIN_ROOT env-set wiring tests (M6)
+# =============================================================================
+
+
+class TestPluginRootEnvWiring:
+    """M6: Verify that main() honors CLAUDE_PLUGIN_ROOT when already set in env.
+
+    The happy-path tests (TestWriteContextIntegration) cover the case where
+    CLAUDE_PLUGIN_ROOT is unset (empty string is passed through). These tests
+    cover the complementary case where the Claude Code plugin loader sets
+    CLAUDE_PLUGIN_ROOT BEFORE session_init runs. session_init.py:317 reads
+    the env var directly:
+
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+
+    So the test merely needs to assert that when the env var is set, the
+    value flows through to:
+      (a) write_context() -> pact-session-context.json
+      (b) update_session_info() -> `- Plugin root:` line in CLAUDE.md
+    """
+
+    def test_plugin_root_env_flows_to_write_context(self, monkeypatch, tmp_path):
+        """M6a: CLAUDE_PLUGIN_ROOT in env is passed as write_context's 4th arg."""
+        from session_init import main
+
+        plugin_root_value = "/some/custom/plugin/root"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context") as mock_write_ctx, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # 4th positional arg of write_context is plugin_root
+        mock_write_ctx.assert_called_once_with(
+            "pact-aabb1122",
+            "aabb1122-0000-0000-0000-000000000000",
+            str(tmp_path / "proj"),
+            plugin_root_value,
+        )
+
+    def test_plugin_root_env_flows_to_update_session_info(
+        self, monkeypatch, tmp_path
+    ):
+        """M6b: CLAUDE_PLUGIN_ROOT value is passed to update_session_info
+        and lands in the `- Plugin root:` line of the CLAUDE.md SESSION_START
+        block.
+
+        This test does NOT mock update_session_info so the real function
+        actually writes CLAUDE.md -- the assertion is on file contents.
+        """
+        from session_init import main
+
+        plugin_root_value = "/opt/pact-plugin/installed/2.0.0"
+
+        # Set up a real project dir so update_session_info can write to it.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        # Intentionally NOT mocking update_session_info — we want it to run
+        # for real against the tmp_path project dir. Everything else that
+        # touches ~/.claude or the plugin root is mocked.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        # update_session_info should have created/updated the project CLAUDE.md
+        # at the preferred .claude/CLAUDE.md location with the Plugin root line.
+        claude_md = project_dir / ".claude" / "CLAUDE.md"
+        assert claude_md.exists(), (
+            "update_session_info should have created .claude/CLAUDE.md"
+        )
+        content = claude_md.read_text(encoding="utf-8")
+        assert "<!-- SESSION_START -->" in content
+        assert f"- Plugin root: `{plugin_root_value}`" in content, (
+            f"CLAUDE_PLUGIN_ROOT env value should have been written to the "
+            f"Plugin root line, but got:\n{content}"
+        )
+
+        # Also assert the Plugin root line is inside the SESSION_START block
+        # (not appended elsewhere).
+        start = content.index("<!-- SESSION_START -->")
+        end = content.index("<!-- SESSION_END -->")
+        session_block = content[start:end]
+        assert f"- Plugin root: `{plugin_root_value}`" in session_block
+
+    def test_plugin_root_env_flows_to_pact_session_context_json(
+        self, monkeypatch, tmp_path
+    ):
+        """M6c: CLAUDE_PLUGIN_ROOT lands in pact-session-context.json on disk.
+
+        Unlike M6a (which mocks write_context to assert call args), this test
+        lets write_context actually run and reads the JSON back off disk to
+        verify the plugin_root field is persisted.
+        """
+        from session_init import main
+
+        plugin_root_value = "/my/plugin/root/for/persistence/check"
+
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", plugin_root_value)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_id = "ccdd3344-0000-0000-0000-000000000000"
+        stdin_data = json.dumps({"session_id": session_id})
+
+        # Reset pact_context module state so write_context computes the path
+        # fresh from session_id + project_dir (no leakage from prior tests).
+        import shared.pact_context as pact_context
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+        # Context JSON lives at
+        # ~/.claude/pact-sessions/<project-basename>/<session-id>/pact-session-context.json
+        context_file = (
+            tmp_path / ".claude" / "pact-sessions" / "proj" / session_id
+            / "pact-session-context.json"
+        )
+        assert context_file.exists(), (
+            f"pact-session-context.json not found at {context_file}"
+        )
+        data = json.loads(context_file.read_text(encoding="utf-8"))
+        assert data["plugin_root"] == plugin_root_value
+        assert data["session_id"] == session_id
+        assert data["team_name"] == "pact-ccdd3344"

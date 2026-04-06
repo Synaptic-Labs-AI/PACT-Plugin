@@ -177,6 +177,125 @@ class TestHandoffGate:
         assert "decisions" in result
 
 
+class TestSubjectPrefixBypassRegression:
+    """M7: Regression tripwire for BYPASS_SUBJECT_PREFIXES reintroduction.
+
+    Round 3 (commit 6e6dc4a) removed the BYPASS_SUBJECT_PREFIXES constant and
+    the subject-based signal task detection from handoff_gate.py. The
+    authoritative signal-task identification is now `metadata.type in
+    ("blocker", "algedonic")` -- the subject prefix has no special meaning.
+
+    These inverse-assertion tests pin that contract end-to-end via main().
+    If anyone reintroduces subject-prefix bypass, these tests will fail
+    because an agent task with `subject: "BLOCKER: ..."` but no handoff
+    metadata and no `metadata.type` key should STILL be blocked (exit 2).
+
+    End-to-end via main() is the highest-leverage tripwire: validate_task_handoff
+    no longer accepts a task_subject argument at all (removed in b09b2d6), so
+    a unit test of that function alone cannot reach the bypass path. main() is
+    where task_subject flows through stdin -> task file -> metadata lookup,
+    and it's where a regression would land.
+    """
+
+    def test_main_blocks_blocker_subject_without_metadata_type(self, capsys):
+        """BLOCKER: subject + no metadata.type + agent owner -> still blocked.
+
+        Inverse of the deleted `test_bypasses_subject_prefix_blocker` test.
+        """
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "42",
+            "task_subject": "BLOCKER: auth middleware hangs on session refresh",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+
+        # Task file has an owner (so teammate_name path is active) but no
+        # `metadata.type` and no handoff. Under the old subject-prefix bypass,
+        # the "BLOCKER:" prefix would have short-circuited validation and
+        # allowed completion. Now, the handoff gate must fire and block.
+        task_data = {
+            "owner": "backend-coder",
+            "metadata": {},  # NO `type` key and NO `handoff` key
+        }
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2, (
+            "BLOCKER:-prefixed task with no metadata.type must be blocked, "
+            "not bypassed. If this fails, the subject-prefix bypass "
+            "(BYPASS_SUBJECT_PREFIXES) has been reintroduced."
+        )
+        captured = capsys.readouterr()
+        assert "handoff" in captured.err.lower()
+
+    def test_main_blocks_halt_subject_without_metadata_type(self, capsys):
+        """HALT: subject + no metadata.type + agent owner -> still blocked.
+
+        Algedonic-signal variant of the subject-prefix tripwire. Mirrors the
+        deleted bypass path for "HALT:"/"ALERT:" subjects.
+        """
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "43",
+            "task_subject": "HALT: SECURITY — credentials found in commit",
+            "teammate_name": "security-engineer",
+            "team_name": "pact-test",
+        })
+
+        task_data = {
+            "owner": "security-engineer",
+            "metadata": {},  # NO `type` key, NO `handoff` key
+        }
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2, (
+            "HALT:-prefixed task with no metadata.type must be blocked, "
+            "not bypassed. If this fails, the subject-prefix bypass has "
+            "been reintroduced."
+        )
+        captured = capsys.readouterr()
+        assert "handoff" in captured.err.lower()
+
+    def test_main_allows_blocker_subject_WITH_metadata_type(self):
+        """Positive complement: BLOCKER: subject + metadata.type=blocker -> allowed.
+
+        Confirms the authoritative signal-task path still works: a real blocker
+        task (with metadata.type correctly set) bypasses the handoff gate as
+        designed. This guards against overcorrection on the regression fix.
+        """
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "44",
+            "task_subject": "BLOCKER: schema migration reverts on rollback",
+            "teammate_name": "database-engineer",
+            "team_name": "pact-test",
+        })
+
+        # Correct blocker task: metadata.type is set. Bypass is authoritative.
+        task_data = {
+            "owner": "database-engineer",
+            "metadata": {"type": "blocker"},
+        }
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0, (
+            "Blocker task with metadata.type='blocker' must bypass the "
+            "handoff gate (this is the authoritative signal-task path)."
+        )
+
+
 class TestCheckMemorySaved:
     """Tests for handoff_gate.check_memory_saved() — blocking enforcement."""
 
