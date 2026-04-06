@@ -46,15 +46,15 @@ if str(_hooks_dir) not in sys.path:
 from shared.task_utils import get_task_list
 
 # Import staleness detection (extracted to staleness.py for maintainability).
-# Public names are get_project_claude_md_path / estimate_tokens in staleness.py.
-# Re-exported here with underscore aliases so existing consumers and tests
-# that patch "session_init._get_project_claude_md_path" continue to work.
+# Underscore aliases (_get_project_claude_md_path, _estimate_tokens) and the
+# uppercase constants are re-exported here so test_staleness.py can keep
+# importing them via `from session_init import ...`. Removing these would
+# break the staleness test suite, even though pyright flags them as unused
+# inside session_init itself — they form the module's public interface.
 from staleness import (  # noqa: F401
     check_pinned_staleness as _staleness_check,
     PINNED_STALENESS_DAYS,
     PINNED_CONTEXT_TOKEN_BUDGET,
-    get_project_claude_md_path,
-    estimate_tokens,
     _get_project_claude_md_path,
     _estimate_tokens,
 )
