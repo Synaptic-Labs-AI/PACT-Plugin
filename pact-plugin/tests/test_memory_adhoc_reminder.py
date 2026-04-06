@@ -304,14 +304,14 @@ class TestGetReminderType:
         assert result == "adhoc_save"
 
     def test_adhoc_save_when_team_dir_missing(self, tmp_path):
-        """Team dir doesn't exist -> completed_handoffs.jsonl check still works (no crash)."""
+        """Team dir doesn't exist -> journal check still works (no crash)."""
         from memory_adhoc_reminder import get_reminder_type
 
         # Don't create team dir at all
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
-        # completed_handoffs.jsonl .exists() returns False, .adhoc_reminded.exists() returns False,
+        # journal doesn't exist, .adhoc_reminded.exists() returns False,
         # transcript is long enough and has quoted "Edit" evidence -> "adhoc_save"
         assert result == "adhoc_save"
 
@@ -400,7 +400,7 @@ class TestGetReminderType:
         assert result == "uncompleted_tasks"
 
     def test_uncompleted_tasks_over_adhoc_save(self, tmp_path):
-        """Uncompleted tasks take priority over adhoc_save (no completed_handoffs.jsonl)."""
+        """Uncompleted tasks take priority over adhoc_save (no journal handoffs)."""
         from memory_adhoc_reminder import get_reminder_type
 
         teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
@@ -668,8 +668,7 @@ class TestEdgeCaseJournalContent:
     def test_empty_journal_does_not_trigger_unprocessed(self, tmp_path):
         """Empty journal file → no agent_handoff events → 'adhoc_save' (not unprocessed).
 
-        Unlike the old completed_handoffs.jsonl check (file existence = signal),
-        the journal check is content-based: only agent_handoff events count.
+        The journal check is content-based: only agent_handoff events count.
         """
         from memory_adhoc_reminder import get_reminder_type
 

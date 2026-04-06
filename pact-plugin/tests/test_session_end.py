@@ -597,13 +597,13 @@ class TestCleanupTeachbackMarkers:
         assert not list(slug_dir.glob("teachback-warned-*"))
 
     def test_preserves_non_marker_files(self, tmp_path):
-        """Should not delete non-marker files (last-session.md, paused-state.json)."""
+        """Should not delete non-marker files in the slug directory."""
         from session_end import cleanup_teachback_markers
 
         slug_dir = tmp_path / "my-project"
         slug_dir.mkdir(parents=True)
-        (slug_dir / "last-session.md").write_text("# Session")
-        (slug_dir / "paused-state.json").write_text("{}")
+        (slug_dir / "notes.txt").write_text("keep me")
+        (slug_dir / "config.json").write_text("{}")
         self._create_markers(slug_dir, ["teachback-warned-agent-1"])
 
         cleanup_teachback_markers(
@@ -612,8 +612,8 @@ class TestCleanupTeachbackMarkers:
             sessions_dir=str(tmp_path),
         )
 
-        assert (slug_dir / "last-session.md").exists()
-        assert (slug_dir / "paused-state.json").exists()
+        assert (slug_dir / "notes.txt").exists()
+        assert (slug_dir / "config.json").exists()
         assert not (slug_dir / "teachback-warned-agent-1").exists()
 
     def test_skips_when_no_project_slug(self, tmp_path):
@@ -765,9 +765,9 @@ class TestCleanupOldSessions:
         slug_dir.mkdir(parents=True)
         current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-        # Create slug-level files
-        (slug_dir / "last-session.md").write_text("# Session")
-        (slug_dir / "paused-state.json").write_text("{}")
+        # Create slug-level files (non-directory entries should be ignored)
+        (slug_dir / "notes.txt").write_text("keep me")
+        (slug_dir / "config.json").write_text("{}")
 
         self._create_session_dir(slug_dir, current_id, age_days=0)
 
@@ -778,8 +778,8 @@ class TestCleanupOldSessions:
             max_age_days=7,
         )
 
-        assert (slug_dir / "last-session.md").exists()
-        assert (slug_dir / "paused-state.json").exists()
+        assert (slug_dir / "notes.txt").exists()
+        assert (slug_dir / "config.json").exists()
 
     def test_keeps_recent_sessions(self, tmp_path):
         from session_end import cleanup_old_sessions
@@ -1064,7 +1064,7 @@ class TestCleanupMigrationScenario:
         # Session-scoped marker
         (session_dir / "teachback-warned-new-coder-42").touch()
         # Non-marker file at slug level
-        (slug_dir / "last-session.md").write_text("# Session")
+        (slug_dir / "notes.txt").write_text("keep me")
 
         cleanup_teachback_markers(
             project_slug="my-project",
@@ -1076,7 +1076,7 @@ class TestCleanupMigrationScenario:
         assert not (slug_dir / "teachback-warned-old-coder").exists()
         assert not (session_dir / "teachback-warned-new-coder-42").exists()
         # Non-marker preserved
-        assert (slug_dir / "last-session.md").exists()
+        assert (slug_dir / "notes.txt").exists()
 
     def test_session_dir_markers_not_affected_by_slug_sweep(self, tmp_path):
         """Slug-level sweep should not descend into session directories.

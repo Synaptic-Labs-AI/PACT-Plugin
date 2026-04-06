@@ -181,10 +181,10 @@ class TestCriticalProtocolReferences:
         """Skill must reference CalibrationRecord for variety scoring feedback."""
         assert "CalibrationRecord" in skill_content
 
-    def test_has_completed_handoffs_cleanup_guidance(self, skill_content):
-        """Skill must include Path.unlink completed_handoffs.jsonl cleanup guidance."""
+    def test_has_file_cleanup_guidance(self, skill_content):
+        """Skill must include Path.unlink cleanup guidance for orphaned files."""
         assert "unlink" in skill_content, (
-            "Skill must reference Path.unlink for completed_handoffs.jsonl cleanup"
+            "Skill must reference Path.unlink for orphaned file cleanup"
         )
 
     def test_has_processed_tasks_tracking(self, skill_content):
