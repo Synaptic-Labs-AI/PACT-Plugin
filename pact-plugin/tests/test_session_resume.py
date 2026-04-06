@@ -130,6 +130,29 @@ class TestUpdateSessionInfo:
         assert "sess-xyz" in content
         assert "<!-- SESSION_START -->" in content
 
+    def test_session_dir_line_roundtrips_with_extract(self, tmp_path, monkeypatch):
+        """Session dir written by update_session_info can be parsed back by _extract_prev_session_dir."""
+        from shared.session_resume import update_session_info
+        from session_init import _extract_prev_session_dir
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# Project\n\n## Retrieved Context\n")
+
+        session_dir = str(
+            Path.home() / ".claude" / "pact-sessions" / "myproject" / "abc-123"
+        )
+        result = update_session_info("abc-123", "pact-abc123", session_dir)
+        assert result is not None
+
+        # Verify Session dir line is present
+        content = target.read_text()
+        assert "Session dir:" in content
+
+        # Roundtrip: _extract_prev_session_dir should recover the same path
+        extracted = _extract_prev_session_dir(str(tmp_path))
+        assert extracted == session_dir
+
 
 class TestRestoreLastSession:
     """Tests for restore_last_session() -- journal-only path."""

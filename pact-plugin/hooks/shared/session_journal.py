@@ -106,15 +106,12 @@ def append_event(event: dict[str, Any]) -> bool:
 
         # Serialize and write atomically via O_APPEND
         entry = json.dumps(event, separators=(",", ":")) + "\n"
-        fd = os.open(
-            str(journal),
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
-            0o600,
-        )
-        try:
-            os.write(fd, entry.encode("utf-8"))
-        finally:
-            os.close(fd)
+        if not _atomic_write(journal, entry.encode("utf-8")):
+            print(
+                "session_journal: append_event failed: write error",
+                file=sys.stderr,
+            )
+            return False
         return True
 
     except Exception as e:
@@ -341,6 +338,29 @@ def _journal_path_from(session_dir: str) -> Path:
     return Path(session_dir) / "session-journal.jsonl"
 
 
+def _atomic_write(path: Path, data: bytes) -> bool:
+    """
+    Append *data* to *path* using POSIX O_APPEND for atomic writes.
+
+    Returns True on success, False on OSError.  File is created with 0o600
+    if it does not exist.  The caller is responsible for ensuring the parent
+    directory exists before calling.
+    """
+    try:
+        fd = os.open(
+            str(path),
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            0o600,
+        )
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
 # --- CLI ---
 
 
@@ -407,20 +427,10 @@ def main() -> int:
         journal = _journal_path_from(args.session_dir)
         journal.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         entry = json.dumps(event, separators=(",", ":")) + "\n"
-        try:
-            fd = os.open(
-                str(journal),
-                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
-                0o600,
-            )
-            try:
-                os.write(fd, entry.encode("utf-8"))
-            finally:
-                os.close(fd)
-            return 0
-        except Exception as e:
-            print(f"session_journal: write failed: {e}", file=sys.stderr)
+        if not _atomic_write(journal, entry.encode("utf-8")):
+            print("session_journal: write failed", file=sys.stderr)
             return 1
+        return 0
 
     elif args.command == "read":
         events = read_events_from(args.session_dir, event_type=args.event_type)

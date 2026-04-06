@@ -19,7 +19,7 @@ append_event():
 8b. Returns False when v is False (bool subclass of int)
 9. Returns False when type field is missing
 10. Returns False when type field is empty string
-11. Returns False when team_name is empty
+11. Returns False when session_dir is empty
 12. Returns False on write error (fail-open, no exception)
 13. Auto-sets ts when missing from event
 14. Creates file with 0o600 permissions
@@ -233,7 +233,7 @@ class TestAppendEvent:
         assert "ts" in read_back
 
     def test_creates_directory(self, journal_home, team_name, journal_file):
-        """P0: mkdir -p behavior when teams dir doesn't exist."""
+        """P0: mkdir -p behavior when sessions dir doesn't exist."""
         from shared.session_journal import append_event, make_event
 
         assert not journal_file.parent.exists()
@@ -940,11 +940,11 @@ class TestBuildJournalResume:
         result = _build_journal_resume(session_dir)
         assert result is None
 
-    def test_returns_none_for_nonexistent_team(self, journal_home):
-        """Returns None for a team with no journal file."""
+    def test_returns_none_for_nonexistent_session_dir(self, journal_home):
+        """Returns None for a session dir with no journal file."""
         from shared.session_resume import _build_journal_resume
 
-        result = _build_journal_resume("nonexistent-team-xyz")
+        result = _build_journal_resume("nonexistent-session-dir")
         assert result is None
 
     def test_includes_handoff_summary(self, journal_home, session_dir):
@@ -1089,11 +1089,11 @@ class TestCheckJournalPausedState:
         result = _check_journal_paused_state(session_dir)
         assert result is None
 
-    def test_returns_none_for_nonexistent_team(self, journal_home):
-        """Returns None for a team with no journal."""
+    def test_returns_none_for_nonexistent_session_dir(self, journal_home):
+        """Returns None for a session dir with no journal."""
         from shared.session_resume import _check_journal_paused_state
 
-        result = _check_journal_paused_state("nonexistent-team")
+        result = _check_journal_paused_state("nonexistent-session-dir")
         assert result is None
 
     def test_returns_formatted_context(self, journal_home, session_dir):
@@ -1564,6 +1564,22 @@ class TestExtractPrevSessionDir:
 
         assert result is None
 
+    def test_non_tilde_absolute_path_returned_as_is(self, tmp_path):
+        """Absolute path without tilde prefix is returned unchanged."""
+        from session_init import _extract_prev_session_dir
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume abc123`\n"
+            "- Session dir: `/var/data/pact-sessions/myproject/abc123`\n"
+            "- Started: 2026-04-05\n"
+        )
+
+        result = _extract_prev_session_dir(str(tmp_path))
+        assert result == "/var/data/pact-sessions/myproject/abc123"
+
 
 # ---------------------------------------------------------------------------
 # CLI tests (main() via subprocess)
@@ -1702,3 +1718,17 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == "null"
+
+    def test_write_non_dict_data_exits_1(self, journal_home, session_dir, journal_file):
+        """50. write with non-dict --data (array) exits 1 with error."""
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--session-dir", session_dir, "--type", "test",
+                "--data", "[1,2,3]",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "must be a JSON object" in result.stderr
