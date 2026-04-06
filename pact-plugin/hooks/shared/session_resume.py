@@ -29,6 +29,12 @@ from shared.session_journal import read_events_from, read_last_event_from
 # Maximum characters for decision summaries in journal resume output
 _DECISION_TRUNCATION_LIMIT = 80
 
+# Maximum characters for phase strings rendered into journal resume output.
+# Phases are nominally short uppercase identifiers (CODE, TEST, etc.) but the
+# consumer must defend against historical or hand-crafted events that stashed
+# a long free-form string or a non-string type in the `phase` field.
+_PHASE_TRUNCATION_LIMIT = 80
+
 
 def update_session_info(
     session_id: str,
@@ -215,6 +221,29 @@ def _coerce_decision_summary(decisions: Any) -> str:
     return summary
 
 
+def _coerce_phase_string(phase: Any) -> str:
+    """
+    Stringify and bound a `phase` value drawn from a phase_transition event.
+
+    Parallel to `_coerce_decision_summary`: the per-type validator rejects
+    new writes that lack `phase`, but the defensive consumer backstop must
+    still handle:
+    - non-string phase values from older schema versions or hand-crafted
+      journal files (dict, list, None, number)
+    - pathologically long strings from a misconfigured writer that stashed
+      a whole error message in `phase`
+
+    Any of the above is stringified via ``str()`` and truncated at
+    ``_PHASE_TRUNCATION_LIMIT`` so a bad event can produce at worst a
+    readable 80-character stub in the resume output instead of flooding
+    the SessionStart hook context or raising a TypeError downstream.
+    """
+    rendered = str(phase)
+    if len(rendered) > _PHASE_TRUNCATION_LIMIT:
+        rendered = rendered[:_PHASE_TRUNCATION_LIMIT - 3] + "..."
+    return rendered
+
+
 def _build_journal_resume(session_dir: str) -> str | None:
     """
     Build resume context from a previous session's journal events.
@@ -308,9 +337,14 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             and (phase := p.get("phase")) is not None
         ]
         if completed:
-            lines.append(f"Completed phases: {', '.join(str(c) for c in completed)}")
+            lines.append(
+                "Completed phases: "
+                + ", ".join(_coerce_phase_string(c) for c in completed)
+            )
         if in_progress:
-            lines.append(f"Last active phase: {in_progress[-1]}")
+            lines.append(
+                f"Last active phase: {_coerce_phase_string(in_progress[-1])}"
+            )
         lines.append("")
 
     # Check for warnings in session_end events
