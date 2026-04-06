@@ -1180,6 +1180,69 @@ class TestWriteContextIntegration:
         m = _re.search(r"unknown-([0-9a-f]{8})", captured.err)
         assert m is not None, f"expected unknown-XXXXXXXX in stderr: {captured.err}"
 
+    def test_substitution_instructions_warn_when_session_dir_unavailable(
+        self, monkeypatch, tmp_path
+    ):
+        """R-3 regression (2026-04-06): when session_id is missing from stdin,
+        the substitution-instructions block in the SessionStart system
+        reminder MUST explicitly warn the orchestrator that {session_dir} is
+        unavailable for this session.
+
+        Without this warning, an orchestrator on the malformed-stdin path
+        would silently fall back to whatever {session_dir} value it can
+        construct (e.g. from `pact-session-context.json` or CLAUDE.md),
+        bypassing the R3 disk-leak gate by writing into a path that
+        session_init deliberately refused to materialize. The warning text
+        is the user-facing half of the R3 contract: persistence is skipped
+        AND the orchestrator is told not to use {session_dir} commands.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+        captured_stdout = io.StringIO()
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", captured_stdout), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # The hook emits a JSON envelope on stdout with the additionalContext
+        # field containing the substitution instructions. Parse it and assert
+        # the warning text is present.
+        hook_output = captured_stdout.getvalue()
+        envelope = json.loads(hook_output)
+        additional_context = (
+            envelope.get("hookSpecificOutput", {}).get("additionalContext", "")
+        )
+
+        # The "session_dir unavailable" warning must appear in the
+        # substitution instructions block.
+        assert "Session dir unavailable" in additional_context, (
+            f"expected substitution-instructions warning about unavailable "
+            f"session_dir, got: {additional_context!r}"
+        )
+        assert "session_id missing from stdin" in additional_context, (
+            f"expected explicit cause in warning, got: {additional_context!r}"
+        )
+        assert "do not run commands that depend on {session_dir}" in additional_context, (
+            f"expected directive to avoid {{session_dir}} commands, got: "
+            f"{additional_context!r}"
+        )
+
     def test_session_start_event_dropped_when_stdin_lacks_session_id(
         self, monkeypatch, tmp_path
     ):
