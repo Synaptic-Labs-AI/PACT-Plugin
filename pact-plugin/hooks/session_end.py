@@ -193,9 +193,17 @@ def _is_paused_session(session_dir: str) -> bool:
     """
     Check if a session directory contains a paused session that hasn't ended.
 
-    A session is considered "paused" when its journal has a session_paused
-    event but NO subsequent session_end event. Sessions that were paused,
-    then resumed and completed (both events present) are NOT preserved.
+    A session is considered "paused" when the most recent session_paused
+    event is strictly newer than the most recent session_end event (or no
+    session_end event exists). Sessions that were paused, then resumed and
+    completed are NOT preserved. Sessions that were ended and then paused
+    again (a paused→ended→paused sequence) ARE preserved.
+
+    Timestamp comparison uses string ordering. Journal timestamps are
+    written in ISO `%Y-%m-%dT%H:%M:%SZ` format (see session_journal.py),
+    which sorts lexicographically in chronological order — no datetime
+    parsing needed. Missing `ts` fields default to "" (oldest), which
+    biases toward preserving the session.
 
     Fail-open: if the journal is unreadable, returns False (allow cleanup).
 
@@ -209,9 +217,9 @@ def _is_paused_session(session_dir: str) -> bool:
     if not paused:
         return False
 
-    # If session_end also exists, the session was resumed and completed
+    # Compare timestamps: paused must be strictly newer than ended.
     ended = read_last_event_from(session_dir, "session_end")
-    if ended:
+    if ended and ended.get("ts", "") >= paused.get("ts", ""):
         return False
 
     return True

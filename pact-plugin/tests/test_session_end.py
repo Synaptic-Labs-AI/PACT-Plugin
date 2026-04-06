@@ -1228,6 +1228,27 @@ class TestIsPausedSession:
 
         assert _is_paused_session(session_dir) is False
 
+    def test_returns_true_for_paused_after_ended(self, tmp_path):
+        """Paused → ended → paused sequence: latest paused wins (F1 fix).
+
+        Regression: previously _is_paused_session returned False for ANY
+        session with a session_end event, even if a newer session_paused
+        followed it. The function's semantics should be ordering-based:
+        the session is paused iff the latest session_paused is strictly
+        newer than the latest session_end.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-repaused")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 43, "ts": "2026-01-03T00:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
     def test_returns_false_for_no_paused_event(self, tmp_path):
         """Session without session_paused is not paused."""
         from session_end import _is_paused_session
