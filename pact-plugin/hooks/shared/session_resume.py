@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from shared.claude_md_manager import (
@@ -78,14 +77,15 @@ def update_session_info(
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Build session dir line with ~ abbreviation for readability
+    # Build session dir line. MUST be written as an absolute path — command
+    # files read this value via bash single-quoted expansion which does NOT
+    # perform tilde expansion, and `session_journal._validate_cli_session_dir`
+    # rejects non-absolute paths via `Path(session_dir).is_absolute()`. A
+    # tilde-abbreviated path would break every journal write from command
+    # files (R4 regression). Mirrors `plugin_root` below.
     session_dir_line = ""
     if session_dir:
-        home = str(Path.home())
-        display_dir = session_dir
-        if display_dir.startswith(home):
-            display_dir = "~" + display_dir[len(home):]
-        session_dir_line = f"- Session dir: `{display_dir}`\n"
+        session_dir_line = f"- Session dir: `{session_dir}`\n"
 
     # Build plugin root line (no abbreviation — needs to be usable as-is in Bash)
     plugin_root_line = ""

@@ -249,6 +249,36 @@ class TestUpdateSessionInfo:
         assert f"- Plugin root: `{pr}`" in content
         assert "- Plugin root: `~/" not in content
 
+    def test_session_dir_not_abbreviated_with_tilde(self, tmp_path, monkeypatch):
+        """Session dir must NOT be tilde-abbreviated (R4 regression).
+
+        Parallel to `test_plugin_root_not_abbreviated_with_tilde`. Command
+        files read `- Session dir:` via bash single-quoted expansion which
+        does NOT perform tilde expansion, and
+        `session_journal._validate_cli_session_dir` rejects non-absolute
+        paths via `Path(session_dir).is_absolute()` — which returns False
+        for `"~/..."`. A tilde-abbreviated value would therefore break
+        every journal write from command files when the orchestrator falls
+        back to reading CLAUDE.md post-compaction. The fix removes the
+        tilde-abbreviation step in `update_session_info` so the absolute
+        path is written verbatim, matching `plugin_root`.
+        """
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# Project\n\n## Retrieved Context\n")
+
+        home = str(Path.home())
+        sd = f"{home}/.claude/pact-sessions/myproject/abc-123"
+        update_session_info("sess-sd1", "pact-sd1", session_dir=sd)
+
+        content = target.read_text()
+        # The full absolute path must appear, NOT a ~-abbreviated version.
+        assert f"- Session dir: `{sd}`" in content
+        # Sanity: no `- Session dir: \`~/` line survives the fix.
+        assert "- Session dir: `~/" not in content
+
     def test_plugin_root_omitted_when_none(self, tmp_path, monkeypatch):
         """Plugin root line should be absent when plugin_root is not passed."""
         from shared.session_resume import update_session_info
