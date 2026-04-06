@@ -157,6 +157,80 @@ class TestUpdateClaudeMd:
         assert result is not None
         assert "unmanaged" in result
 
+    def test_handles_multiple_pact_start_markers_gracefully(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Corrupted CLAUDE.md with multiple PACT_START markers must not silently
+        drop intermediate content. The manager should warn to stderr, replace
+        only the LAST PACT block, and preserve everything before it verbatim.
+
+        Regression: prior implementation used `split(START_MARKER)` and only
+        kept parts[0] and parts[1], silently dropping parts[2:] (any user
+        content between the second start marker and the trailing end marker).
+        """
+        from shared.claude_md_manager import update_claude_md
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        (plugin_root / "CLAUDE.md").write_text("# PACT v2\nNew content")
+
+        start = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
+        end = "<!-- PACT_END -->"
+
+        # Construct a corrupted CLAUDE.md with THREE PACT_START markers.
+        # The intermediate "stale orphan block" + "user notes" between blocks
+        # must survive the update; only the final block should be rewritten.
+        corrupted = (
+            "User preamble\n"
+            f"{start}\n"
+            "# Stale PACT v0\nFirst orphan body\n"
+            f"{end}\n"
+            "Important user notes between blocks\n"
+            f"{start}\n"
+            "# Stale PACT v0.5\nSecond orphan body\n"
+            f"{end}\n"
+            "More user notes\n"
+            f"{start}\n"
+            "# PACT v1\nMost recent body\n"
+            f"{end}\n"
+            "User trailing content"
+        )
+
+        claude_dir = tmp_path / "home" / ".claude"
+        claude_dir.mkdir(parents=True)
+        target = claude_dir / "CLAUDE.md"
+        target.write_text(corrupted)
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        result = update_claude_md()
+
+        assert result == "PACT Orchestrator updated"
+
+        content = target.read_text()
+
+        # New content replaced the LAST block
+        assert "# PACT v2" in content
+        assert "New content" in content
+        # The most recent stale body must be gone (it was the one replaced)
+        assert "Most recent body" not in content
+        # All surrounding user content must survive verbatim
+        assert "User preamble" in content
+        assert "Important user notes between blocks" in content
+        assert "More user notes" in content
+        assert "User trailing content" in content
+        # Intermediate orphan blocks are preserved (not silently dropped)
+        assert "# Stale PACT v0" in content
+        assert "First orphan body" in content
+        assert "# Stale PACT v0.5" in content
+        assert "Second orphan body" in content
+
+        # A warning was emitted to stderr identifying the corruption
+        captured = capsys.readouterr()
+        assert "PACT warning" in captured.err
+        assert "3 PACT_START markers" in captured.err
+
     def test_appends_when_no_markers_no_conflict(self, tmp_path, monkeypatch):
         """Should append PACT block when no markers and no PACT content."""
         from shared.claude_md_manager import update_claude_md

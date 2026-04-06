@@ -19,6 +19,7 @@ default path so creators land at the preferred location.
 """
 
 import os
+import sys
 from pathlib import Path
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
@@ -129,11 +130,21 @@ def update_claude_md() -> str | None:
 
         # Case 2: Markers found - update if changed
         if START_MARKER in target_content and END_MARKER in target_content:
-            parts = target_content.split(START_MARKER)
-            pre = parts[0]
-            # Handle case where multiple markers might exist (take first and last valid)
-            # but usually just one block.
-            rest = parts[1]
+            # Split on the LAST PACT_START so a corrupted CLAUDE.md with
+            # multiple start markers (e.g., from a prior failed write) doesn't
+            # silently drop intermediate content. Everything before the last
+            # marker is preserved verbatim in `pre`; only the most recent PACT
+            # block is replaced. Warn the user so they know to inspect the file.
+            marker_count = target_content.count(START_MARKER)
+            if marker_count > 1:
+                print(
+                    f"PACT warning: CLAUDE.md contains {marker_count} PACT_START "
+                    f"markers (expected 1). File may be corrupted from a prior "
+                    f"failed write. Using the LAST marker; intermediate content "
+                    f"preserved. Inspect {target_file} and remove stale markers.",
+                    file=sys.stderr,
+                )
+            pre, rest = target_content.rsplit(START_MARKER, 1)
             if END_MARKER in rest:
                 post = rest.split(END_MARKER, 1)[1]
                 new_full_content = f"{pre}{wrapped_source}{post}"
