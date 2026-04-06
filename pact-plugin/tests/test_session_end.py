@@ -1191,9 +1191,12 @@ class TestMainIntegrationCleanup:
 class TestIsPausedSession:
     """Tests for session_end._is_paused_session() — paused-session detection.
 
-    A session is "paused" when its journal has session_paused event but
-    NO subsequent session_end event. Used by cleanup_old_sessions() to
-    preserve paused sessions.
+    Semantics: a session is "paused" iff its journal contains ANY
+    session_paused event, regardless of later session_end events. This
+    is a "has-ever-been-paused" predicate. The caller applies a longer
+    TTL (180 days) to paused sessions to preserve in-progress work
+    across the pause→quit→session_end race (AdvF1) and equal-timestamp
+    ties (BugF2).
     """
 
     def _write_journal(self, session_dir, events):
@@ -1215,8 +1218,16 @@ class TestIsPausedSession:
 
         assert _is_paused_session(session_dir) is True
 
-    def test_returns_false_for_completed_paused(self, tmp_path):
-        """Session with both session_paused AND session_end is NOT paused (Scenario 11)."""
+    def test_returns_true_for_paused_then_ended(self, tmp_path):
+        """Paused → ended: still counts as paused under new semantics.
+
+        Previously this returned False (old "is-currently-paused" predicate).
+        Under the new "has-ever-been-paused" semantics, the presence of
+        any session_paused event is sufficient — the subsequent
+        session_end does not un-pause the session from the cleanup
+        policy's perspective. The caller applies the 180-day paused
+        TTL to this session instead of the 30-day active TTL.
+        """
         from session_end import _is_paused_session
 
         session_dir = str(tmp_path / "sess-abc")
@@ -1226,16 +1237,58 @@ class TestIsPausedSession:
             {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
         ])
 
-        assert _is_paused_session(session_dir) is False
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_true_for_pause_quit_race(self, tmp_path):
+        """AdvF1: /PACT:pause then quit Claude Code ~1s later.
+
+        The real-world flow: user runs /PACT:pause (writes
+        session_paused), then quits Claude Code, which fires session_end
+        a moment later. Under the old semantics, session_end.ts >=
+        session_paused.ts caused _is_paused_session to return False and
+        the paused state was deleted at the 30-day TTL. Under the new
+        semantics, the session_paused event is sufficient.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-race")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            # session_end fires ~1s later when the CC process shuts down
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:01Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_true_for_equal_timestamp_tie(self, tmp_path):
+        """BugF2: equal-ts tie (paused.ts == ended.ts) due to 1-Hz ISO precision.
+
+        ISO timestamps have 1-second precision, so if /PACT:pause and
+        the subsequent session_end both land in the same wall-clock
+        second, their `ts` fields are equal. Under the old `>=` check
+        this caused _is_paused_session to return False (data loss).
+        Under the new semantics the session_paused event is sufficient.
+        """
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-tie")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
 
     def test_returns_true_for_paused_after_ended(self, tmp_path):
-        """Paused → ended → paused sequence: latest paused wins (F1 fix).
+        """Paused → ended → paused sequence: still paused (was F1 fix, still holds).
 
-        Regression: previously _is_paused_session returned False for ANY
-        session with a session_end event, even if a newer session_paused
-        followed it. The function's semantics should be ordering-based:
-        the session is paused iff the latest session_paused is strictly
-        newer than the latest session_end.
+        Under the new semantics this is trivially true — any
+        session_paused event is sufficient. Kept as a regression test
+        to ensure the read_last_event_from path still finds the latest
+        session_paused without being confused by intervening
+        session_end events.
         """
         from session_end import _is_paused_session
 
@@ -1300,9 +1353,13 @@ class TestIsPausedSession:
 class TestCleanupPausedPreservation:
     """Tests for paused-session preservation in cleanup_old_sessions().
 
-    Scenarios 9-11: Paused sessions (session_paused without session_end)
-    survive cleanup regardless of age. Sessions that were paused then
-    completed (both events) are cleaned normally after TTL.
+    Dual-TTL semantics (AdvF1/BugF2 fix): any session that has ever
+    recorded a session_paused event uses the extended paused TTL
+    (_PAUSED_SESSION_MAX_AGE_DAYS, default 180 days). Active sessions
+    use the standard TTL (_SESSION_MAX_AGE_DAYS, default 30 days).
+    The presence of a later session_end does NOT downgrade a paused
+    session to the active TTL — this closes the pause→quit race and
+    the equal-timestamp tie that previously caused silent data loss.
 
     Note: _set_age() must be called AFTER writing journal files, because
     writing into a directory updates its mtime on Unix/macOS.
@@ -1353,22 +1410,31 @@ class TestCleanupPausedPreservation:
         # Paused session must survive despite being 35 days old
         assert paused_dir.exists()
 
-    def test_cleans_completed_paused_session_beyond_ttl(self, tmp_path):
-        """Scenario 11: Session paused then completed — cleaned after TTL."""
+    def test_preserves_paused_ended_session_at_35_days(self, tmp_path):
+        """AdvF1/BugF2 fix: paused→ended session survives the 30-day TTL.
+
+        Under the old semantics, a session that recorded session_paused
+        and then session_end was treated as "no longer paused" and
+        deleted at 30 days — the pause→quit race (AdvF1) and the
+        equal-ts tie (BugF2) both produced this state and silently
+        lost user data. Under dual-TTL semantics, any paused session
+        uses the 180-day TTL, so a 35-day-old paused+ended session
+        survives.
+        """
         from session_end import cleanup_old_sessions
 
         slug_dir = tmp_path / "my-project"
         current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        completed_id = "22222222-3333-4444-5555-666666666666"
+        paused_ended_id = "22222222-3333-4444-5555-666666666666"
 
         self._create_session_dir(slug_dir, current_id)
-        completed_dir = self._create_session_dir(slug_dir, completed_id)
-        self._write_journal(completed_dir, [
+        paused_ended_dir = self._create_session_dir(slug_dir, paused_ended_id)
+        self._write_journal(paused_ended_dir, [
             {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
             {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
-            {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:01Z"},
         ])
-        self._set_age(completed_dir, 35)
+        self._set_age(paused_ended_dir, 35)
 
         cleanup_old_sessions(
             project_slug="my-project",
@@ -1376,8 +1442,65 @@ class TestCleanupPausedPreservation:
             sessions_dir=str(tmp_path),
         )
 
-        # Completed-paused session should be cleaned (TTL exceeded)
-        assert not completed_dir.exists()
+        # Paused session (even if also ended) survives beyond 30-day TTL
+        assert paused_ended_dir.exists()
+
+    def test_preserves_paused_session_at_100_days(self, tmp_path):
+        """Dual-TTL: paused session 100 days old still survives.
+
+        100 days > 30-day active TTL but < 180-day paused TTL, so the
+        session must survive.
+        """
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_id = "33333333-4444-5555-6666-777777777777"
+
+        self._create_session_dir(slug_dir, current_id)
+        paused_dir = self._create_session_dir(slug_dir, paused_id)
+        self._write_journal(paused_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+        ])
+        self._set_age(paused_dir, 100)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert paused_dir.exists()
+
+    def test_cleans_paused_session_beyond_paused_ttl(self, tmp_path):
+        """Dual-TTL: paused sessions eventually age out past 180 days.
+
+        A 200-day-old paused session exceeds the paused TTL and must
+        be cleaned — the extended TTL is protection, not permanent
+        retention.
+        """
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ancient_id = "44444444-5555-6666-7777-888888888888"
+
+        self._create_session_dir(slug_dir, current_id)
+        ancient_dir = self._create_session_dir(slug_dir, ancient_id)
+        self._write_journal(ancient_dir, [
+            {"v": 1, "type": "session_start", "ts": "2025-06-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2025-06-01T01:00:00Z"},
+        ])
+        self._set_age(ancient_dir, 200)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not ancient_dir.exists()
 
     def test_malformed_journal_allows_cleanup(self, tmp_path):
         """Scenario 10: Malformed journal in old session — cleanup proceeds (fail-open)."""
