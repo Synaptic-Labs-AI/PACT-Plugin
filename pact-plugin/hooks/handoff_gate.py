@@ -32,7 +32,6 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def validate_task_handoff(
-    task_subject: str,
     task_metadata: dict,
     teammate_name: str | None,
 ) -> str | None:
@@ -40,7 +39,6 @@ def validate_task_handoff(
     Validate that a task has complete handoff metadata.
 
     Args:
-        task_subject: Task subject line
         task_metadata: Task metadata dict (from task file)
         teammate_name: Name of completing teammate (None for non-agent)
 
@@ -236,7 +234,6 @@ def main():
     task_metadata = task_data.get("metadata", {})
 
     error = validate_task_handoff(
-        task_subject=task_subject,
         task_metadata=task_metadata,
         teammate_name=teammate_name,
     )

@@ -45,7 +45,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={"handoff": VALID_HANDOFF},
             teammate_name="backend-coder"
         )
@@ -55,7 +54,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={},
             teammate_name="backend-coder"
         )
@@ -67,7 +65,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={},
             teammate_name="backend-coder"
         )
@@ -89,7 +86,6 @@ class TestHandoffGate:
 
         incomplete = {k: v for k, v in VALID_HANDOFF.items() if k != "produced"}
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={"handoff": incomplete},
             teammate_name="backend-coder"
         )
@@ -101,7 +97,6 @@ class TestHandoffGate:
 
         empty_produced = {**VALID_HANDOFF, "produced": []}
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={"handoff": empty_produced},
             teammate_name="backend-coder"
         )
@@ -111,7 +106,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="PREPARE: research",
             task_metadata={"skipped": True},
             teammate_name="preparer"
         )
@@ -121,7 +115,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="BLOCKER: missing API key",
             task_metadata={"type": "blocker"},
             teammate_name="backend-coder"
         )
@@ -131,7 +124,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="HALT: security issue",
             task_metadata={"type": "algedonic"},
             teammate_name="backend-coder"
         )
@@ -141,7 +133,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="Feature: auth system",
             task_metadata={},
             teammate_name=None
         )
@@ -152,7 +143,6 @@ class TestHandoffGate:
         from handoff_gate import validate_task_handoff
 
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={"handoff": None},
             teammate_name="backend-coder"
         )
@@ -168,7 +158,6 @@ class TestHandoffGate:
             "reasoning_chain": "Used JWT because stateless auth required"
         }
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={"handoff": handoff_with_reasoning},
             teammate_name="backend-coder"
         )
@@ -181,7 +170,6 @@ class TestHandoffGate:
         incomplete = {k: v for k, v in VALID_HANDOFF.items() if k != "decisions"}
         incomplete["reasoning_chain"] = "Used JWT because stateless auth required"
         result = validate_task_handoff(
-            task_subject="CODE: implement auth",
             task_metadata={"handoff": incomplete},
             teammate_name="backend-coder"
         )
