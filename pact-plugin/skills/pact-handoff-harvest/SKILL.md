@@ -30,7 +30,7 @@ When reviewing multiple HANDOFFs, read ALL of them before saving any memories. T
 
 You have two sources for finding completed agent tasks, in priority order:
 
-1. **Session journal** (primary, GC-proof): `~/.claude/teams/{team_name}/session-journal.jsonl` — read `agent_handoff` events via `python3 -c "import sys; sys.path.insert(0, '{hooks_dir}'); from shared.session_journal import read_events; import json; [print(json.dumps(e)) for e in read_events('{team_name}', 'agent_handoff')]"`. Each event contains `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. **Deduplicate**: extract unique task_ids only.
+1. **Session journal** (primary, GC-proof): `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl` — read `agent_handoff` events via `python3 -c "import sys; sys.path.insert(0, '{hooks_dir}'); from shared.session_journal import read_events; import json; [print(json.dumps(e)) for e in read_events('agent_handoff')]"`. Each event contains `{"type": "agent_handoff", "agent": "...", "task_id": "...", "task_subject": "...", "handoff": {...}, "ts": "..."}` — full HANDOFF content inline, garbage-collection-proof. **Deduplicate**: extract unique task_ids only.
 2. **`TaskList`** (supplementary): Read `TaskList` for completed tasks owned by agents. Useful as a cross-reference and for catching tasks where the completion hook didn't fire. Note: the platform garbage-collects older task files during long sessions, so `TaskList` may be incomplete.
 
 If none of these sources have completed agent tasks, report "No pending HANDOFFs to review" and complete — this is normal when HANDOFFs were already processed by an earlier trigger (idempotent).
@@ -267,8 +267,8 @@ For direct save requests from the lead outside of workflow HANDOFF review (ad-ho
 
 This is the Layer 4 fallback for completed handoffs left behind by sessions that ended without wrap-up or where Layer 2 triggers were missed.
 
-1. Look for `session-journal.jsonl` in `~/.claude/teams/*/` directories. **Exclude the current session's team** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session-id}/pact-session-context.json`, or the team name provided in your dispatch prompt) — that team's data is active, not orphaned.
-2. If found: report to lead "Found N orphaned HANDOFFs from prior session {team_name}"
-3. Attempt to process them — prefer `agent_handoff` events from the session journal (full HANDOFF inline); fall back to `TaskGet` (may fail for garbage-collected tasks)
+1. Look for `session-journal.jsonl` in `~/.claude/pact-sessions/*/*/` directories. **Exclude the current session's directory** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session_id}/pact-session-context.json`, or the session dir provided in your dispatch prompt) — that session's data is active, not orphaned.
+2. If found: report to lead "Found N orphaned HANDOFFs from prior session {session_dir}"
+3. Attempt to process them — prefer `agent_handoff` events from the session journal (full HANDOFF inline, read via `read_events_from(session_dir, 'agent_handoff')`); fall back to `TaskGet` (may fail for garbage-collected tasks)
 4. Delete processed files after recovery (use `python3 -c "from pathlib import Path; Path(...).unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts)
 5. Report summary of recovered knowledge (or gaps where all sources failed)
