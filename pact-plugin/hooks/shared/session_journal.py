@@ -79,10 +79,12 @@ _SCHEMA_VERSION = 1
 # mapping AND add a test to TestValidateEventSchemaPerType in
 # test_session_journal.py.
 _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
-    # hooks/session_init.py:339 writes session_start with team, session_id,
-    # project_dir, worktree. Of these, session_id and project_dir are the
-    # load-bearing fields downstream consumers depend on; team is redundant
-    # with CLAUDE.md and worktree is empty at write time.
+    # hooks/session_init.py writes session_start with team, session_id,
+    # project_dir, worktree on the valid-stdin path only (under R3, the event
+    # is dropped entirely when stdin lacks session_id to avoid an unreapable
+    # `unknown-*` directory leak). Of these, session_id and project_dir are
+    # the load-bearing fields downstream consumers depend on; team is
+    # redundant with CLAUDE.md and worktree is empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
     # commands/orchestrate.md writes variety_assessed with task_id (quoted
     # string) and variety (nested JSON object → dict).

@@ -484,8 +484,9 @@ def main():
         # (session_dir already resolved above for substitution instructions)
         # Skip the CLAUDE.md write when session_id is an "unknown-*" sentinel
         # (bundle 5 fallback for missing stdin; per-process unique suffix).
-        # The sentinel is preserved in the session_start journal event so the
-        # anchor is still recorded, but writing
+        # On the malformed-stdin path BOTH the journal session_start event and
+        # the CLAUDE.md Current Session block are skipped (see the gate above
+        # around append_event and the rationale at step 5 intro): writing
         # `- Session dir: .../unknown-xxxx/` into CLAUDE.md pollutes state
         # recovery: session_resume.py:199 would feed `.../unknown-xxxx/` into
         # _extract_prev_session_dir, and session_end.py:cleanup_old_sessions

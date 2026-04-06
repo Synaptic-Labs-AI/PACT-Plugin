@@ -1296,8 +1296,8 @@ class TestWriteContextIntegration:
         CLAUDE.md Current Session block must NOT be written.
 
         The "unknown-*" fallback (bundle 5, with bundle 11 unique suffix)
-        exists so the session_start journal event can be preserved when
-        stdin lacks session_id. But writing
+        exists so the hook can complete without crashing when stdin lacks
+        session_id. But writing
         `- Session dir: ~/.claude/pact-sessions/{slug}/unknown-xxxx/`
         into CLAUDE.md would pollute state recovery:
 
@@ -1310,9 +1310,10 @@ class TestWriteContextIntegration:
           pollution accumulates indefinitely.
 
         Fix: `session_init.main` short-circuits the `update_session_info`
-        call when `session_id.startswith("unknown")`. The journal anchor
-        event is still written (with the sentinel) but the CLAUDE.md
-        write is skipped.
+        call when `session_id.startswith("unknown")`. Under R3 the journal
+        session_start event is also dropped on this path (see
+        test_session_start_event_dropped_when_stdin_lacks_session_id),
+        so neither the journal anchor nor the CLAUDE.md write happens.
         """
         from session_init import main
 
