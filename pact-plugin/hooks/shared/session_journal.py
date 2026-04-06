@@ -64,6 +64,24 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
     return event
 
 
+def _validate_event_schema(event: dict[str, Any]) -> bool:
+    """
+    Validate that an event dict has the required schema fields.
+
+    Required: 'v' is an int (and NOT a bool — Python bool is a subclass
+    of int, so it must be rejected explicitly), 'type' is a non-empty str.
+
+    Returns:
+        True if the event is schema-valid, False otherwise.
+    """
+    v = event.get("v")
+    if not isinstance(v, int) or isinstance(v, bool):
+        return False
+    if not isinstance(event.get("type"), str) or not event["type"]:
+        return False
+    return True
+
+
 def append_event(event: dict[str, Any]) -> bool:
     """
     Append a single event to the current session's journal.
@@ -82,12 +100,8 @@ def append_event(event: dict[str, Any]) -> bool:
         True if write succeeded, False on any error (fail-open).
     """
     try:
-        # Validate required fields.
-        # Reject bool explicitly — Python bool is a subclass of int.
-        v = event.get("v")
-        if not isinstance(v, int) or isinstance(v, bool):
-            return False
-        if not isinstance(event.get("type"), str) or not event["type"]:
+        # Validate required schema fields (shared with CLI write path).
+        if not _validate_event_schema(event):
             return False
 
         # Auto-set timestamp if missing
@@ -424,6 +438,18 @@ def main() -> int:
             return 1
 
         event = make_event(args.event_type, **extra)
+
+        # Apply the same schema validation as append_event() — extra fields
+        # in --data may shadow defaults from make_event() (e.g., a caller
+        # passing {"v": true} would overwrite the default v=1 with a bool).
+        if not _validate_event_schema(event):
+            print(
+                "session_journal: invalid event schema "
+                "(v must be int, type must be non-empty str)",
+                file=sys.stderr,
+            )
+            return 1
+
         journal = _journal_path_from(args.session_dir)
         journal.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         entry = json.dumps(event, separators=(",", ":")) + "\n"

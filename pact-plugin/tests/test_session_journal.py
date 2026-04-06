@@ -369,6 +369,29 @@ class TestAppendEvent:
         for i, event in enumerate(events):
             assert event["seq"] == i
 
+    def test_atomic_write_returns_false_on_oserror(self, tmp_path):
+        """F4: _atomic_write fails open (returns False) when os.open raises OSError.
+
+        Direct unit test of the underlying primitive used by append_event(). The
+        function is currently exercised indirectly via append_event's fail-open
+        path (test_fail_open_on_write_error uses chmod 0o444 on the parent dir),
+        but a direct test pins the contract: any OSError from os.open must be
+        swallowed and surface as a False return -- never propagate.
+        """
+        import shared.session_journal as sj
+
+        target = tmp_path / "journal.jsonl"
+
+        def _raise_oserror(*args, **kwargs):
+            raise OSError("simulated disk failure")
+
+        with patch.object(sj.os, "open", side_effect=_raise_oserror):
+            result = sj._atomic_write(target, b"test payload")
+
+        assert result is False
+        # File should not exist (os.open raised before any bytes were written)
+        assert not target.exists()
+
 
 # ---------------------------------------------------------------------------
 # read_events()
@@ -1243,6 +1266,71 @@ class TestCheckJournalPausedState:
         assert result is not None
         assert "closed" in result.lower()
 
+    def test_unparseable_ts_does_not_crash(self, journal_home, session_dir, journal_file):
+        """M5: corrupted `ts` field is swallowed, function falls through to PR check.
+
+        The TTL gate at session_resume.py:358-369 catches
+        (ValueError, TypeError, OverflowError) from datetime.fromisoformat(...)
+        and pass-throughs to the active-PR check. With PR state mocked to OPEN,
+        the standard 'Paused work detected' message must be returned -- the
+        unparseable ts must not bubble up as an exception or short-circuit to
+        None.
+        """
+        from shared.session_resume import _check_journal_paused_state
+
+        # Write a paused event directly (bypasses make_event so we control ts).
+        event = {
+            "v": 1,
+            "type": "session_paused",
+            "pr_number": 123,
+            "branch": "feat/bad-ts",
+            "worktree_path": "/tmp/bad-ts",
+            "consolidation_completed": True,
+            "ts": "not-a-timestamp",  # corrupted -- fromisoformat will raise ValueError
+        }
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+        with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
+            result = _check_journal_paused_state(session_dir)
+
+        assert result is not None
+        assert "Paused work detected" in result
+        assert "PR #123" in result
+        assert "feat/bad-ts" in result
+        # Stale TTL message should NOT appear -- we never reached the comparison
+        assert "Stale" not in result
+        assert "older than 14 days" not in result
+
+    def test_missing_ts_does_not_crash(self, journal_home, session_dir, journal_file):
+        """M5: missing `ts` field is treated as fail-open (skips TTL gate).
+
+        When the `ts` field is absent (empty string from .get default), the
+        `if ts_str:` guard at session_resume.py:358 short-circuits past the
+        TTL block entirely and falls through to the PR check. With PR mocked
+        to OPEN, the standard paused message is returned.
+        """
+        from shared.session_resume import _check_journal_paused_state
+
+        # No `ts` key at all -- event.get("ts", "") returns "" -> guard skips block.
+        event = {
+            "v": 1,
+            "type": "session_paused",
+            "pr_number": 456,
+            "branch": "feat/no-ts",
+            "worktree_path": "/tmp/no-ts",
+            "consolidation_completed": True,
+        }
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+        with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
+            result = _check_journal_paused_state(session_dir)
+
+        assert result is not None
+        assert "Paused work detected" in result
+        assert "PR #456" in result
+
 
 # ---------------------------------------------------------------------------
 # Integration: restore_last_session() and check_paused_state() prefer journal
@@ -1732,3 +1820,26 @@ class TestCLI:
         )
         assert result.returncode == 1
         assert "must be a JSON object" in result.stderr
+
+    def test_write_bool_v_field_rejected(self, journal_home, session_dir, journal_file):
+        """51. write with --data containing bool 'v' is rejected (M2 fix).
+
+        Regression: a caller passing --data '{"v": true, ...}' would have
+        overwritten the default v=1 (set by make_event) with a bool, which
+        bypasses the int-not-bool check that append_event() enforces.
+        The CLI write path must apply the same schema validation.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "test_event",
+                "--session-dir", session_dir,
+                "--data", '{"v": true}',
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode != 0
+        assert "invalid event schema" in result.stderr
+        # The journal must NOT have been written.
+        assert not journal_file.exists() or journal_file.read_text() == ""
