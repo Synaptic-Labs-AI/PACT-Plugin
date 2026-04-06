@@ -325,8 +325,23 @@ def main():
         # 5a. Write session context file FIRST so get_session_dir() works for
         # subsequent journal writes. write_context() populates the _cache
         # immediately, enabling append_event() to derive the journal path.
+        # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
+        # rejects empty strings for str-typed required fields, so an empty
+        # session_id would cause append_event() to silently drop the
+        # session_start event — the journal's anchor event. Substitute a
+        # non-empty fallback and emit a stderr warning so the substitution is
+        # visible. Reachable in production via the malformed-stdin fallback
+        # above (input_data = {} on JSONDecodeError); latent otherwise because
+        # Claude Code reliably provides session_id. Mirrors bundle 4's
+        # handoff_gate.py fix (commit 2b0ee90) for the same bug class.
         raw_id = input_data.get("session_id")
-        session_id = str(raw_id) if raw_id else ""
+        session_id = str(raw_id) if raw_id else "unknown"
+        if session_id == "unknown":
+            print(
+                "session_init: missing session_id in stdin payload; "
+                "using fallback to preserve session_start event",
+                file=sys.stderr,
+            )
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
         try:
             write_context(team_name, session_id, project_dir, plugin_root)

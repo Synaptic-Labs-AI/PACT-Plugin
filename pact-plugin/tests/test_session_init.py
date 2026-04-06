@@ -1117,8 +1117,13 @@ class TestWriteContextIntegration:
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
         )
 
-    def test_write_context_gets_empty_session_id_when_stdin_lacks_it(self, monkeypatch, tmp_path):
-        """write_context should receive empty session_id when stdin has none."""
+    def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
+        """When stdin lacks session_id, fall back to "unknown" and emit a
+        stderr warning so the substitution is visible. The fallback value is
+        passed to write_context() so the context file and the journal anchor
+        event stay consistent. Mirrors the bundle 4 defensive-substitution
+        pattern in handoff_gate.py.
+        """
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
@@ -1140,9 +1145,69 @@ class TestWriteContextIntegration:
             with pytest.raises(SystemExit):
                 main()
 
-        # session_id should be empty string — no env var fallback
+        # write_context receives the "unknown" fallback, keeping the
+        # fallback value consistent between the context file and the
+        # journal anchor event.
         call_args = mock_write_ctx.call_args[0]
-        assert call_args[1] == ""
+        assert call_args[1] == "unknown"
+
+        # The stderr warning makes the substitution visible in logs
+        # (same visibility pattern as handoff_gate.py's bundle 4 fix).
+        captured = capsys.readouterr()
+        assert "missing session_id" in captured.err
+        assert "fallback to preserve session_start event" in captured.err
+
+    def test_session_start_event_journaled_with_unknown_when_stdin_lacks_session_id(
+        self, monkeypatch, tmp_path
+    ):
+        """Regression: the session_start event — the journal's anchor
+        event — must be written with a non-empty session_id even when
+        stdin lacks one. The RA1+RG2 schema validator rejects empty
+        session_id for session_start events; without the "unknown"
+        fallback, append_event() would silently drop the anchor event
+        (Finding A from r6-audit-producer-defaults). Mirrors the
+        handoff_gate.py bundle 4 regression test for agent_handoff
+        event integrity.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event") as mock_append, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # Find the session_start event in the append_event calls.
+        session_start_calls = [
+            call for call in mock_append.call_args_list
+            if call.args and call.args[0].get("type") == "session_start"
+        ]
+        assert len(session_start_calls) == 1, (
+            f"Expected exactly one session_start event, got "
+            f"{len(session_start_calls)}"
+        )
+        session_start_event = session_start_calls[0].args[0]
+
+        # The session_id must be the non-empty "unknown" fallback so the
+        # schema validator accepts the event. An empty string here is the
+        # Finding A bug — the anchor event is silently dropped.
+        assert session_start_event["session_id"] == "unknown"
+        assert session_start_event["session_id"] != ""
 
     def test_write_context_failure_does_not_block_session(self, monkeypatch, tmp_path):
         """write_context failure should not prevent session_init from completing."""
