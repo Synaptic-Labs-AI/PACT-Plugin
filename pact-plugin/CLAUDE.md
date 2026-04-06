@@ -74,7 +74,9 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 ## Session Placeholder Variables
 
-Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholder variables. Substitute from the Current Session block in the project's `CLAUDE.md`. PACT honors both supported locations: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred / new default) and `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Whichever exists wins; when neither exists, `session_init` creates the file at the new default `.claude/CLAUDE.md`. If a value is missing or the file is unavailable, fall back to `pact-session-context.json` in the current session directory.
+Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholder variables. **Substitution is manual — there is no template engine.** Command files contain literal brace-wrapped strings; the orchestrator reads the resolved values and performs textual replacement before invoking shell commands. Read the values from the Current Session block in the project's `CLAUDE.md`. PACT honors both supported locations: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred / new default) and `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Whichever exists wins; when neither exists, `session_init` creates the file at the new default `.claude/CLAUDE.md`.
+
+**Fallback is per-field**: if an individual variable is missing from `CLAUDE.md` (for example, a session block written by an older `session_init` that didn't record `- Plugin root:`), fall back to `pact-session-context.json` in the current session directory for that one variable. Do not re-read the whole set from JSON when a single field is missing.
 
 | Placeholder | CLAUDE.md line | Context JSON key | Description |
 |-------------|---------------|-----------------|-------------|
@@ -82,7 +84,7 @@ Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session
 | `{session_dir}` | `- Session dir:` | Derived from `session_id` + `project_dir` | Session journal directory |
 | `{plugin_root}` | `- Plugin root:` | `plugin_root` | Installed plugin root for CLI paths |
 
-**Fallback for `{plugin_root}`**: If both sources are unavailable, use `$HOME/.claude/protocols/pact-plugin/../` (symlink traversal).
+**Last-resort fallback for `{plugin_root}`**: if both `CLAUDE.md` and `pact-session-context.json` are unavailable, use `$HOME/.claude/protocols/pact-plugin/../` (symlink traversal). ⚠️ This fallback is fragile — if the plugin symlink has been deleted or the plugin was reinstalled mid-session, the path may resolve to a missing directory. If you detect that the resolved path does not exist, stop and report the issue to the user rather than continuing with a broken path.
 
 ## GUIDELINES
 
@@ -380,8 +382,8 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
 | Reading agent's full HANDOFF | `TaskGet(taskId).metadata.handoff` (on-demand, not automatic) |
 | Creating downstream phase task | Include upstream task IDs in description for chain-read |
-| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...")` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])` |
-| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...")` then amplify scope via `addBlockedBy` on phase/feature task |
+| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — the `handoff_gate` hook only bypasses handoff validation for tasks where `metadata.type in ("blocker", "algedonic")`; the subject prefix has no special meaning. |
+| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. **`metadata.type` is required** for handoff-gate bypass (see blocker row). |
 
 **Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals, progress signals). The orchestrator creates tasks and monitors via `TaskList` and incoming `SendMessage` signals. Agents can send brief mid-task status updates (`[sender→lead] Progress: {done}/{remaining}, {status}`) when requested.
 
