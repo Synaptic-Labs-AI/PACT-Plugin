@@ -152,7 +152,7 @@ Spawn all reviewers in parallel (multiple `Task` calls in one response).
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:
 ```bash
 python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-  --type review_dispatch --team '{team_name}' \
+  --type review_dispatch --session-dir '{session_dir}' \
   --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}'
 ```
 
@@ -203,7 +203,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
    ```bash
    # Repeat for each finding:
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type review_finding --team '{team_name}' \
+     --type review_finding --session-dir '{session_dir}' \
      --data '{"severity": "{blocking|suggestion|nitpick}", "finding": "{one-line description}", "reviewer": "{reviewer-name}", "task_id": "{reviewer_task_id}"}'
    ```
 3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
@@ -226,7 +226,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
      - **Journal event**: Write a `remediation` event when dispatching fixes:
        ```bash
        python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-         --type remediation --team '{team_name}' \
+         --type remediation --session-dir '{session_dir}' \
          --data '{"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}"}'
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
@@ -278,7 +278,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
    **Journal event**: When merge-ready, write a `pr_ready` event:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type pr_ready --team '{team_name}' \
+     --type pr_ready --session-dir '{session_dir}' \
      --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}'
    ```
 

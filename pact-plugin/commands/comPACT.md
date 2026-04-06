@@ -173,7 +173,7 @@ For each specialist needed:
 3. **Journal event**: Write `agent_dispatch` before spawning each specialist:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type agent_dispatch --team '{team_name}' \
+     --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
    ```
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
@@ -198,7 +198,7 @@ Use a single specialist agent only when:
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type agent_dispatch --team '{team_name}' \
+     --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}'
    ```
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
@@ -247,7 +247,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Journal events**: After each commit, write a `commit` event:
   ```bash
   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-    --type commit --team '{team_name}' \
+    --type commit --session-dir '{session_dir}' \
     --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
   ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
@@ -261,7 +261,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] **Journal event**: Write `phase_transition` to mark comPACT completion:
   ```bash
   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-    --type phase_transition --team '{team_name}' \
+    --type phase_transition --session-dir '{session_dir}' \
     --data '{"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}'
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"

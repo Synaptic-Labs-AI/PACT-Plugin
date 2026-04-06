@@ -58,15 +58,15 @@ Before deleting the team (step 7), ensure all journal entries have been processe
 
 1. Confirm the secretary has completed the consolidation harvest (step 1). The secretary should confirm via `SendMessage`: "All journal entries processed to pact-memory."
 2. **Only on confirmation**: Proceed to worktree cleanup and team deletion.
-3. **If secretary cannot confirm**: Warn user, do NOT delete team directory — the journal must survive for future recovery.
+3. **If secretary cannot confirm**: Warn user — unprocessed journal entries will not be distilled to pact-memory. The journal itself is safe (stored in `~/.claude/pact-sessions/`, not the team directory).
 
 **Journal event**: Write a `session_end` event after confirmation:
 ```bash
 python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-  --type session_end --team '{team_name}'
+  --type session_end --session-dir '{session_dir}'
 ```
 
-**Recovery note**: If wrap-up is interrupted before the team directory is deleted, team directories at `~/.claude/teams/{team_name}/` accumulate but do not affect functionality. These directories can be safely deleted manually after extracting any needed journal data from `session-journal.jsonl`. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
+**Recovery note**: The journal survives `TeamDelete` — it lives in `~/.claude/pact-sessions/{slug}/{session_id}/`, independent of the team directory. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
 
 ## 6. Worktree Cleanup
 

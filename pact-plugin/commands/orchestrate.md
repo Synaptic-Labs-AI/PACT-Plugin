@@ -137,7 +137,7 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 **Journal event**: After persisting variety, write a `variety_assessed` event:
 ```bash
 python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-  --type variety_assessed --team '{team_name}' \
+  --type variety_assessed --session-dir '{session_dir}' \
   --data '{"task_id": "{feature_task_id}", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}'
 ```
 
@@ -199,17 +199,17 @@ Lead monitors for phase completion via `SendMessage` from teammates (completion 
 SJ="$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py"
 
 # Phase started:
-python3 "$SJ" write --type phase_transition --team '{team_name}' \
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
   --data '{"phase": "{PHASE}", "status": "started", "skip_reason": "", "metadata": {}}'
 
 # Phase completed (followed by checkpoint):
-python3 "$SJ" write --type phase_transition --team '{team_name}' \
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
   --data '{"phase": "{PHASE}", "status": "completed", "skip_reason": "", "metadata": {}}'
-python3 "$SJ" write --type checkpoint --team '{team_name}' \
+python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' \
   --data '{"phase": "{PHASE}", "completed_phases": [...], "active_agents": [{"name": "...", "task_id": "...", "status": "..."}], "variety": VARIETY_DICT_OR_NULL, "pending_phases": [...], "safe_to_retry": true}'
 
 # Phase skipped:
-python3 "$SJ" write --type phase_transition --team '{team_name}' \
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
   --data '{"phase": "{PHASE}", "status": "skipped", "skip_reason": "{reason}", "metadata": {}}'
 ```
 
@@ -257,7 +257,7 @@ Wire variety dimension scores (already computed in the Task Variety Assessment a
 
 **If any hard gate fires** → Phase runs. No further analysis needed for this phase.
 
-**Missing variety data**: If variety scores are not available, hard gates cannot be evaluated — the default-run posture applies. After compaction, read the journal's `variety_assessed` event first (`python3 "$SJ" read-last --team '{team_name}' --type variety_assessed`); fall back to `TaskGet(featureTaskId).metadata.variety` if journal is unavailable. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery hierarchy.
+**Missing variety data**: If variety scores are not available, hard gates cannot be evaluated — the default-run posture applies. After compaction, read the journal's `variety_assessed` event first (`python3 "$SJ" read-last --session-dir '{session_dir}' --type variety_assessed`); fall back to `TaskGet(featureTaskId).metadata.variety` if journal is unavailable. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery hierarchy.
 
 ### Layer 3: Structured Analysis Gate
 
@@ -368,7 +368,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type agent_dispatch --team '{team_name}' \
+     --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}'
    ```
 4. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
@@ -447,7 +447,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type agent_dispatch --team '{team_name}' \
+     --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}'
    ```
 4. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
@@ -533,7 +533,7 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 **Journal event**: After persisting S2 boundaries for concurrent dispatch, write an `s2_state_seeded` event:
 ```bash
 python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-  --type s2_state_seeded --team '{team_name}' \
+  --type s2_state_seeded --session-dir '{session_dir}' \
   --data '{"worktree": "{worktree_path}", "agents": ["{agent1}", "{agent2}"], "boundaries": {"{agent1}": ["path/"], "{agent2}": ["path/"]}}'
 ```
 
@@ -555,7 +555,7 @@ For each coder needed:
 3. **Journal event**: Write `agent_dispatch` before spawning each coder:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type agent_dispatch --team '{team_name}' \
+     --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
    ```
 4. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
@@ -589,7 +589,7 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] **Journal event**: After each commit, write a `commit` event:
   ```bash
   python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-    --type commit --team '{team_name}' \
+    --type commit --session-dir '{session_dir}' \
     --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
   ```
 - [ ] **Process coder HANDOFFs** (non-blocking):
@@ -656,7 +656,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
    python3 "$HOME/.claude/protocols/pact-plugin/../hooks/shared/session_journal.py" write \
-     --type agent_dispatch --team '{team_name}' \
+     --type agent_dispatch --session-dir '{session_dir}' \
      --data '{"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}'
    ```
 4. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
