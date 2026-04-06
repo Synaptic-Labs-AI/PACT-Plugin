@@ -235,6 +235,35 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
+def _is_unknown_or_missing_session(raw_id: object) -> bool:
+    """Return True if the session_id is missing, blank, or already a sentinel.
+
+    Single canonical predicate for the malformed-stdin gate. Both the
+    persistence call sites at the top of main() (write_context + append_event)
+    and the CLAUDE.md write at step 5b consult this helper so the two gates
+    can never drift. Drift previously allowed two corruption classes:
+
+    * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
+      `not raw_id`, leaking through to write_context as a literal directory
+      name.
+    * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
+      the string is non-empty, then later passed `startswith("unknown")`
+      and was written into CLAUDE.md anyway via a different code path.
+
+    The unified helper rejects all of: None, non-strings, empty strings,
+    whitespace-only strings, and any string already shaped like the
+    `unknown-*` sentinel.
+    """
+    if not raw_id:
+        return True
+    if not isinstance(raw_id, str):
+        return True
+    stripped = raw_id.strip()
+    if not stripped:
+        return True
+    return stripped.startswith("unknown")
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -349,8 +378,12 @@ def main():
         # durably record the session, and creating an orphaned journal file
         # in an unreapable directory is worse than the missing anchor.
         raw_id = input_data.get("session_id")
-        session_id_was_missing = not raw_id
-        if raw_id:
+        # Single canonical predicate (R-1+R-2): rejects None, non-strings,
+        # empty strings, whitespace-only strings, and any "unknown-*" sentinel.
+        # The CLAUDE.md write gate at step 5b consults the same helper so the
+        # two predicates can never drift.
+        session_id_was_missing = _is_unknown_or_missing_session(raw_id)
+        if not session_id_was_missing:
             session_id = str(raw_id)
         else:
             session_id = f"unknown-{secrets.token_hex(4)}"
@@ -492,7 +525,7 @@ def main():
         # _extract_prev_session_dir, and session_end.py:cleanup_old_sessions
         # filters by _UUID_PATTERN (which "unknown-*" never matches), so the
         # directory would accumulate indefinitely.
-        if session_id and not session_id.startswith("unknown"):
+        if not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
                 if "failed" in session_msg.lower():
