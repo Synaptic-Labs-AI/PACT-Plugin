@@ -215,8 +215,23 @@ def main():
         sys.exit(0)
 
     pact_context.init(input_data)
-    task_id = input_data.get("task_id", "")
-    task_subject = input_data.get("task_subject", "")
+    # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
+    # rejects empty strings for str-typed required fields. If the platform
+    # ever omits task_id/task_subject from the TaskCompleted payload, the
+    # downstream agent_handoff event would be silently dropped by
+    # append_event() (which is fail-open). Substitute fallback values and
+    # emit a stderr warning so the substitution is visible — preserving the
+    # HANDOFF event is more important than rejecting it on missing metadata.
+    task_id = input_data.get("task_id") or "unknown"
+    task_subject = input_data.get("task_subject") or "(no subject)"
+    if task_id == "unknown" or task_subject == "(no subject)":
+        print(
+            f"handoff_gate: missing required field(s) in TaskCompleted payload "
+            f"(task_id={'present' if task_id != 'unknown' else 'MISSING'}, "
+            f"task_subject={'present' if task_subject != '(no subject)' else 'MISSING'}); "
+            f"using fallback values to preserve agent_handoff event",
+            file=sys.stderr,
+        )
     team_name = (input_data.get("team_name") or get_team_name()).lower()
 
     # Read task file once — used for both owner resolution and metadata.

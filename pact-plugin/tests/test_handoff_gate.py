@@ -624,8 +624,14 @@ class TestMainEntryPoint:
         # No JSON on stdout
         assert captured.out == ""
 
-    def test_main_no_block_when_memory_saved(self, capsys):
+    def test_main_no_block_when_memory_saved(self, capsys, pact_context):
         """Integration: valid handoff + memory_saved=true -> exit 0, suppressOutput."""
+        # Initialize pact_context so append_event() doesn't emit the AdvF2
+        # "called before init()" warning. Without this, the test passes only
+        # when other tests have polluted module-level _context_path; in
+        # isolation it fails. The fixture monkeypatches _context_path to a
+        # tmp file for the duration of this test.
+        pact_context(team_name="pact-test", session_id="test-session")
         from handoff_gate import main
 
         input_data = json.dumps({
@@ -644,7 +650,10 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         assert json.loads(captured.out.strip()) == {"suppressOutput": True}
-        assert captured.err == ""
+        # Catch the specific regression — the AdvF2 init warning must NOT
+        # fire when pact_context is initialized. Tolerates unrelated stderr
+        # from other code paths.
+        assert "append_event called before pact_context.init()" not in captured.err
 
     def test_main_no_memory_block_when_handoff_blocked(self, capsys):
         """Integration: missing handoff -> exit 2 (blocked), no memory feedback on stdout."""
@@ -757,6 +766,75 @@ class TestMainEntryPoint:
                 main()
 
         assert exc_info.value.code == 0
+
+    def test_main_substitutes_fallbacks_when_required_fields_missing(self, capsys):
+        """
+        Defensive substitution: when the platform omits task_id/task_subject
+        (or sends empty strings), handoff_gate substitutes "unknown" /
+        "(no subject)" so the agent_handoff event still satisfies the
+        RA1+RG2 schema validator (which rejects empty strings for str
+        required fields). Without this, the event would be silently dropped
+        by append_event() — a silent HANDOFF loss path.
+        """
+        from handoff_gate import main
+
+        # Input WITHOUT task_id and task_subject. teammate_name is present
+        # so this is a real agent completion path (not the non-agent bypass).
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_event", return_value=True) as mock_append, \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Hook still exits cleanly (no block)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        # Substitution warning is visible on stderr
+        assert "handoff_gate: missing required field(s)" in captured.err
+        assert "task_id=MISSING" in captured.err
+        assert "task_subject=MISSING" in captured.err
+        # The agent_handoff event was still written (not dropped) — and
+        # it carries the fallback values, satisfying the schema validator
+        mock_append.assert_called_once()
+        event = mock_append.call_args[0][0]
+        assert event["type"] == "agent_handoff"
+        assert event["task_id"] == "unknown"
+        assert event["task_subject"] == "(no subject)"
+        assert event["agent"] == "backend-coder"
+
+    def test_main_substitutes_fallback_when_task_id_empty_string(self, capsys):
+        """Empty-string task_id (vs missing key) also triggers substitution."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "",  # explicit empty string
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+
+        task_data = {"metadata": {"handoff": VALID_HANDOFF, "memory_saved": True}}
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_event", return_value=True) as mock_append, \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        # Only task_id was missing — task_subject was provided
+        assert "task_id=MISSING" in captured.err
+        assert "task_subject=present" in captured.err
+        mock_append.assert_called_once()
+        event = mock_append.call_args[0][0]
+        assert event["task_id"] == "unknown"
+        assert event["task_subject"] == "CODE: auth"
 
 
 class TestReadTaskOwnerCorruptedJson:
