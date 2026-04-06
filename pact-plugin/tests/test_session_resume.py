@@ -1092,6 +1092,68 @@ class TestBuildJournalResumeDefensive:
         assert result is not None
         assert "Last active phase: CODE" in result
 
+    def test_active_phase_uses_latest_ts(
+        self, session_dir, journal_file,
+    ):
+        """R1: the "Last active phase" line must reflect the most recent ts,
+        not dict insertion order.
+
+        Prior regression: when two phases were both currently `started`, the
+        renderer picked `active[-1]` from a dict-iteration-order list. Dict
+        iteration follows FIRST-insertion order (reassigning an existing key
+        does not move it to the tail in Python 3.7+), so the last-seen entry
+        in insertion order is NOT necessarily the phase with the greatest
+        `ts`. The fix selects via `max(ts)` across still-started entries.
+
+        This test gives CODE the LATER ts but PREPARE the later first-seen
+        position in the dict, so the pre-fix code would pick PREPARE (the
+        last insertion-order entry) while the fix correctly picks CODE.
+
+        After defensive sort-by-ts, events are processed in ts order:
+          1. CODE @ ts=05  -> latest_per_phase[CODE] inserted first
+          2. PREPARE @ ts=10 -> latest_per_phase[PREPARE] inserted second
+        Dict order: [CODE, PREPARE]. Old code: active[-1] = PREPARE. Max ts
+        selector: CODE @ ts=10 is NOT the latest — PREPARE @ ts=10 wins.
+        ...so we need CODE's ts > PREPARE's ts but PREPARE inserted later.
+
+        The only way to achieve that (insertion later but ts smaller) is to
+        have CODE with a larger ts but a SMALLER ts in its FIRST-seen event
+        than PREPARE's first-seen event. Concretely: CODE seen first with a
+        ts that is LATER than PREPARE's first-seen ts is impossible when
+        events are sorted by ts. So we must disable the sort effect — write
+        a completed CODE older than PREPARE's start, then a started CODE
+        with the greatest ts. That way CODE is first inserted (by completed
+        event), PREPARE second, then CODE re-inserted-into-same-slot by the
+        started event. Dict order stays [CODE, PREPARE]; still-started set
+        is {CODE (ts=20), PREPARE (ts=10)}; active[-1] = PREPARE (wrong),
+        max-ts pick = CODE (correct).
+        """
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            # 1) CODE completed at an early ts — inserts CODE first into
+            #    latest_per_phase with status="completed".
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "completed", "ts": "2026-01-01T00:00:00Z"},
+            # 2) PREPARE started — inserts PREPARE second into
+            #    latest_per_phase. Dict insertion order: [CODE, PREPARE].
+            {"v": 1, "type": "phase_transition", "phase": "PREPARE",
+             "status": "started", "ts": "2026-01-01T00:00:10Z"},
+            # 3) CODE re-started with the greatest ts — reassigns the CODE
+            #    slot to ("...:20Z", "started") WITHOUT moving it to the
+            #    tail of the dict. Dict order remains [CODE, PREPARE].
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "started", "ts": "2026-01-01T00:00:20Z"},
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        # CODE has the greatest ts among still-started phases — must win.
+        assert "Last active phase: CODE" in result
+        # PREPARE was the tail of dict insertion order; the pre-fix
+        # active[-1] code would have picked it. The fix must NOT.
+        assert "Last active phase: PREPARE" not in result
+
     def test_outer_wrapper_catches_unexpected_exception(
         self, session_dir, journal_file, capsys, monkeypatch,
     ):

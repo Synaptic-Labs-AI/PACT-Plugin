@@ -352,9 +352,14 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
                 prev = latest_per_phase.get(name)
                 if prev is None or ts > prev[0]:
                     latest_per_phase[name] = (ts, status)
-        active = [
-            name
-            for name, (_, status) in latest_per_phase.items()
+        # Pick the active phase by max ts among still-started entries.
+        # Dict insertion order does not match latest-ts order when multiple
+        # phases are concurrently active, so scanning `latest_per_phase` and
+        # taking the last insertion (R1 regression) could surface a stale
+        # phase on the "Last active phase:" line.
+        active_entries = [
+            (ts, name)
+            for name, (ts, status) in latest_per_phase.items()
             if status == "started"
         ]
 
@@ -363,9 +368,10 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
                 "Completed phases: "
                 + ", ".join(_coerce_phase_string(c) for c in completed)
             )
-        if active:
+        if active_entries:
+            latest_active = max(active_entries)[1]
             lines.append(
-                f"Last active phase: {_coerce_phase_string(active[-1])}"
+                f"Last active phase: {_coerce_phase_string(latest_active)}"
             )
         lines.append("")
 
