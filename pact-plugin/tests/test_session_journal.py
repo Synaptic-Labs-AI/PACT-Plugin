@@ -1549,6 +1549,196 @@ class TestBuildJournalResume:
 
 
 # ---------------------------------------------------------------------------
+# Integration: simulated-compaction full lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestJournalLifecycleSimulatedCompaction:
+    """End-to-end lifecycle test for the session journal feature.
+
+    Addresses the end-to-end validation gap noted in PR #350 merge-readiness
+    review: every other test in this suite mocks either the write side
+    (`sj._get_session_dir`) or the read side (by calling
+    `_build_journal_resume(session_dir)` against a path seeded by hand). This
+    class asserts the full chain survives an in-memory state reset:
+
+        write_context -> pact_context.get_session_dir -> append_event
+        -> [clear in-memory caches to simulate compaction]
+        -> read from disk via _build_journal_resume
+
+    What this test does NOT validate (be explicit about the limitations):
+
+    1. **Real platform compaction** — Claude's compaction summarizes the
+       model context window; it does not clear Python module state. This
+       test substitutes "clear `_cache` / `_context_path` / reimport" for
+       "model context was summarized" because the two share the same
+       observable precondition for the journal: the in-memory state from
+       the prior session is gone, and the only surviving artifact is the
+       JSONL file on disk. It catches write/read contract drift; it does
+       not catch bugs that require a real compaction event.
+    2. **Hook behavior during recovery** — session_init's on-resume logic
+       (reconstructing CLAUDE.md, re-invoking resolvers, spawning the
+       secretary) is not exercised. See issue #364 for that scope.
+    3. **Cross-session recovery** — this test writes and reads under a
+       single session_id. A genuine "resume from previous session" flow
+       would write events under session_id=A and read them while a new
+       session_id=B is active. The journal file path derivation is
+       session-scoped, so the cross-session case adds path-resolution
+       concerns the single-session lifecycle does not.
+    4. **Performance under large journals** — the test writes a handful
+       of events. Scalability of `_build_journal_resume` against thousands
+       of events is not measured here.
+
+    The test is a coverage *improvement*, not a *complete validation*. Its
+    value is catching write/read schema drift end-to-end — the class of
+    bug where a writer and a reader agree in isolation (unit tests pass)
+    but disagree on the on-disk representation.
+    """
+
+    def test_journal_state_survives_simulated_compaction(
+        self, tmp_path, monkeypatch
+    ):
+        """P1: write → clear in-memory state → re-read recovers full journal.
+
+        Uses REAL filesystem persistence via monkeypatched Path.home(), the
+        public write API (`append_event` / `make_event`), and the public
+        read path (`_build_journal_resume(session_dir)` — the same entry
+        point session_init calls on resume). No mocking of the journal
+        write or read code paths.
+
+        Determinism: every `make_event(...)` call passes an explicit `ts`
+        (monotonically increasing) so the test does not depend on wall
+        clock resolution or ordering of same-second events. The
+        `_build_journal_resume` active-phase logic uses `max(ts)` to pick
+        the latest started phase, so the injected timestamps double as a
+        verification that the tie-breaking contract is stable.
+        """
+        import shared.pact_context as pc
+        import shared.session_journal as sj
+
+        # --- Setup: isolate filesystem to tmp_path, reset module caches.
+        # This is equivalent to "the previous session wrote these events,
+        # then the process ended; now we are in a new process whose
+        # in-memory state is empty but the on-disk journal remains."
+        monkeypatch.setattr(pc, "_context_path", None)
+        monkeypatch.setattr(pc, "_cache", None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Disable the autouse `mock_get_session_dir` fixture so the real
+        # pact_context.get_session_dir() drives path derivation — without
+        # this line, the autouse fixture pins _get_session_dir to a
+        # hard-coded string and bypasses the write_context cache path
+        # this test is trying to exercise.
+        monkeypatch.setattr(sj, "_get_session_dir", pc.get_session_dir)
+
+        session_id = "11111111-2222-3333-4444-555555555555"
+        project_dir = str(tmp_path / "test_project")
+        Path(project_dir).mkdir(parents=True)
+
+        # --- Act (phase 1): bootstrap session context and write events.
+        pc.write_context("pact-lifecycle", session_id, project_dir, "/plugin/root")
+
+        # Sanity check: the context cache MUST be populated by write_context
+        # (otherwise append_event's path derivation will silently fall
+        # through and we would be testing a fail-open code path instead
+        # of the lifecycle).
+        assert pc._cache is not None
+        assert pc.get_session_dir() != ""
+
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import _build_journal_resume
+
+        # Explicit, monotonically increasing timestamps — the
+        # `_build_journal_resume` active-phase selector sorts by `ts`,
+        # so deterministic stamps prove the selector works on the
+        # persisted bytes, not on iteration order.
+        events = [
+            make_event(
+                "session_start",
+                team="pact-lifecycle",
+                session_id=session_id,
+                project_dir=project_dir,
+                ts="2026-04-06T10:00:00Z",
+            ),
+            make_event(
+                "phase_transition",
+                phase="PREPARE",
+                status="started",
+                ts="2026-04-06T10:01:00Z",
+            ),
+            make_event(
+                "phase_transition",
+                phase="PREPARE",
+                status="completed",
+                ts="2026-04-06T10:02:00Z",
+            ),
+            make_event(
+                "phase_transition",
+                phase="CODE",
+                status="started",
+                ts="2026-04-06T10:03:00Z",
+            ),
+            make_event(
+                "agent_handoff",
+                agent="lifecycle-coder",
+                task_id="61",
+                task_subject="CODE: lifecycle integration test",
+                handoff={"decisions": ["Wrote the lifecycle test end-to-end"]},
+                ts="2026-04-06T10:04:00Z",
+            ),
+        ]
+        for e in events:
+            assert append_event(e) is True, f"append_event failed for {e['type']}"
+
+        # Verify the journal file actually exists on disk before we
+        # clear state — if this fails, the rest of the test is moot.
+        expected_session_dir = (
+            tmp_path / ".claude" / "pact-sessions" / "test_project" / session_id
+        )
+        expected_journal = expected_session_dir / "session-journal.jsonl"
+        assert expected_journal.exists()
+        on_disk_lines = expected_journal.read_text(encoding="utf-8").splitlines()
+        assert len(on_disk_lines) == len(events)
+
+        # --- Simulate compaction: drop ALL in-memory state that could
+        # short-circuit a re-read. This is the closest analog to a
+        # context-loss event available from inside a Python test —
+        # the journal file on disk is now the ONLY record of the
+        # session's prior work.
+        pc._cache = None
+        pc._context_path = None
+
+        # --- Act (phase 2): reconstruct session_dir from known inputs
+        # (slug + session_id) and ask session_resume to rebuild the
+        # resume summary from disk. We deliberately pass the path
+        # explicitly — _build_journal_resume is the public entry point
+        # session_init calls with a previous-session dir, so this
+        # mirrors the real recovery code path.
+        session_dir_str = str(expected_session_dir)
+        resume = _build_journal_resume(session_dir_str)
+
+        # --- Assert: the resume string reflects every persisted fact.
+        assert resume is not None, (
+            "resume build returned None after simulated compaction — "
+            "the on-disk journal was not recovered"
+        )
+        # Handoff survived
+        assert "## Completed Work" in resume
+        assert "lifecycle-coder" in resume
+        assert "CODE: lifecycle integration test" in resume
+        assert "Wrote the lifecycle test end-to-end" in resume
+        # Phase progress survived
+        assert "Completed phases: PREPARE" in resume
+        # CODE was started but never completed — must be the active phase
+        # picked by max(ts), not the earlier PREPARE start.
+        assert "Last active phase: CODE" in resume
+        # PREPARE must NOT appear as the active phase — its latest
+        # transition was `completed`, so the started→completed transition
+        # must correctly demote it out of the active-phase set.
+        assert "Last active phase: PREPARE" not in resume
+
+
+# ---------------------------------------------------------------------------
 # Integration: _check_journal_paused_state()
 # ---------------------------------------------------------------------------
 
