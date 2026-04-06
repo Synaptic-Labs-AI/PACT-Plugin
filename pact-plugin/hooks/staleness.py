@@ -35,22 +35,43 @@ PINNED_STALENESS_DAYS = 30
 PINNED_CONTEXT_TOKEN_BUDGET = 1200
 
 
+def _find_existing_claude_md(base: Path) -> Optional[Path]:
+    """
+    Look for an existing project CLAUDE.md under `base`, honoring both
+    supported locations: `.claude/CLAUDE.md` (preferred) then `CLAUDE.md`
+    (legacy). Returns the first match or None.
+    """
+    dot_claude = base / ".claude" / "CLAUDE.md"
+    if dot_claude.exists():
+        return dot_claude
+    legacy = base / "CLAUDE.md"
+    if legacy.exists():
+        return legacy
+    return None
+
+
 def get_project_claude_md_path() -> Optional[Path]:
     """
     Get the path to the project-level CLAUDE.md.
 
-    Checks CLAUDE_PROJECT_DIR env var first, then falls back to git
-    worktree/repo root detection via `git rev-parse --git-common-dir`
-    (worktree-safe), then to the current working directory.
+    Honors both supported locations:
+      - $base/.claude/CLAUDE.md  (preferred / new default)
+      - $base/CLAUDE.md          (legacy)
+
+    Resolution order for $base:
+      1. CLAUDE_PROJECT_DIR env var
+      2. Git common-dir parent (worktree-safe; --show-toplevel would return
+         the worktree path, which often does not contain CLAUDE.md)
+      3. Current working directory
 
     Returns:
-        Path to project CLAUDE.md if found, None otherwise.
+        Path to an existing project CLAUDE.md if found, None otherwise.
     """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
-        path = Path(project_dir) / "CLAUDE.md"
-        if path.exists():
-            return path
+        found = _find_existing_claude_md(Path(project_dir))
+        if found is not None:
+            return found
 
     # Fallback: detect git root (worktree-safe)
     # Uses --git-common-dir instead of --show-toplevel because the latter
@@ -70,18 +91,14 @@ def get_project_claude_md_path() -> Optional[Path]:
         if result.returncode == 0 and result.stdout.strip():
             git_common_dir = result.stdout.strip()
             repo_root = Path(git_common_dir).resolve().parent
-            path = repo_root / "CLAUDE.md"
-            if path.exists():
-                return path
+            found = _find_existing_claude_md(repo_root)
+            if found is not None:
+                return found
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
     # Last resort: current working directory
-    path = Path.cwd() / "CLAUDE.md"
-    if path.exists():
-        return path
-
-    return None
+    return _find_existing_claude_md(Path.cwd())
 
 
 # Backward-compatible alias (tests and session_init patch the underscore name)

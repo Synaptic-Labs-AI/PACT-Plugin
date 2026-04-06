@@ -4,13 +4,15 @@ Tests for shared/session_resume.py -- session resume and snapshot management.
 Tests cover:
 update_session_info():
 1. Returns None when CLAUDE_PROJECT_DIR not set
-2. Creates project CLAUDE.md with template when file doesn't exist
-3. Replaces existing session block between markers
+2. Creates project .claude/CLAUDE.md (new default) with template when no file exists
+3. Replaces existing session block between markers (both locations)
 4. Inserts session block before "## Retrieved Context" when no markers
 5. Appends session block at end as fallback
 6. Returns error message on exception
 7. Created file has 0o600 permissions
 8. Created file includes session_dir and plugin_root when provided
+9. Dual location support: .claude/CLAUDE.md preferred over legacy ./CLAUDE.md
+10. Legacy ./CLAUDE.md is still updated in place when only it exists
 
 restore_last_session():
 7. Returns None when no prev_session_dir
@@ -66,18 +68,22 @@ class TestUpdateSessionInfo:
         assert result is None
 
     def test_creates_file_when_missing(self, tmp_path, monkeypatch):
-        """Should create project CLAUDE.md with template when file doesn't exist."""
+        """Should create .claude/CLAUDE.md (new default) when no project CLAUDE.md exists."""
         from shared.session_resume import update_session_info
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = tmp_path / "CLAUDE.md"
-        assert not target.exists()
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        legacy = tmp_path / "CLAUDE.md"
+        assert not new_default.exists()
+        assert not legacy.exists()
 
         result = update_session_info("session-123", "pact-session1")
 
         assert result == "Session info created in new project CLAUDE.md"
-        assert target.exists()
-        content = target.read_text()
+        assert new_default.exists()
+        # Legacy location should NOT be created when neither exists
+        assert not legacy.exists()
+        content = new_default.read_text()
         # Header
         assert content.startswith("# Project Memory\n")
         # Auto-creation comment
@@ -97,13 +103,16 @@ class TestUpdateSessionInfo:
         from shared.session_resume import update_session_info
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = tmp_path / "CLAUDE.md"
+        target = tmp_path / ".claude" / "CLAUDE.md"
 
         update_session_info("session-456", "pact-session2")
 
         assert target.exists()
         mode = stat.S_IMODE(target.stat().st_mode)
         assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+        # The .claude/ parent should have been created with mode 0o700
+        parent_mode = stat.S_IMODE(target.parent.stat().st_mode)
+        assert parent_mode == 0o700, f"Expected .claude/ 0o700, got {oct(parent_mode)}"
 
     def test_created_file_includes_session_dir_and_plugin_root(
         self, tmp_path, monkeypatch
@@ -112,7 +121,7 @@ class TestUpdateSessionInfo:
         from shared.session_resume import update_session_info
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = tmp_path / "CLAUDE.md"
+        target = tmp_path / ".claude" / "CLAUDE.md"
 
         result = update_session_info(
             "session-789",
@@ -252,6 +261,89 @@ class TestUpdateSessionInfo:
 
         content = target.read_text()
         assert "Plugin root:" not in content
+
+
+class TestUpdateSessionInfoDualLocation:
+    """Tests for update_session_info() dual-location CLAUDE.md support.
+
+    Claude Code accepts the project memory file at either:
+      - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md   (preferred / new default)
+      - $CLAUDE_PROJECT_DIR/CLAUDE.md           (legacy)
+    """
+
+    def test_dot_claude_only_writes_in_place(self, tmp_path, monkeypatch):
+        """When only .claude/CLAUDE.md exists, update it in place; do NOT create legacy."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        dot_claude_file = dot_claude_dir / "CLAUDE.md"
+        dot_claude_file.write_text("# Project\n\n## Retrieved Context\n")
+        legacy = tmp_path / "CLAUDE.md"
+
+        result = update_session_info("dc-sess", "pact-dc1")
+
+        assert result == "Session info added to project CLAUDE.md"
+        # Edit landed at .claude/CLAUDE.md
+        assert "dc-sess" in dot_claude_file.read_text()
+        # Legacy was NOT created as a side effect
+        assert not legacy.exists()
+
+    def test_legacy_only_writes_in_place(self, tmp_path, monkeypatch):
+        """When only ./CLAUDE.md exists, update it in place; do NOT create .claude/."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# Project\n\n## Retrieved Context\n")
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+
+        result = update_session_info("lg-sess", "pact-lg1")
+
+        assert result == "Session info added to project CLAUDE.md"
+        # Edit landed at the legacy file
+        assert "lg-sess" in legacy.read_text()
+        # .claude/CLAUDE.md was NOT created as a side effect
+        assert not new_default.exists()
+        assert not (tmp_path / ".claude").exists()
+
+    def test_both_exist_prefers_dot_claude(self, tmp_path, monkeypatch):
+        """When both files exist, .claude/CLAUDE.md is preferred and legacy is untouched."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        dot_claude_file = dot_claude_dir / "CLAUDE.md"
+        dot_claude_file.write_text("# Preferred\n\n## Retrieved Context\n")
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("# Legacy untouched\n\n## Retrieved Context\n")
+
+        result = update_session_info("both-sess", "pact-both1")
+
+        assert result == "Session info added to project CLAUDE.md"
+        # Preferred file got the edit
+        assert "both-sess" in dot_claude_file.read_text()
+        # Legacy file was untouched (still has its original content marker)
+        legacy_content = legacy.read_text()
+        assert "Legacy untouched" in legacy_content
+        assert "both-sess" not in legacy_content
+
+    def test_neither_exists_creates_dot_claude_default(self, tmp_path, monkeypatch):
+        """When neither file exists, create at the new default .claude/CLAUDE.md."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        new_default = tmp_path / ".claude" / "CLAUDE.md"
+        legacy = tmp_path / "CLAUDE.md"
+
+        result = update_session_info("new-sess", "pact-new1")
+
+        assert result == "Session info created in new project CLAUDE.md"
+        assert new_default.exists()
+        assert not legacy.exists()
+        assert "new-sess" in new_default.read_text()
 
 
 class TestRestoreLastSession:

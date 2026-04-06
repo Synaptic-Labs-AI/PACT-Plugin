@@ -74,7 +74,7 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 ## Session Placeholder Variables
 
-Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholder variables. Substitute from the Current Session block in the project's `CLAUDE.md` (created by `session_init` if missing). If a value is missing or the file is unavailable, fall back to `pact-session-context.json` in the current session directory.
+Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholder variables. Substitute from the Current Session block in the project's `CLAUDE.md`. PACT honors both supported locations: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred / new default) and `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Whichever exists wins; when neither exists, `session_init` creates the file at the new default `.claude/CLAUDE.md`. If a value is missing or the file is unavailable, fall back to `pact-session-context.json` in the current session directory.
 
 | Placeholder | CLAUDE.md line | Context JSON key | Description |
 |-------------|---------------|-----------------|-------------|

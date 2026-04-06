@@ -66,7 +66,11 @@ from shared.session_journal import append_event, make_event
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
-from shared.claude_md_manager import update_claude_md, ensure_project_memory_md
+from shared.claude_md_manager import (
+    update_claude_md,
+    ensure_project_memory_md,
+    resolve_project_claude_md_path,
+)
 from shared.session_resume import (
     update_session_info,
     restore_last_session,
@@ -163,12 +167,15 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     and extracts the session dir from lines like
     "- Session dir: `~/.claude/pact-sessions/PACT-prompt/abc12345-...`".
 
+    Honors both supported project CLAUDE.md locations
+    ($project_dir/.claude/CLAUDE.md preferred, $project_dir/CLAUDE.md legacy).
+
     Falls back to deriving the path from the Resume line's session_id +
     project root basename if the Session dir line is absent (backward compat
     with sessions that wrote team name but not session dir).
 
     This is used to locate the previous session's journal for resume context
-    and pause state detection. Returns None if CLAUDE.md doesn't exist or
+    and pause state detection. Returns None if neither CLAUDE.md exists or
     the session dir can't be extracted.
 
     Args:
@@ -181,8 +188,9 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         return None
 
     try:
-        claude_md = Path(project_dir) / "CLAUDE.md"
-        if not claude_md.exists():
+        claude_md, source = resolve_project_claude_md_path(project_dir)
+        # source == "new_default" means neither location exists -- nothing to read
+        if source == "new_default":
             return None
 
         content = claude_md.read_text(encoding="utf-8")

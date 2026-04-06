@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from shared.claude_md_manager import (
+    ensure_dot_claude_parent,
+    resolve_project_claude_md_path,
+)
 from shared.session_journal import read_events_from, read_last_event_from
 
 # Maximum characters for decision summaries in journal resume output
@@ -56,7 +60,11 @@ def update_session_info(
     if not project_dir:
         return None
 
-    target_file = Path(project_dir) / "CLAUDE.md"
+    # Honor both supported project CLAUDE.md locations.
+    # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
+    # if neither exists, the resolver returns the new default
+    # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
+    target_file, _source = resolve_project_claude_md_path(project_dir)
 
     SESSION_START = "<!-- SESSION_START -->"
     SESSION_END = "<!-- SESSION_END -->"
@@ -92,7 +100,9 @@ def update_session_info(
     try:
         # Case 0: File doesn't exist -- create it with a minimal template
         # so the orchestrator has a stable Current Session block to read on
-        # the very first session in a project.
+        # the very first session in a project. The resolver returns the
+        # preferred .claude/CLAUDE.md location in this case, so create the
+        # .claude/ parent directory if needed (no-op when target is legacy).
         if not target_file.exists():
             new_content = (
                 "# Project Memory\n"
@@ -103,6 +113,7 @@ def update_session_info(
                 "\n"
                 f"{session_block}\n"
             )
+            ensure_dot_claude_parent(target_file)
             target_file.write_text(new_content, encoding="utf-8")
             os.chmod(str(target_file), 0o600)
             return "Session info created in new project CLAUDE.md"

@@ -1026,3 +1026,114 @@ class TestWriteContextIntegration:
         output = json.loads(mock_stdout.getvalue())
         # Should still have team instruction in output
         assert "pact-aabb1122" in output["hookSpecificOutput"]["additionalContext"]
+
+
+# =============================================================================
+# _extract_prev_session_dir() Dual-Location Tests
+# =============================================================================
+
+
+class TestExtractPrevSessionDirDualLocation:
+    """Tests for _extract_prev_session_dir() honoring both project CLAUDE.md
+    locations.
+
+    Claude Code accepts the project memory file at either:
+      - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md   (preferred / new default)
+      - $CLAUDE_PROJECT_DIR/CLAUDE.md           (legacy)
+
+    _extract_prev_session_dir must locate the previous session's journal
+    regardless of which location is in use, with .claude/CLAUDE.md taking
+    priority when both exist.
+    """
+
+    _CONTENT_TEMPLATE = (
+        "# Project\n"
+        "<!-- SESSION_START -->\n"
+        "## Current Session\n"
+        "- Resume: `claude --resume {sid}`\n"
+        "- Team: `pact-{sid_short}`\n"
+        "- Session dir: `{session_dir}`\n"
+        "<!-- SESSION_END -->\n"
+    )
+
+    def _make_content(self, session_id: str, session_dir: str) -> str:
+        return self._CONTENT_TEMPLATE.format(
+            sid=session_id,
+            sid_short=session_id[:8],
+            session_dir=session_dir,
+        )
+
+    def test_returns_none_when_neither_location_exists(self, tmp_path):
+        """Returns None when neither .claude/CLAUDE.md nor ./CLAUDE.md exists."""
+        from session_init import _extract_prev_session_dir
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result is None
+
+    def test_returns_none_when_project_dir_empty(self):
+        """Returns None when project_dir is the empty string."""
+        from session_init import _extract_prev_session_dir
+
+        assert _extract_prev_session_dir("") is None
+
+    def test_reads_dot_claude_when_only_dot_claude_exists(self, tmp_path):
+        """Reads .claude/CLAUDE.md when it is the only location present."""
+        from session_init import _extract_prev_session_dir
+
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        expected = "/tmp/sessions/dot-claude-only"
+        (dot_claude_dir / "CLAUDE.md").write_text(
+            self._make_content("aaaaaaaa-1111-2222-3333-444444444444", expected),
+            encoding="utf-8",
+        )
+        # Legacy must NOT exist for this case
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result == expected
+
+    def test_reads_legacy_when_only_legacy_exists(self, tmp_path):
+        """Reads ./CLAUDE.md when it is the only location present."""
+        from session_init import _extract_prev_session_dir
+
+        expected = "/tmp/sessions/legacy-only"
+        (tmp_path / "CLAUDE.md").write_text(
+            self._make_content("bbbbbbbb-1111-2222-3333-444444444444", expected),
+            encoding="utf-8",
+        )
+        # .claude/ must NOT exist for this case
+        assert not (tmp_path / ".claude").exists()
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result == expected
+
+    def test_prefers_dot_claude_when_both_exist(self, tmp_path):
+        """When both files exist, .claude/CLAUDE.md is the source of truth."""
+        from session_init import _extract_prev_session_dir
+
+        dot_claude_dir = tmp_path / ".claude"
+        dot_claude_dir.mkdir()
+        preferred = "/tmp/sessions/dot-claude-preferred"
+        legacy = "/tmp/sessions/legacy-ignored"
+
+        (dot_claude_dir / "CLAUDE.md").write_text(
+            self._make_content(
+                "cccccccc-1111-2222-3333-444444444444", preferred
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "CLAUDE.md").write_text(
+            self._make_content(
+                "dddddddd-1111-2222-3333-444444444444", legacy
+            ),
+            encoding="utf-8",
+        )
+
+        result = _extract_prev_session_dir(str(tmp_path))
+
+        assert result == preferred
+        assert result != legacy
