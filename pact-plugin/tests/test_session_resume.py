@@ -4,11 +4,13 @@ Tests for shared/session_resume.py -- session resume and snapshot management.
 Tests cover:
 update_session_info():
 1. Returns None when CLAUDE_PROJECT_DIR not set
-2. Returns None when project CLAUDE.md doesn't exist
+2. Creates project CLAUDE.md with template when file doesn't exist
 3. Replaces existing session block between markers
 4. Inserts session block before "## Retrieved Context" when no markers
 5. Appends session block at end as fallback
 6. Returns error message on exception
+7. Created file has 0o600 permissions
+8. Created file includes session_dir and plugin_root when provided
 
 restore_last_session():
 7. Returns None when no prev_session_dir
@@ -63,15 +65,67 @@ class TestUpdateSessionInfo:
 
         assert result is None
 
-    def test_returns_none_when_file_missing(self, tmp_path, monkeypatch):
-        """Should return None when project CLAUDE.md doesn't exist."""
+    def test_creates_file_when_missing(self, tmp_path, monkeypatch):
+        """Should create project CLAUDE.md with template when file doesn't exist."""
         from shared.session_resume import update_session_info
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+        assert not target.exists()
 
         result = update_session_info("session-123", "pact-session1")
 
-        assert result is None
+        assert result == "Session info created in new project CLAUDE.md"
+        assert target.exists()
+        content = target.read_text()
+        # Header
+        assert content.startswith("# Project Memory\n")
+        # Auto-creation comment
+        assert "PACT auto-creates this file" in content
+        assert "SESSION_START/SESSION_END markers" in content
+        # Session block written with provided values
+        assert "<!-- SESSION_START -->" in content
+        assert "<!-- SESSION_END -->" in content
+        assert "## Current Session" in content
+        assert "session-123" in content
+        assert "pact-session1" in content
+
+    def test_created_file_has_secure_permissions(self, tmp_path, monkeypatch):
+        """Newly created project CLAUDE.md should have 0o600 permissions."""
+        import stat
+
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+
+        update_session_info("session-456", "pact-session2")
+
+        assert target.exists()
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+
+    def test_created_file_includes_session_dir_and_plugin_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Created file should include optional session_dir and plugin_root lines."""
+        from shared.session_resume import update_session_info
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+
+        result = update_session_info(
+            "session-789",
+            "pact-session3",
+            session_dir="/tmp/sessions/abc",
+            plugin_root="/opt/plugins/PACT/3.16.0",
+        )
+
+        assert result == "Session info created in new project CLAUDE.md"
+        content = target.read_text()
+        assert "Session dir:" in content
+        assert "Plugin root:" in content
+        assert "/opt/plugins/PACT/3.16.0" in content
 
     def test_replaces_existing_session_block(self, tmp_path, monkeypatch):
         """Should replace content between session markers."""

@@ -57,8 +57,6 @@ def update_session_info(
         return None
 
     target_file = Path(project_dir) / "CLAUDE.md"
-    if not target_file.exists():
-        return None
 
     SESSION_START = "<!-- SESSION_START -->"
     SESSION_END = "<!-- SESSION_END -->"
@@ -92,6 +90,23 @@ def update_session_info(
     )
 
     try:
+        # Case 0: File doesn't exist -- create it with a minimal template
+        # so the orchestrator has a stable Current Session block to read on
+        # the very first session in a project.
+        if not target_file.exists():
+            new_content = (
+                "# Project Memory\n"
+                "\n"
+                "<!-- PACT auto-creates this file on first session. "
+                "Safe to add your own content; the SESSION_START/SESSION_END "
+                "markers are auto-updated each session. -->\n"
+                "\n"
+                f"{session_block}\n"
+            )
+            target_file.write_text(new_content, encoding="utf-8")
+            os.chmod(str(target_file), 0o600)
+            return "Session info created in new project CLAUDE.md"
+
         content = target_file.read_text(encoding="utf-8")
 
         # Case 1: Markers already exist -- replace the block
