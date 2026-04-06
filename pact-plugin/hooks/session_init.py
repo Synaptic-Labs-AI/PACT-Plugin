@@ -61,7 +61,7 @@ from staleness import (  # noqa: F401
 
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
-from shared.pact_context import write_context
+from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -155,22 +155,27 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     return f"pact-{suffix}"
 
 
-def _extract_prev_team_name(project_dir: str) -> str | None:
+def _extract_prev_session_dir(project_dir: str) -> str | None:
     """
-    Extract the previous session's team name from the project CLAUDE.md.
+    Extract the previous session's directory path from the project CLAUDE.md.
 
     Reads the "## Current Session" block written by update_session_info()
-    and extracts the team name from lines like "- Team: `pact-abc12345`".
+    and extracts the session dir from lines like
+    "- Session dir: `~/.claude/pact-sessions/PACT-prompt/abc12345-...`".
+
+    Falls back to deriving the path from the Resume line's session_id +
+    project root basename if the Session dir line is absent (backward compat
+    with sessions that wrote team name but not session dir).
 
     This is used to locate the previous session's journal for resume context
     and pause state detection. Returns None if CLAUDE.md doesn't exist or
-    the team name can't be extracted.
+    the session dir can't be extracted.
 
     Args:
         project_dir: CLAUDE_PROJECT_DIR path
 
     Returns:
-        Previous team name string, or None if not found
+        Previous session directory path string, or None if not found
     """
     if not project_dir:
         return None
@@ -181,12 +186,29 @@ def _extract_prev_team_name(project_dir: str) -> str | None:
             return None
 
         content = claude_md.read_text(encoding="utf-8")
-        # Match "- Team: `pact-XXXXXXXX`" in the Current Session block.
-        # Uses [^`]+ (any non-backtick) to be format-agnostic — works even
-        # if generate_team_name() changes its suffix format.
-        match = re.search(r'- Team:\s*`(pact-[^`]+)`', content)
+
+        # Primary: match "- Session dir: `<path>`" in the Current Session block.
+        match = re.search(r'- Session dir:\s*`([^`]+)`', content)
         if match:
-            return match.group(1)
+            raw = match.group(1)
+            # Expand ~ to actual home directory
+            if raw.startswith("~/"):
+                return str(Path.home() / raw[2:])
+            return raw
+
+        # Fallback: derive from Resume line session_id + project root basename.
+        # Resume line format: "- Resume: `claude --resume <session_id>`"
+        resume_match = re.search(
+            r'- Resume:\s*`claude --resume\s+([0-9a-f-]+)`', content
+        )
+        if resume_match:
+            session_id = resume_match.group(1)
+            # Use project root basename (not worktree) for slug
+            slug = Path(project_dir).name
+            return str(
+                Path.home() / ".claude" / "pact-sessions" / slug / session_id
+            )
+
     except (IOError, OSError):
         pass
     return None
@@ -279,19 +301,26 @@ def main():
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
 
-        # Write session_start event to journal (before team existence check).
-        # append_event creates the teams directory via mkdir -p if needed.
-        raw_session_id = input_data.get("session_id")
-        _journal_session_id = str(raw_session_id) if raw_session_id else ""
+        # 5a. Write session context file FIRST so get_session_dir() works for
+        # subsequent journal writes. write_context() populates the _cache
+        # immediately, enabling append_event() to derive the journal path.
+        raw_id = input_data.get("session_id")
+        session_id = str(raw_id) if raw_id else ""
+        try:
+            write_context(team_name, session_id, project_dir)
+        except Exception as e:
+            # Fail-open: context file is best-effort; hooks fall back to empty strings
+            print(f"session_init: could not write context file: {e}", file=sys.stderr)
+
+        # Write session_start event to journal (after write_context so path is available).
         append_event(
             make_event(
                 "session_start",
                 team=team_name,
-                session_id=_journal_session_id,
+                session_id=session_id,
                 project_dir=project_dir,
                 worktree="",  # Not yet created at this point
             ),
-            team_name,
         )
 
         try:
@@ -362,18 +391,10 @@ def main():
                 f'Check TaskList for recovery context.'
             ))
 
-        # 5a. Write session context file for all subsequent hooks
-        raw_id = input_data.get("session_id")
-        session_id = str(raw_id) if raw_id else ""
-        try:
-            write_context(team_name, session_id, project_dir)
-        except Exception as e:
-            # Fail-open: context file is best-effort; hooks fall back to empty strings
-            print(f"session_init: could not write context file: {e}", file=sys.stderr)
-
         # 5b. Write session resume info to project CLAUDE.md
+        session_dir = get_session_dir()
         if session_id:
-            session_msg = update_session_info(session_id, team_name)
+            session_msg = update_session_info(session_id, team_name, session_dir)
             if session_msg:
                 if "failed" in session_msg.lower():
                     system_messages.append(session_msg)
@@ -392,14 +413,14 @@ def main():
                     context_parts.append(resumption_msg)
 
         # 7. Restore last session snapshot for cross-session continuity
-        # Locate previous session's team name from project CLAUDE.md for journal access
-        prev_team = _extract_prev_team_name(project_dir)
-        session_snapshot = restore_last_session(prev_team_name=prev_team)
+        # Locate previous session's directory from project CLAUDE.md for journal access
+        prev_session_dir = _extract_prev_session_dir(project_dir)
+        session_snapshot = restore_last_session(prev_session_dir=prev_session_dir)
         if session_snapshot:
             context_parts.append(session_snapshot)
 
         # 8. Check for paused work from previous session's /PACT:pause
-        paused_msg = check_paused_state(prev_team_name=prev_team)
+        paused_msg = check_paused_state(prev_session_dir=prev_session_dir)
         if paused_msg:
             context_parts.append(paused_msg)
 

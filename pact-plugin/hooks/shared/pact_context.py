@@ -330,9 +330,11 @@ def write_context(
         )
         return
 
-    # Update module state so reads in the same process find the file
+    # Update module state so reads in the same process find the file.
+    # Populate _cache immediately so get_session_dir() works right after
+    # write_context() within the same process (e.g., session_init.py).
     _context_path = target
-    _cache = None
+    _cache = context
 
     context_dir = target.parent
     try:

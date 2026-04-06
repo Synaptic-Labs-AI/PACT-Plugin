@@ -232,7 +232,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_called_once()
@@ -252,7 +252,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_called_once()
@@ -265,7 +265,7 @@ class TestCheckUnpausedPr:
 
         tasks = [self._make_task_with_pr_number(288)]
 
-        def mock_read_events(team, event_type=None):
+        def mock_read_events(event_type=None):
             if event_type == "session_paused":
                 return [{"type": "session_paused", "pr_number": 288}]
             return []
@@ -275,7 +275,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -284,7 +284,7 @@ class TestCheckUnpausedPr:
         """Should detect PR from review_dispatch journal event (primary path)."""
         from session_end import check_unpaused_pr
 
-        def mock_read_events(team, event_type=None):
+        def mock_read_events(event_type=None):
             if event_type == "session_paused":
                 return []
             if event_type == "review_dispatch":
@@ -296,7 +296,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=None,  # No tasks needed — journal has PR
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_called_once()
@@ -316,7 +316,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -330,7 +330,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=None,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -343,7 +343,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=[self._make_task_with_pr_number(100)],
                 project_slug="",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -357,7 +357,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=[],
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -385,7 +385,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -413,7 +413,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         event = mock_append.call_args[0][0]
@@ -445,7 +445,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         event = mock_append.call_args[0][0]
@@ -473,7 +473,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         event = mock_append.call_args[0][0]
@@ -501,7 +501,7 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
@@ -524,27 +524,25 @@ class TestCheckUnpausedPr:
             check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-                team_name="pact-test123",
+
             )
 
         mock_append.assert_not_called()
 
-    def test_no_journal_write_when_team_name_empty(self):
-        """Should not write journal event when team_name resolves to empty."""
+    def test_no_journal_write_when_project_slug_empty(self):
+        """Should not write journal event when project_slug is empty."""
         from session_end import check_unpaused_pr
 
         tasks = [self._make_task_with_pr_number(42)]
 
-        with patch("session_end.get_team_name", return_value=""), \
-             patch("session_end.read_events", return_value=[]), \
+        with patch("session_end.read_events", return_value=[]), \
              patch("session_end.append_event") as mock_append:
             check_unpaused_pr(
                 tasks=tasks,
-                project_slug="proj",
-                # No team_name param — falls back to get_team_name() which returns ""
+                project_slug="",
             )
 
-        # No team → cannot read journal or write events
+        # Empty project_slug → early return, no journal writes
         mock_append.assert_not_called()
 
 
@@ -924,7 +922,7 @@ class TestCleanupOldSessionsBoundary:
             "33333333-4444-5555-6666-777777777777",
         ]
         for oid in old_ids:
-            self._create_session_dir(slug_dir, oid, age_days=14)
+            self._create_session_dir(slug_dir, oid, age_days=31)
 
         cleanup_old_sessions(
             project_slug="my-project",
@@ -954,7 +952,7 @@ class TestCleanupOldSessionsBoundary:
         (old_dir / "teachback-warned-coder-1-42").touch()
         (old_dir / "some-other-artifact.json").write_text("{}")
         # Set mtime AFTER all writes (writing updates dir mtime on Unix)
-        old_time = _time.time() - (10 * 86400)
+        old_time = _time.time() - (31 * 86400)
         _os.utime(str(old_dir), (old_time, old_time))
 
         cleanup_old_sessions(

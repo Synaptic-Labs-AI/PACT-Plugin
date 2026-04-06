@@ -89,13 +89,13 @@ When waiting for teammates to complete their tasks, **do not narrate waiting** �
 
 Reconstruct state:
 1. `git worktree list` — identify active feature work
-2. Read session journal (`~/.claude/teams/{team_name}/session-journal.jsonl`) — durable record of HANDOFFs, phase transitions, variety scores, and commits
+2. Read session journal (`~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`) — durable record of HANDOFFs, phase transitions, variety scores, and commits
 3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
 4. `TaskGet` on priority tasks: in-progress first, then recent completed (fallback for metadata not yet in journal)
 5. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
 **Two-tier state model**:
-- **Session journal** (durable): Workflow state persisted as JSONL events at `~/.claude/teams/{team_name}/session-journal.jsonl`. Survives compaction and task GC. Primary source for HANDOFFs, phase progress, and cross-session recovery.
+- **Session journal** (durable): Workflow state persisted as JSONL events at `~/.claude/pact-sessions/{slug}/{session_id}/session-journal.jsonl`. Survives compaction and task GC. Primary source for HANDOFFs, phase progress, and cross-session recovery.
 - **Task system** (ephemeral coordination): Status, blocking, assignment. `TaskList` summaries survive compaction, but task FILES (containing metadata) may be GC'd by the platform in long sessions. Use journal events as the authoritative source when task metadata is unavailable.
 
 Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the journal does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.

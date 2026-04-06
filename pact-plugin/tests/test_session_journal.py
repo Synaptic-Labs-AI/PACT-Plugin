@@ -63,7 +63,7 @@ Integration:
 40. _check_journal_paused_state handles MERGED/CLOSED PR
 41. restore_last_session uses journal when prev_team_name provided
 42. check_paused_state uses journal when prev_team_name provided
-43. _extract_prev_team_name returns None on IOError (fail-open)
+43. _extract_prev_session_dir returns None on IOError (fail-open)
 
 CLI (main()):
 44. write subcommand creates event and exits 0
@@ -99,15 +99,33 @@ def journal_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def session_dir(journal_home):
+    """Standard test session directory path (string, not created on disk)."""
+    return str(journal_home / ".claude" / "pact-sessions" / "test-project" / "test-session-id")
+
+
+@pytest.fixture
 def team_name():
-    """Standard test team name."""
+    """Standard test team name (still used for non-journal tests)."""
     return "pact-test1234"
 
 
 @pytest.fixture
-def journal_file(journal_home, team_name):
+def journal_file(session_dir):
     """Return the expected journal file path (does not create it)."""
-    return journal_home / ".claude" / "teams" / team_name / "session-journal.jsonl"
+    return Path(session_dir) / "session-journal.jsonl"
+
+
+@pytest.fixture(autouse=True)
+def mock_get_session_dir(monkeypatch, session_dir):
+    """Mock _get_session_dir at the session_journal module level.
+
+    Patches the internal _get_session_dir() function which is called by
+    _journal_path() to derive the implicit path. This avoids import-path
+    complications (shared.pact_context vs pact_context).
+    """
+    import shared.session_journal as sj
+    monkeypatch.setattr(sj, "_get_session_dir", lambda: session_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +181,7 @@ class TestMakeEvent:
 class TestAppendEvent:
     """Tests for append_event() -- atomic JSONL append."""
 
-    def test_roundtrip_append_and_read(self, journal_home, team_name):
+    def test_roundtrip_append_and_read(self, journal_home):
         """P0: Write event, read it back, all fields match."""
         from shared.session_journal import append_event, make_event, read_events
 
@@ -175,10 +193,10 @@ class TestAppendEvent:
             handoff={"produced": ["src/auth.ts"]},
         )
 
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is True
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 1
 
         read_back = events[0]
@@ -196,80 +214,82 @@ class TestAppendEvent:
         assert not journal_file.parent.exists()
 
         event = make_event("session_start", team="test")
-        result = append_event(event, team_name)
+        result = append_event(event)
 
         assert result is True
         assert journal_file.exists()
 
-    def test_rejects_missing_v(self, journal_home, team_name):
+    def test_rejects_missing_v(self, journal_home):
         """P0: Returns False when v field is missing."""
         from shared.session_journal import append_event
 
         event = {"type": "test", "ts": "2026-01-01T00:00:00Z"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is False
 
-    def test_rejects_non_int_v(self, journal_home, team_name):
+    def test_rejects_non_int_v(self, journal_home):
         """P0: Returns False when v is not an int."""
         from shared.session_journal import append_event
 
         event = {"v": "1", "type": "test", "ts": "2026-01-01T00:00:00Z"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is False
 
-    def test_rejects_bool_v_true(self, journal_home, team_name):
+    def test_rejects_bool_v_true(self, journal_home):
         """P0: Returns False when v is True (bool is subclass of int)."""
         from shared.session_journal import append_event
 
         event = {"v": True, "type": "test", "ts": "2026-01-01T00:00:00Z"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is False
 
-    def test_rejects_bool_v_false(self, journal_home, team_name):
+    def test_rejects_bool_v_false(self, journal_home):
         """P0: Returns False when v is False (bool is subclass of int)."""
         from shared.session_journal import append_event
 
         event = {"v": False, "type": "test", "ts": "2026-01-01T00:00:00Z"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is False
 
-    def test_rejects_missing_type(self, journal_home, team_name):
+    def test_rejects_missing_type(self, journal_home):
         """P0: Returns False when type field is missing."""
         from shared.session_journal import append_event
 
         event = {"v": 1, "ts": "2026-01-01T00:00:00Z"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is False
 
-    def test_rejects_empty_type(self, journal_home, team_name):
+    def test_rejects_empty_type(self, journal_home):
         """P0: Returns False when type is empty string."""
         from shared.session_journal import append_event
 
         event = {"v": 1, "type": "", "ts": "2026-01-01T00:00:00Z"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is False
 
-    def test_rejects_empty_team_name(self, journal_home):
-        """P0: Returns False when team_name is empty."""
+    def test_rejects_empty_session_dir(self, journal_home, monkeypatch):
+        """P0: Returns False when session dir is empty (not initialized)."""
         from shared.session_journal import append_event, make_event
+        import shared.session_journal as sj
 
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
         event = make_event("test")
-        result = append_event(event, "")
+        result = append_event(event)
         assert result is False
 
-    def test_fail_open_on_write_error(self, journal_home, team_name):
+    def test_fail_open_on_write_error(self, session_dir):
         """P0: Returns False on write error, no exception raised."""
         from shared.session_journal import append_event, make_event
 
         event = make_event("test")
 
         # Force a write error by making the parent read-only
-        journal_dir = journal_home / ".claude" / "teams" / team_name
+        journal_dir = Path(session_dir)
         journal_dir.mkdir(parents=True)
         os.chmod(str(journal_dir), 0o444)
 
         try:
-            result = append_event(event, team_name)
+            result = append_event(event)
             # Should return False, not raise
             assert result is False
         finally:
@@ -281,10 +301,10 @@ class TestAppendEvent:
         from shared.session_journal import append_event, read_events
 
         event = {"v": 1, "type": "test_auto_ts"}
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is True
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 1
         assert "ts" in events[0]
         assert events[0]["ts"].endswith("Z")
@@ -294,7 +314,7 @@ class TestAppendEvent:
         from shared.session_journal import append_event, make_event
 
         event = make_event("test")
-        append_event(event, team_name)
+        append_event(event)
 
         assert journal_file.exists()
         stat = journal_file.stat()
@@ -306,20 +326,20 @@ class TestAppendEvent:
         from shared.session_journal import append_event, make_event
 
         event = make_event("test")
-        append_event(event, team_name)
+        append_event(event)
 
         dir_stat = journal_file.parent.stat()
         assert dir_stat.st_mode & 0o777 == 0o700
 
-    def test_multiple_appends_sequential(self, journal_home, team_name):
+    def test_multiple_appends_sequential(self, journal_home):
         """Multiple sequential appends produce separate lines."""
         from shared.session_journal import append_event, make_event, read_events
 
         for i in range(5):
             event = make_event("test", seq=i)
-            append_event(event, team_name)
+            append_event(event)
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 5
         for i, event in enumerate(events):
             assert event["seq"] == i
@@ -337,11 +357,11 @@ class TestReadEvents:
         """P0: Returns all events when no type filter."""
         from shared.session_journal import append_event, make_event, read_events
 
-        append_event(make_event("session_start", team="t1"), team_name)
-        append_event(make_event("agent_handoff", agent="coder"), team_name)
-        append_event(make_event("session_end"), team_name)
+        append_event(make_event("session_start", team="t1"))
+        append_event(make_event("agent_handoff", agent="coder"))
+        append_event(make_event("session_end"))
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 3
         assert events[0]["type"] == "session_start"
         assert events[1]["type"] == "agent_handoff"
@@ -351,12 +371,12 @@ class TestReadEvents:
         """P0: Returns only matching events when type filter applied."""
         from shared.session_journal import append_event, make_event, read_events
 
-        append_event(make_event("session_start", team="t1"), team_name)
-        append_event(make_event("agent_handoff", agent="coder1"), team_name)
-        append_event(make_event("phase_transition", phase="CODE"), team_name)
-        append_event(make_event("agent_handoff", agent="coder2"), team_name)
+        append_event(make_event("session_start", team="t1"))
+        append_event(make_event("agent_handoff", agent="coder1"))
+        append_event(make_event("phase_transition", phase="CODE"))
+        append_event(make_event("agent_handoff", agent="coder2"))
 
-        handoffs = read_events(team_name, event_type="agent_handoff")
+        handoffs = read_events(event_type="agent_handoff")
         assert len(handoffs) == 2
         assert handoffs[0]["agent"] == "coder1"
         assert handoffs[1]["agent"] == "coder2"
@@ -365,7 +385,7 @@ class TestReadEvents:
         """P0: Returns empty list when journal file doesn't exist."""
         from shared.session_journal import read_events
 
-        events = read_events(team_name)
+        events = read_events()
         assert events == []
 
     def test_skips_malformed_lines(self, journal_home, team_name, journal_file):
@@ -373,14 +393,14 @@ class TestReadEvents:
         from shared.session_journal import append_event, make_event, read_events
 
         # Write a valid event first
-        append_event(make_event("test", seq=1), team_name)
+        append_event(make_event("test", seq=1))
 
         # Inject a malformed line directly
         with open(str(journal_file), "a") as f:
             f.write("this is not json\n")
             f.write('{"v":1,"type":"test","seq":2,"ts":"2026-01-01T00:00:00Z"}\n')
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 2
         assert events[0]["seq"] == 1
         assert events[1]["seq"] == 2
@@ -397,7 +417,7 @@ class TestReadEvents:
             f.write("   \n")
             f.write('{"v":1,"type":"test","seq":2,"ts":"2026-01-01T00:00:00Z"}\n')
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 2
 
     def test_fail_open_on_outer_exception(self, journal_home, team_name):
@@ -405,7 +425,7 @@ class TestReadEvents:
         from shared.session_journal import read_events
 
         with patch("shared.session_journal._journal_path", side_effect=RuntimeError("boom")):
-            events = read_events(team_name)
+            events = read_events()
             assert events == []
 
     def test_chronological_order(self, journal_home, team_name):
@@ -413,9 +433,9 @@ class TestReadEvents:
         from shared.session_journal import append_event, make_event, read_events
 
         for label in ["alpha", "beta", "gamma"]:
-            append_event(make_event("test", label=label), team_name)
+            append_event(make_event("test", label=label))
 
-        events = read_events(team_name)
+        events = read_events()
         assert [e["label"] for e in events] == ["alpha", "beta", "gamma"]
 
     def test_skips_truncated_line(self, journal_home, team_name, journal_file):
@@ -423,14 +443,14 @@ class TestReadEvents:
         from shared.session_journal import append_event, make_event, read_events
 
         # Write two valid events
-        append_event(make_event("test", seq=1), team_name)
-        append_event(make_event("test", seq=2), team_name)
+        append_event(make_event("test", seq=1))
+        append_event(make_event("test", seq=2))
 
         # Append a truncated JSON line (simulates crash mid-write)
         with open(str(journal_file), "a") as f:
             f.write('{"v":1,"type":"test","seq":3,"ts"')  # no closing brace or newline
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 2
         assert events[0]["seq"] == 1
         assert events[1]["seq"] == 2
@@ -439,10 +459,10 @@ class TestReadEvents:
         """Filtering by a type that no event matches returns an empty list."""
         from shared.session_journal import append_event, make_event, read_events
 
-        append_event(make_event("alpha", data=1), team_name)
-        append_event(make_event("beta", data=2), team_name)
+        append_event(make_event("alpha", data=1))
+        append_event(make_event("beta", data=2))
 
-        events = read_events(team_name, event_type="nonexistent_type")
+        events = read_events(event_type="nonexistent_type")
         assert events == []
 
 
@@ -458,11 +478,11 @@ class TestReadLastEvent:
         """P0: Returns the last matching event."""
         from shared.session_journal import append_event, make_event, read_last_event
 
-        append_event(make_event("checkpoint", data="old"), team_name)
-        append_event(make_event("agent_handoff", agent="coder"), team_name)
-        append_event(make_event("checkpoint", data="new"), team_name)
+        append_event(make_event("checkpoint", data="old"))
+        append_event(make_event("agent_handoff", agent="coder"))
+        append_event(make_event("checkpoint", data="new"))
 
-        last = read_last_event(team_name, "checkpoint")
+        last = read_last_event("checkpoint")
         assert last is not None
         assert last["data"] == "new"
 
@@ -470,16 +490,16 @@ class TestReadLastEvent:
         """P0: Returns None when no events match the type."""
         from shared.session_journal import append_event, make_event, read_last_event
 
-        append_event(make_event("session_start", team="t"), team_name)
+        append_event(make_event("session_start", team="t"))
 
-        result = read_last_event(team_name, "checkpoint")
+        result = read_last_event("checkpoint")
         assert result is None
 
     def test_returns_none_for_missing_journal(self, journal_home, team_name):
         """P0: Returns None when journal file doesn't exist."""
         from shared.session_journal import read_last_event
 
-        result = read_last_event(team_name, "checkpoint")
+        result = read_last_event("checkpoint")
         assert result is None
 
 
@@ -491,19 +511,19 @@ class TestReadLastEvent:
 class TestGetJournalPath:
     """Tests for get_journal_path() -- path string helper."""
 
-    def test_returns_correct_path(self, journal_home, team_name):
+    def test_returns_correct_path(self, journal_home, session_dir):
         from shared.session_journal import get_journal_path
 
-        path = get_journal_path(team_name)
-        expected = str(journal_home / ".claude" / "teams" / team_name / "session-journal.jsonl")
+        path = get_journal_path()
+        expected = str(Path(session_dir) / "session-journal.jsonl")
         assert path == expected
 
-    def test_does_not_require_file_existence(self, journal_home):
+    def test_does_not_require_file_existence(self, journal_home, session_dir):
         """Should return path even when file doesn't exist."""
         from shared.session_journal import get_journal_path
 
-        path = get_journal_path("nonexistent-team")
-        assert "nonexistent-team" in path
+        path = get_journal_path()
+        assert "session-journal.jsonl" in path
         assert not Path(path).exists()
 
 
@@ -527,7 +547,7 @@ class TestConcurrentAppends:
             try:
                 for seq in range(events_per_thread):
                     event = make_event("test", thread=thread_id, seq=seq)
-                    result = append_event(event, team_name)
+                    result = append_event(event)
                     if not result:
                         errors.append(f"Thread {thread_id} seq {seq} failed")
             except Exception as e:
@@ -541,7 +561,7 @@ class TestConcurrentAppends:
 
         assert not errors, f"Thread errors: {errors}"
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == num_threads * events_per_thread
 
         # Verify each event is complete (no interleaved JSON)
@@ -577,10 +597,10 @@ class TestConcurrentAppends:
         serialized = json.dumps(event)
         assert len(serialized) > 2000, f"Event only {len(serialized)} bytes, expected >2KB"
 
-        result = append_event(event, team_name)
+        result = append_event(event)
         assert result is True
 
-        events = read_events(team_name)
+        events = read_events()
         assert len(events) == 1
         assert events[0]["handoff"]["produced"] == large_handoff["produced"]
         assert len(events[0]["handoff"]["decisions"]) == 20
@@ -594,11 +614,11 @@ class TestConcurrentAppends:
 class TestBuildJournalResume:
     """Integration tests for _build_journal_resume() in session_resume.py."""
 
-    def test_returns_none_for_empty_journal(self, journal_home, team_name):
+    def test_returns_none_for_empty_journal(self, journal_home, session_dir):
         """Returns None when no events exist in the journal."""
         from shared.session_resume import _build_journal_resume
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is None
 
     def test_returns_none_for_nonexistent_team(self, journal_home):
@@ -608,7 +628,7 @@ class TestBuildJournalResume:
         result = _build_journal_resume("nonexistent-team-xyz")
         assert result is None
 
-    def test_includes_handoff_summary(self, journal_home, team_name):
+    def test_includes_handoff_summary(self, journal_home, session_dir):
         """Produces resume with agent handoffs and first decision."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
@@ -620,10 +640,9 @@ class TestBuildJournalResume:
                 task_subject="CODE: implement auth",
                 handoff={"decisions": ["Used JWT for token-based auth"]},
             ),
-            team_name,
         )
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is not None
         assert "Previous session summary" in result
         assert "journal" in result
@@ -632,7 +651,7 @@ class TestBuildJournalResume:
         assert "CODE: implement auth" in result
         assert "Used JWT" in result
 
-    def test_truncates_long_decisions(self, journal_home, team_name):
+    def test_truncates_long_decisions(self, journal_home, session_dir):
         """Decision summaries longer than 80 chars are truncated to 77+..."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
@@ -646,58 +665,53 @@ class TestBuildJournalResume:
                 task_subject="CODE: test",
                 handoff={"decisions": [long_decision]},
             ),
-            team_name,
         )
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is not None
         # Should be truncated to 77 chars + "..."
         assert "A" * 77 + "..." in result
         assert "A" * 100 not in result
 
-    def test_includes_phase_progress(self, journal_home, team_name):
+    def test_includes_phase_progress(self, journal_home, session_dir):
         """Includes completed and in-progress phases."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
 
         append_event(
             make_event("phase_transition", phase="PREPARE", status="completed"),
-            team_name,
         )
         append_event(
             make_event("phase_transition", phase="ARCHITECT", status="completed"),
-            team_name,
         )
         append_event(
             make_event("phase_transition", phase="CODE", status="started"),
-            team_name,
         )
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is not None
         assert "Completed phases: PREPARE, ARCHITECT" in result
         assert "Last active phase: CODE" in result
 
-    def test_includes_session_end_warnings(self, journal_home, team_name):
+    def test_includes_session_end_warnings(self, journal_home, session_dir):
         """Includes warnings from session_end events."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
 
-        append_event(make_event("session_start", team=team_name), team_name)
+        append_event(make_event("session_start", team="pact-test1234"))
         append_event(
             make_event(
                 "session_end",
                 warning="Session ended without memory consolidation. PR #42 is open.",
             ),
-            team_name,
         )
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is not None
         assert "**Warning**" in result
         assert "PR #42" in result
 
-    def test_handoff_without_decisions(self, journal_home, team_name):
+    def test_handoff_without_decisions(self, journal_home, session_dir):
         """Handoff with no decisions should still appear, just without summary."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
@@ -709,14 +723,13 @@ class TestBuildJournalResume:
                 task_subject="PREPARE: research",
                 handoff={"produced": ["docs/prep.md"]},
             ),
-            team_name,
         )
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is not None
         assert "preparer: PREPARE: research" in result
 
-    def test_multiple_handoffs(self, journal_home, team_name):
+    def test_multiple_handoffs(self, journal_home, session_dir):
         """Multiple agent handoffs are all listed."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _build_journal_resume
@@ -729,10 +742,9 @@ class TestBuildJournalResume:
                     task_subject=f"Task for {agent}",
                     handoff={"decisions": [f"{agent} decision"]},
                 ),
-                team_name,
             )
 
-        result = _build_journal_resume(team_name)
+        result = _build_journal_resume(session_dir)
         assert result is not None
         assert "preparer" in result
         assert "architect" in result
@@ -747,15 +759,15 @@ class TestBuildJournalResume:
 class TestCheckJournalPausedState:
     """Integration tests for _check_journal_paused_state() in session_resume.py."""
 
-    def test_returns_none_when_no_paused_events(self, journal_home, team_name):
+    def test_returns_none_when_no_paused_events(self, journal_home, session_dir):
         """Returns None when no session_paused events exist."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
 
         # Write some non-paused events
-        append_event(make_event("session_start", team=team_name), team_name)
+        append_event(make_event("session_start", team="pact-test1234"))
 
-        result = _check_journal_paused_state(team_name)
+        result = _check_journal_paused_state(session_dir)
         assert result is None
 
     def test_returns_none_for_nonexistent_team(self, journal_home):
@@ -765,7 +777,7 @@ class TestCheckJournalPausedState:
         result = _check_journal_paused_state("nonexistent-team")
         assert result is None
 
-    def test_returns_formatted_context(self, journal_home, team_name):
+    def test_returns_formatted_context(self, journal_home, session_dir):
         """Returns formatted paused work context with PR details."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
@@ -778,18 +790,17 @@ class TestCheckJournalPausedState:
                 worktree_path="/Users/dev/project/.worktrees/feat/my-feature",
                 consolidation_completed=True,
             ),
-            team_name,
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
-            result = _check_journal_paused_state(team_name)
+            result = _check_journal_paused_state(session_dir)
 
         assert result is not None
         assert "PR #42" in result
         assert "feat/my-feature" in result
         assert "Paused work detected" in result
 
-    def test_includes_consolidation_warning(self, journal_home, team_name):
+    def test_includes_consolidation_warning(self, journal_home, session_dir):
         """Includes memory consolidation warning when not completed."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
@@ -802,16 +813,15 @@ class TestCheckJournalPausedState:
                 worktree_path="/tmp/wt",
                 consolidation_completed=False,
             ),
-            team_name,
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
-            result = _check_journal_paused_state(team_name)
+            result = _check_journal_paused_state(session_dir)
 
         assert result is not None
         assert "Memory consolidation did NOT complete" in result
 
-    def test_no_consolidation_warning_when_completed(self, journal_home, team_name):
+    def test_no_consolidation_warning_when_completed(self, journal_home, session_dir):
         """No consolidation warning when consolidation_completed is True."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
@@ -824,16 +834,15 @@ class TestCheckJournalPausedState:
                 worktree_path="/tmp/wt",
                 consolidation_completed=True,
             ),
-            team_name,
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
-            result = _check_journal_paused_state(team_name)
+            result = _check_journal_paused_state(session_dir)
 
         assert result is not None
         assert "consolidation" not in result.lower()
 
-    def test_returns_none_when_pr_number_is_none(self, journal_home, team_name):
+    def test_returns_none_when_pr_number_is_none(self, journal_home, session_dir):
         """Returns None when the paused event has no pr_number."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
@@ -844,13 +853,12 @@ class TestCheckJournalPausedState:
                 branch="feat/test",
                 worktree_path="/tmp/wt",
             ),
-            team_name,
         )
 
-        result = _check_journal_paused_state(team_name)
+        result = _check_journal_paused_state(session_dir)
         assert result is None
 
-    def test_stale_event_older_than_14_days(self, journal_home, team_name, journal_file):
+    def test_stale_event_older_than_14_days(self, journal_home, session_dir, journal_file):
         """Returns stale message for events older than 14 days."""
         from shared.session_resume import _check_journal_paused_state
 
@@ -870,12 +878,12 @@ class TestCheckJournalPausedState:
         with open(str(journal_file), "w") as f:
             f.write(json.dumps(event) + "\n")
 
-        result = _check_journal_paused_state(team_name)
+        result = _check_journal_paused_state(session_dir)
         assert result is not None
         assert "Stale" in result or "older than 14 days" in result
         assert "PR #55" in result
 
-    def test_merged_pr_returns_info(self, journal_home, team_name):
+    def test_merged_pr_returns_info(self, journal_home, session_dir):
         """Returns informational message when PR is MERGED."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
@@ -887,17 +895,16 @@ class TestCheckJournalPausedState:
                 branch="feat/done",
                 worktree_path="/tmp/done",
             ),
-            team_name,
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="MERGED"):
-            result = _check_journal_paused_state(team_name)
+            result = _check_journal_paused_state(session_dir)
 
         assert result is not None
         assert "merged" in result.lower()
         assert "PR #77" in result
 
-    def test_closed_pr_returns_info(self, journal_home, team_name):
+    def test_closed_pr_returns_info(self, journal_home, session_dir):
         """Returns informational message when PR is CLOSED."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import _check_journal_paused_state
@@ -909,11 +916,10 @@ class TestCheckJournalPausedState:
                 branch="feat/abandoned",
                 worktree_path="/tmp/abandoned",
             ),
-            team_name,
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="CLOSED"):
-            result = _check_journal_paused_state(team_name)
+            result = _check_journal_paused_state(session_dir)
 
         assert result is not None
         assert "closed" in result.lower()
@@ -927,7 +933,7 @@ class TestCheckJournalPausedState:
 class TestJournalPreference:
     """Tests that restore_last_session and check_paused_state use journal."""
 
-    def test_restore_uses_journal(self, journal_home, team_name):
+    def test_restore_uses_journal(self, journal_home, session_dir):
         """restore_last_session reads journal when prev_team_name is provided."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import restore_last_session
@@ -939,10 +945,9 @@ class TestJournalPreference:
                 task_subject="CODE: feature",
                 handoff={"decisions": ["Built feature X"]},
             ),
-            team_name,
         )
 
-        result = restore_last_session(prev_team_name=team_name)
+        result = restore_last_session(prev_session_dir=session_dir)
 
         assert result is not None
         assert "journal" in result  # Journal-based resume header
@@ -951,10 +956,10 @@ class TestJournalPreference:
         """restore_last_session returns None when no prev_team_name."""
         from shared.session_resume import restore_last_session
 
-        result = restore_last_session(prev_team_name=None)
+        result = restore_last_session(prev_session_dir=None)
         assert result is None
 
-    def test_check_paused_uses_journal(self, journal_home, team_name):
+    def test_check_paused_uses_journal(self, journal_home, session_dir):
         """check_paused_state reads journal when prev_team_name is provided."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import check_paused_state
@@ -967,11 +972,10 @@ class TestJournalPreference:
                 worktree_path="/tmp/wt",
                 consolidation_completed=True,
             ),
-            team_name,
         )
 
         with patch("shared.session_resume._check_pr_state", return_value="OPEN"):
-            result = check_paused_state(prev_team_name=team_name)
+            result = check_paused_state(prev_session_dir=session_dir)
 
         assert result is not None
         assert "PR #42" in result
@@ -980,7 +984,7 @@ class TestJournalPreference:
         """check_paused_state returns None when no prev_team_name."""
         from shared.session_resume import check_paused_state
 
-        result = check_paused_state(prev_team_name=None)
+        result = check_paused_state(prev_session_dir=None)
         assert result is None
 
 
@@ -1103,11 +1107,9 @@ class TestSessionInitJournalWrite:
         # Verify session_start event was written to journal
         from shared.session_journal import read_events
 
-        events = read_events("pact-abc12345")
+        events = read_events("session_start")
         assert len(events) >= 1
-        start_events = [e for e in events if e["type"] == "session_start"]
-        assert len(start_events) == 1
-        assert start_events[0]["team"] == "pact-abc12345"
+        assert events[0]["team"] == "pact-abc12345"
 
 
 # ---------------------------------------------------------------------------
@@ -1124,8 +1126,7 @@ class TestSessionEndJournalWrite:
 
         # Pre-create journal with a session_start event
         from shared.session_journal import append_event, make_event
-        team = "pact-endtest12"
-        append_event(make_event("session_start", team=team), team)
+        append_event(make_event("session_start", team="pact-endtest12"))
 
         input_data = {}
 
@@ -1134,7 +1135,7 @@ class TestSessionEndJournalWrite:
              patch("session_end.get_project_dir", return_value=str(journal_home / "project")), \
              patch("session_end.get_session_dir", return_value=None), \
              patch("session_end.get_session_id", return_value="test-session-id"), \
-             patch("session_end.get_team_name", return_value=team), \
+             patch("session_end.get_team_name", return_value="pact-endtest12"), \
              patch("session_end.get_task_list", return_value=[]):
 
             with pytest.raises(SystemExit) as exc:
@@ -1146,22 +1147,21 @@ class TestSessionEndJournalWrite:
         # Verify session_end event was written
         from shared.session_journal import read_events
 
-        events = read_events(team)
-        end_events = [e for e in events if e["type"] == "session_end"]
-        assert len(end_events) >= 1
+        events = read_events("session_end")
+        assert len(events) >= 1
 
 
 # ---------------------------------------------------------------------------
-# Integration: _extract_prev_team_name
+# Integration: _extract_prev_session_dir
 # ---------------------------------------------------------------------------
 
 
-class TestExtractPrevTeamName:
-    """Tests for session_init._extract_prev_team_name()."""
+class TestExtractPrevSessionDir:
+    """Tests for session_init._extract_prev_session_dir()."""
 
-    def test_extracts_team_from_claude_md(self, tmp_path):
-        """Extracts team name from Current Session block."""
-        from session_init import _extract_prev_team_name
+    def test_extracts_session_dir_from_claude_md(self, tmp_path):
+        """Extracts session dir from Session dir line in Current Session block."""
+        from session_init import _extract_prev_session_dir
 
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(
@@ -1169,55 +1169,79 @@ class TestExtractPrevTeamName:
             "## Current Session\n"
             "- Resume: `claude --resume abc123`\n"
             "- Team: `pact-abc12345`\n"
+            "- Session dir: `~/.claude/pact-sessions/myproject/abc123`\n"
             "- Started: 2026-04-05\n"
         )
 
-        result = _extract_prev_team_name(str(tmp_path))
-        assert result == "pact-abc12345"
+        result = _extract_prev_session_dir(str(tmp_path))
+        assert result is not None
+        assert result.endswith("pact-sessions/myproject/abc123")
+
+    def test_fallback_derives_from_resume_line(self, tmp_path):
+        """Falls back to deriving session dir from Resume line + project slug."""
+        from session_init import _extract_prev_session_dir
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume abc12345-6789-0123-4567-890123456789`\n"
+            "- Team: `pact-abc12345`\n"
+            "- Started: 2026-04-05\n"
+        )
+
+        result = _extract_prev_session_dir(str(tmp_path))
+        assert result is not None
+        slug = tmp_path.name  # project slug = basename of project_dir
+        assert slug in result
+        assert "abc12345-6789-0123-4567-890123456789" in result
 
     def test_returns_none_when_no_claude_md(self, tmp_path):
         """Returns None when CLAUDE.md doesn't exist."""
-        from session_init import _extract_prev_team_name
+        from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_team_name(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path))
         assert result is None
 
-    def test_returns_none_when_no_team_line(self, tmp_path):
-        """Returns None when CLAUDE.md has no Team line."""
-        from session_init import _extract_prev_team_name
+    def test_returns_none_when_no_session_info(self, tmp_path):
+        """Returns None when CLAUDE.md has no session info lines."""
+        from session_init import _extract_prev_session_dir
 
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Project\nNo session info here.\n")
 
-        result = _extract_prev_team_name(str(tmp_path))
+        result = _extract_prev_session_dir(str(tmp_path))
         assert result is None
 
     def test_returns_none_for_empty_project_dir(self):
         """Returns None when project_dir is empty string."""
-        from session_init import _extract_prev_team_name
+        from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_team_name("")
+        result = _extract_prev_session_dir("")
         assert result is None
 
     def test_returns_none_for_none_project_dir(self):
         """Returns None when project_dir is None."""
-        from session_init import _extract_prev_team_name
+        from session_init import _extract_prev_session_dir
 
-        result = _extract_prev_team_name(None)  # type: ignore[arg-type]
+        result = _extract_prev_session_dir(None)  # type: ignore[arg-type]
         assert result is None
 
     def test_returns_none_on_ioerror(self, tmp_path):
         """Returns None when CLAUDE.md read raises IOError (fail-open)."""
         from unittest.mock import patch as mock_patch
-        from session_init import _extract_prev_team_name
+        from session_init import _extract_prev_session_dir
 
         # Create CLAUDE.md so the existence check passes
         claude_md = tmp_path / "CLAUDE.md"
-        claude_md.write_text("# Project\n## Current Session\n- Team: `pact-abc123`\n")
+        claude_md.write_text(
+            "# Project\n## Current Session\n"
+            "- Session dir: `~/.claude/pact-sessions/proj/abc123`\n"
+        )
 
         # Patch read_text to raise IOError
         with mock_patch.object(Path, "read_text", side_effect=IOError("disk error")):
-            result = _extract_prev_team_name(str(tmp_path))
+            result = _extract_prev_session_dir(str(tmp_path))
 
         assert result is None
 
@@ -1235,13 +1259,13 @@ _SJ_SCRIPT = str(
 class TestCLI:
     """Tests for the CLI entry point (main) invoked via subprocess."""
 
-    def test_write_creates_event_and_exits_0(self, journal_home, team_name, journal_file):
+    def test_write_creates_event_and_exits_0(self, journal_home, session_dir, journal_file):
         """44. write subcommand creates event and exits 0."""
         result = subprocess.run(
             [
                 sys.executable, _SJ_SCRIPT, "write",
                 "--type", "test_event",
-                "--team", team_name,
+                "--session-dir", session_dir,
                 "--data", '{"key": "value"}',
             ],
             capture_output=True, text=True,
@@ -1257,7 +1281,7 @@ class TestCLI:
         assert event["v"] == 1
         assert "ts" in event
 
-    def test_read_outputs_json_array_and_exits_0(self, journal_home, team_name, journal_file):
+    def test_read_outputs_json_array_and_exits_0(self, journal_home, session_dir, journal_file):
         """45. read subcommand outputs JSON array and exits 0."""
         # Seed two events
         journal_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1267,7 +1291,7 @@ class TestCLI:
         )
 
         result = subprocess.run(
-            [sys.executable, _SJ_SCRIPT, "read", "--team", team_name],
+            [sys.executable, _SJ_SCRIPT, "read", "--session-dir", session_dir],
             capture_output=True, text=True,
             env={**os.environ, "HOME": str(journal_home)},
         )
@@ -1277,7 +1301,7 @@ class TestCLI:
         assert events[0]["type"] == "a"
         assert events[1]["type"] == "b"
 
-    def test_read_with_type_filter(self, journal_home, team_name, journal_file):
+    def test_read_with_type_filter(self, journal_home, session_dir, journal_file):
         """45b. read --type filters to matching events only."""
         journal_file.parent.mkdir(parents=True, exist_ok=True)
         journal_file.write_text(
@@ -1288,7 +1312,7 @@ class TestCLI:
         result = subprocess.run(
             [
                 sys.executable, _SJ_SCRIPT, "read",
-                "--team", team_name, "--type", "b",
+                "--session-dir", session_dir, "--type", "b",
             ],
             capture_output=True, text=True,
             env={**os.environ, "HOME": str(journal_home)},
@@ -1298,7 +1322,7 @@ class TestCLI:
         assert len(events) == 1
         assert events[0]["type"] == "b"
 
-    def test_read_last_outputs_single_event(self, journal_home, team_name, journal_file):
+    def test_read_last_outputs_single_event(self, journal_home, session_dir, journal_file):
         """46. read-last subcommand outputs single event JSON and exits 0."""
         journal_file.parent.mkdir(parents=True, exist_ok=True)
         journal_file.write_text(
@@ -1309,7 +1333,7 @@ class TestCLI:
         result = subprocess.run(
             [
                 sys.executable, _SJ_SCRIPT, "read-last",
-                "--team", team_name, "--type", "x",
+                "--session-dir", session_dir, "--type", "x",
             ],
             capture_output=True, text=True,
             env={**os.environ, "HOME": str(journal_home)},
@@ -1318,13 +1342,13 @@ class TestCLI:
         event = json.loads(result.stdout)
         assert event["n"] == 2
 
-    def test_write_invalid_data_json_exits_1(self, journal_home, team_name):
+    def test_write_invalid_data_json_exits_1(self, journal_home, session_dir):
         """47. write with invalid --data JSON exits 1."""
         result = subprocess.run(
             [
                 sys.executable, _SJ_SCRIPT, "write",
                 "--type", "test_event",
-                "--team", team_name,
+                "--session-dir", session_dir,
                 "--data", "not-json",
             ],
             capture_output=True, text=True,
@@ -1336,13 +1360,13 @@ class TestCLI:
     def test_write_missing_type_exits_nonzero(self, journal_home):
         """48. write with missing --type exits non-zero."""
         result = subprocess.run(
-            [sys.executable, _SJ_SCRIPT, "write", "--team", "t"],
+            [sys.executable, _SJ_SCRIPT, "write", "--session-dir", "t"],
             capture_output=True, text=True,
             env={**os.environ, "HOME": str(journal_home)},
         )
         assert result.returncode != 0
 
-    def test_read_last_no_match_outputs_null(self, journal_home, team_name, journal_file):
+    def test_read_last_no_match_outputs_null(self, journal_home, session_dir, journal_file):
         """49. read-last with no matching events outputs 'null'."""
         journal_file.parent.mkdir(parents=True, exist_ok=True)
         journal_file.write_text(
@@ -1352,7 +1376,7 @@ class TestCLI:
         result = subprocess.run(
             [
                 sys.executable, _SJ_SCRIPT, "read-last",
-                "--team", team_name, "--type", "nonexistent",
+                "--session-dir", session_dir, "--type", "nonexistent",
             ],
             capture_output=True, text=True,
             env={**os.environ, "HOME": str(journal_home)},

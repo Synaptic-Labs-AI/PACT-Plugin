@@ -63,7 +63,7 @@ def _write_task(task_dir, task_id, status, owner=None, subject=None):
     (task_dir / f"{task_id}.json").write_text(json.dumps(data))
 
 
-def _write_journal_event(teams_dir, event_type="agent_handoff", **fields):
+def _write_journal_event(session_dir, event_type="agent_handoff", **fields):
     """Helper to write a journal event to session-journal.jsonl.
 
     Creates the journal file if it doesn't exist, and appends a single
@@ -71,7 +71,7 @@ def _write_journal_event(teams_dir, event_type="agent_handoff", **fields):
     """
     event = {"v": 1, "type": event_type, "ts": "2026-01-01T00:00:00Z"}
     event.update(fields)
-    journal = teams_dir / "session-journal.jsonl"
+    journal = session_dir / "session-journal.jsonl"
     with open(str(journal), "a") as f:
         f.write(json.dumps(event) + "\n")
 
@@ -225,10 +225,12 @@ class TestGetReminderType:
         """Substantive work session with no agent_handoff events -> 'adhoc_save'."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "adhoc_save"
@@ -237,11 +239,13 @@ class TestGetReminderType:
         """Session journal with agent_handoff events -> unprocessed HANDOFFs warning."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "unprocessed_handoffs"
@@ -250,10 +254,12 @@ class TestGetReminderType:
         """Short transcript (< 500 chars) -> no reminder."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", 'short session with "Edit"')
 
         assert result is None
@@ -262,7 +268,9 @@ class TestGetReminderType:
         """No team_name -> no session context -> None."""
         from memory_adhoc_reminder import get_reminder_type
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("", WORK_TRANSCRIPT)
 
         assert result is None
@@ -271,10 +279,12 @@ class TestGetReminderType:
         """Empty transcript -> trivial -> None."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", "")
 
         assert result is None
@@ -283,10 +293,12 @@ class TestGetReminderType:
         """Exactly 499 chars -> below threshold -> None."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", '"Edit" ' + "x" * 492)
 
         assert result is None
@@ -295,10 +307,12 @@ class TestGetReminderType:
         """Exactly 500 chars with quoted "Edit" evidence -> at threshold -> 'adhoc_save'."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", '"Edit" ' + "x" * 493)
 
         assert result == "adhoc_save"
@@ -308,7 +322,9 @@ class TestGetReminderType:
         from memory_adhoc_reminder import get_reminder_type
 
         # Don't create team dir at all
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         # journal doesn't exist, .adhoc_reminded.exists() returns False,
@@ -319,10 +335,12 @@ class TestGetReminderType:
         """Long transcript but no Edit/Write -> chat session -> None."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", CHAT_TRANSCRIPT)
 
         assert result is None
@@ -331,11 +349,13 @@ class TestGetReminderType:
         """Transcript with quoted "Write" (not "Edit") evidence -> 'adhoc_save'."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         transcript = "Discussing the feature... " + "x" * 470 + ' "Write" the config...'
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", transcript)
 
         assert result == "adhoc_save"
@@ -344,11 +364,13 @@ class TestGetReminderType:
         """Guard file .adhoc_reminded exists -> already reminded -> None."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        (teams_dir / ".adhoc_reminded").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        (session_dir / ".adhoc_reminded").write_text("")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result is None
@@ -357,12 +379,14 @@ class TestGetReminderType:
         """Guard file blocks even unprocessed_handoffs path."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
-        (teams_dir / ".adhoc_reminded").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
+        (session_dir / ".adhoc_reminded").write_text("")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result is None
@@ -371,11 +395,13 @@ class TestGetReminderType:
         """Journal agent_handoff events trigger unprocessed_handoffs regardless of transcript length."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", "short")
 
         assert result == "unprocessed_handoffs"
@@ -384,17 +410,19 @@ class TestGetReminderType:
         """Uncompleted tasks take priority over agent_handoff events AND adhoc_save."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
         # Both journal agent_handoff events AND work transcript exist
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
         # Also have uncompleted tasks
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "uncompleted_tasks"
@@ -403,14 +431,16 @@ class TestGetReminderType:
         """Uncompleted tasks take priority over adhoc_save (no journal handoffs)."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Active task")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "uncompleted_tasks"
@@ -419,15 +449,17 @@ class TestGetReminderType:
         """Guard file blocks all paths including uncompleted_tasks."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        (teams_dir / ".adhoc_reminded").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        (session_dir / ".adhoc_reminded").write_text("")
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result is None
@@ -436,16 +468,18 @@ class TestGetReminderType:
         """No uncompleted tasks + journal agent_handoff events → falls through to unprocessed_handoffs."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
         # All tasks completed
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "completed", owner="coder", subject="Done task")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "unprocessed_handoffs"
@@ -458,12 +492,14 @@ class TestMain:
         """Ad-hoc work session -> JSON systemMessage with adhoc_save content, exit 0."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -480,13 +516,15 @@ class TestMain:
         """Workflow session (journal has agent_handoff events) -> unprocessed HANDOFFs warning, exit 0."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -523,12 +561,14 @@ class TestMain:
         """Short transcript -> no reminder, exit 0."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": "hello"})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -542,12 +582,14 @@ class TestMain:
         """Long transcript but no Edit/Write -> no reminder, exit 0."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": CHAT_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -562,12 +604,14 @@ class TestMain:
         from memory_adhoc_reminder import main
 
         # Create dir with lowercase name
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-upper"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "teams" / "pact-upper"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-upper"):
             with pytest.raises(SystemExit) as exc_info:
@@ -582,38 +626,42 @@ class TestMain:
         """When reminder fires, .adhoc_reminded guard file is created."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        guard = teams_dir / ".adhoc_reminded"
+        guard = session_dir / ".adhoc_reminded"
         assert guard.exists()
 
     def test_guard_file_permissions_0o600(self, tmp_path, capsys):
         """Guard file has 0o600 permissions."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        guard = teams_dir / ".adhoc_reminded"
+        guard = session_dir / ".adhoc_reminded"
         mode = os.stat(guard).st_mode & 0o777
         assert mode == 0o600
 
@@ -621,13 +669,15 @@ class TestMain:
         """Guard file already exists -> no reminder, exit 0."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        (teams_dir / ".adhoc_reminded").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        (session_dir / ".adhoc_reminded").write_text("")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -641,19 +691,21 @@ class TestMain:
         """When reminder doesn't fire (chat session), no guard file is created."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": CHAT_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        guard = teams_dir / ".adhoc_reminded"
+        guard = session_dir / ".adhoc_reminded"
         assert not guard.exists()
 
 
@@ -672,11 +724,13 @@ class TestEdgeCaseJournalContent:
         """
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        (teams_dir / "session-journal.jsonl").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session-journal.jsonl").write_text("")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "adhoc_save"
@@ -688,12 +742,14 @@ class TestEdgeCaseJournalContent:
         """
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "session_start", team="pact-test")
-        _write_journal_event(teams_dir, "session_end")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "session_start", team="pact-test")
+        _write_journal_event(session_dir, "session_end")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "adhoc_save"
@@ -702,12 +758,14 @@ class TestEdgeCaseJournalContent:
         """Journal with agent_handoff event → 'unprocessed_handoffs'."""
         from memory_adhoc_reminder import get_reminder_type
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "session_start", team="pact-test")
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "session_start", team="pact-test")
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
-        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path):
+        with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")):
             result = get_reminder_type("pact-test", WORK_TRANSCRIPT)
 
         assert result == "unprocessed_handoffs"
@@ -721,20 +779,22 @@ class TestMainIntegrationBothPaths:
         """Guard file is written when unprocessed_handoffs reminder fires."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": "short"})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        assert (teams_dir / ".adhoc_reminded").exists()
+        assert (session_dir / ".adhoc_reminded").exists()
 
         captured = capsys.readouterr()
         output = json.loads(captured.out)
@@ -744,14 +804,16 @@ class TestMainIntegrationBothPaths:
         """Guard file prevents unprocessed_handoffs reminder in main()."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
-        (teams_dir / ".adhoc_reminded").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
+        (session_dir / ".adhoc_reminded").write_text("")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -765,12 +827,14 @@ class TestMainIntegrationBothPaths:
         """Verify adhoc_save message contains actionable content."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -789,13 +853,15 @@ class TestMainIntegrationBothPaths:
         """Verify unprocessed_handoffs message contains actionable content."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -814,13 +880,15 @@ class TestMainIntegrationBothPaths:
         """Journal with agent_handoff event → unprocessed_handoffs warning via main()."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
 
         input_data = json.dumps({"transcript": "short"})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -838,6 +906,8 @@ class TestMainIntegrationBothPaths:
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value=""):
             with pytest.raises(SystemExit) as exc_info:
@@ -855,8 +925,8 @@ class TestMainUncompletedTasks:
         """Uncompleted tasks → dynamic systemMessage with task subjects, exit 0."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Fix API")
@@ -864,6 +934,8 @@ class TestMainUncompletedTasks:
         input_data = json.dumps({"transcript": "short"})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -881,8 +953,8 @@ class TestMainUncompletedTasks:
         """Guard file is written when uncompleted_tasks reminder fires."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Fix API")
@@ -890,20 +962,22 @@ class TestMainUncompletedTasks:
         input_data = json.dumps({"transcript": "short"})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        assert (teams_dir / ".adhoc_reminded").exists()
+        assert (session_dir / ".adhoc_reminded").exists()
 
     def test_uncompleted_tasks_multiple_subjects(self, tmp_path, capsys):
         """Multiple uncompleted tasks → message includes all subjects."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="backend", subject="Fix API")
@@ -912,6 +986,8 @@ class TestMainUncompletedTasks:
         input_data = json.dumps({"transcript": "short"})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -928,9 +1004,9 @@ class TestMainUncompletedTasks:
         """Uncompleted tasks + journal agent_handoff events → uncompleted_tasks message wins."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        _write_journal_event(teams_dir, "agent_handoff", agent="coder", task_id="1")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        _write_journal_event(session_dir, "agent_handoff", agent="coder", task_id="1")
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
@@ -938,6 +1014,8 @@ class TestMainUncompletedTasks:
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:
@@ -954,9 +1032,9 @@ class TestMainUncompletedTasks:
         """Guard file prevents uncompleted_tasks reminder in main()."""
         from memory_adhoc_reminder import main
 
-        teams_dir = tmp_path / ".claude" / "teams" / "pact-test"
-        teams_dir.mkdir(parents=True)
-        (teams_dir / ".adhoc_reminded").write_text("")
+        session_dir = tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id"
+        session_dir.mkdir(parents=True)
+        (session_dir / ".adhoc_reminded").write_text("")
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-test"
         tasks_dir.mkdir(parents=True)
         _write_task(tasks_dir, "5", "in_progress", owner="coder", subject="Stuck task")
@@ -964,6 +1042,8 @@ class TestMainUncompletedTasks:
         input_data = json.dumps({"transcript": WORK_TRANSCRIPT})
 
         with patch("memory_adhoc_reminder.Path.home", return_value=tmp_path), \
+             patch("shared.session_journal._get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
+             patch("memory_adhoc_reminder.get_session_dir", return_value=str(tmp_path / ".claude" / "pact-sessions" / "test-project" / "test-session-id")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"):
             with pytest.raises(SystemExit) as exc_info:

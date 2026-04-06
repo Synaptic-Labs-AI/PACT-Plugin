@@ -27,7 +27,7 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name
+from shared.pact_context import get_session_dir, get_team_name
 from shared.session_journal import read_events
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
@@ -109,10 +109,15 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
     if not team_name:
         return None
 
-    teams_dir = Path.home() / ".claude" / "teams" / team_name
+    # Guard file lives in session dir (survives independently of team dir)
+    session_dir = get_session_dir()
+    if session_dir:
+        guard_dir = Path(session_dir)
+    else:
+        guard_dir = Path.home() / ".claude" / "teams" / team_name
 
     # If already reminded this session, skip
-    if (teams_dir / ".adhoc_reminded").exists():
+    if (guard_dir / ".adhoc_reminded").exists():
         return None
 
     # Path 0: Agent-owned tasks still in_progress (highest priority)
@@ -120,7 +125,7 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
         return REMINDER_UNCOMPLETED_TASKS
 
     # Path 1: session journal has agent_handoff events → unprocessed HANDOFFs
-    if read_events(team_name, event_type="agent_handoff"):
+    if read_events(event_type="agent_handoff"):
         return REMINDER_UNPROCESSED_HANDOFFS
 
     # Path 2: No agent_handoff events but substantive ad-hoc work
@@ -138,10 +143,14 @@ def get_reminder_type(team_name: str, transcript: str) -> str | None:
 
 def _write_guard_file(team_name: str) -> None:
     """Write the .adhoc_reminded guard file to prevent duplicate reminders."""
-    teams_dir = Path.home() / ".claude" / "teams" / team_name
-    if not teams_dir.exists():
+    session_dir = get_session_dir()
+    if session_dir:
+        guard_dir = Path(session_dir)
+    else:
+        guard_dir = Path.home() / ".claude" / "teams" / team_name
+    if not guard_dir.exists():
         return
-    guard_path = teams_dir / ".adhoc_reminded"
+    guard_path = guard_dir / ".adhoc_reminded"
     try:
         fd = os.open(str(guard_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)

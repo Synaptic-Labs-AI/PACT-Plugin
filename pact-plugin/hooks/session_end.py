@@ -9,7 +9,7 @@ Actions:
 1. Write session_end event to the session journal
 2. Detect open PRs that were not paused (append warning to journal)
 3. Clean up teachback warning markers (session-scoped + legacy slug-level)
-4. Clean up stale session directories older than 7 days
+4. Clean up stale session directories older than 30 days (preserving paused sessions)
 
 Purely observational — no destructive operations on project files. Session
 directory cleanup is best-effort and never blocks session termination.
@@ -33,7 +33,12 @@ if str(_hooks_dir) not in sys.path:
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_project_dir, get_session_dir, get_session_id, get_team_name
-from shared.session_journal import append_event, make_event, read_events
+from shared.session_journal import (
+    append_event,
+    make_event,
+    read_events,
+    read_last_event_from,
+)
 
 from shared.task_utils import get_task_list
 
@@ -53,7 +58,6 @@ def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
     sessions_dir: str | None = None,
-    team_name: str | None = None,
 ) -> None:
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
@@ -73,26 +77,21 @@ def check_unpaused_pr(
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
         sessions_dir: Override for sessions base directory (for testing)
-        team_name: Team name for journal access (defaults to get_team_name())
     """
     if not project_slug:
         return
 
-    resolved_team = team_name or get_team_name()
-
     # Check journal for pause state: if session_paused event exists, no warning needed
-    if resolved_team:
-        paused_events = read_events(resolved_team, "session_paused")
-        if paused_events:
-            return
+    paused_events = read_events("session_paused")
+    if paused_events:
+        return
 
     # Check journal for PR creation
     pr_number = None
-    if resolved_team:
-        review_events = read_events(resolved_team, "review_dispatch")
-        if review_events:
-            # Use the most recent review_dispatch event's PR number
-            pr_number = review_events[-1].get("pr_number")
+    review_events = read_events("review_dispatch")
+    if review_events:
+        # Use the most recent review_dispatch event's PR number
+        pr_number = review_events[-1].get("pr_number")
 
     # Fallback: scan task metadata for PR indicators (safety net for PRs
     # not tracked through the review workflow journal events)
@@ -116,18 +115,16 @@ def check_unpaused_pr(
         return
 
     # Write warning to journal
-    if resolved_team:
-        append_event(
-            make_event(
-                "session_end",
-                warning=(
-                    f"Session ended without memory consolidation. "
-                    f"PR #{pr_number} is open but pause-mode was not run. "
-                    f"Run /PACT:pause or /PACT:wrap-up in next session."
-                ),
+    append_event(
+        make_event(
+            "session_end",
+            warning=(
+                f"Session ended without memory consolidation. "
+                f"PR #{pr_number} is open but pause-mode was not run. "
+                f"Run /PACT:pause or /PACT:wrap-up in next session."
             ),
-            resolved_team,
-        )
+        ),
+    )
 
 
 def cleanup_teachback_markers(
@@ -186,8 +183,38 @@ _UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 )
 
-# Default threshold for stale session directory cleanup
-_SESSION_MAX_AGE_DAYS = 7
+# Default threshold for stale session directory cleanup.
+# 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
+# cross-session recovery value. Paused sessions are preserved regardless.
+_SESSION_MAX_AGE_DAYS = 30
+
+
+def _is_paused_session(session_dir: str) -> bool:
+    """
+    Check if a session directory contains a paused session that hasn't ended.
+
+    A session is considered "paused" when its journal has a session_paused
+    event but NO subsequent session_end event. Sessions that were paused,
+    then resumed and completed (both events present) are NOT preserved.
+
+    Fail-open: if the journal is unreadable, returns False (allow cleanup).
+
+    Args:
+        session_dir: Absolute path to the session directory.
+
+    Returns:
+        True if the session is paused and should be preserved.
+    """
+    paused = read_last_event_from(session_dir, "session_paused")
+    if not paused:
+        return False
+
+    # If session_end also exists, the session was resumed and completed
+    ended = read_last_event_from(session_dir, "session_end")
+    if ended:
+        return False
+
+    return True
 
 
 def cleanup_old_sessions(
@@ -200,13 +227,14 @@ def cleanup_old_sessions(
     Remove session directories older than max_age_days.
 
     Best-effort cleanup — never raises. Skips the current session's
-    directory and any entry that doesn't look like a UUID directory.
+    directory, any entry that doesn't look like a UUID directory, and
+    paused sessions (session_paused without session_end).
 
     Args:
         project_slug: Project identifier (basename of project_dir)
         current_session_id: Current session's UUID (never deleted)
         sessions_dir: Override for base directory (testing)
-        max_age_days: Threshold in days (default: 7)
+        max_age_days: Threshold in days (default: 30)
     """
     if not project_slug or not current_session_id:
         return
@@ -229,6 +257,9 @@ def cleanup_old_sessions(
             try:
                 age_days = (time.time() - entry.stat().st_mtime) / 86400
                 if age_days > max_age_days:
+                    # Preserve paused sessions (no session_end after pause)
+                    if _is_paused_session(str(entry)):
+                        continue
                     shutil.rmtree(entry, ignore_errors=True)
             except OSError:
                 continue
@@ -249,16 +280,13 @@ def main():
         current_session_id = get_session_id()
 
         # Write session_end event to journal (best-effort, before other work)
-        team_name = get_team_name()
-        if team_name:
-            append_event(make_event("session_end"), team_name)
+        append_event(make_event("session_end"))
 
         # Safety-net: warn if open PR detected but pause-mode wasn't run
         tasks = get_task_list()
         check_unpaused_pr(
             tasks=tasks,
             project_slug=project_slug,
-            team_name=team_name,
         )
 
         # Clean up teachback warning markers (no longer needed after session)
@@ -267,7 +295,7 @@ def main():
             session_dir=session_dir,
         )
 
-        # Clean up stale session directories (older than 7 days)
+        # Clean up stale session directories (older than 30 days, preserving paused)
         cleanup_old_sessions(
             project_slug=project_slug,
             current_session_id=current_session_id,

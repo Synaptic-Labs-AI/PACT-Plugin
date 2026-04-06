@@ -256,7 +256,7 @@ def main():
 
     # Both gates passed — write agent_handoff event to session journal (GC-proof).
     # This is the sole HANDOFF persistence path. The secretary reads HANDOFFs from
-    # journal events via read_events(team_name, "agent_handoff").
+    # journal events via read_events("agent_handoff").
     append_event(
         make_event(
             "agent_handoff",
@@ -265,7 +265,6 @@ def main():
             task_subject=task_subject,
             handoff=task_metadata.get("handoff", {}),
         ),
-        team_name,
     )
 
     print(_SUPPRESS_OUTPUT)

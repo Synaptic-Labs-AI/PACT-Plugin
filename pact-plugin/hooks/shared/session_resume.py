@@ -19,24 +19,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from shared.session_journal import read_events, read_last_event
+from shared.session_journal import read_events_from, read_last_event_from
 
 # Maximum characters for decision summaries in journal resume output
 _DECISION_TRUNCATION_LIMIT = 80
 
 
-def update_session_info(session_id: str, team_name: str) -> str | None:
+def update_session_info(
+    session_id: str,
+    team_name: str,
+    session_dir: str | None = None,
+) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
 
     Inserts (or overwrites) a managed section containing the session resume
-    command, team name, and start timestamp. Uses <!-- SESSION_START --> /
-    <!-- SESSION_END --> comment markers for reliable replacement across
-    sessions.
+    command, team name, session directory, and start timestamp. Uses
+    <!-- SESSION_START --> / <!-- SESSION_END --> comment markers for
+    reliable replacement across sessions.
 
     Args:
         session_id: Full session UUID (e.g. "93cf3da0-c792-4daa-888e-...")
         team_name: Generated team name (e.g. "PACT-93cf3da0")
+        session_dir: Absolute path to the session directory (optional).
+            When provided, written as "- Session dir:" line for next-session
+            journal access.
 
     Returns:
         Status message or None if no action taken.
@@ -54,12 +61,22 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    # Build session dir line with ~ abbreviation for readability
+    session_dir_line = ""
+    if session_dir:
+        home = str(Path.home())
+        display_dir = session_dir
+        if display_dir.startswith(home):
+            display_dir = "~" + display_dir[len(home):]
+        session_dir_line = f"- Session dir: `{display_dir}`\n"
+
     session_block = (
         f"{SESSION_START}\n"
         f"## Current Session\n"
         f"<!-- Auto-managed by session_init hook. Overwritten each session. -->\n"
         f"- Resume: `claude --resume {session_id}`\n"
         f"- Team: `{team_name}`\n"
+        f"{session_dir_line}"
         f"- Started: {timestamp}\n"
         f"{SESSION_END}"
     )
@@ -105,29 +122,29 @@ def update_session_info(session_id: str, team_name: str) -> str | None:
 
 
 def restore_last_session(
-    prev_team_name: str | None = None,
+    prev_session_dir: str | None = None,
 ) -> str | None:
     """
     Restore the last session context for cross-session continuity.
 
-    Reads the previous session's journal (located by prev_team_name) and
+    Reads the previous session's journal (located by prev_session_dir) and
     constructs a resume summary from agent_handoff, phase_transition, and
     checkpoint events.
 
     Args:
-        prev_team_name: Previous session's team name (from CLAUDE.md).
-            When provided, reads that team's journal for resume context.
+        prev_session_dir: Previous session's directory path (from CLAUDE.md).
+            When provided, reads that session's journal for resume context.
 
     Returns:
         Resume context string if available, None otherwise
     """
-    if not prev_team_name:
+    if not prev_session_dir:
         return None
 
-    return _build_journal_resume(prev_team_name)
+    return _build_journal_resume(prev_session_dir)
 
 
-def _build_journal_resume(team_name: str) -> str | None:
+def _build_journal_resume(session_dir: str) -> str | None:
     """
     Build resume context from a previous session's journal events.
 
@@ -136,12 +153,12 @@ def _build_journal_resume(team_name: str) -> str | None:
     concise resume summary.
 
     Args:
-        team_name: The previous session's team name
+        session_dir: The previous session's directory path
 
     Returns:
         Formatted resume string, or None if journal is empty/missing
     """
-    all_events = read_events(team_name)
+    all_events = read_events_from(session_dir)
     if not all_events:
         return None
 
@@ -259,7 +276,7 @@ def check_resumption_context(tasks: list[dict[str, Any]]) -> str | None:
 
 
 def check_paused_state(
-    prev_team_name: str | None = None,
+    prev_session_dir: str | None = None,
 ) -> str | None:
     """
     Detect paused work from a previous session's /PACT:pause invocation.
@@ -275,21 +292,21 @@ def check_paused_state(
     The journal is immutable — no file deletion is performed.
 
     Args:
-        prev_team_name: Previous session's team name (from CLAUDE.md).
-            When provided, reads that team's journal for pause state.
+        prev_session_dir: Previous session's directory path (from CLAUDE.md).
+            When provided, reads that session's journal for pause state.
 
     Returns:
         Formatted context string if paused state exists, None otherwise
     """
-    if not prev_team_name:
+    if not prev_session_dir:
         return None
 
-    return _check_journal_paused_state(prev_team_name)
+    return _check_journal_paused_state(prev_session_dir)
 
 
-def _check_journal_paused_state(team_name: str) -> str | None:
+def _check_journal_paused_state(session_dir: str) -> str | None:
     """Check for paused state in the previous session's journal."""
-    event = read_last_event(team_name, "session_paused")
+    event = read_last_event_from(session_dir, "session_paused")
     if not event:
         return None
 
