@@ -1154,6 +1154,44 @@ class TestBuildJournalResumeDefensive:
         # active[-1] code would have picked it. The fix must NOT.
         assert "Last active phase: PREPARE" not in result
 
+    def test_tie_break_uses_later_seen_status(
+        self, session_dir, journal_file,
+    ):
+        """R2: when two events for the same phase share identical ts,
+        the later-seen event must win the `latest_per_phase` slot.
+
+        Prior regression: the comparator was strict `>`, so a second event
+        with the same ts was dropped. Concretely, a `started` + `completed`
+        pair written with the same timestamp would leave the phase marked
+        as `started` (first-seen wins), and the phase would surface on the
+        "Last active phase:" line instead of "Completed phases:". The fix
+        changes the comparator to `>=` so the later-seen status replaces
+        the earlier one on ties.
+
+        Pair: CODE `started` at ts=05, then CODE `completed` at ts=05.
+        Expected: CODE on "Completed phases", NOT on "Last active phase".
+
+        NOTE: the defensive ts sort is stable, so input order is preserved
+        when ts values are equal. We explicitly append the `started` event
+        first so that the `completed` event is the second (later-seen)
+        record in the iteration — that is the one the fix must respect.
+        """
+        from shared.session_resume import _build_journal_resume
+
+        self._write_raw_events(journal_file, [
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "started", "ts": "2026-01-01T00:00:05Z"},
+            {"v": 1, "type": "phase_transition", "phase": "CODE",
+             "status": "completed", "ts": "2026-01-01T00:00:05Z"},
+        ])
+
+        result = _build_journal_resume(session_dir)
+        assert result is not None
+        # The later-seen `completed` must supersede the earlier-seen
+        # `started` on the identical-ts tie.
+        assert "Completed phases: CODE" in result
+        assert "Last active phase: CODE" not in result
+
     def test_outer_wrapper_catches_unexpected_exception(
         self, session_dir, journal_file, capsys, monkeypatch,
     ):

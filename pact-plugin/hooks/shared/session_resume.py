@@ -350,7 +350,13 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             ts = p.get("ts", "")
             if isinstance(name, str) and name and isinstance(status, str):
                 prev = latest_per_phase.get(name)
-                if prev is None or ts > prev[0]:
+                # Use `>=` so the later-seen event wins on ties: when two
+                # events for the same phase share the identical `ts`, the
+                # strict `>` comparator would keep the first-seen record
+                # and drop the second, causing a
+                # `started` + `completed` pair at the same timestamp to
+                # leave the phase visible as "active" (BugF2 territory).
+                if prev is None or ts >= prev[0]:
                     latest_per_phase[name] = (ts, status)
         # Pick the active phase by max ts among still-started entries.
         # Dict insertion order does not match latest-ts order when multiple
