@@ -5,12 +5,19 @@ Used by: session_init.py, session_end.py, handoff_gate.py (hooks);
          orchestrate.md, comPACT.md, peer-review.md, wrap-up.md, pause.md
          (commands invoke via CLI: python3 session_journal.py write|read|read-last).
 
-Write path: POSIX O_APPEND atomic append. Safe for concurrent writers
-(hooks + orchestrator commands). O_APPEND on regular files guarantees
-atomic seek+write regardless of write size on POSIX systems. This is NOT
-governed by PIPE_BUF — that limit applies only to pipes and FIFOs.
-The kernel serializes O_APPEND writes at the VFS level, making each
-append atomic regardless of entry size.
+Write path: O_APPEND append, safe for concurrent writers (hooks +
+orchestrator commands) on Linux local filesystems. Linux O_APPEND on
+regular files atomically advances the file offset and writes up to
+PIPE_BUF bytes (typically 4096) in one kernel call; POSIX itself only
+guarantees that the seek+write PAIR is not interleaved with other
+appenders, not that the write of arbitrary sizes is atomic. NFS does
+not honor this at all. Current event sizes are well under PIPE_BUF
+(events are small JSONL lines), so interleaving is not a practical
+concern on the supported platforms — but maintainers should not rely
+on the broader "POSIX atomic regardless of size" claim if event sizes
+grow or the journal ever lands on NFS. The short-write loop in
+`_atomic_write` is the belt-and-braces guard against partial writes
+from signal interruption even within the PIPE_BUF bound.
 
 Read path: Sequential scan with type filtering. For typical sessions
 (<200 events, <80KB), full scan completes in <5ms. For crash recovery,
@@ -126,14 +133,14 @@ def make_event(event_type: str, **fields: Any) -> dict[str, Any]:
     return event
 
 
-def _validate_event_schema(event: dict[str, Any]) -> bool:
+def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
     """
     Validate that an event dict has the required schema fields.
 
     Baseline (all event types):
     - 'v' is an int (and NOT a bool — Python bool is a subclass of int,
       so it must be rejected explicitly)
-    - 'type' is a non-empty str
+    - 'type' is a non-empty str (whitespace-only is rejected)
 
     Per-type (only for types in _REQUIRED_FIELDS_BY_TYPE):
     - Every required field is present and not None. Unknown event types
@@ -148,22 +155,29 @@ def _validate_event_schema(event: dict[str, Any]) -> bool:
     anything that slips past this (e.g. events from prior schema versions).
 
     Returns:
-        True if the event is schema-valid, False otherwise.
+        A `(ok, reason)` tuple. `ok` is True only when every check passes;
+        `reason` is a short human-readable string. On success `reason` is
+        "ok". On failure `reason` identifies the first failing check so
+        callers (notably the CLI write path) can surface a precise error
+        to stderr instead of a generic "invalid event schema" line.
     """
     v = event.get("v")
     if not isinstance(v, int) or isinstance(v, bool):
-        return False
+        return False, "v must be int"
     event_type = event.get("type")
-    if not isinstance(event_type, str) or not event_type:
-        return False
+    if not isinstance(event_type, str) or not event_type.strip():
+        return False, "type must be non-empty str"
     required = _REQUIRED_FIELDS_BY_TYPE.get(event_type)
     if required is None:
         # Unknown event type — opt-in enforcement, pass through.
-        return True
+        return True, "ok"
     for field in required:
         if field not in event or event[field] is None:
-            return False
-    return True
+            return (
+                False,
+                f"missing required field '{field}' for type '{event_type}'",
+            )
+    return True, "ok"
 
 
 def append_event(event: dict[str, Any]) -> bool:
@@ -185,7 +199,12 @@ def append_event(event: dict[str, Any]) -> bool:
     """
     try:
         # Validate required schema fields (shared with CLI write path).
-        if not _validate_event_schema(event):
+        # In-process API is fail-open: the caller gets a bool and the
+        # reason is intentionally discarded — hooks never surface per-type
+        # validator messages to end users. The CLI write path below has a
+        # symmetric call site that DOES print the reason.
+        ok, _reason = _validate_event_schema(event)
+        if not ok:
             return False
 
         # Auto-set timestamp if missing
@@ -438,11 +457,20 @@ def _journal_path_from(session_dir: str) -> Path:
 
 def _atomic_write(path: Path, data: bytes) -> bool:
     """
-    Append *data* to *path* using POSIX O_APPEND for atomic writes.
+    Append *data* to *path* using O_APPEND, looping over short writes.
 
-    Returns True on success, False on OSError.  File is created with 0o600
-    if it does not exist.  The caller is responsible for ensuring the parent
-    directory exists before calling.
+    Returns True on success, False on OSError or a non-progressing write.
+    File is created with 0o600 if it does not exist. The caller is
+    responsible for ensuring the parent directory exists before calling.
+
+    Short-write loop rationale: `os.write` can return fewer bytes than
+    requested when (a) the write is interrupted by a signal, or (b) the
+    request exceeds PIPE_BUF on platforms where only the first PIPE_BUF
+    bytes of an O_APPEND write are guaranteed atomic. The caller handles
+    (a) by retrying from where we left off; (b) is not our concern for
+    current event sizes but the loop makes the primitive correct in
+    principle. A non-positive return from os.write indicates a failure we
+    cannot recover from — bail out and let the caller see False.
     """
     try:
         fd = os.open(
@@ -451,7 +479,16 @@ def _atomic_write(path: Path, data: bytes) -> bool:
             0o600,
         )
         try:
-            os.write(fd, data)
+            view = memoryview(data)
+            total = 0
+            while total < len(view):
+                n = os.write(fd, view[total:])
+                if n <= 0:
+                    # Non-progressing write — treat as failure so the
+                    # caller can log and return False up the stack rather
+                    # than spin forever.
+                    return False
+                total += n
         finally:
             os.close(fd)
         return True
@@ -526,10 +563,25 @@ def main() -> int:
         # Apply the same schema validation as append_event() — extra fields
         # in --data may shadow defaults from make_event() (e.g., a caller
         # passing {"v": true} would overwrite the default v=1 with a bool).
-        if not _validate_event_schema(event):
+        # Unlike append_event (which is fail-open), the CLI surfaces the
+        # exact failure reason so operators see precisely which check fired
+        # instead of a generic "v must be int" line that may not apply.
+        ok, reason = _validate_event_schema(event)
+        if not ok:
             print(
-                "session_journal: invalid event schema "
-                "(v must be int, type must be non-empty str)",
+                f"session_journal: invalid event schema ({reason})",
+                file=sys.stderr,
+            )
+            return 1
+
+        # AdvF4: mirror the empty-session-dir guard from read_events_from /
+        # read_last_event_from. Without this, an empty `--session-dir`
+        # silently resolves to "./session-journal.jsonl" and creates a
+        # stray journal file in the caller's CWD. Argparse's `required=True`
+        # catches a missing flag, but the empty-string case slips past it.
+        if not args.session_dir:
+            print(
+                "session_journal: --session-dir must be non-empty",
                 file=sys.stderr,
             )
             return 1

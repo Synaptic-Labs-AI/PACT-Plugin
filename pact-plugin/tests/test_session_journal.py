@@ -382,6 +382,16 @@ class TestAppendEvent:
         path (test_fail_open_on_write_error uses chmod 0o444 on the parent dir),
         but a direct test pins the contract: any OSError from os.open must be
         swallowed and surface as a False return -- never propagate.
+
+        Patch path: the string form `"shared.session_journal.os.open"` is the
+        canonical pytest pattern for intercepting a stdlib function at the
+        module where it is LOOKED UP. The earlier attribute-style patch
+        (`patch.object(sj.os, "open", ...)`) worked only because the module
+        does `import os` and looks up `os.open` at call time; if the code
+        were ever refactored to `from os import open`, that form would
+        silently no-op while the call still routed through the original
+        stdlib function. The string form matches the rest of the codebase
+        (see tests/test_memory_database.py patching `scripts.database.os.open`).
         """
         import shared.session_journal as sj
 
@@ -390,12 +400,97 @@ class TestAppendEvent:
         def _raise_oserror(*args, **kwargs):
             raise OSError("simulated disk failure")
 
-        with patch.object(sj.os, "open", side_effect=_raise_oserror):
+        with patch("shared.session_journal.os.open", side_effect=_raise_oserror):
             result = sj._atomic_write(target, b"test payload")
 
         assert result is False
         # File should not exist (os.open raised before any bytes were written)
         assert not target.exists()
+
+    def test_atomic_write_loops_over_short_writes(self, tmp_path):
+        """BugF3: _atomic_write retries when os.write returns a short count.
+
+        `os.write` may return fewer bytes than requested — signal interruption
+        is the usual culprit; the O_APPEND atomicity guarantee is also only
+        pinned up to PIPE_BUF on Linux, so a giant entry could be split by
+        the kernel. Before this fix the function called `os.write(fd, data)`
+        once and discarded the return value, silently losing any bytes
+        beyond the short count. The loop now drains the buffer via a
+        memoryview, retrying from where it left off until every byte has
+        been written.
+
+        This test fakes `os.write` to return a small positive count on each
+        call, then falls back to the real write for the final tail so the
+        file actually lands on disk and we can cross-check the contents.
+        """
+        import shared.session_journal as sj
+
+        target = tmp_path / "journal.jsonl"
+        payload = b"x" * 1000 + b"\n"  # 1001 bytes — well over any single chunk.
+
+        real_os_write = sj.os.write
+        chunks_written = []
+
+        def short_write(fd, buf):
+            # Every call writes at most 100 bytes so the loop must run at
+            # least ceil(1001/100) = 11 times to drain the payload.
+            mv = memoryview(buf)
+            limit = 100
+            if len(mv) > limit:
+                mv = mv[:limit]
+            n = real_os_write(fd, bytes(mv))
+            chunks_written.append(n)
+            return n
+
+        with patch("shared.session_journal.os.write", side_effect=short_write):
+            result = sj._atomic_write(target, payload)
+
+        assert result is True, "short writes should loop to completion"
+        assert sum(chunks_written) == len(payload), (
+            f"sum of short writes ({sum(chunks_written)}) must equal the "
+            f"payload size ({len(payload)}) — otherwise bytes were dropped"
+        )
+        # The file must contain the exact payload — no gaps, no duplication.
+        assert target.read_bytes() == payload
+        # And the loop must have taken more than one iteration; otherwise
+        # the short-write scenario was not actually exercised.
+        assert len(chunks_written) > 1, (
+            f"expected multiple short writes but observed only "
+            f"{len(chunks_written)} call(s) — patch may be ineffective"
+        )
+
+    def test_atomic_write_bails_out_on_non_progressing_write(self, tmp_path):
+        """BugF3 edge case: a zero-return from os.write must not spin.
+
+        If a fake `os.write` returns 0 (no progress, no exception), the loop
+        must return False rather than spin forever. Real filesystems do not
+        normally return 0 from a blocking write, but guarding the loop is
+        cheap insurance against FUSE filesystems, test doubles, or a future
+        refactor that accidentally configures a non-blocking fd.
+        """
+        import shared.session_journal as sj
+
+        target = tmp_path / "journal.jsonl"
+
+        call_counter = {"n": 0}
+
+        def zero_write(fd, buf):
+            call_counter["n"] += 1
+            # Guard against the test itself hanging: after 10 zero returns
+            # something is very wrong — raise to fail loudly.
+            if call_counter["n"] > 10:
+                raise AssertionError(
+                    "loop spun past 10 iterations on zero-return write"
+                )
+            return 0
+
+        with patch("shared.session_journal.os.write", side_effect=zero_write):
+            result = sj._atomic_write(target, b"data")
+
+        assert result is False
+        # Exactly one iteration should have fired before bail-out; more than
+        # that means the loop does not treat zero as terminal.
+        assert call_counter["n"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1908,7 +2003,102 @@ class TestCLI:
         )
         assert result.returncode != 0
         assert "invalid event schema" in result.stderr
+        # The reason propagation lands the exact failing check in stderr
+        # instead of the pre-refactor generic "(v must be int, type must
+        # be non-empty str)" line that mentioned both checks regardless of
+        # which one fired.
+        assert "v must be int" in result.stderr
         # The journal must NOT have been written.
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+    def test_write_cli_surfaces_missing_field_reason(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """B2/RG1/A4: CLI write reports the *precise* per-type failure.
+
+        Before the reason-propagation fix, this path printed the generic
+        "v must be int, type must be non-empty str" message even when a
+        per-type required field was missing. The regression test pins the
+        new behavior: the stderr line names the specific missing field and
+        the event type, so operators can act on it without re-running with
+        a debugger. Uses `phase_transition` (the BugF1 canary type) with
+        `status` present but `phase` missing.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "phase_transition",
+                "--session-dir", session_dir,
+                "--data", '{"status": "started"}',
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid event schema" in result.stderr
+        # The specific failing field and event type must be in the message.
+        assert "phase" in result.stderr
+        assert "phase_transition" in result.stderr
+        # And the stale generic phrase from before the fix must NOT appear.
+        assert "v must be int" not in result.stderr
+        # Journal must not have been written.
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+    def test_write_rejects_empty_session_dir(self, journal_home, tmp_path):
+        """AdvF4: CLI write rejects an empty --session-dir with exit 1.
+
+        Regression: previously an empty string for --session-dir slipped past
+        argparse's `required=True` (which only checks presence, not value),
+        fell into `_journal_path_from("")`, and silently wrote
+        `./session-journal.jsonl` into the caller's current working directory.
+        The CLI now mirrors read_events_from / read_last_event_from by
+        rejecting the empty-string case before touching the filesystem.
+
+        Matches the behavior at session_journal.py read_events_from:273 and
+        read_last_event_from:349 which return empty collections on empty
+        session_dir without performing any I/O.
+        """
+        # Run in an isolated cwd so we can assert that no stray journal file
+        # is created there. `tmp_path` is the ideal scratch directory.
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "test_event",
+                "--session-dir", "",
+                "--data", "{}",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+            cwd=str(tmp_path),
+        )
+        assert result.returncode == 1
+        assert "--session-dir must be non-empty" in result.stderr
+        # CRITICAL: no stray journal must have been created in cwd.
+        assert not (tmp_path / "session-journal.jsonl").exists()
+
+    def test_write_rejects_whitespace_only_type_via_cli(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """A2: CLI write rejects --type '   ' (whitespace-only).
+
+        Mirrors the baseline unit test
+        (test_baseline_type_check_rejects_whitespace_only) but exercises the
+        full CLI write path so we catch any call site that bypasses
+        _validate_event_schema and trusts argparse's `required=True` alone.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "   ",  # Whitespace-only
+                "--session-dir", session_dir,
+                "--data", "{}",
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid event schema" in result.stderr
+        assert "type must be non-empty str" in result.stderr
         assert not journal_file.exists() or journal_file.read_text() == ""
 
 
@@ -1998,11 +2188,18 @@ class TestValidateEventSchemaPerType:
 
     @pytest.mark.parametrize("event_type", list(_SAMPLES.keys()))
     def test_happy_path_all_required_fields_present(self, event_type):
-        """Validation passes when all required fields are present."""
+        """Validation passes when all required fields are present.
+
+        The validator returns a `(ok, reason)` tuple — on success the reason
+        is the literal string "ok" so the CLI write path can print a meaningful
+        message on the opposite branch without a special case for success.
+        """
         from shared.session_journal import _validate_event_schema, make_event
 
         event = make_event(event_type, **self._SAMPLES[event_type])
-        assert _validate_event_schema(event) is True
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
 
     @pytest.mark.parametrize(
         "event_type",
@@ -2012,8 +2209,10 @@ class TestValidateEventSchemaPerType:
         """Validation rejects when ANY single required field is missing.
 
         Iterates through each required field, removes it, and verifies the
-        validator returns False. This catches schema drift where a writer
-        stops passing a load-bearing field.
+        validator returns (False, "missing required field '<field>' for
+        type '<event_type>'"). This catches schema drift where a writer
+        stops passing a load-bearing field, AND pins the reason string
+        format so the CLI write path can surface the precise field.
         """
         from shared.session_journal import _validate_event_schema, make_event
 
@@ -2021,8 +2220,17 @@ class TestValidateEventSchemaPerType:
         for missing_field in sample:
             partial = {k: v for k, v in sample.items() if k != missing_field}
             event = make_event(event_type, **partial)
-            assert _validate_event_schema(event) is False, (
+            ok, reason = _validate_event_schema(event)
+            assert ok is False, (
                 f"{event_type} with missing {missing_field!r} should be rejected"
+            )
+            expected = (
+                f"missing required field '{missing_field}' "
+                f"for type '{event_type}'"
+            )
+            assert reason == expected, (
+                f"{event_type} missing {missing_field!r}: expected reason "
+                f"{expected!r}, got {reason!r}"
             )
 
     @pytest.mark.parametrize(
@@ -2034,7 +2242,9 @@ class TestValidateEventSchemaPerType:
 
         The validator's check is `field not in event or event[field] is None`
         — this covers the explicit-None case. Without this guard a writer
-        that passes `phase=None` would slip through.
+        that passes `phase=None` would slip through. The reason string
+        uses the same "missing required field" template so the None case
+        and the missing-key case surface identically to the CLI user.
         """
         from shared.session_journal import _validate_event_schema, make_event
 
@@ -2042,9 +2252,14 @@ class TestValidateEventSchemaPerType:
         for none_field in sample:
             with_none = {**sample, none_field: None}
             event = make_event(event_type, **with_none)
-            assert _validate_event_schema(event) is False, (
+            ok, reason = _validate_event_schema(event)
+            assert ok is False, (
                 f"{event_type} with {none_field}=None should be rejected"
             )
+            assert (
+                f"missing required field '{none_field}' "
+                f"for type '{event_type}'"
+            ) == reason
 
     def test_unknown_event_type_passes_per_type(self):
         """Unknown event types pass per-type validation (opt-in whitelist).
@@ -2056,7 +2271,51 @@ class TestValidateEventSchemaPerType:
         from shared.session_journal import _validate_event_schema, make_event
 
         event = make_event("some_unit_test_type_not_in_dict", payload="anything")
-        assert _validate_event_schema(event) is True
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    @pytest.mark.parametrize(
+        "bad_v, expected_reason",
+        [
+            (None, "v must be int"),
+            ("1", "v must be int"),
+            (True, "v must be int"),    # bool is a subclass of int — rejected.
+            (False, "v must be int"),
+        ],
+        ids=["missing_v", "string_v", "bool_true_v", "bool_false_v"],
+    )
+    def test_baseline_v_check_reason(self, bad_v, expected_reason):
+        """Baseline v-field check surfaces the 'v must be int' reason."""
+        from shared.session_journal import _validate_event_schema
+
+        event: dict = {"type": "session_end", "ts": "2026-01-01T00:00:00Z"}
+        if bad_v is not None:
+            event["v"] = bad_v
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == expected_reason
+
+    @pytest.mark.parametrize(
+        "bad_type",
+        ["", " ", "\t", "\n", "   \t  "],
+        ids=["empty", "single_space", "tab", "newline", "mixed_whitespace"],
+    )
+    def test_baseline_type_check_rejects_whitespace_only(self, bad_type):
+        """A2: whitespace-only --type is rejected with 'type must be non-empty str'.
+
+        Prior to this fix the validator only checked `len(event_type) > 0`,
+        so " " or "\\t" slipped through and produced a journal line with a
+        whitespace-only type. The validator now strips before checking and
+        returns the same reason whether the field is missing, non-string,
+        empty, or whitespace-only.
+        """
+        from shared.session_journal import _validate_event_schema
+
+        event = {"v": 1, "type": bad_type, "ts": "2026-01-01T00:00:00Z"}
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == "type must be non-empty str"
 
     def test_append_event_rejects_missing_required_field(self, journal_home):
         """append_event returns False (fail-open) when required field missing.
