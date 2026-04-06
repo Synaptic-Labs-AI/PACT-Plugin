@@ -58,14 +58,16 @@ def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
     sessions_dir: str | None = None,
-) -> None:
+) -> str | None:
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
 
-    Checks the session journal for review_dispatch events (PR was created) and
-    the absence of session_paused events (pause was not run). If this condition
-    is met, writes a warning session_end event to the journal so the next session
-    can flag it.
+    Compares the session journal's most-recent `session_paused` event against
+    its most-recent `review_dispatch` event. The pause covers a PR only when
+    it occurred at-or-after that PR was dispatched; an older pause does NOT
+    cover a freshly-dispatched PR (e.g., pause→resume→new PR→quit). If the
+    current PR is unpaused, returns a warning string so the caller can attach
+    it to the single `session_end` journal event.
 
     Also checks task metadata as fallback for PRs not tracked through the normal
     review workflow (preserves the existing safety-net regex detection).
@@ -77,18 +79,31 @@ def check_unpaused_pr(
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
         sessions_dir: Override for sessions base directory (for testing)
+
+    Returns:
+        Warning string if an unpaused PR is detected, otherwise None.
     """
     if not project_slug:
-        return
+        return None
 
-    # Check journal for pause state: if session_paused event exists, no warning needed
     paused_events = read_events("session_paused")
-    if paused_events:
-        return
+    review_events = read_events("review_dispatch")
+
+    # Reconcile pause vs review timing: a pause only "covers" a PR when it
+    # occurred at-or-after that PR's dispatch. Bias toward "paused" (silence)
+    # on equal timestamps via `>=` to avoid spurious warnings on the
+    # 1-second ISO precision tie.
+    if paused_events and review_events:
+        last_pause_ts = paused_events[-1].get("ts", "")
+        last_review_ts = review_events[-1].get("ts", "")
+        if last_pause_ts >= last_review_ts:
+            return None  # Most recent PR was paused; safe.
+        # else fall through — current PR is unpaused
+    elif paused_events:
+        return None  # Paused, no PRs at all — safe.
 
     # Check journal for PR creation
     pr_number = None
-    review_events = read_events("review_dispatch")
     if review_events:
         # Use the most recent review_dispatch event's PR number
         pr_number = review_events[-1].get("pr_number")
@@ -112,18 +127,12 @@ def check_unpaused_pr(
                 break
 
     if not pr_number:
-        return
+        return None
 
-    # Write warning to journal
-    append_event(
-        make_event(
-            "session_end",
-            warning=(
-                f"Session ended without memory consolidation. "
-                f"PR #{pr_number} is open but pause-mode was not run. "
-                f"Run /PACT:pause or /PACT:wrap-up in next session."
-            ),
-        ),
+    return (
+        f"Session ended without memory consolidation. "
+        f"PR #{pr_number} is open but pause-mode was not run. "
+        f"Run /PACT:pause or /PACT:wrap-up in next session."
     )
 
 
@@ -312,15 +321,23 @@ def main():
         session_dir = get_session_dir()
         current_session_id = get_session_id()
 
-        # Write session_end event to journal (best-effort, before other work)
-        append_event(make_event("session_end"))
-
-        # Safety-net: warn if open PR detected but pause-mode wasn't run
+        # Safety-net: warn if open PR detected but pause-mode wasn't run.
+        # Returns a warning string (or None) so we can emit a single
+        # session_end event with an optional `warning=` field.
         tasks = get_task_list()
-        check_unpaused_pr(
+        warning = check_unpaused_pr(
             tasks=tasks,
             project_slug=project_slug,
         )
+
+        # Write a single session_end event to the journal (best-effort).
+        # Wrapped in its own try/except so a journal failure does not skip
+        # the cleanup steps that follow.
+        try:
+            event_kwargs = {"warning": warning} if warning else {}
+            append_event(make_event("session_end", **event_kwargs))
+        except Exception as e:
+            print(f"Hook warning (session_end journal): {e}", file=sys.stderr)
 
         # Clean up teachback warning markers (no longer needed after session)
         cleanup_teachback_markers(

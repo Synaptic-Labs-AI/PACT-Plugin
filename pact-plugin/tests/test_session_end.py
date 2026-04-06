@@ -153,18 +153,26 @@ class TestMainEntryPoint:
     def test_main_call_ordering(self):
         """main() must call functions in correct order:
         check_unpaused_pr -> cleanup_teachback_markers -> cleanup_old_sessions.
+        check_unpaused_pr now runs BEFORE the journal write so its return
+        value can be merged into the single session_end event.
         """
         from session_end import main
 
         call_order = []
 
+        def _record(name):
+            def _side_effect(**kw):
+                call_order.append(name)
+                return None  # check_unpaused_pr now returns Optional[str]
+            return _side_effect
+
         patches = self._patch_main_deps(
             check_unpaused_pr=patch("session_end.check_unpaused_pr",
-                side_effect=lambda **kw: call_order.append("check_unpaused_pr")),
+                side_effect=_record("check_unpaused_pr")),
             cleanup_teachback_markers=patch("session_end.cleanup_teachback_markers",
-                side_effect=lambda **kw: call_order.append("cleanup_teachback_markers")),
+                side_effect=_record("cleanup_teachback_markers")),
             cleanup_old_sessions=patch("session_end.cleanup_old_sessions",
-                side_effect=lambda **kw: call_order.append("cleanup_old_sessions")),
+                side_effect=_record("cleanup_old_sessions")),
         )
         with patch("sys.stdin", io.StringIO("{}")):
             with ExitStack() as stack:
@@ -179,6 +187,72 @@ class TestMainEntryPoint:
             "cleanup_old_sessions",
         ]
 
+    def test_main_emits_single_session_end_event_when_warning(self):
+        """When check_unpaused_pr returns a warning, main() emits exactly
+        ONE session_end event with the warning attached (not two events)."""
+        from session_end import main
+
+        warning_text = "Session ended without memory consolidation. PR #99 is open."
+        patches = self._patch_main_deps(
+            check_unpaused_pr=patch("session_end.check_unpaused_pr",
+                                    return_value=warning_text),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit):
+                    main()
+
+        mock_append = mocks["append_event"]
+        # Exactly one session_end event — not two (regression test for
+        # the old "session_end then session_end+warning" double-write bug).
+        assert mock_append.call_count == 1
+        event_arg = mock_append.call_args[0][0]
+        assert event_arg["type"] == "session_end"
+        assert event_arg.get("warning") == warning_text
+
+    def test_main_emits_single_session_end_event_no_warning(self):
+        """When check_unpaused_pr returns None, main() emits exactly ONE
+        session_end event with NO warning field."""
+        from session_end import main
+
+        patches = self._patch_main_deps(
+            check_unpaused_pr=patch("session_end.check_unpaused_pr",
+                                    return_value=None),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit):
+                    main()
+
+        mock_append = mocks["append_event"]
+        assert mock_append.call_count == 1
+        event_arg = mock_append.call_args[0][0]
+        assert event_arg["type"] == "session_end"
+        assert "warning" not in event_arg
+
+    def test_main_continues_cleanup_when_journal_write_fails(self):
+        """If append_event raises, main() must still call cleanup functions
+        (regression test for the bare-write single-point-of-failure bug)."""
+        from session_end import main
+
+        patches = self._patch_main_deps(
+            append_event=patch("session_end.append_event",
+                               side_effect=RuntimeError("disk full")),
+        )
+        with patch("sys.stdin", io.StringIO("{}")):
+            with ExitStack() as stack:
+                mocks = {name: stack.enter_context(p) for name, p in patches.items()}
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+        # Exit 0 (fire-and-forget)
+        assert exc_info.value.code == 0
+        # Cleanup steps still ran despite the journal write failure
+        mocks["cleanup_teachback_markers"].assert_called_once()
+        mocks["cleanup_old_sessions"].assert_called_once()
+
 
 # =============================================================================
 # check_unpaused_pr() Tests
@@ -187,14 +261,16 @@ class TestMainEntryPoint:
 class TestCheckUnpausedPr:
     """Tests for session_end.check_unpaused_pr() — journal-based safety-net.
 
-    Detects open PRs that were NOT paused (no memory consolidation), writing
-    a warning event to the session journal for next-session pickup.
+    Detects open PRs that were NOT paused (no memory consolidation), returning
+    a warning string that the caller attaches to the single session_end event.
 
     Key behavior:
-    - Reads session_paused events (if present → no warning)
+    - Compares session_paused vs review_dispatch event timestamps:
+      pause covers PR only when last_pause_ts >= last_review_ts.
     - Reads review_dispatch events (primary PR detection from journal)
     - Falls back to task metadata scanning (safety net for non-journal PRs)
-    - Writes session_end warning event to journal
+    - Returns the warning string (or None) instead of writing the journal
+      directly — the caller emits the single session_end event.
     """
 
     def _make_task_with_pr_number(self, pr_number):
@@ -222,24 +298,20 @@ class TestCheckUnpausedPr:
         }
 
     def test_detects_pr_number_in_task_metadata(self):
-        """Should write warning event when pr_number found in task metadata."""
+        """Should return warning string when pr_number found in task metadata."""
         from session_end import check_unpaused_pr
 
         tasks = [self._make_task_with_pr_number(288)]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_called_once()
-        event = mock_append.call_args[0][0]
-        assert event["type"] == "session_end"
-        assert "PR #288" in event["warning"]
-        assert "pause-mode was not run" in event["warning"]
+        assert warning is not None
+        assert "PR #288" in warning
+        assert "pause-mode was not run" in warning
 
     def test_detects_pr_url_in_handoff_values(self):
         """Should extract PR number from github.com/pull/ URL in handoff metadata."""
@@ -247,38 +319,33 @@ class TestCheckUnpausedPr:
 
         tasks = [self._make_task_with_pr_url("https://github.com/owner/repo/pull/42")]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_called_once()
-        event = mock_append.call_args[0][0]
-        assert "PR #42" in event["warning"]
+        assert warning is not None
+        assert "PR #42" in warning
 
     def test_no_warning_when_session_paused_event_exists(self):
-        """Should skip warning when journal has session_paused event."""
+        """Should return None when journal has only session_paused (no review)."""
         from session_end import check_unpaused_pr
 
         tasks = [self._make_task_with_pr_number(288)]
 
         def mock_read_events(event_type=None):
             if event_type == "session_paused":
-                return [{"type": "session_paused", "pr_number": 288}]
+                return [{"type": "session_paused", "pr_number": 288, "ts": "2026-01-01T00:00:00Z"}]
             return []
 
-        with patch("session_end.read_events", side_effect=mock_read_events), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_detects_pr_from_review_dispatch_event(self):
         """Should detect PR from review_dispatch journal event (primary path)."""
@@ -288,79 +355,68 @@ class TestCheckUnpausedPr:
             if event_type == "session_paused":
                 return []
             if event_type == "review_dispatch":
-                return [{"type": "review_dispatch", "pr_number": 55}]
+                return [{"type": "review_dispatch", "pr_number": 55, "ts": "2026-01-01T00:00:00Z"}]
             return []
 
-        with patch("session_end.read_events", side_effect=mock_read_events), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
                 tasks=None,  # No tasks needed — journal has PR
                 project_slug="proj",
-
             )
 
-        mock_append.assert_called_once()
-        event = mock_append.call_args[0][0]
-        assert "PR #55" in event["warning"]
+        assert warning is not None
+        assert "PR #55" in warning
 
     def test_no_warning_when_no_pr_detected(self):
-        """Should not write event when no PR found in journal or tasks."""
+        """Should return None when no PR found in journal or tasks."""
         from session_end import check_unpaused_pr
 
         tasks = [
             {"id": "1", "subject": "CODE: auth", "status": "completed", "metadata": {}},
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_no_warning_when_tasks_is_none_and_no_journal_pr(self):
-        """Should return safely when tasks is None and no journal PR."""
+        """Should return None when tasks is None and no journal PR."""
         from session_end import check_unpaused_pr
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=None,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_no_warning_when_project_slug_empty(self):
-        """Should return early when project_slug is empty."""
+        """Should return None early when project_slug is empty."""
         from session_end import check_unpaused_pr
 
-        with patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
-                tasks=[self._make_task_with_pr_number(100)],
-                project_slug="",
+        warning = check_unpaused_pr(
+            tasks=[self._make_task_with_pr_number(100)],
+            project_slug="",
+        )
 
-            )
-
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_no_warning_when_tasks_empty_and_no_journal_pr(self):
-        """Should return with no event for empty task list and no journal PR."""
+        """Should return None for empty task list and no journal PR."""
         from session_end import check_unpaused_pr
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=[],
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_handles_malformed_pr_url(self):
         """Bare /pull/ without github.com domain should not detect PR."""
@@ -380,15 +436,13 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_pr_number_metadata_takes_priority_over_url(self):
         """When task has both pr_number and URL, pr_number is used first."""
@@ -408,16 +462,14 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        event = mock_append.call_args[0][0]
-        assert "PR #100" in event["warning"]
+        assert warning is not None
+        assert "PR #100" in warning
 
     def test_non_string_handoff_values_skipped(self):
         """Non-string handoff values (dict/list) should be skipped without error."""
@@ -440,16 +492,14 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        event = mock_append.call_args[0][0]
-        assert "PR #42" in event["warning"]
+        assert warning is not None
+        assert "PR #42" in warning
 
     def test_detects_full_github_pr_url(self):
         """Should detect PR from full github.com/org/repo/pull/N URL."""
@@ -468,16 +518,14 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        event = mock_append.call_args[0][0]
-        assert "PR #123" in event["warning"]
+        assert warning is not None
+        assert "PR #123" in warning
 
     def test_non_url_pull_text_not_detected(self):
         """Non-URL text with '/pull/' should NOT trigger detection."""
@@ -496,15 +544,13 @@ class TestCheckUnpausedPr:
             }
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_handles_metadata_none_in_task(self):
         """Task with 'metadata': None should not crash (or {} guard handles it)."""
@@ -519,31 +565,114 @@ class TestCheckUnpausedPr:
             },
         ]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="proj",
-
             )
 
-        mock_append.assert_not_called()
+        assert warning is None
 
     def test_no_journal_write_when_project_slug_empty(self):
-        """Should not write journal event when project_slug is empty."""
+        """Should return None (no warning) when project_slug is empty."""
         from session_end import check_unpaused_pr
 
         tasks = [self._make_task_with_pr_number(42)]
 
-        with patch("session_end.read_events", return_value=[]), \
-             patch("session_end.append_event") as mock_append:
-            check_unpaused_pr(
+        with patch("session_end.read_events", return_value=[]):
+            warning = check_unpaused_pr(
                 tasks=tasks,
                 project_slug="",
             )
 
-        # Empty project_slug → early return, no journal writes
-        mock_append.assert_not_called()
+        # Empty project_slug → early return, no warning
+        assert warning is None
+
+    # ========================================================================
+    # M2 — pause-vs-review timestamp reconciliation tests
+    # ========================================================================
+
+    def test_unpaused_pr_after_earlier_pause(self):
+        """pause→resume→new PR→quit: pause is OLDER than review → warn."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 10, "ts": "2026-01-01T00:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 20, "ts": "2026-01-02T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #20" in warning
+
+    def test_paused_after_review_no_warning(self):
+        """Pause after review covers the current PR → no warning."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 20, "ts": "2026-01-02T00:00:01Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 20, "ts": "2026-01-02T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_equal_timestamps_bias_toward_paused(self):
+        """Equal pause/review timestamps → bias toward paused (no warning).
+
+        ISO timestamps have 1-second precision; using `>=` means a tied
+        timestamp is treated as covered by the pause to avoid spurious
+        warnings.
+        """
+        from session_end import check_unpaused_pr
+
+        ts = "2026-01-02T00:00:00Z"
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 20, "ts": ts}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 20, "ts": ts}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_paused_only_no_review_no_warning(self):
+        """Paused but no review_dispatch → no warning (paused, no PRs)."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
 
 
 # =============================================================================
