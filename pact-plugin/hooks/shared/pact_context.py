@@ -291,6 +291,10 @@ def _lookup_agent_in_team_config(
                 return str(member.get("name", ""))
 
         return ""
+    except FileNotFoundError:
+        # Normal fall-back path in resolve_agent_name (step 3 of 5);
+        # silent because team config is not always present.
+        return ""
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
         print(
             f"pact_context: could not read team config: {e}",
@@ -353,12 +357,6 @@ def write_context(
         )
         return
 
-    # Update module state so reads in the same process find the file.
-    # Populate _cache immediately so get_session_dir() works right after
-    # write_context() within the same process (e.g., session_init.py).
-    _context_path = target
-    _cache = context
-
     context_dir = target.parent
     try:
         context_dir.mkdir(parents=True, exist_ok=True)
@@ -381,6 +379,14 @@ def write_context(
             except OSError:
                 pass
             raise
+
+        # Only after successful rename: update module state so reads in the
+        # same process find the file. Populate _cache so get_session_dir()
+        # works right after write_context() within the same process (e.g.,
+        # session_init.py). On rename failure, the cache stays unset and the
+        # in-memory state matches the on-disk state (no file).
+        _context_path = target
+        _cache = context
     except Exception as e:
         print(
             f"pact_context: could not write context file: {e}",
