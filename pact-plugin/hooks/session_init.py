@@ -334,13 +334,18 @@ def main():
         # above (input_data = {} on JSONDecodeError); latent otherwise because
         # Claude Code reliably provides session_id. Mirrors bundle 4's
         # handoff_gate.py fix (commit 2b0ee90) for the same bug class.
+        # The fallback is per-process unique (mirrors generate_team_name above)
+        # so concurrent malformed-stdin sessions don't collide on the same
+        # `pact-sessions/.../unknown/` directory.
         raw_id = input_data.get("session_id")
         session_id_was_missing = not raw_id
-        session_id = str(raw_id) if raw_id else "unknown"
-        if session_id_was_missing:
+        if raw_id:
+            session_id = str(raw_id)
+        else:
+            session_id = f"unknown-{secrets.token_hex(4)}"
             print(
-                "session_init: missing session_id in stdin payload; "
-                "using fallback to preserve session_start event",
+                f"session_init: missing session_id in stdin payload; "
+                f"using fallback {session_id} to preserve session_start event",
                 file=sys.stderr,
             )
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
@@ -370,17 +375,31 @@ def main():
 
         # Resolve session_dir early so substitution instructions can include it.
         # get_session_dir() works here because write_context() populated _cache above.
-        session_dir = get_session_dir()
+        # Suppress session_dir for the unknown-* sentinel so the literal
+        # `.../unknown-xxxx/` path never leaks into the substitution instructions
+        # block — otherwise the orchestrator would obediently mkdir that path
+        # for any command that uses {session_dir}, bypassing the CLAUDE.md guard
+        # below.
+        session_dir = get_session_dir() if not session_id_was_missing else ""
 
         # Build context message based on source × team_exists (5 paths)
         # Session placeholder variable substitution instructions tell the orchestrator how to
         # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
-        _substitutions = (
-            f'Session placeholder variables (substitute before running commands): '
-            f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
-            f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
-            f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
-        )
+        if session_dir:
+            _substitutions = (
+                f'Session placeholder variables (substitute before running commands): '
+                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+                f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
+                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            )
+        else:
+            _substitutions = (
+                f'Session placeholder variables (substitute before running commands): '
+                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+                f'Session dir unavailable (session_id missing from stdin) — '
+                f'do not run commands that depend on {{session_dir}} until next clean start. '
+                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            )
         _team_reuse = (
             f'Your team is `{team_name}` (existing — resumed session). '
             f'Do not call TeamCreate — the team already exists. '
@@ -451,15 +470,16 @@ def main():
 
         # 5b. Write session resume info to project CLAUDE.md
         # (session_dir already resolved above for substitution instructions)
-        # Skip the CLAUDE.md write when session_id is the "unknown" sentinel
-        # (bundle 5 fallback for missing stdin). The sentinel is preserved in
-        # the session_start journal event so the anchor is still recorded,
-        # but writing `- Session dir: .../unknown/` into CLAUDE.md pollutes
-        # state recovery: session_resume.py:199 feeds `.../unknown/` into
+        # Skip the CLAUDE.md write when session_id is an "unknown-*" sentinel
+        # (bundle 5 fallback for missing stdin; per-process unique suffix).
+        # The sentinel is preserved in the session_start journal event so the
+        # anchor is still recorded, but writing
+        # `- Session dir: .../unknown-xxxx/` into CLAUDE.md pollutes state
+        # recovery: session_resume.py:199 would feed `.../unknown-xxxx/` into
         # _extract_prev_session_dir, and session_end.py:cleanup_old_sessions
-        # filters by _UUID_PATTERN (which "unknown" never matches), so the
+        # filters by _UUID_PATTERN (which "unknown-*" never matches), so the
         # directory would accumulate indefinitely.
-        if session_id and session_id != "unknown":
+        if session_id and not session_id.startswith("unknown"):
             session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
                 if "failed" in session_msg.lower():

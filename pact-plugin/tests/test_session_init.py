@@ -1118,11 +1118,14 @@ class TestWriteContextIntegration:
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
-        """When stdin lacks session_id, fall back to "unknown" and emit a
-        stderr warning so the substitution is visible. The fallback value is
-        passed to write_context() so the context file and the journal anchor
-        event stay consistent. Mirrors the bundle 4 defensive-substitution
-        pattern in handoff_gate.py.
+        """When stdin lacks session_id, fall back to a per-process unique
+        "unknown-XXXXXXXX" sentinel and emit a stderr warning so the
+        substitution is visible. The fallback value is passed to
+        write_context() so the context file and the journal anchor event
+        stay consistent. The unique suffix mirrors generate_team_name() and
+        prevents concurrent malformed-stdin sessions from colliding on the
+        same `pact-sessions/.../unknown/` directory. Mirrors the bundle 4
+        defensive-substitution pattern in handoff_gate.py.
         """
         from session_init import main
 
@@ -1145,17 +1148,27 @@ class TestWriteContextIntegration:
             with pytest.raises(SystemExit):
                 main()
 
-        # write_context receives the "unknown" fallback, keeping the
-        # fallback value consistent between the context file and the
-        # journal anchor event.
+        # write_context receives the per-process unique "unknown-XXXXXXXX"
+        # fallback, keeping the fallback value consistent between the
+        # context file and the journal anchor event. The 8-hex suffix
+        # comes from secrets.token_hex(4), mirroring generate_team_name().
         call_args = mock_write_ctx.call_args[0]
-        assert call_args[1] == "unknown"
+        passed_session_id = call_args[1]
+        assert passed_session_id.startswith("unknown-")
+        # token_hex(4) -> 8 hex chars; full sentinel is "unknown-" + 8 chars = 16
+        assert len(passed_session_id) == len("unknown-") + 8
+        suffix = passed_session_id[len("unknown-"):]
+        assert all(c in "0123456789abcdef" for c in suffix)
 
         # The stderr warning makes the substitution visible in logs
         # (same visibility pattern as handoff_gate.py's bundle 4 fix).
         captured = capsys.readouterr()
         assert "missing session_id" in captured.err
-        assert "fallback to preserve session_start event" in captured.err
+        assert "fallback" in captured.err
+        assert "to preserve session_start event" in captured.err
+        # The warning includes the unique sentinel value so logs show
+        # which fallback was used.
+        assert passed_session_id in captured.err
 
     def test_session_start_event_journaled_with_unknown_when_stdin_lacks_session_id(
         self, monkeypatch, tmp_path
@@ -1163,7 +1176,7 @@ class TestWriteContextIntegration:
         """Regression: the session_start event — the journal's anchor
         event — must be written with a non-empty session_id even when
         stdin lacks one. The RA1+RG2 schema validator rejects empty
-        session_id for session_start events; without the "unknown"
+        session_id for session_start events; without the "unknown-XXXXXXXX"
         fallback, append_event() would silently drop the anchor event
         (Finding A from r6-audit-producer-defaults). Mirrors the
         handoff_gate.py bundle 4 regression test for agent_handoff
@@ -1203,35 +1216,40 @@ class TestWriteContextIntegration:
         )
         session_start_event = session_start_calls[0].args[0]
 
-        # The session_id must be the non-empty "unknown" fallback so the
-        # schema validator accepts the event. An empty string here is the
-        # Finding A bug — the anchor event is silently dropped.
-        assert session_start_event["session_id"] == "unknown"
-        assert session_start_event["session_id"] != ""
+        # The session_id must be the non-empty "unknown-XXXXXXXX" fallback
+        # so the schema validator accepts the event. An empty string here
+        # is the Finding A bug — the anchor event is silently dropped.
+        # The unique suffix prevents directory collisions across concurrent
+        # malformed-stdin sessions.
+        journaled_id = session_start_event["session_id"]
+        assert journaled_id != ""
+        assert journaled_id.startswith("unknown-")
+        assert len(journaled_id) == len("unknown-") + 8
 
     def test_unknown_session_id_does_not_pollute_claude_md(
         self, monkeypatch, tmp_path
     ):
-        """When the session_id is the "unknown" sentinel, the CLAUDE.md
-        Current Session block must NOT be written.
+        """When the session_id is an "unknown-XXXXXXXX" sentinel, the
+        CLAUDE.md Current Session block must NOT be written.
 
-        The "unknown" fallback (bundle 5) exists so the session_start
-        journal event can be preserved when stdin lacks session_id. But
-        writing `- Session dir: ~/.claude/pact-sessions/{slug}/unknown/`
-        into CLAUDE.md pollutes state recovery:
+        The "unknown-*" fallback (bundle 5, with bundle 11 unique suffix)
+        exists so the session_start journal event can be preserved when
+        stdin lacks session_id. But writing
+        `- Session dir: ~/.claude/pact-sessions/{slug}/unknown-xxxx/`
+        into CLAUDE.md would pollute state recovery:
 
-        * `session_resume.py:199` regex-matches the path and feeds
-          `.../unknown/` into `_extract_prev_session_dir`, which
+        * `session_resume.py:199` regex-matches the path and would feed
+          `.../unknown-xxxx/` into `_extract_prev_session_dir`, which
           corrupts cross-session resume.
         * `session_end.py:cleanup_old_sessions` filters by
-          `_UUID_PATTERN`, which "unknown" never matches — so the
-          `.../unknown/` directory is never cleaned up and pollution
-          accumulates indefinitely.
+          `_UUID_PATTERN`, which "unknown-*" never matches — so the
+          `.../unknown-xxxx/` directory is never cleaned up and
+          pollution accumulates indefinitely.
 
-        Fix: `session_init.main` now short-circuits the
-        `update_session_info` call when session_id == "unknown". The
-        journal anchor event is still written (with the sentinel) but
-        the CLAUDE.md write is skipped.
+        Fix: `session_init.main` short-circuits the `update_session_info`
+        call when `session_id.startswith("unknown")`. The journal anchor
+        event is still written (with the sentinel) but the CLAUDE.md
+        write is skipped.
         """
         from session_init import main
 
@@ -1257,9 +1275,9 @@ class TestWriteContextIntegration:
                 main()
 
         # The critical assertion: update_session_info must NOT be called
-        # when session_id is the "unknown" sentinel. If it were called,
+        # when session_id is an "unknown-*" sentinel. If it were called,
         # the CLAUDE.md Current Session block would contain
-        # `- Session dir: .../unknown/` and pollute state recovery.
+        # `- Session dir: .../unknown-xxxx/` and pollute state recovery.
         mock_update_info.assert_not_called()
 
     def test_valid_session_id_still_updates_claude_md(
