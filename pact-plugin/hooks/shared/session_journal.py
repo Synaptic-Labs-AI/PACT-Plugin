@@ -53,58 +53,79 @@ _SCHEMA_VERSION = 1
 # bypass per-type validation and only get baseline v/type/ts checks — this
 # preserves test ergonomics without loosening production safety.
 #
-# When adding a new event type, add it here with its required fields AND
-# add a test to TestValidateEventSchemaPerType in test_session_journal.py.
-_REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
-    # hooks/session_init.py:326 writes session_start with team, session_id,
+# Each required field maps to its expected Python type. At validate time,
+# the validator checks presence AND `isinstance(value, expected_type)` AND
+# — for str fields — rejects empty or whitespace-only values. The expected
+# types reflect what the writer literally produces: unquoted values in the
+# --data JSON become int/bool/list/dict, quoted values become str.
+#
+# When adding a new event type, add it here with its required field → type
+# mapping AND add a test to TestValidateEventSchemaPerType in
+# test_session_journal.py.
+_REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
+    # hooks/session_init.py:339 writes session_start with team, session_id,
     # project_dir, worktree. Of these, session_id and project_dir are the
     # load-bearing fields downstream consumers depend on; team is redundant
     # with CLAUDE.md and worktree is empty at write time.
-    "session_start": ("session_id", "project_dir"),
-    # commands/orchestrate.md writes variety_assessed with task_id + variety.
-    "variety_assessed": ("task_id", "variety"),
+    "session_start": {"session_id": str, "project_dir": str},
+    # commands/orchestrate.md writes variety_assessed with task_id (quoted
+    # string) and variety (nested JSON object → dict).
+    "variety_assessed": {"task_id": str, "variety": dict},
     # commands/orchestrate.md + comPACT.md write phase_transition with
-    # phase + status. session_resume._build_journal_resume subscripts
-    # `p["phase"]` — this schema check is the defensive bulwark against F1.
-    "phase_transition": ("phase", "status"),
-    # commands/orchestrate.md writes checkpoint with phase + completed_phases
-    # + active_agents + variety + pending_phases + safe_to_retry. Only
-    # `phase` is universally required; the rest vary per checkpoint context.
-    "checkpoint": ("phase",),
+    # phase + status (both quoted strings). session_resume._build_journal_resume
+    # subscripts `p["phase"]` — this schema check is the defensive bulwark
+    # against F1.
+    "phase_transition": {"phase": str, "status": str},
+    # commands/orchestrate.md writes checkpoint with phase (quoted string) +
+    # completed_phases + active_agents + variety + pending_phases + safe_to_retry.
+    # Only `phase` is universally required; the rest vary per checkpoint context.
+    "checkpoint": {"phase": str},
     # commands/orchestrate.md + comPACT.md write agent_dispatch with agent,
-    # task_id, phase, scope.
-    "agent_dispatch": ("agent", "task_id", "phase"),
+    # task_id, phase (all quoted strings) + scope (list).
+    "agent_dispatch": {"agent": str, "task_id": str, "phase": str},
     # hooks/handoff_gate.py:261 writes agent_handoff with agent, task_id,
-    # task_subject, handoff. All four are load-bearing for the secretary.
-    "agent_handoff": ("agent", "task_id", "task_subject", "handoff"),
-    # commands/orchestrate.md writes s2_state_seeded with worktree, agents,
-    # boundaries. No hook-based writer; CLI-only event.
-    "s2_state_seeded": ("worktree", "agents", "boundaries"),
-    # commands/orchestrate.md + comPACT.md write commit with sha, message, phase.
-    "commit": ("sha", "message", "phase"),
-    # commands/peer-review.md writes review_dispatch with pr_number, pr_url, reviewers.
-    "review_dispatch": ("pr_number", "pr_url", "reviewers"),
+    # task_subject (all strings) and handoff (dict from task metadata).
+    # All four are load-bearing for the secretary.
+    "agent_handoff": {
+        "agent": str,
+        "task_id": str,
+        "task_subject": str,
+        "handoff": dict,
+    },
+    # commands/orchestrate.md writes s2_state_seeded with worktree (quoted
+    # string), agents (JSON list), and boundaries (JSON object → dict).
+    # No hook-based writer; CLI-only event.
+    "s2_state_seeded": {"worktree": str, "agents": list, "boundaries": dict},
+    # commands/orchestrate.md + comPACT.md write commit with sha, message,
+    # phase (all quoted strings).
+    "commit": {"sha": str, "message": str, "phase": str},
+    # commands/peer-review.md writes review_dispatch with pr_number (unquoted
+    # int), pr_url (quoted string), reviewers (JSON list).
+    "review_dispatch": {"pr_number": int, "pr_url": str, "reviewers": list},
     # commands/peer-review.md writes review_finding with severity, finding,
-    # reviewer, task_id.
-    "review_finding": ("severity", "finding", "reviewer"),
-    # commands/peer-review.md writes remediation with cycle, items, fixer.
-    "remediation": ("cycle", "items", "fixer"),
-    # commands/peer-review.md writes pr_ready with pr_number, pr_url, commits.
-    "pr_ready": ("pr_number", "pr_url", "commits"),
-    # commands/pause.md writes session_paused with pr_number, pr_url, branch,
-    # worktree_path, consolidation_completed, team_name.
-    "session_paused": (
-        "pr_number",
-        "pr_url",
-        "branch",
-        "worktree_path",
-        "consolidation_completed",
-    ),
+    # reviewer, task_id (all quoted strings).
+    "review_finding": {"severity": str, "finding": str, "reviewer": str},
+    # commands/peer-review.md writes remediation with cycle (unquoted int),
+    # items (JSON list), fixer (quoted string).
+    "remediation": {"cycle": int, "items": list, "fixer": str},
+    # commands/peer-review.md writes pr_ready with pr_number (unquoted int),
+    # pr_url (quoted string), commits (unquoted int).
+    "pr_ready": {"pr_number": int, "pr_url": str, "commits": int},
+    # commands/pause.md writes session_paused with pr_number (unquoted int),
+    # pr_url/branch/worktree_path (quoted strings),
+    # consolidation_completed (unquoted bool), team_name (quoted string).
+    "session_paused": {
+        "pr_number": int,
+        "pr_url": str,
+        "branch": str,
+        "worktree_path": str,
+        "consolidation_completed": bool,
+    },
     # hooks/session_end.py writes session_end with NO required fields — one
     # writer passes an optional `warning` (line 119), the other passes
-    # nothing (line 291). commands/wrap-up.md CLI also writes session_end
+    # nothing (line 316). commands/wrap-up.md CLI also writes session_end
     # with no --data. Baseline v/type/ts validation is the only requirement.
-    "session_end": (),
+    "session_end": {},
 }
 
 
@@ -143,16 +164,25 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
     - 'type' is a non-empty str (whitespace-only is rejected)
 
     Per-type (only for types in _REQUIRED_FIELDS_BY_TYPE):
-    - Every required field is present and not None. Unknown event types
-      (e.g. free-form "test" used in unit tests) pass per-type validation
-      by default — the whitelist is opt-in enforcement for known types.
+    - Every required field is present and not None.
+    - Every required field has the expected Python type (isinstance check).
+      `int` fields reject `bool` explicitly because bool is an int subclass;
+      a writer passing `pr_number=True` would otherwise slip through.
+    - `str` fields additionally reject empty and whitespace-only values —
+      a blank `phase` or `agent` is functionally indistinguishable from
+      missing for every downstream consumer, and the baseline `type` check
+      already uses the same semantics for consistency.
+    - Unknown event types (e.g. free-form "test" used in unit tests) pass
+      per-type validation by default — the whitelist is opt-in enforcement
+      for known types.
 
     This is the bulwark that prevents BugF1: a malformed `phase_transition`
-    event (missing `phase` field) from any writer causes `append_event` or
-    the CLI write path to return False BEFORE the bad line reaches disk,
-    so `_build_journal_resume` in the next session never has to deal with
-    a missing-field event. The defensive consumer is still a backstop for
-    anything that slips past this (e.g. events from prior schema versions).
+    event (missing `phase` field, or `phase=""`, or `phase=42`) from any
+    writer causes `append_event` or the CLI write path to return False
+    BEFORE the bad line reaches disk, so `_build_journal_resume` in the
+    next session never has to deal with it. The defensive consumer is
+    still a backstop for anything that slips past this (e.g. events from
+    prior schema versions).
 
     Returns:
         A `(ok, reason)` tuple. `ok` is True only when every check passes;
@@ -171,11 +201,35 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
     if required is None:
         # Unknown event type — opt-in enforcement, pass through.
         return True, "ok"
-    for field in required:
+    for field, expected_type in required.items():
         if field not in event or event[field] is None:
             return (
                 False,
                 f"missing required field '{field}' for type '{event_type}'",
+            )
+        value = event[field]
+        # int fields must reject bool even though bool subclasses int —
+        # symmetric with the baseline v check above.
+        if expected_type is int and isinstance(value, bool):
+            return (
+                False,
+                f"field '{field}' for type '{event_type}' must be int, "
+                f"got bool",
+            )
+        if not isinstance(value, expected_type):
+            return (
+                False,
+                f"field '{field}' for type '{event_type}' must be "
+                f"{expected_type.__name__}, got {type(value).__name__}",
+            )
+        # Fix B (RG2): str fields additionally reject empty or
+        # whitespace-only values — a blank phase/agent/task_id would
+        # pass the isinstance check but break every downstream consumer.
+        if expected_type is str and not value.strip():
+            return (
+                False,
+                f"field '{field}' for type '{event_type}' must be "
+                f"non-empty string",
             )
     return True, "ok"
 

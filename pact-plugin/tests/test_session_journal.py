@@ -2181,10 +2181,29 @@ class TestValidateEventSchemaPerType:
         If this test fails, a new event type was added to the source dict
         without adding a matching sample here — guards against the per-type
         check silently skipping coverage of new types.
+
+        Also verifies each sample value has the expected Python type from
+        the source dict — otherwise happy-path tests would accidentally
+        exercise the validator with mis-typed samples.
         """
         from shared.session_journal import _REQUIRED_FIELDS_BY_TYPE
 
         assert set(self._SAMPLES.keys()) == set(_REQUIRED_FIELDS_BY_TYPE.keys())
+        for event_type, field_types in _REQUIRED_FIELDS_BY_TYPE.items():
+            sample = self._SAMPLES[event_type]
+            for field, expected_type in field_types.items():
+                assert field in sample, (
+                    f"sample for {event_type} missing required field {field!r}"
+                )
+                value = sample[field]
+                # Mirror the validator's bool-in-int rejection.
+                assert not (expected_type is int and isinstance(value, bool)), (
+                    f"sample for {event_type}.{field} is bool but schema says int"
+                )
+                assert isinstance(value, expected_type), (
+                    f"sample for {event_type}.{field} is "
+                    f"{type(value).__name__}, expected {expected_type.__name__}"
+                )
 
     @pytest.mark.parametrize("event_type", list(_SAMPLES.keys()))
     def test_happy_path_all_required_fields_present(self, event_type):
@@ -2352,4 +2371,207 @@ class TestValidateEventSchemaPerType:
         assert result.returncode == 1
         assert "invalid event schema" in result.stderr
         # Journal must not have been written.
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+    # -- Fix A (RA1): per-field type checks -------------------------------
+
+    # One wrong-typed sample per required field for each event type. Each
+    # tuple is (event_type, field, bad_value, expected_type_name,
+    # got_type_name). Built from _REQUIRED_FIELDS_BY_TYPE so adding a new
+    # schema entry forces a matching mismatch sample.
+    _TYPE_MISMATCHES: list = [
+        # str fields fed an int
+        ("phase_transition", "phase", 42, "str", "int"),
+        ("phase_transition", "status", 42, "str", "int"),
+        ("checkpoint", "phase", 42, "str", "int"),
+        ("agent_dispatch", "agent", 42, "str", "int"),
+        ("agent_handoff", "task_subject", 42, "str", "int"),
+        ("commit", "sha", 42, "str", "int"),
+        ("review_dispatch", "pr_url", 42, "str", "int"),
+        ("review_finding", "severity", 42, "str", "int"),
+        ("remediation", "fixer", 42, "str", "int"),
+        ("session_paused", "branch", 42, "str", "int"),
+        ("session_start", "session_id", 42, "str", "int"),
+        ("variety_assessed", "task_id", 42, "str", "int"),
+        # int fields fed a str
+        ("review_dispatch", "pr_number", "42", "int", "str"),
+        ("remediation", "cycle", "1", "int", "str"),
+        ("pr_ready", "commits", "7", "int", "str"),
+        ("session_paused", "pr_number", "42", "int", "str"),
+        # dict fields fed a list
+        ("variety_assessed", "variety", [1, 2], "dict", "list"),
+        ("agent_handoff", "handoff", [1, 2], "dict", "list"),
+        ("s2_state_seeded", "boundaries", [1, 2], "dict", "list"),
+        # list fields fed a dict
+        ("s2_state_seeded", "agents", {"k": "v"}, "list", "dict"),
+        ("review_dispatch", "reviewers", {"k": "v"}, "list", "dict"),
+        ("remediation", "items", {"k": "v"}, "list", "dict"),
+        # bool field fed an int (bool fields currently only consolidation_completed)
+        ("session_paused", "consolidation_completed", 1, "bool", "int"),
+    ]
+
+    @pytest.mark.parametrize(
+        "event_type, field, bad_value, expected_name, got_name",
+        _TYPE_MISMATCHES,
+        ids=[f"{t}.{f}" for t, f, *_ in _TYPE_MISMATCHES],
+    )
+    def test_required_field_type_mismatch_rejected(
+        self, event_type, field, bad_value, expected_name, got_name,
+    ):
+        """RA1: Per-field type check rejects wrong Python types.
+
+        The validator's per-type dict now maps each required field to its
+        expected Python type. A writer that produces the right field name
+        but the wrong type (e.g. `phase=42` instead of `phase="CODE"`)
+        must be rejected with a reason that names BOTH the expected type
+        and the actual type, so debugging from the stderr line is sharp.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        sample = dict(self._SAMPLES[event_type])
+        sample[field] = bad_value
+        event = make_event(event_type, **sample)
+        ok, reason = _validate_event_schema(event)
+        assert ok is False, (
+            f"{event_type}.{field}={bad_value!r} should be rejected"
+        )
+        expected_reason = (
+            f"field '{field}' for type '{event_type}' must be "
+            f"{expected_name}, got {got_name}"
+        )
+        assert reason == expected_reason, (
+            f"expected {expected_reason!r}, got {reason!r}"
+        )
+
+    def test_int_field_rejects_bool_explicitly(self):
+        """RA1: int field rejects bool even though bool subclasses int.
+
+        Symmetric with the baseline `v must be int` rejection of True/False.
+        Without this guard, a writer passing `pr_number=True` for a
+        `review_dispatch` event would slip through the isinstance(int)
+        check because `isinstance(True, int)` returns True in Python.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        sample = dict(self._SAMPLES["review_dispatch"])
+        sample["pr_number"] = True
+        event = make_event("review_dispatch", **sample)
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert reason == (
+            "field 'pr_number' for type 'review_dispatch' must be int, "
+            "got bool"
+        )
+
+    # -- Fix B (RG2): empty/whitespace-only strings rejected --------------
+
+    @pytest.mark.parametrize(
+        "event_type, field, bad_value",
+        [
+            ("phase_transition", "phase", ""),
+            ("phase_transition", "phase", "   "),
+            ("phase_transition", "phase", "\t"),
+            ("phase_transition", "status", ""),
+            ("agent_handoff", "task_id", ""),
+            ("agent_handoff", "agent", "  \n  "),
+            ("commit", "sha", ""),
+            ("commit", "message", "\t\t"),
+            ("session_start", "session_id", ""),
+            ("session_start", "project_dir", "   "),
+        ],
+        ids=[
+            "phase_empty",
+            "phase_spaces",
+            "phase_tab",
+            "status_empty",
+            "handoff_task_id_empty",
+            "handoff_agent_whitespace",
+            "commit_sha_empty",
+            "commit_message_tabs",
+            "session_id_empty",
+            "project_dir_spaces",
+        ],
+    )
+    def test_required_str_field_rejects_empty_and_whitespace(
+        self, event_type, field, bad_value,
+    ):
+        """RG2: str fields additionally reject empty / whitespace-only.
+
+        A blank `phase` or `agent` or `task_id` passes the isinstance(str)
+        check but is functionally indistinguishable from missing for every
+        downstream consumer. The validator strips before checking, so
+        "", " ", "\\t", and "   \\n  " all surface the same reason
+        ("must be non-empty string") — consistent with the baseline
+        `type must be non-empty str` behavior.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        sample = dict(self._SAMPLES[event_type])
+        sample[field] = bad_value
+        event = make_event(event_type, **sample)
+        ok, reason = _validate_event_schema(event)
+        assert ok is False, (
+            f"{event_type}.{field}={bad_value!r} should be rejected"
+        )
+        expected = (
+            f"field '{field}' for type '{event_type}' must be "
+            f"non-empty string"
+        )
+        assert reason == expected, f"expected {expected!r}, got {reason!r}"
+
+    def test_cli_write_rejects_type_mismatch(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """CLI write path surfaces the type-mismatch reason on stderr.
+
+        Dual-API check for RA1: the CLI subcommand (used by orchestrator
+        command bash blocks) must reject wrong-typed fields with the same
+        precise reason as the in-process API. Uses `phase_transition`
+        with `phase=42` (a number instead of a string) as the canary —
+        the same field that BugF1 involved.
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "phase_transition",
+                "--session-dir", session_dir,
+                "--data", '{"phase": 42, "status": "started"}',
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid event schema" in result.stderr
+        assert (
+            "field 'phase' for type 'phase_transition' must be str, got int"
+            in result.stderr
+        )
+        assert not journal_file.exists() or journal_file.read_text() == ""
+
+    def test_cli_write_rejects_empty_string_required_field(
+        self, journal_home, session_dir, journal_file,
+    ):
+        """CLI write path surfaces the empty-string reason on stderr (RG2).
+
+        Dual-API check for RG2: the CLI subcommand must reject empty
+        `phase` with the "non-empty string" reason, not the isinstance
+        "must be str" reason. This pins the reason string so operators
+        get a sharper diagnostic than a generic "invalid event schema".
+        """
+        result = subprocess.run(
+            [
+                sys.executable, _SJ_SCRIPT, "write",
+                "--type", "phase_transition",
+                "--session-dir", session_dir,
+                "--data", '{"phase": "", "status": "started"}',
+            ],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": str(journal_home)},
+        )
+        assert result.returncode == 1
+        assert "invalid event schema" in result.stderr
+        assert (
+            "field 'phase' for type 'phase_transition' must be "
+            "non-empty string"
+        ) in result.stderr
         assert not journal_file.exists() or journal_file.read_text() == ""
