@@ -335,8 +335,9 @@ def main():
         # Claude Code reliably provides session_id. Mirrors bundle 4's
         # handoff_gate.py fix (commit 2b0ee90) for the same bug class.
         raw_id = input_data.get("session_id")
+        session_id_was_missing = not raw_id
         session_id = str(raw_id) if raw_id else "unknown"
-        if session_id == "unknown":
+        if session_id_was_missing:
             print(
                 "session_init: missing session_id in stdin payload; "
                 "using fallback to preserve session_start event",
@@ -450,7 +451,15 @@ def main():
 
         # 5b. Write session resume info to project CLAUDE.md
         # (session_dir already resolved above for substitution instructions)
-        if session_id:
+        # Skip the CLAUDE.md write when session_id is the "unknown" sentinel
+        # (bundle 5 fallback for missing stdin). The sentinel is preserved in
+        # the session_start journal event so the anchor is still recorded,
+        # but writing `- Session dir: .../unknown/` into CLAUDE.md pollutes
+        # state recovery: session_resume.py:199 feeds `.../unknown/` into
+        # _extract_prev_session_dir, and session_end.py:cleanup_old_sessions
+        # filters by _UUID_PATTERN (which "unknown" never matches), so the
+        # directory would accumulate indefinitely.
+        if session_id and session_id != "unknown":
             session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
                 if "failed" in session_msg.lower():

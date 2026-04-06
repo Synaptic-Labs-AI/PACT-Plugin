@@ -1209,6 +1209,95 @@ class TestWriteContextIntegration:
         assert session_start_event["session_id"] == "unknown"
         assert session_start_event["session_id"] != ""
 
+    def test_unknown_session_id_does_not_pollute_claude_md(
+        self, monkeypatch, tmp_path
+    ):
+        """When the session_id is the "unknown" sentinel, the CLAUDE.md
+        Current Session block must NOT be written.
+
+        The "unknown" fallback (bundle 5) exists so the session_start
+        journal event can be preserved when stdin lacks session_id. But
+        writing `- Session dir: ~/.claude/pact-sessions/{slug}/unknown/`
+        into CLAUDE.md pollutes state recovery:
+
+        * `session_resume.py:199` regex-matches the path and feeds
+          `.../unknown/` into `_extract_prev_session_dir`, which
+          corrupts cross-session resume.
+        * `session_end.py:cleanup_old_sessions` filters by
+          `_UUID_PATTERN`, which "unknown" never matches — so the
+          `.../unknown/` directory is never cleaned up and pollution
+          accumulates indefinitely.
+
+        Fix: `session_init.main` now short-circuits the
+        `update_session_info` call when session_id == "unknown". The
+        journal anchor event is still written (with the sentinel) but
+        the CLAUDE.md write is skipped.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # No session_id in stdin
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info") as mock_update_info, \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=True), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # The critical assertion: update_session_info must NOT be called
+        # when session_id is the "unknown" sentinel. If it were called,
+        # the CLAUDE.md Current Session block would contain
+        # `- Session dir: .../unknown/` and pollute state recovery.
+        mock_update_info.assert_not_called()
+
+    def test_valid_session_id_still_updates_claude_md(
+        self, monkeypatch, tmp_path
+    ):
+        """Positive complement to the unknown-sentinel short-circuit: a
+        real session_id must still flow through to update_session_info.
+        This pins the bundle-6 guard so a future refactor cannot
+        accidentally short-circuit the happy path too.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        real_session_id = "aabb1122-0000-0000-0000-000000000000"
+        stdin_data = json.dumps({"session_id": real_session_id})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None) as mock_update_info, \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=True), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit):
+                main()
+
+        # A real session_id flows through to update_session_info.
+        mock_update_info.assert_called_once()
+        assert mock_update_info.call_args[0][0] == real_session_id
+
     def test_write_context_failure_does_not_block_session(self, monkeypatch, tmp_path):
         """write_context failure should not prevent session_init from completing."""
         from session_init import main

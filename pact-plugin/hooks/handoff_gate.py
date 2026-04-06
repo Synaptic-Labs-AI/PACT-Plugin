@@ -222,13 +222,17 @@ def main():
     # append_event() (which is fail-open). Substitute fallback values and
     # emit a stderr warning so the substitution is visible — preserving the
     # HANDOFF event is more important than rejecting it on missing metadata.
-    task_id = input_data.get("task_id") or "unknown"
-    task_subject = input_data.get("task_subject") or "(no subject)"
-    if task_id == "unknown" or task_subject == "(no subject)":
+    raw_task_id = input_data.get("task_id")
+    raw_task_subject = input_data.get("task_subject")
+    task_id_was_missing = not raw_task_id
+    task_subject_was_missing = not raw_task_subject
+    task_id = raw_task_id or "unknown"
+    task_subject = raw_task_subject or "(no subject)"
+    if task_id_was_missing or task_subject_was_missing:
         print(
             f"handoff_gate: missing required field(s) in TaskCompleted payload "
-            f"(task_id={'present' if task_id != 'unknown' else 'MISSING'}, "
-            f"task_subject={'present' if task_subject != '(no subject)' else 'MISSING'}); "
+            f"(task_id={'MISSING' if task_id_was_missing else 'present'}, "
+            f"task_subject={'MISSING' if task_subject_was_missing else 'present'}); "
             f"using fallback values to preserve agent_handoff event",
             file=sys.stderr,
         )
