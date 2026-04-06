@@ -139,9 +139,12 @@ Before running orchestration, assess task variety using the protocol in [pact-va
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type variety_assessed --session-dir '{session_dir}' \
-  --data '{"task_id": "{feature_task_id}", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}'
+  --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
+{"task_id": "{feature_task_id}", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
+JSON
 ```
+
+> ⚠️ **Heredoc-stdin contract for journal events**: All journal-event writes use `--stdin <<'JSON' ... JSON` (note the **quoted** delimiter `'JSON'`). The quoted delimiter disables bash variable expansion inside the heredoc body, so apostrophes, double quotes, dollar signs, and backticks in template-substituted values are passed through verbatim. **The orchestrator's responsibility**: any value substituted into the heredoc body (e.g., `{first_line}`, `{finding}`, `{branch}`) MUST be a JSON-valid string literal — apostrophes are fine inside JSON strings, but embedded double quotes must be escaped (`\"`), backslashes (`\\`), and control characters (`\n`, `\t`) likewise. When in doubt, JSON-encode the value before substitution. Without this discipline, an unescaped `"` in a finding text would still corrupt the event.
 
 **When uncertain**: Default to standard orchestrate. Variety can be reassessed at phase transitions.
 
@@ -204,8 +207,9 @@ Each case is a separate bash block — select and execute the ONE block that mat
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
-  --data '{"phase": "{PHASE}", "status": "started", "skip_reason": "", "metadata": {}}'
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+{"phase": "{PHASE}", "status": "started", "skip_reason": "", "metadata": {}}
+JSON
 ```
 
 **Phase completed** (writes phase_transition then checkpoint):
@@ -213,10 +217,12 @@ python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
-  --data '{"phase": "{PHASE}", "status": "completed", "skip_reason": "", "metadata": {}}'
-python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' \
-  --data '{"phase": "{PHASE}", "completed_phases": [...], "active_agents": [{"name": "...", "task_id": "...", "status": "..."}], "variety": VARIETY_DICT_OR_NULL, "pending_phases": [...], "safe_to_retry": true}'
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+{"phase": "{PHASE}", "status": "completed", "skip_reason": "", "metadata": {}}
+JSON
+python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' --stdin <<'JSON'
+{"phase": "{PHASE}", "completed_phases": [...], "active_agents": [{"name": "...", "task_id": "...", "status": "..."}], "variety": VARIETY_DICT_OR_NULL, "pending_phases": [...], "safe_to_retry": true}
+JSON
 ```
 
 **Phase skipped**:
@@ -224,8 +230,9 @@ python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' \
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 SJ="{plugin_root}/hooks/shared/session_journal.py"
-python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' \
-  --data '{"phase": "{PHASE}", "status": "skipped", "skip_reason": "{reason}", "metadata": {}}'
+python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+{"phase": "{PHASE}", "status": "skipped", "skip_reason": "{reason}", "metadata": {}}
+JSON
 ```
 
 Substitute `{PHASE}` with PREPARE/ARCHITECT/CODE/TEST, `{reason}` with the skip reason, and populate checkpoint fields from current orchestration state.
@@ -385,8 +392,9 @@ When a phase is skipped but a coder encounters a decision that would have been h
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' \
-     --data '{"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}
+JSON
    ```
 4. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -466,8 +474,9 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' \
-     --data '{"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}
+JSON
    ```
 4. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -554,8 +563,9 @@ Before concurrent dispatch, check internally: shared files? shared interfaces? c
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type s2_state_seeded --session-dir '{session_dir}' \
-  --data '{"worktree": "{worktree_path}", "agents": ["{agent1}", "{agent2}"], "boundaries": {"{agent1}": ["path/"], "{agent2}": ["path/"]}}'
+  --type s2_state_seeded --session-dir '{session_dir}' --stdin <<'JSON'
+{"worktree": "{worktree_path}", "agents": ["{agent1}", "{agent2}"], "boundaries": {"{agent1}": ["path/"], "{agent2}": ["path/"]}}
+JSON
 ```
 
 **Include worktree path in all agent prompts**: "You are working in a git worktree at [worktree_path]. All file paths must be absolute and within this worktree. Note: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
@@ -578,8 +588,9 @@ For each coder needed:
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' \
-     --data '{"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
+JSON
    ```
 4. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -614,8 +625,9 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
   set -e
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-    --type commit --session-dir '{session_dir}' \
-    --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
+    --type commit --session-dir '{session_dir}' --stdin <<'JSON'
+  {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
+JSON
   ```
 - [ ] **Process coder HANDOFFs** (non-blocking):
   ```
@@ -683,8 +695,9 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] orchestrate.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' \
-     --data '{"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}
+JSON
    ```
 4. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 

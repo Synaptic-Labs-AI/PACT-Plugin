@@ -175,9 +175,12 @@ For each specialist needed:
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' \
-     --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
+JSON
    ```
+
+> ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
 Spawn all specialists in parallel (multiple `Task` calls in one response).
@@ -202,8 +205,9 @@ Use a single specialist agent only when:
    set -e
    trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-     --type agent_dispatch --session-dir '{session_dir}' \
-     --data '{"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}'
+     --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
+   {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
+JSON
    ```
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
@@ -253,8 +257,9 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
   set -e
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-    --type commit --session-dir '{session_dir}' \
-    --data '{"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}'
+    --type commit --session-dir '{session_dir}' --stdin <<'JSON'
+  {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
+JSON
   ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Process specialist HANDOFFs** (non-blocking):
@@ -269,8 +274,9 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
   set -e
   trap 'rc=$?; echo "[JOURNAL WRITE FAILED] comPACT.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
   python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-    --type phase_transition --session-dir '{session_dir}' \
-    --data '{"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}'
+    --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
+  {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
+JSON
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 

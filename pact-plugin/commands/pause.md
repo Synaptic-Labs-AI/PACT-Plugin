@@ -63,9 +63,12 @@ Persist session state as a `session_paused` event in the session journal. The ev
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_paused --session-dir '{session_dir}' \
-  --data '{"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}'
+  --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
+{"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}
+JSON
 ```
+
+> ⚠️ **Heredoc-stdin contract**: This write uses `--stdin <<'JSON' ... JSON` (quoted delimiter). The quoted delimiter disables bash variable expansion, so an apostrophe in `{branch}` (e.g., `feat/o'connor-fix`) or in `{pr_url}` cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars when constructing the body).
 
 **Event fields**:
 | Field | Type | Description |
