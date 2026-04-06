@@ -1182,3 +1182,333 @@ class TestMainIntegrationCleanup:
             project_slug="proj",
             current_session_id="test-session",
         )
+
+
+# =============================================================================
+# _is_paused_session() Tests
+# =============================================================================
+
+class TestIsPausedSession:
+    """Tests for session_end._is_paused_session() — paused-session detection.
+
+    A session is "paused" when its journal has session_paused event but
+    NO subsequent session_end event. Used by cleanup_old_sessions() to
+    preserve paused sessions.
+    """
+
+    def _write_journal(self, session_dir, events):
+        """Helper: write events to a session's journal file."""
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps(e) + "\n" for e in events]
+        journal.write_text("".join(lines))
+
+    def test_returns_true_for_paused_only(self, tmp_path):
+        """Session with session_paused but no session_end is paused."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-abc")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is True
+
+    def test_returns_false_for_completed_paused(self, tmp_path):
+        """Session with both session_paused AND session_end is NOT paused (Scenario 11)."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-abc")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_no_paused_event(self, tmp_path):
+        """Session without session_paused is not paused."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-abc")
+        self._write_journal(session_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"},
+        ])
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_missing_journal(self, tmp_path):
+        """Session directory with no journal file — returns False (fail-open)."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-missing")
+        Path(session_dir).mkdir(parents=True, exist_ok=True)
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_malformed_journal(self, tmp_path):
+        """Malformed journal — returns False (fail-open, Scenario 10)."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-bad")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("this is not json\nanother bad line\n")
+
+        assert _is_paused_session(session_dir) is False
+
+    def test_returns_false_for_empty_journal(self, tmp_path):
+        """Empty journal file — returns False."""
+        from session_end import _is_paused_session
+
+        session_dir = str(tmp_path / "sess-empty")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("")
+
+        assert _is_paused_session(session_dir) is False
+
+
+# =============================================================================
+# cleanup_old_sessions() — Paused Session Preservation Tests
+# =============================================================================
+
+class TestCleanupPausedPreservation:
+    """Tests for paused-session preservation in cleanup_old_sessions().
+
+    Scenarios 9-11: Paused sessions (session_paused without session_end)
+    survive cleanup regardless of age. Sessions that were paused then
+    completed (both events) are cleaned normally after TTL.
+
+    Note: _set_age() must be called AFTER writing journal files, because
+    writing into a directory updates its mtime on Unix/macOS.
+    """
+
+    def _create_session_dir(self, slug_dir, session_id):
+        """Helper: create a session directory (without setting age)."""
+        session_dir = slug_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text("{}")
+        return session_dir
+
+    def _set_age(self, session_dir, age_days):
+        """Set directory mtime to simulate age. Call AFTER writing all files."""
+        import os as _os
+        import time as _time
+        old_time = _time.time() - (age_days * 86400)
+        _os.utime(str(session_dir), (old_time, old_time))
+
+    def _write_journal(self, session_dir, events):
+        """Helper: write events to a session's journal."""
+        journal = session_dir / "session-journal.jsonl"
+        lines = [json.dumps(e) + "\n" for e in events]
+        journal.write_text("".join(lines))
+
+    def test_preserves_paused_session_beyond_ttl(self, tmp_path):
+        """Scenario 9: Paused session (no session_end) survives cleanup."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_id = "11111111-2222-3333-4444-555555555555"
+
+        self._create_session_dir(slug_dir, current_id)
+        paused_dir = self._create_session_dir(slug_dir, paused_id)
+        self._write_journal(paused_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+        ])
+        self._set_age(paused_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Paused session must survive despite being 35 days old
+        assert paused_dir.exists()
+
+    def test_cleans_completed_paused_session_beyond_ttl(self, tmp_path):
+        """Scenario 11: Session paused then completed — cleaned after TTL."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        completed_id = "22222222-3333-4444-5555-666666666666"
+
+        self._create_session_dir(slug_dir, current_id)
+        completed_dir = self._create_session_dir(slug_dir, completed_id)
+        self._write_journal(completed_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_paused", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"},
+        ])
+        self._set_age(completed_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Completed-paused session should be cleaned (TTL exceeded)
+        assert not completed_dir.exists()
+
+    def test_malformed_journal_allows_cleanup(self, tmp_path):
+        """Scenario 10: Malformed journal in old session — cleanup proceeds (fail-open)."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        bad_id = "33333333-4444-5555-6666-777777777777"
+
+        self._create_session_dir(slug_dir, current_id)
+        bad_dir = self._create_session_dir(slug_dir, bad_id)
+        # Write malformed journal
+        (bad_dir / "session-journal.jsonl").write_text("not json\ngarbage\n")
+        self._set_age(bad_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # Malformed journal -> _is_paused_session returns False -> cleaned
+        assert not bad_dir.exists()
+
+    def test_preserves_paused_cleans_non_paused(self, tmp_path):
+        """Mixed cleanup: paused survives, non-paused cleaned."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        paused_id = "11111111-2222-3333-4444-555555555555"
+        stale_id = "22222222-3333-4444-5555-666666666666"
+
+        self._create_session_dir(slug_dir, current_id)
+
+        # Paused session
+        paused_dir = self._create_session_dir(slug_dir, paused_id)
+        self._write_journal(paused_dir, [
+            {"v": 1, "type": "session_paused", "pr_number": 99, "ts": "2026-01-01T00:00:00Z"},
+        ])
+        self._set_age(paused_dir, 35)
+
+        # Non-paused stale session
+        stale_dir = self._create_session_dir(slug_dir, stale_id)
+        self._write_journal(stale_dir, [
+            {"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"},
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T01:00:00Z"},
+        ])
+        self._set_age(stale_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert paused_dir.exists(), "Paused session should survive"
+        assert not stale_dir.exists(), "Stale non-paused session should be cleaned"
+
+    def test_no_journal_allows_cleanup(self, tmp_path):
+        """Session dir without journal file — cleanup proceeds."""
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        no_journal_id = "44444444-5555-6666-7777-888888888888"
+
+        self._create_session_dir(slug_dir, current_id)
+        no_journal_dir = self._create_session_dir(slug_dir, no_journal_id)
+        self._set_age(no_journal_dir, 35)
+
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        # No journal -> _is_paused_session returns False -> cleaned
+        assert not no_journal_dir.exists()
+
+
+# =============================================================================
+# TTL Constant Verification — 30 Days Default
+# =============================================================================
+
+class TestTTLDefault:
+    """Verify the 30-day default TTL constant (Scenario 8)."""
+
+    def test_session_max_age_days_is_30(self):
+        """The default TTL constant should be 30 days (changed from 7)."""
+        from session_end import _SESSION_MAX_AGE_DAYS
+
+        assert _SESSION_MAX_AGE_DAYS == 30
+
+    def test_29_day_session_kept_at_default(self, tmp_path):
+        """A 29-day-old session should be kept with default TTL."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        recent_id = "11111111-2222-3333-4444-555555555555"
+
+        # Create current session
+        current_dir = slug_dir / current_id
+        current_dir.mkdir(parents=True, exist_ok=True)
+        (current_dir / "context.json").write_text("{}")
+
+        # Create 29-day-old session
+        recent_dir = slug_dir / recent_id
+        recent_dir.mkdir(parents=True, exist_ok=True)
+        (recent_dir / "context.json").write_text("{}")
+        old_time = _time.time() - (29 * 86400)
+        _os.utime(str(recent_dir), (old_time, old_time))
+
+        # Use default max_age_days (should be 30)
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert recent_dir.exists(), "29-day-old session should survive with 30-day TTL"
+
+    def test_31_day_session_cleaned_at_default(self, tmp_path):
+        """A 31-day-old session should be cleaned with default TTL."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "my-project"
+        current_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        old_id = "11111111-2222-3333-4444-555555555555"
+
+        # Create current session
+        current_dir = slug_dir / current_id
+        current_dir.mkdir(parents=True, exist_ok=True)
+        (current_dir / "context.json").write_text("{}")
+
+        # Create 31-day-old session
+        old_dir = slug_dir / old_id
+        old_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "context.json").write_text("{}")
+        old_time = _time.time() - (31 * 86400)
+        _os.utime(str(old_dir), (old_time, old_time))
+
+        # Use default max_age_days (should be 30)
+        cleanup_old_sessions(
+            project_slug="my-project",
+            current_session_id=current_id,
+            sessions_dir=str(tmp_path),
+        )
+
+        assert not old_dir.exists(), "31-day-old session should be cleaned with 30-day TTL"

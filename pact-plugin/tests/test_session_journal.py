@@ -44,6 +44,27 @@ read_last_event():
 get_journal_path():
 26. Returns correct absolute path string
 27. Does not check file existence
+27a. Returns empty string when session_dir unavailable
+
+read_events_from() — Explicit API:
+50. Reads events from explicit session directory path
+51. Filters by event_type
+52. Returns empty list for missing journal
+53. Returns empty list for empty session_dir
+54. Skips malformed lines
+55. Skips empty lines
+56. Returns empty for nonexistent event_type filter
+
+read_last_event_from() — Explicit API:
+57. Returns most recent matching event
+58. Returns None when no match
+59. Returns None for missing journal
+60. Returns None for empty session_dir
+61. Skips malformed lines
+
+_get_session_dir():
+62. Returns session dir from mocked pact_context
+63. Returns empty string when unavailable
 
 Concurrency (P1):
 28. Multiple threads can append without interleaving
@@ -61,9 +82,13 @@ Integration:
 38. _check_journal_paused_state handles stale (>14 day) events
 39. _check_journal_paused_state returns None when pr_number is None
 40. _check_journal_paused_state handles MERGED/CLOSED PR
-41. restore_last_session uses journal when prev_team_name provided
-42. check_paused_state uses journal when prev_team_name provided
+41. restore_last_session uses journal when prev_session_dir provided
+42. check_paused_state uses journal when prev_session_dir provided
 43. _extract_prev_session_dir returns None on IOError (fail-open)
+
+Integration: pact_context.write_context() cache fix:
+64. Full path chain: write_context -> append_event -> file at sessions/ path
+65. write_context populates _cache for immediate get_session_dir() access
 
 CLI (main()):
 44. write subcommand creates event and exits 0
@@ -526,6 +551,300 @@ class TestGetJournalPath:
         assert "session-journal.jsonl" in path
         assert not Path(path).exists()
 
+    def test_returns_empty_string_when_session_dir_empty(self, journal_home, monkeypatch):
+        """Returns empty string when _get_session_dir returns empty."""
+        from shared.session_journal import get_journal_path
+        import shared.session_journal as sj
+
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
+
+        assert get_journal_path() == ""
+
+
+# ---------------------------------------------------------------------------
+# read_events_from() — Explicit API
+# ---------------------------------------------------------------------------
+
+
+class TestReadEventsFrom:
+    """Tests for read_events_from() — explicit session_dir parameter."""
+
+    def test_reads_events_from_explicit_path(self, tmp_path):
+        """P0: Reads events from a specified session directory."""
+        from shared.session_journal import read_events_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"session_start","team":"t","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"v":1,"type":"agent_handoff","agent":"coder","ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        events = read_events_from(session_dir)
+        assert len(events) == 2
+        assert events[0]["type"] == "session_start"
+        assert events[1]["type"] == "agent_handoff"
+
+    def test_filters_by_event_type(self, tmp_path):
+        """P0: Filters events by type when event_type is specified."""
+        from shared.session_journal import read_events_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"session_start","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"v":1,"type":"agent_handoff","agent":"a","ts":"2026-01-01T00:01:00Z"}\n'
+            '{"v":1,"type":"agent_handoff","agent":"b","ts":"2026-01-01T00:02:00Z"}\n'
+        )
+
+        handoffs = read_events_from(session_dir, event_type="agent_handoff")
+        assert len(handoffs) == 2
+        assert handoffs[0]["agent"] == "a"
+        assert handoffs[1]["agent"] == "b"
+
+    def test_returns_empty_for_missing_journal(self, tmp_path):
+        """P0: Returns empty list when journal file doesn't exist."""
+        from shared.session_journal import read_events_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-missing")
+
+        assert read_events_from(session_dir) == []
+
+    def test_returns_empty_for_empty_session_dir(self):
+        """P0: Returns empty list when session_dir is empty string."""
+        from shared.session_journal import read_events_from
+
+        assert read_events_from("") == []
+
+    def test_skips_malformed_lines(self, tmp_path):
+        """P0: Malformed JSON lines are silently skipped."""
+        from shared.session_journal import read_events_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"good","ts":"2026-01-01T00:00:00Z"}\n'
+            'this is not json\n'
+            '{"v":1,"type":"also_good","ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        events = read_events_from(session_dir)
+        assert len(events) == 2
+        assert events[0]["type"] == "good"
+        assert events[1]["type"] == "also_good"
+
+    def test_skips_empty_lines(self, tmp_path):
+        """Empty and whitespace-only lines are skipped."""
+        from shared.session_journal import read_events_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"a","ts":"2026-01-01T00:00:00Z"}\n'
+            '\n'
+            '   \n'
+            '{"v":1,"type":"b","ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        events = read_events_from(session_dir)
+        assert len(events) == 2
+
+    def test_returns_empty_for_nonexistent_event_type(self, tmp_path):
+        """Filtering by type that doesn't exist returns empty list."""
+        from shared.session_journal import read_events_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"alpha","ts":"2026-01-01T00:00:00Z"}\n'
+        )
+
+        assert read_events_from(session_dir, event_type="nonexistent") == []
+
+
+# ---------------------------------------------------------------------------
+# read_last_event_from() — Explicit API
+# ---------------------------------------------------------------------------
+
+
+class TestReadLastEventFrom:
+    """Tests for read_last_event_from() — explicit session_dir parameter."""
+
+    def test_returns_most_recent_matching_event(self, tmp_path):
+        """P0: Returns the last event matching the type."""
+        from shared.session_journal import read_last_event_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"checkpoint","data":"old","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"v":1,"type":"agent_handoff","agent":"c","ts":"2026-01-01T00:01:00Z"}\n'
+            '{"v":1,"type":"checkpoint","data":"new","ts":"2026-01-01T00:02:00Z"}\n'
+        )
+
+        result = read_last_event_from(session_dir, "checkpoint")
+        assert result is not None
+        assert result["data"] == "new"
+
+    def test_returns_none_when_no_match(self, tmp_path):
+        """P0: Returns None when no events match the type."""
+        from shared.session_journal import read_last_event_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"session_start","ts":"2026-01-01T00:00:00Z"}\n'
+        )
+
+        assert read_last_event_from(session_dir, "nonexistent") is None
+
+    def test_returns_none_for_missing_journal(self, tmp_path):
+        """P0: Returns None when journal file doesn't exist."""
+        from shared.session_journal import read_last_event_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-missing")
+
+        assert read_last_event_from(session_dir, "any") is None
+
+    def test_returns_none_for_empty_session_dir(self):
+        """P0: Returns None when session_dir is empty string."""
+        from shared.session_journal import read_last_event_from
+
+        assert read_last_event_from("", "any") is None
+
+    def test_skips_malformed_lines(self, tmp_path):
+        """Malformed lines are skipped; valid match still found."""
+        from shared.session_journal import read_last_event_from
+
+        session_dir = str(tmp_path / "sessions" / "proj" / "sess-abc")
+        journal = Path(session_dir) / "session-journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            '{"v":1,"type":"target","n":1,"ts":"2026-01-01T00:00:00Z"}\n'
+            'not json\n'
+            '{"v":1,"type":"target","n":2,"ts":"2026-01-01T00:01:00Z"}\n'
+        )
+
+        result = read_last_event_from(session_dir, "target")
+        assert result is not None
+        assert result["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# _get_session_dir() — Internal helper
+# ---------------------------------------------------------------------------
+
+
+class TestGetSessionDir:
+    """Tests for _get_session_dir() — lazy import of pact_context."""
+
+    def test_returns_session_dir_from_mock(self, session_dir):
+        """Returns the session dir value from the monkeypatched function."""
+        import shared.session_journal as sj
+
+        result = sj._get_session_dir()
+        assert result == session_dir
+
+    def test_returns_empty_when_unavailable(self, monkeypatch):
+        """Returns empty string when get_session_dir is unavailable."""
+        import shared.session_journal as sj
+
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: "")
+        assert sj._get_session_dir() == ""
+
+
+# ---------------------------------------------------------------------------
+# Integration: pact_context.write_context() -> journal (Scenario 13)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteContextCacheIntegration:
+    """Integration test: write_context() populates _cache so get_session_dir()
+    works immediately after, enabling append_event() to find the journal path.
+
+    This verifies the critical one-line fix in pact_context.py (Phase 2 of plan).
+    """
+
+    def test_full_path_chain_write_context_then_journal(self, tmp_path, monkeypatch):
+        """P1: Real pact_context.write_context -> append_event -> file at sessions/ path."""
+        import shared.pact_context as pc
+
+        # Reset pact_context module state
+        monkeypatch.setattr(pc, "_context_path", None)
+        monkeypatch.setattr(pc, "_cache", None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        project_dir = str(tmp_path / "project")
+        team_name = "pact-aaaaaaaa"
+
+        # Write context — this should populate _cache
+        pc.write_context(team_name, session_id, project_dir)
+
+        # Verify _cache was populated (the fix)
+        assert pc._cache is not None
+        assert pc._cache["session_id"] == session_id
+
+        # Verify get_session_dir returns the correct path
+        sd = pc.get_session_dir()
+        assert sd != ""
+        assert "pact-sessions" in sd
+        assert session_id in sd
+
+        # Now use session_journal with the real get_session_dir
+        import shared.session_journal as sj
+
+        # Undo the autouse mock — use real _get_session_dir
+        monkeypatch.setattr(sj, "_get_session_dir", pc.get_session_dir)
+
+        from shared.session_journal import append_event, make_event, read_events
+
+        event = make_event("integration_test", data="hello")
+        result = append_event(event)
+        assert result is True
+
+        # Read back and verify
+        events = read_events()
+        assert len(events) == 1
+        assert events[0]["type"] == "integration_test"
+        assert events[0]["data"] == "hello"
+
+        # Verify the file is at the expected sessions/ path
+        expected_journal = (
+            tmp_path / ".claude" / "pact-sessions" / "project" / session_id
+            / "session-journal.jsonl"
+        )
+        assert expected_journal.exists()
+
+    def test_write_context_without_cache_fix_would_fail(self, tmp_path, monkeypatch):
+        """Verify that get_session_dir needs _cache populated by write_context.
+
+        If _cache were None after write_context (pre-fix state), get_session_dir()
+        would need to read from disk — which works, but the _cache optimization
+        ensures it works even before get_pact_context() is called.
+        """
+        import shared.pact_context as pc
+
+        monkeypatch.setattr(pc, "_context_path", None)
+        monkeypatch.setattr(pc, "_cache", None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+        project_dir = str(tmp_path / "myproject")
+
+        pc.write_context("pact-test", session_id, project_dir)
+
+        # _cache should be set (the fix ensures this)
+        assert pc._cache is not None
+        assert pc.get_session_dir() != ""
+
 
 # ---------------------------------------------------------------------------
 # P1: Concurrency and Large Events
@@ -934,7 +1253,7 @@ class TestJournalPreference:
     """Tests that restore_last_session and check_paused_state use journal."""
 
     def test_restore_uses_journal(self, journal_home, session_dir):
-        """restore_last_session reads journal when prev_team_name is provided."""
+        """restore_last_session reads journal when prev_session_dir is provided."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import restore_last_session
 
@@ -953,14 +1272,14 @@ class TestJournalPreference:
         assert "journal" in result  # Journal-based resume header
 
     def test_restore_returns_none_without_team_name(self, journal_home):
-        """restore_last_session returns None when no prev_team_name."""
+        """restore_last_session returns None when no prev_session_dir."""
         from shared.session_resume import restore_last_session
 
         result = restore_last_session(prev_session_dir=None)
         assert result is None
 
     def test_check_paused_uses_journal(self, journal_home, session_dir):
-        """check_paused_state reads journal when prev_team_name is provided."""
+        """check_paused_state reads journal when prev_session_dir is provided."""
         from shared.session_journal import append_event, make_event
         from shared.session_resume import check_paused_state
 
@@ -981,7 +1300,7 @@ class TestJournalPreference:
         assert "PR #42" in result
 
     def test_check_paused_returns_none_without_team_name(self, journal_home):
-        """check_paused_state returns None when no prev_team_name."""
+        """check_paused_state returns None when no prev_session_dir."""
         from shared.session_resume import check_paused_state
 
         result = check_paused_state(prev_session_dir=None)

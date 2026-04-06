@@ -11,7 +11,7 @@ update_session_info():
 6. Returns error message on exception
 
 restore_last_session():
-7. Returns None when no prev_team_name
+7. Returns None when no prev_session_dir
 
 check_resumption_context():
 8. Returns None when no in_progress or pending tasks
@@ -23,7 +23,7 @@ check_resumption_context():
 14. metadata: None in task dict does not crash (or {} guard)
 
 check_paused_state():
-15. Returns None when no prev_team_name
+15. Returns None when no prev_session_dir
 
 _check_pr_state() -- direct tests:
 16. Returns "OPEN" for open PRs
@@ -135,17 +135,17 @@ class TestRestoreLastSession:
     """Tests for restore_last_session() -- journal-only path."""
 
     def test_returns_none_when_no_team_name(self):
-        """Should return None when prev_team_name is None."""
+        """Should return None when prev_session_dir is None."""
         from shared.session_resume import restore_last_session
 
-        result = restore_last_session(prev_team_name=None)
+        result = restore_last_session(prev_session_dir=None)
         assert result is None
 
     def test_returns_none_when_empty_team_name(self):
-        """Should return None when prev_team_name is empty string."""
+        """Should return None when prev_session_dir is empty string."""
         from shared.session_resume import restore_last_session
 
-        result = restore_last_session(prev_team_name="")
+        result = restore_last_session(prev_session_dir="")
         assert result is None
 
 
@@ -303,17 +303,17 @@ class TestCheckPausedState:
     """Tests for check_paused_state() -- journal-only path."""
 
     def test_returns_none_when_no_team_name(self):
-        """Should return None when prev_team_name is None."""
+        """Should return None when prev_session_dir is None."""
         from shared.session_resume import check_paused_state
 
-        result = check_paused_state(prev_team_name=None)
+        result = check_paused_state(prev_session_dir=None)
         assert result is None
 
     def test_returns_none_when_empty_team_name(self):
-        """Should return None when prev_team_name is empty string."""
+        """Should return None when prev_session_dir is empty string."""
         from shared.session_resume import check_paused_state
 
-        result = check_paused_state(prev_team_name="")
+        result = check_paused_state(prev_session_dir="")
         assert result is None
 
 
@@ -452,14 +452,14 @@ class TestBuildJournalResumeTruncation:
     """Tests for decision string truncation boundary in _build_journal_resume()."""
 
     @pytest.fixture
-    def journal_home(self, tmp_path, monkeypatch):
-        """Redirect Path.home() to tmp_path for filesystem isolation."""
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        return tmp_path
+    def session_dir(self, tmp_path, monkeypatch):
+        """Set up session dir and patch _get_session_dir for implicit API."""
+        import shared.session_journal as sj
+        sd = str(tmp_path / ".claude" / "pact-sessions" / "test" / "truncation-test")
+        monkeypatch.setattr(sj, "_get_session_dir", lambda: sd)
+        return sd
 
-    TEAM = "pact-truncation-test"
-
-    def _write_handoff(self, team_name: str, decision: str) -> None:
+    def _write_handoff(self, decision: str) -> None:
         """Write a single agent_handoff event with one decision string."""
         from shared.session_journal import append_event, make_event
 
@@ -470,7 +470,6 @@ class TestBuildJournalResumeTruncation:
                 task_subject="CODE: boundary",
                 handoff={"decisions": [decision]},
             ),
-            team_name,
         )
 
     @pytest.mark.parametrize(
@@ -484,15 +483,15 @@ class TestBuildJournalResumeTruncation:
         ids=["79_under", "80_at_boundary", "81_over", "120_well_over"],
     )
     def test_decision_truncation_boundary(
-        self, journal_home, length, should_truncate
+        self, session_dir, length, should_truncate
     ):
         """Decision strings are truncated only when len > 80."""
         from shared.session_resume import _build_journal_resume
 
         decision = "D" * length
-        self._write_handoff(self.TEAM, decision)
+        self._write_handoff(decision)
 
-        result = _build_journal_resume(self.TEAM)
+        result = _build_journal_resume(session_dir)
         assert result is not None
 
         if should_truncate:
