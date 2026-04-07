@@ -1246,6 +1246,7 @@ class TestBuildJournalResumeDefensive:
         ])
 
         def _boom(_session_dir: str):
+            del _session_dir  # mock signature match; argument intentionally unused
             raise RuntimeError("simulated unexpected shape")
 
         monkeypatch.setattr(
