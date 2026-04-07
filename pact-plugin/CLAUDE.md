@@ -167,7 +167,27 @@ When a user requests work without specifying a workflow, invoke the appropriate 
 
 ### Memory Management
 
-Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
+PACT uses three memory layers with distinct ownership:
+
+- **Auto-memory** (`MEMORY.md`, platform-managed) — you write directly via the base memory tool when you learn durable user, feedback, project, or reference facts.
+- **pact-memory** (SQLite, secretary-managed) — query via `SendMessage` to the secretary; delegate saves via harvest triggers or ad-hoc save requests.
+- **Agent persistent memory** (per-specialist, self-managed) — not your concern; specialists manage their own accumulated domain expertise.
+
+#### Querying the Secretary
+
+The secretary answers queries about prior project knowledge from pact-memory — decisions, patterns, user preferences, recurring blockers.
+
+**When to query**: before decisions that depend on project history, at phase boundaries, or when you encounter unfamiliar conventions.
+
+**How to query**:
+
+```
+SendMessage(to="secretary",
+  message="[lead→secretary] Query: {specific question}",
+  summary="Query: {topic}")
+```
+
+The secretary returns relevant memory entries with IDs — historical context, not implementation advice. Specialists can query directly via `SendMessage` without routing through the orchestrator; remind them in dispatch GUIDELINES.
 
 #### Memory Processing Triggers
 
@@ -178,53 +198,9 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 - After comPACT specialist completes → Standard Harvest
 - During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
-These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via session journal `agent_handoff` events (primary source) and cross-references with `TaskList` (supplementary). `TaskList` may be incomplete in long sessions due to platform garbage collection of older task files.
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via session journal `agent_handoff` events (primary source) and cross-references with `TaskList` (supplementary).
 
 NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
-
-#### Task Completion Safety Nets
-
-Four layers ensure agents mark tasks completed so HANDOFFs are captured:
-- SKILL.md step merge (instruction — agent self-completes)
-- TeammateIdle completion gate hook (mechanical — blocks idle until tasks completed)
-- Orchestrator verification checklist (instruction — catch on HANDOFF receipt via TaskList)
-- Stop hook uncompleted-tasks warning (mechanical — last-resort alert at session end)
-
-#### Three-Layer Memory Architecture
-
-PACT uses three complementary memory layers:
-
-| Layer | Storage | Purpose | Who Writes | Auto-loaded |
-|-------|---------|---------|------------|-------------|
-| **Auto-memory** (`MEMORY.md`) | Per-project file | General session learnings, user preferences | Platform (automatic) | Yes (first 200 lines) |
-| **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Secretary | Via Working Memory in CLAUDE.md |
-| **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents (built-in) | Yes (first 200 lines) |
-
-**Coexistence model**: Auto-memory captures broad session context automatically. pact-memory provides structured, searchable knowledge with semantic retrieval and graph-enhanced lookup. Agent persistent memory builds domain expertise per specialist. These layers complement each other — do not treat them as redundant.
-
-**Decision tree** — which layer should store this knowledge?
-
-```
-Is this knowledge specific to ONE agent's craft/domain?
-  -> YES -> Agent persistent memory (the agent saves it themselves)
-  -> NO |
-
-Is this knowledge about the project that other agents/sessions need?
-  -> YES -> pact-memory (secretary saves via Knowledge Distiller)
-  -> NO |
-
-Is this a broad session observation or user preference?
-  -> YES -> Auto-memory (platform handles automatically)
-  -> NO -> Probably doesn't need saving
-```
-
-| Content | Layer | Example |
-|---------|-------|---------|
-| File locations, codepaths, framework quirks | Agent persistent memory | "React components are in src/ui/" |
-| Architectural decisions, cross-cutting patterns | pact-memory | "Auth uses JWT with 15-min expiry" |
-| Scope expansion patterns, variety calibration | pact-memory | "Auth tasks consistently underestimated" |
-| User communication preferences | Auto-memory | "User prefers concise responses" |
-| Stakeholder constraints, compliance requirements | pact-memory | "Legal requires session token encryption" |
 
 ### S3/S4 Operational Modes
 
