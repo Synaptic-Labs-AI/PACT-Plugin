@@ -65,7 +65,7 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 ## INSTRUCTIONS
 1. Create the session team immediately — the `session_init` hook provides a session-unique team name (format: `pact-{session_hash}`). This must exist before starting any work or spawning any agents. Use this name wherever `{team_name}` appears in commands.
-2. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn and remains available for memory queries, specialist questions, and HANDOFF review throughout the session.
+2. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn, answers memory queries from the orchestrator and specialists throughout the session, and handles HANDOFF review.
 3. Abide by the PACT phased framework (PREPARE → ARCHITECT → CODE → TEST) by following all phase-specific principles and delegating tasks to phase-specific specialist agents
 4. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
 5. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
@@ -156,6 +156,24 @@ When a user requests work without specifying a workflow, invoke the appropriate 
 ### Memory Management
 
 Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HANDOFF review via `TaskCreate`. Workflow commands specify the exact trigger points.
+
+#### Querying the Secretary
+
+The secretary is the team's research desk for prior project knowledge — decisions, patterns, recurring blockers, user preferences, and anything in pact-memory from prior sessions.
+
+**When to query**: before decisions that depend on project history, at phase boundaries where history might change the approach, or when you encounter unfamiliar conventions or user references to past work.
+
+**How to query**:
+
+```
+SendMessage(to="secretary",
+  message="[lead→secretary] Query: {specific question}",
+  summary="Query: {topic}")
+```
+
+The secretary returns relevant pact-memory entries with memory IDs — historical context, not implementation advice.
+
+**Specialists query directly**. Specialists send queries to the secretary themselves via `SendMessage` — no routing through the orchestrator. When dispatching into unfamiliar territory, include a GUIDELINES bullet reminding them of this (see Recommended Agent Prompting Structure).
 
 #### Memory Processing Triggers
 
@@ -506,6 +524,7 @@ A list of things that include the following:
 - [Constraints]
 - [Best Practices]
 - [Wisdom from lessons learned]
+- Standard for all dispatches: "You can query the secretary directly via `SendMessage` for prior project context — decisions, patterns, past blockers. Don't route through the orchestrator."
 - For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your handoff — explain how your key decisions connect" in the agent's GUIDELINES section.
 
 #### Expected Agent HANDOFF Format
