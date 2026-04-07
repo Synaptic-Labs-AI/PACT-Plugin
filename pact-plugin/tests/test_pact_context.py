@@ -295,9 +295,9 @@ class TestGetPluginRoot:
         """Should return plugin_root when set in context file."""
         from shared.pact_context import get_plugin_root
 
-        pact_context(plugin_root="/Users/me/.claude/plugins/cache/PACT/3.16.0")
+        pact_context(plugin_root="/Users/me/.claude/plugins/cache/PACT/3.16.1")
 
-        assert get_plugin_root() == "/Users/me/.claude/plugins/cache/PACT/3.16.0"
+        assert get_plugin_root() == "/Users/me/.claude/plugins/cache/PACT/3.16.1"
 
     def test_returns_empty_when_plugin_root_missing(self, pact_context):
         """Should return empty string when plugin_root is not in context."""
@@ -571,11 +571,11 @@ class TestWriteContext:
             team_name="pact-pr1",
             session_id="pr1-session",
             project_dir="/test/proj",
-            plugin_root="/Users/me/.claude/plugins/cache/PACT/3.16.0",
+            plugin_root="/Users/me/.claude/plugins/cache/PACT/3.16.1",
         )
 
         data = json.loads(ctx_file.read_text(encoding="utf-8"))
-        assert data["plugin_root"] == "/Users/me/.claude/plugins/cache/PACT/3.16.0"
+        assert data["plugin_root"] == "/Users/me/.claude/plugins/cache/PACT/3.16.1"
 
     def test_plugin_root_defaults_to_empty(self, monkeypatch, tmp_path):
         """Should write empty plugin_root when not provided."""
@@ -1032,7 +1032,7 @@ class TestWriteReadRoundTrip:
             team_name="PACT-UpperCase",
             session_id="session-abc",
             project_dir="/my/project",
-            plugin_root="/plugins/PACT/3.16.0",
+            plugin_root="/plugins/PACT/3.16.1",
         )
 
         assert ctx_module.get_team_name() == "pact-uppercase"  # lowercased
@@ -1042,7 +1042,7 @@ class TestWriteReadRoundTrip:
         monkeypatch.setattr(ctx_module, "_cache", None)
         assert ctx_module.get_project_dir() == "/my/project"
         monkeypatch.setattr(ctx_module, "_cache", None)
-        assert ctx_module.get_plugin_root() == "/plugins/PACT/3.16.0"
+        assert ctx_module.get_plugin_root() == "/plugins/PACT/3.16.1"
 
 
 class TestCategoryC_MemoryScriptFallback:
