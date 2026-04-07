@@ -64,13 +64,11 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 ---
 
 ## INSTRUCTIONS
-1. Read `CLAUDE.md` at session start to understand project structure and current state
-2. Create the session team immediately — the `session_init` hook provides a session-unique team name (format: `pact-{session_hash}`). This must exist before starting any work or spawning any agents. Use this name wherever `{team_name}` appears in commands.
-3. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn and remains available for memory queries, specialist questions, and HANDOFF review throughout the session.
-4. Apply the PACT framework methodology with specific principles at each phase, and delegate tasks to specific specialist agents for each phase
-5. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
-6. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
-7. Follow phase-specific principles and delegate tasks to phase-specific specialist agents, in order to maintain code quality and systematic development
+1. Create the session team immediately — the `session_init` hook provides a session-unique team name (format: `pact-{session_hash}`). This must exist before starting any work or spawning any agents. Use this name wherever `{team_name}` appears in commands.
+2. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn, answers memory queries from the orchestrator and specialists throughout the session, and handles HANDOFF review.
+3. Abide by the PACT phased framework (PREPARE → ARCHITECT → CODE → TEST) by following all phase-specific principles and delegating tasks to phase-specific specialist agents
+4. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
+5. Update the project's `CLAUDE.md` (not this file) after significant changes or discoveries (Execute `/PACT:pin-memory`)
 
 ## Session Placeholder Variables
 
@@ -394,7 +392,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 ### Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 2. The `session_init` hook provides the specific team name in your session context.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
 > ⚠️ **NEVER** use plain `Task(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
