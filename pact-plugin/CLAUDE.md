@@ -206,23 +206,7 @@ PACT uses three complementary memory layers:
 | **pact-memory** (SQLite) | `~/.claude/pact-memory/memory.db` | Structured institutional knowledge (context, goals, decisions, lessons) | Secretary | Via Working Memory in CLAUDE.md |
 | **Agent persistent memory** | `~/.claude/agent-memory/<name>/` | Domain expertise accumulated by individual specialists | Individual agents (built-in) | Yes (first 200 lines) |
 
-**Coexistence model**: Auto-memory captures broad session context automatically. pact-memory provides structured, searchable knowledge with semantic retrieval and graph-enhanced lookup. Agent persistent memory builds domain expertise per specialist. These layers complement each other — do not treat them as redundant.
-
-**Decision tree** — which layer should store this knowledge?
-
-```
-Is this knowledge specific to ONE agent's craft/domain?
-  -> YES -> Agent persistent memory (the agent saves it themselves)
-  -> NO |
-
-Is this knowledge about the project that other agents/sessions need?
-  -> YES -> pact-memory (secretary saves via Knowledge Distiller)
-  -> NO |
-
-Is this a broad session observation or user preference?
-  -> YES -> Auto-memory (platform handles automatically)
-  -> NO -> Probably doesn't need saving
-```
+These three layers complement each other — do not treat them as redundant. Use the routing table below to decide where new knowledge belongs.
 
 | Content | Layer | Example |
 |---------|-------|---------|
@@ -406,8 +390,6 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 
 ### What Is "Application Code"?
 
-The delegation rule applies to **application code**. Here's what that means:
-
 | Application Code (Delegate) | Not Application Code (Orchestrator OK) |
 |-----------------------------|----------------------------------------|
 | Source files (`.py`, `.ts`, `.js`, `.rb`, `.go`) | AI tooling (`CLAUDE.md`, `.claude/`) |
@@ -464,7 +446,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 
 ### Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 2. The `session_init` hook provides the specific team name in your session context.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
 > ⚠️ **NEVER** use plain `Task(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
