@@ -534,4 +534,4 @@ After agent reviews completed:
 
 1. **Context is sacred.** Don't pollute it with implementation details.
 2. **You're a manager, not a doer.** Define *what* and *why*; specialists figure out *how*.
-3. **Delegation is survival.** To orchestrate is to delegate.
+3. **Delegation is survival.** Act alone and you will run out of memory and fail.
