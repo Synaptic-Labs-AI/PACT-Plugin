@@ -72,11 +72,12 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 ## Session Placeholder Variables
 
-Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session placeholder variables. **Substitution is manual — there is no template engine.** Command files contain literal brace-wrapped strings; the orchestrator reads the resolved values and performs textual replacement before invoking shell commands. Read the values from the Current Session block in the project's `CLAUDE.md`. PACT honors both supported locations: `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred / new default) and `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Whichever exists wins; when neither exists, `session_init` creates the file at the new default `.claude/CLAUDE.md`.
+Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as placeholders. **Substitution is manual — there is no template engine.** Command files contain literal brace-wrapped strings; the orchestrator reads the resolved values and performs textual replacement before invoking shell commands.
 
-**Source precedence**: when the `session_init` hook delivers substitution instructions inline (in the SessionStart system reminder at the top of the session), **those hook-delivered values are authoritative** and take precedence over the Current Session block in `CLAUDE.md`. The `CLAUDE.md` block is the fallback source, used only when the hook context has been lost — for example, after conversation compaction drops the initial system reminder. Always prefer the hook-delivered values when they are still visible in context. If the hook reported that `{session_dir}` is unavailable for this session, honor that notice and do not fabricate a path from `CLAUDE.md`.
-
-**Fallback is per-field**: if an individual variable is missing from `CLAUDE.md` (for example, a session block written by an older `session_init` that didn't record `- Plugin root:`), fall back to `pact-session-context.json` in the current session directory for that one variable. Do not re-read the whole set from JSON when a single field is missing.
+**Source precedence** (most to least authoritative):
+1. **`session_init` hook** — values delivered inline in the SessionStart system reminder. Prefer these whenever they're still visible in context. If the hook reported `{session_dir}` as unavailable, honor that notice — do not fabricate a path.
+2. **Current Session block in `CLAUDE.md`** — fallback when hook context has been lost (e.g., after compaction drops the initial system reminder). PACT honors both `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) and `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy); whichever exists wins. When neither exists, `session_init` creates the file at the new default.
+3. **`pact-session-context.json`** in the session directory — per-field fallback when a single variable is missing from the `CLAUDE.md` block (e.g., older `session_init` that didn't record `- Plugin root:`). Don't re-read the whole set from JSON for one missing field.
 
 | Placeholder | CLAUDE.md line | Context JSON key | Description |
 |-------------|---------------|-----------------|-------------|
@@ -84,7 +85,7 @@ Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session
 | `{session_dir}` | `- Session dir:` | Derived from `session_id` + `project_dir` | Session journal directory |
 | `{plugin_root}` | `- Plugin root:` | `plugin_root` | Installed plugin root for CLI paths |
 
-**Last-resort fallback for `{plugin_root}`**: if both `CLAUDE.md` and `pact-session-context.json` are unavailable, use `$HOME/.claude/protocols/pact-plugin/../` (symlink traversal). ⚠️ This fallback is fragile — if the plugin symlink has been deleted or the plugin was reinstalled mid-session, the path may resolve to a missing directory. If you detect that the resolved path does not exist, stop and report the issue to the user rather than continuing with a broken path.
+**Last-resort fallback for `{plugin_root}`**: if both `CLAUDE.md` and `pact-session-context.json` are unavailable, use `$HOME/.claude/protocols/pact-plugin/../` (symlink traversal). ⚠️ Fragile — if the plugin symlink is missing or was reinstalled mid-session, the path may resolve to a missing directory. If you detect that the resolved path does not exist, stop and report the issue to the user rather than continuing with a broken path.
 
 ## GUIDELINES
 
