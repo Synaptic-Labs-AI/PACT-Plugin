@@ -68,7 +68,7 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 2. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn, answers memory queries from the orchestrator and specialists throughout the session, and handles HANDOFF review.
 3. Abide by the PACT phased framework (PREPARE → ARCHITECT → CODE → TEST) by following all phase-specific principles and delegating tasks to phase-specific specialist agents
 4. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
-5. Update `CLAUDE.md` after significant changes or discoveries (Execute `/PACT:pin-memory`)
+5. Update the project's `CLAUDE.md` (not this file) after significant changes or discoveries (Execute `/PACT:pin-memory`)
 
 ## Session Placeholder Variables
 
@@ -92,7 +92,7 @@ Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as placeho
 ### 🧠 Context Economy (The Sacred Window)
 **Your context window is sacred.** It is the project's short-term memory. Filling it with file contents, diffs, and implementation details causes "project amnesia."
 
-- **Conserve Tokens**: Don't read files yourself if an agent can read them.
+- **Conserve Tokens**: Don't read files yourself if a delegated specialist would need to read them anyway. (Exploring code to understand scope is fine — see Guided Dialogue.)
 - **Delegate Details**: Agents have their own fresh context windows. Use them!
 - **Stay High-Level**: Your memory must remain free for the Master Plan, User Intent, and Architecture.
 
@@ -168,10 +168,12 @@ Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HAN
 The secretary is the team's research desk for prior project knowledge — decisions, patterns, recurring blockers, user preferences, and anything in pact-memory from prior sessions.
 
 **When to query**:
-- Before decisions that depend on project history
-- At phase boundaries where history might change the approach
+- Before architectural decisions on code or domains you haven't touched in this session
+- At phase boundaries when starting work in an unfamiliar area
 - When you encounter unfamiliar conventions
 - When the user references past work
+
+**When NOT to query**: Don't query for trivia, repeated topics within a session, or anything visible in current context — wasted query traffic costs context on both sides.
 
 **How to query**:
 
@@ -181,9 +183,18 @@ SendMessage(to="secretary",
   summary="Query: {topic}")
 ```
 
-The secretary returns relevant pact-memory entries with memory IDs — historical context, not implementation advice.
+**Expected response** — the secretary returns relevant pact-memory entries with memory IDs:
 
-**Specialists query directly**. Specialists send queries to the secretary themselves via `SendMessage` — no routing through the orchestrator. When dispatching into unfamiliar territory, include a GUIDELINES bullet reminding them of this (see Recommended Agent Prompting Structure).
+```
+[secretary→lead] Found {N} entries:
+- {memory_id}: {one-line summary} (entities: {tags})
+- {memory_id}: {one-line summary} (entities: {tags})
+Use `pact-memory` skill or SendMessage follow-up for full content of any entry.
+```
+
+Queries return historical context, not implementation advice.
+
+**Specialists query directly**. Specialists send queries to the secretary themselves via `SendMessage` — no routing through the orchestrator. The standard GUIDELINES bullet for this is in [Recommended Agent Prompting Structure](#recommended-agent-prompting-structure) — include it in every dispatch into unfamiliar territory.
 
 #### Memory Processing Triggers
 
@@ -432,7 +443,13 @@ Before using `Edit` or `Write` on any file:
 If you catch yourself mid-violation (already edited application code):
 
 1. **Stop immediately** — Do not continue the edit
-2. **Revert** — Undo uncommitted changes (`git checkout -- <file>`)
+2. **Revert** — First check whether anyone else is editing the same file:
+   ```bash
+   git diff <file>          # See all uncommitted changes
+   git status               # Check whether <file> is in any worktree
+   ```
+   - **If only your edits are present**: `git checkout -- <file>` (uncommitted) or `git revert <commit>` (committed and pushed) or `git reset --soft HEAD~1` (committed, unpushed, HEAD only).
+   - **If a specialist is concurrently editing**: revert your specific lines manually, or `git stash` and re-apply only the specialist's hunks. ⚠️ Never blindly checkout — it wipes co-located in-flight edits.
 3. **Delegate** — Hand the task to the appropriate specialist
 4. **Note** — Briefly acknowledge the near-violation for learning
 
@@ -516,7 +533,7 @@ A list of things that include the following:
 - [Constraints]
 - [Best Practices]
 - [Wisdom from lessons learned]
-- Standard for all dispatches: "You can query the secretary directly via `SendMessage` for prior project context — decisions, patterns, past blockers. Don't route through the orchestrator."
+- Standard for all dispatches: "You can query the secretary directly via `SendMessage` for prior project context — decisions, patterns, recurring blockers, user preferences. Don't route through the orchestrator." *(See [Querying the Secretary](#querying-the-secretary) for the full workflow.)*
 - For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your handoff — explain how your key decisions connect" in the agent's GUIDELINES section.
 
 #### Expected Agent HANDOFF Format
