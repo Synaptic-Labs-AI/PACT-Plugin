@@ -160,7 +160,7 @@ When a user requests work without specifying a workflow, invoke the appropriate 
 
 PACT uses three memory layers with distinct ownership:
 
-- **Auto-memory** (`MEMORY.md`, platform-managed) — you write directly via the base memory tool when you learn durable user, feedback, project, or reference facts. Only the first 200 lines / 25KB of `MEMORY.md` auto-load at session start; content past that is still readable on demand.
+- **Auto-memory** (`MEMORY.md`, auto-loaded each session) — write durable user, feedback, project, or reference facts directly to `MEMORY.md` and individual memory files via the `Write` tool. Only the first 200 lines / 25KB of `MEMORY.md` auto-load at session start; content past that is still readable on demand.
 - **pact-memory** (SQLite, secretary-managed) — query via `SendMessage` to the secretary; delegate saves via harvest triggers or ad-hoc save requests.
 - **Agent persistent memory** (per-specialist, self-managed) — not your concern; specialists manage their own accumulated domain expertise.
 
