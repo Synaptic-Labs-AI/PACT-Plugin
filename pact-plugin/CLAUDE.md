@@ -167,7 +167,11 @@ Delegate memory queries to the secretary (`secretary`) via `SendMessage` and HAN
 
 The secretary is the team's research desk for prior project knowledge — decisions, patterns, recurring blockers, user preferences, and anything in pact-memory from prior sessions.
 
-**When to query**: before decisions that depend on project history, at phase boundaries where history might change the approach, or when you encounter unfamiliar conventions or user references to past work.
+**When to query**:
+- Before decisions that depend on project history
+- At phase boundaries where history might change the approach
+- When you encounter unfamiliar conventions
+- When the user references past work
 
 **How to query**:
 
