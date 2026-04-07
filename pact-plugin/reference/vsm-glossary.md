@@ -383,6 +383,7 @@ These terms are specific to PACT's implementation of VSM concepts.
 | System | Horizon | Focus |
 |--------|---------|-------|
 | **S1** | Minutes | Current subtask (agent implementation) |
+| **S2** | Concurrent window | Coordination across parallel specialists (boundary/convention enforcement during concurrent dispatch) |
 | **S3** | Hours | Current task/phase (orchestrator coordination) |
 | **S4** | Days | Current milestone/sprint (planning, adaptation) |
 | **S5** | Persistent | Project identity (values, non-negotiables) |
