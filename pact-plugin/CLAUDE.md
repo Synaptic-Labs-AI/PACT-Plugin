@@ -271,56 +271,21 @@ When making decisions, consider which horizon applies. Misalignment indicates mo
 
 ### PACT Framework Principles
 
-#### 📋 PREPARE Phase Principles
-1. **Documentation First**: Read all relevant docs before making changes
-2. **Context Gathering**: Understand the full scope and requirements
-3. **Dependency Mapping**: Identify all external and internal dependencies
-4. **API Exploration**: Test and understand interfaces before integration
-5. **Research Patterns**: Look for established solutions and best practices
-6. **Requirement Validation**: Confirm understanding with stakeholders
+#### 📋 PREPARE
+- Read docs and gather context before acting
+- Map dependencies; validate requirements with stakeholders
 
-#### 🏗️ ARCHITECT Phase Principles
-1. **Single Responsibility**: Each component should have one clear purpose
-2. **Loose Coupling**: Minimal dependencies between components
-3. **High Cohesion**: Related functionality grouped together
-4. **Interface Segregation**: Small, focused interfaces over large ones
-5. **Dependency Inversion**: Depend on abstractions, not implementations
-6. **Open/Closed**: Open for extension, closed for modification
-7. **Modular Design**: Clear boundaries and organized structure
+#### 🏗️ ARCHITECT
+- Single responsibility, loose coupling, high cohesion
+- Depend on abstractions; open for extension, closed for modification
 
-#### 💻 CODE Phase Principles
-1. **Clean Code**: Readable, self-documenting, and maintainable
-2. **DRY**: Eliminate code duplication
-3. **KISS**: Simplest solution that works
-4. **Error Handling**: Comprehensive error handling and logging
-5. **Performance Awareness**: Consider efficiency without premature optimization
-6. **Security Mindset**: Validate inputs, sanitize outputs, secure by default
-7. **Consistent Style**: Follow established coding conventions
-8. **Incremental Development**: Small, testable changes
+#### 💻 CODE
+- Clean, DRY, KISS; incremental, testable changes
+- Handle errors; validate inputs; secure by default
 
-#### 🧪 TEST Phase Principles
-1. **Test Coverage**: Aim for meaningful coverage of critical paths
-2. **Edge Case Testing**: Test boundary conditions and error scenarios
-3. **Integration Testing**: Verify component interactions
-4. **Performance Testing**: Validate system performance requirements
-5. **Security Testing**: Check for vulnerabilities and attack vectors
-6. **User Acceptance**: Ensure functionality meets user needs
-7. **Regression Prevention**: Test existing functionality after changes
-8. **Documentation**: Document test scenarios and results
-
-### Development Best Practices
-- Keep files under 500-600 lines for maintainability
-- Review existing code before adding new functionality
-- Code must be self-documenting by using descriptive naming for variables, functions, and classes
-- Add comprehensive comments explaining complex logic
-- Prefer composition over inheritance
-- Follow the Boy Scout Rule: leave code cleaner than you found it, and remove deprecated or legacy code
-
-### Quality Assurance
-- Verify all changes against project requirements
-- Test implementations before marking complete
-- Update `CLAUDE.md` with new patterns or insights
-- Document decisions and trade-offs for future reference
+#### 🧪 TEST
+- Cover critical paths, edge cases, integration, security
+- Prevent regression; document scenarios
 
 ## PACT AGENT ORCHESTRATION
 
