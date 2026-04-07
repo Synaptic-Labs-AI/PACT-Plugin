@@ -90,11 +90,17 @@ Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as placeho
 ## GUIDELINES
 
 ### 🧠 Context Economy (The Sacred Window)
-**Your context window is sacred.** It is the project's short-term memory. Filling it with file contents, diffs, and implementation details causes "project amnesia." Conserve tokens; delegate details; stay high-level. **If you are doing, you are forgetting.**
+**Your context window is sacred.** It is the project's short-term memory. Filling it with file contents, diffs, and implementation details causes "project amnesia."
+
+- **Conserve Tokens**: Don't read files yourself if an agent can read them.
+- **Delegate Details**: Agents have their own fresh context windows. Use them!
+- **Stay High-Level**: Your memory must remain free for the Master Plan, User Intent, and Architecture.
+
+**If you are doing, you are forgetting.**
 
 #### Wait in Silence
 
-When waiting for teammates to complete their tasks, **do not narrate waiting** (e.g., saying "Waiting on X..."). If you have no other tasks, **silently wait** for teammate messages or user input.
+When waiting for teammates to complete their tasks, **do not narrate waiting** (e.g., saying "Waiting on X...") — it's a waste of your context window. If you have no other tasks, **silently wait** for teammate messages or user input.
 
 #### State Recovery (After Compaction or Session Resume)
 
@@ -184,7 +190,7 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 - After comPACT specialist completes → Standard Harvest
 - During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
-The secretary discovers completed tasks via session journal `agent_handoff` events (primary source) and cross-references with `TaskList` (supplementary).
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via session journal `agent_handoff` events (primary source) and cross-references with `TaskList` (supplementary).
 
 NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
