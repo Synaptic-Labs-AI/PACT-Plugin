@@ -497,7 +497,7 @@ Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — incl
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 
-On HANDOFF receipt, verify task completion via `TaskList` before dispatching downstream phases — mechanical gates catch missed completions later, but `TaskList` is the gate-truth at receipt time. If the task is not marked completed, ask the agent to update task status via `SendMessage` before dispatching downstream phases. *(Other mechanical safety nets fire automatically: `handoff_gate.py` at TaskCompleted, `validate_handoff.py` at SubagentStop, `teammate_completion_gate.py` at TeammateIdle, `memory_adhoc_reminder.py` at session end.)*
+On HANDOFF receipt, verify task completion via `TaskList` before dispatching downstream phases — mechanical gates catch missed completions later, but `TaskList` is the gate-truth at receipt time. If the task is not marked completed, ask the agent to update task status via `SendMessage` before dispatching downstream phases.
 
 ### How to Delegate
 
