@@ -404,3 +404,174 @@ class TestMemoryFromDbRow:
         row = {"id": "abc"}
         m = memory_from_db_row(row)
         assert m.files == []
+
+
+# ---------------------------------------------------------------------------
+# Bug 3 fix (#374) — strict-on-write / lenient-on-read key validation
+# ---------------------------------------------------------------------------
+#
+# Before PR #374's commit 2, Entity/Decision/TaskItem.from_dict silently
+# dropped unknown sub-object keys via data.get() on a hardcoded field list.
+# A payload like `{"name": "X", "description": "Y"}` would construct an
+# Entity with name="X" and lose `description` (the real field is `notes`).
+#
+# New contract:
+#   - Write paths call from_dict(..., strict=True): unknown keys raise
+#     ValueError with a message naming the bad keys and the allowed set.
+#   - Read paths call from_dict(..., strict=False) (the default): unknown
+#     keys are dropped with a logger.warning so legacy DB rows with stray
+#     keys remain readable.
+
+
+class TestFromDictStrictMode:
+    """Bug 3 — strict=True raises on unknown sub-object keys."""
+
+    def test_entity_strict_raises_on_unknown_key(self):
+        from scripts.models import Entity
+        with pytest.raises(ValueError, match="Unknown keys for Entity"):
+            Entity.from_dict({"name": "Redis", "description": "cache"}, strict=True)
+
+    def test_decision_strict_raises_on_unknown_key(self):
+        from scripts.models import Decision
+        with pytest.raises(ValueError, match="Unknown keys for Decision"):
+            Decision.from_dict(
+                {"decision": "Use Redis", "reason": "fast"},
+                strict=True,
+            )
+
+    def test_taskitem_strict_raises_on_unknown_key(self):
+        from scripts.models import TaskItem
+        with pytest.raises(ValueError, match="Unknown keys for TaskItem"):
+            TaskItem.from_dict(
+                {"task": "Write tests", "due": "tomorrow"},
+                strict=True,
+            )
+
+    def test_strict_error_lists_allowed_keys(self):
+        from scripts.models import Entity
+        with pytest.raises(ValueError) as excinfo:
+            Entity.from_dict({"name": "X", "bogus": "y"}, strict=True)
+        msg = str(excinfo.value)
+        assert "bogus" in msg
+        assert "Allowed keys" in msg
+        assert "name" in msg
+        assert "type" in msg
+        assert "notes" in msg
+
+    def test_strict_error_includes_memory_context(self):
+        """memory_id arg surfaces in the error for debugging."""
+        from scripts.models import Entity
+        with pytest.raises(ValueError, match="in memory mem-123"):
+            Entity.from_dict(
+                {"name": "X", "bogus": "y"},
+                strict=True,
+                memory_id="mem-123",
+            )
+
+    def test_strict_valid_payload_still_works(self):
+        """Happy path: well-formed dict still constructs correctly under strict."""
+        from scripts.models import Entity
+        e = Entity.from_dict(
+            {"name": "Redis", "type": "service", "notes": "in-memory cache"},
+            strict=True,
+        )
+        assert e.name == "Redis"
+        assert e.type == "service"
+        assert e.notes == "in-memory cache"
+
+    def test_strict_mode_ignored_for_string_input(self):
+        """from_dict(str, strict=True) treats the string as the primary field."""
+        from scripts.models import Entity
+        e = Entity.from_dict("Redis", strict=True)
+        assert e.name == "Redis"
+
+
+class TestFromDictLenientMode:
+    """Bug 3 — strict=False (default) drops unknown keys with a warning."""
+
+    def test_entity_lenient_drops_unknown_key(self, caplog):
+        from scripts.models import Entity
+        import logging
+        caplog.set_level(logging.WARNING, logger="scripts.models")
+        e = Entity.from_dict({"name": "X", "legacy_field": "keep"})
+        assert e.name == "X"
+        assert e.type is None
+        assert e.notes is None
+        assert "legacy_field" in caplog.text
+        assert "Entity" in caplog.text
+
+    def test_decision_lenient_drops_unknown_key(self, caplog):
+        from scripts.models import Decision
+        import logging
+        caplog.set_level(logging.WARNING, logger="scripts.models")
+        d = Decision.from_dict({"decision": "Use X", "stray": "value"})
+        assert d.decision == "Use X"
+        assert "stray" in caplog.text
+
+    def test_taskitem_lenient_drops_unknown_key(self, caplog):
+        from scripts.models import TaskItem
+        import logging
+        caplog.set_level(logging.WARNING, logger="scripts.models")
+        t = TaskItem.from_dict({"task": "x", "owner": "alice"})
+        assert t.task == "x"
+        assert "owner" in caplog.text
+
+    def test_lenient_is_default(self, caplog):
+        """Calling without the strict kwarg should be lenient."""
+        from scripts.models import Entity
+        import logging
+        caplog.set_level(logging.WARNING, logger="scripts.models")
+        # No exception — lenient is default
+        Entity.from_dict({"name": "X", "foo": "bar"})
+        assert "foo" in caplog.text
+
+    def test_memoryobject_read_path_tolerates_legacy_stray_keys(self, caplog):
+        """
+        End-to-end read path: MemoryObject.from_dict (which processes raw rows
+        from the DB) must tolerate legacy rows whose entities/decisions/tasks
+        contain stray keys from before PR #374. The stray key should be
+        dropped with a warning; the memory must still be readable.
+        """
+        from scripts.models import MemoryObject
+        import logging
+        caplog.set_level(logging.WARNING, logger="scripts.models")
+        data = {
+            "id": "legacy-mem",
+            "context": "legacy row",
+            "entities": [{"name": "Redis", "legacy_field": "from old schema"}],
+            "decisions": [{"decision": "Use Redis", "old_cite": "ADR-1"}],
+        }
+        m = MemoryObject.from_dict(data)
+        assert m.id == "legacy-mem"
+        assert m.entities[0].name == "Redis"
+        assert m.decisions[0].decision == "Use Redis"
+        assert "legacy_field" in caplog.text
+        assert "old_cite" in caplog.text
+
+
+class TestAllowedKeysInvariant:
+    """
+    Cheap safety net: _ALLOWED_KEYS must match the dataclass fields exactly.
+
+    If a future edit adds a dataclass field without updating _ALLOWED_KEYS,
+    strict-mode validation will reject the new field as "unknown" — silently
+    re-creating bug 3. This invariant fails loudly at test time instead.
+    """
+
+    def test_entity_allowed_keys_matches_fields(self):
+        import dataclasses
+        from scripts.models import Entity
+        field_names = {f.name for f in dataclasses.fields(Entity)}
+        assert Entity._ALLOWED_KEYS == field_names
+
+    def test_decision_allowed_keys_matches_fields(self):
+        import dataclasses
+        from scripts.models import Decision
+        field_names = {f.name for f in dataclasses.fields(Decision)}
+        assert Decision._ALLOWED_KEYS == field_names
+
+    def test_taskitem_allowed_keys_matches_fields(self):
+        import dataclasses
+        from scripts.models import TaskItem
+        field_names = {f.name for f in dataclasses.fields(TaskItem)}
+        assert TaskItem._ALLOWED_KEYS == field_names
