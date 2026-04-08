@@ -76,6 +76,8 @@ Save this state snapshot to pact-memory alongside the institutional knowledge en
 1. Search pact-memory for the same entities and topic: `search --query "{topic}" --limit 5`
 2. If a match is found with high topical overlap (same entities + same decision area + same or superseded conclusion):
    - **Update** the existing memory (`update` CLI command) rather than creating a new one
+   - `update` merges list fields additively with content-hash dedup, so passing just the new lessons/decisions/entities appends them without clobbering what's already there. Repeated calls are idempotent.
+   - Use `update --replace` only when a prior conclusion has been **superseded** and you need to remove the old items from the list. Default `update` is append-only semantically — it will never delete an existing item.
    - Note in summary: "Updated memory {id} (was: {old summary})"
 3. If no match or low overlap: Proceed with `save`
 
@@ -148,7 +150,7 @@ Triggered after remediation completes — processes only the delta since the las
 5. **Extract and save** using Steps 4-7 from Standard Harvest (extract knowledge, organizational state, dedup protocol, save)
 6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
 7. **Do NOT delete the session journal** — it may still be accumulating entries from ongoing work
-8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`)
+8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`). Remember: default `update` is additive merge — pass `--replace` only when the prior list items need to be discarded, not amended.
 9. **Report delta summary** to lead — only report what changed in this incremental pass
 
 ---

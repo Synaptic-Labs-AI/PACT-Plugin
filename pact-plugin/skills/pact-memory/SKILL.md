@@ -63,7 +63,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
 # Get a specific memory by ID
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id>
 
-# Update an existing memory
+# Update an existing memory (scalar fields replace; list fields merge additively)
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update <memory_id> '{"goal": "Updated goal"}'
 
 # Delete a memory
@@ -136,8 +136,9 @@ Each memory can contain:
 | `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
 | `list --limit N` | List with limit | `[...]` (default: 20) |
 | `get <id>` | Get memory by ID | `{"id": "...", "context": "...", ...}` |
-| `update <id> <json>` | Update memory fields | `{"memory_id": "<hex>"}` |
+| `update <id> <json>` | Update memory fields (list fields merge additively) | `{"memory_id": "<hex>"}` |
 | `update <id> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
+| `update <id> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |
 | `delete <id>` | Delete a memory | `{"deleted": true, "memory_id": "<hex>"}` |
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
@@ -147,8 +148,27 @@ Each memory can contain:
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | User error (bad args, invalid JSON) |
-| 2 | System error (DB failure, missing deps) |
+| 1 | User error (bad args, invalid JSON, not found) |
+| 2 | Validation error (unknown field name, unknown sub-object key) — the error envelope includes an `allowed_fields` list |
+
+### Update Semantics
+
+`update` uses **additive merge with content-hash dedup** for list-valued fields
+(`lessons_learned`, `reasoning_chains`, `agreements_reached`, `disagreements_resolved`,
+`active_tasks`, `decisions`, `entities`). Scalar fields (`context`, `goal`, etc.) still
+replace on update.
+
+- Passing `{"lessons_learned": ["new lesson"]}` **appends** to the existing list;
+  duplicate items (by content hash) are silently deduplicated, so repeated saves are
+  idempotent.
+- Pass `--replace` when you intentionally want to remove items from a list by
+  overwriting it wholesale.
+- Unknown top-level fields (e.g. `{"foo": 1}`) raise `ValueError` with exit code 2
+  instead of silently disappearing. Likewise, unknown sub-object keys (e.g.
+  `{"entities": [{"description": "…"}]}` — the field is `notes`, not `description`)
+  raise `ValueError`.
+
+This fixes issue #374 where partial-list updates silently clobbered the entire column.
 
 ### Examples
 
@@ -165,8 +185,18 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth patterns" --current-fi
 # List recent memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 5
 
-# Update an existing memory
-python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update abc123 '{"goal": "Updated goal", "lessons_learned": ["New lesson"]}'
+# Update an existing memory — additive list merge (default)
+# This APPENDS "New lesson" to the existing lessons_learned list; any
+# existing lessons are preserved. Scalar fields like "goal" still replace.
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update abc123 \
+  '{"goal": "Updated goal", "lessons_learned": ["New lesson"]}'
+
+# Update with wholesale list replacement (--replace)
+# Use this ONLY when you intentionally want to remove items from a list.
+# After this call, lessons_learned contains exactly ["Only lesson that matters"]
+# and nothing else.
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update abc123 \
+  '{"lessons_learned": ["Only lesson that matters"]}' --replace
 
 # Delete a memory
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete abc123
