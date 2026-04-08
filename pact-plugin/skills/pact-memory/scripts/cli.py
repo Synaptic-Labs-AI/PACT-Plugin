@@ -36,6 +36,7 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
+from scripts.database import ALLOWED_UPDATE_COLUMNS
 from scripts.memory_api import PACTMemory
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -46,12 +47,14 @@ def _success(result):
     sys.exit(0)
 
 
-def _error(error_type, message, exit_code=1):
-    """Print an error JSON envelope to stderr and exit with given code."""
-    print(
-        json.dumps({"ok": False, "error": error_type, "message": message}),
-        file=sys.stderr,
-    )
+def _error(error_type, message, exit_code=1, **extra):
+    """Print an error JSON envelope to stderr and exit with given code.
+
+    Any extra kwargs are merged into the envelope (e.g. allowed_fields).
+    """
+    envelope = {"ok": False, "error": error_type, "message": message}
+    envelope.update(extra)
+    print(json.dumps(envelope), file=sys.stderr)
     sys.exit(exit_code)
 
 
@@ -73,7 +76,15 @@ def cmd_save(args, db_path=None):
         _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
 
     memory = PACTMemory(db_path=db_path)
-    memory_id = memory.save(memory_dict)
+    try:
+        memory_id = memory.save(memory_dict)
+    except ValueError as exc:
+        _error(
+            "ValueError",
+            str(exc),
+            exit_code=2,
+            allowed_fields=sorted(ALLOWED_UPDATE_COLUMNS),
+        )
     _success({"memory_id": memory_id})
 
 
@@ -142,7 +153,15 @@ def cmd_update(args, db_path=None):
         _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
 
     memory = PACTMemory(db_path=db_path)
-    success = memory.update(args.memory_id, updates)
+    try:
+        success = memory.update(args.memory_id, updates, replace=args.replace)
+    except ValueError as exc:
+        _error(
+            "ValueError",
+            str(exc),
+            exit_code=2,
+            allowed_fields=sorted(ALLOWED_UPDATE_COLUMNS),
+        )
     if not success:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
     _success({"memory_id": args.memory_id})
@@ -238,6 +257,15 @@ def build_parser():
     update_parser.add_argument("json_data", nargs="?", help="JSON with fields to update")
     update_parser.add_argument(
         "--stdin", action="store_true", help="Read JSON from stdin"
+    )
+    update_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help=(
+            "Replace list-valued fields wholesale instead of merging "
+            "additively (default: additive merge with content-hash dedup). "
+            "Use when you intentionally want to remove items from a list."
+        ),
     )
 
     # delete

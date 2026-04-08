@@ -788,7 +788,9 @@ class TestCliUpdateCommand:
             with pytest.raises(SystemExit) as exc_info:
                 cmd_update(args)
         assert exc_info.value.code == 0
-        mock_pact_memory.update.assert_called_once_with("abc123", {"context": "updated"})
+        mock_pact_memory.update.assert_called_once_with(
+            "abc123", {"context": "updated"}, replace=False
+        )
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["ok"] is True
@@ -817,7 +819,9 @@ class TestCliUpdateCommand:
             with pytest.raises(SystemExit) as exc_info:
                 cmd_update(args)
         assert exc_info.value.code == 0
-        mock_pact_memory.update.assert_called_once_with("abc123", {"context": "from stdin"})
+        mock_pact_memory.update.assert_called_once_with(
+            "abc123", {"context": "from stdin"}, replace=False
+        )
 
     def test_update_invalid_json(self, capsys):
         parser = build_parser()
@@ -861,6 +865,91 @@ class TestCliUpdateCommand:
             with pytest.raises(SystemExit):
                 cmd_update(args, db_path=Path("/tmp/t.db"))
         mock_cls.assert_called_once_with(db_path=Path("/tmp/t.db"))
+
+
+class TestCliUpdateReplaceFlag:
+    """Test the --replace flag and ValueError envelope on the update subcommand."""
+
+    def test_replace_flag_forwards_true(self, mock_pact_memory):
+        mock_pact_memory.update.return_value = True
+        parser = build_parser()
+        args = parser.parse_args(
+            ["update", "abc123", '{"lessons": ["x"]}', "--replace"]
+        )
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.update.assert_called_once_with(
+            "abc123", {"lessons": ["x"]}, replace=True
+        )
+
+    def test_replace_default_is_false(self, mock_pact_memory):
+        mock_pact_memory.update.return_value = True
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", '{"lessons": ["x"]}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit):
+                cmd_update(args)
+        _, kwargs = mock_pact_memory.update.call_args
+        assert kwargs == {"replace": False}
+
+    def test_value_error_envelope_exit_code_2(self, mock_pact_memory, capsys):
+        mock_pact_memory.update.side_effect = ValueError(
+            "Unknown memory field(s) for update: 'bogus'. Allowed fields: context, goal"
+        )
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", '{"bogus": 1}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 2
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "ValueError"
+        assert "Unknown memory field" in err_output["message"]
+        assert "allowed_fields" in err_output
+        assert isinstance(err_output["allowed_fields"], list)
+        assert "context" in err_output["allowed_fields"]
+
+    def test_value_error_from_subobject(self, mock_pact_memory, capsys):
+        mock_pact_memory.update.side_effect = ValueError(
+            "Unknown key(s) for Entity: 'description'. Allowed: name, type, notes"
+        )
+        parser = build_parser()
+        args = parser.parse_args(
+            ["update", "abc123", '{"entities": [{"description": "x"}]}']
+        )
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 2
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "ValueError"
+        assert "Entity" in err_output["message"]
+
+
+class TestCliSaveValueError:
+    """Test ValueError envelope on the save subcommand."""
+
+    def test_save_value_error_envelope(self, mock_pact_memory, capsys):
+        mock_pact_memory.save.side_effect = ValueError(
+            "Unknown memory field(s) for save: 'bogus'. Allowed fields: context, goal"
+        )
+        parser = build_parser()
+        args = parser.parse_args(["save", '{"bogus": 1}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 2
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "ValueError"
+        assert "allowed_fields" in err_output
 
 
 # ---------------------------------------------------------------------------
