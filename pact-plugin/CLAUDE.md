@@ -420,12 +420,6 @@ When delegating a task, these specialist agents are available to execute PACT ph
 2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
 3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
 
-**Why Agent Teams?**
-- Teammates self-manage task status (claim, progress, complete)
-- Communication via `SendMessage` (HANDOFFs, blockers, algedonic signals)
-- Completed-phase teammates remain as consultants for questions
-- Multiple specialists run concurrently within the same team
-
 #### Reuse vs. Spawn Decision
 
 | Situation | Action |
