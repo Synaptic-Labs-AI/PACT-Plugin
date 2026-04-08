@@ -176,7 +176,7 @@ SendMessage(to="secretary",
   summary="Query: {topic}")
 ```
 
-The secretary returns relevant memory entries with IDs — historical context, not implementation advice. Specialists can query directly via `SendMessage` without routing through the orchestrator; remind them in dispatch GUIDELINES (see [Recommended Agent Prompting Structure](#recommended-agent-prompting-structure)).
+The secretary returns relevant memory entries with IDs — historical context, not implementation advice. Specialists can query directly via `SendMessage` without routing through the orchestrator.
 
 #### Memory Processing Triggers
 
