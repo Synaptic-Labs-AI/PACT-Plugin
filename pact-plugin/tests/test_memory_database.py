@@ -162,6 +162,13 @@ class TestCreateMemory:
         assert mem_id == "custom-123"
 
     def test_creates_with_json_fields(self, db_conn):
+        """
+        Sub-object fields are canonicalized via _canonicalize_dict_item
+        on the save path (bug 3 part 2, #374). The round-trip through
+        TaskItem.from_dict(strict=True).to_dict() populates default values
+        such as status='pending', so the stored shape is the canonical form
+        — symmetric with update_memory's merge path.
+        """
         from scripts.database import create_memory, get_memory
         mem_id = create_memory(db_conn, {
             "context": "Test",
@@ -171,7 +178,8 @@ class TestCreateMemory:
         })
         result = get_memory(db_conn, mem_id)
         assert result is not None
-        assert result["active_tasks"] == [{"task": "T1"}]
+        # Canonical TaskItem shape: task + status (status defaulted to 'pending').
+        assert result["active_tasks"] == [{"task": "T1", "status": "pending"}]
         assert result["lessons_learned"] == ["L1"]
 
 
@@ -463,6 +471,114 @@ class TestUnknownColumnsRaise:
             })
         # Row unchanged (atomicity — the raise happened outside the transaction).
         assert get_memory(db_conn, mem_id)["context"] == "A"
+
+
+# ---------------------------------------------------------------------------
+# Bug 3 part 2 (#374) — save-path strict-on-ingress for sub-object keys
+# ---------------------------------------------------------------------------
+#
+# The first bug-3 fix wired strict=True into _canonicalize_dict_item but
+# only called it from update_memory's merge path. The save ingress
+# (create_memory) bypassed it entirely — _serialize_json_fields was a raw
+# json.dumps passthrough, so dict-list items with unknown sub-object keys
+# (e.g. active_tasks=[{"id":"abc","subject":"foo"}]) were silently stored
+# as verbatim junk that read back as empty dataclass instances via the
+# lenient read path. Discovered by the post-CODE harvester dogfooding the
+# new contract.
+#
+# Fix: create_memory now runs _canonicalize_dict_item over DICT_LIST_FIELDS
+# BEFORE _serialize_json_fields. Validation-before-write invariant applies
+# symmetrically to save and update: a raise leaves the DB untouched.
+
+
+class TestBug3SavePathStrict:
+    def test_save_raises_on_unknown_subobject_key_in_entities(self, db_conn):
+        """Symmetric with the existing update-path test. The save ingress
+        must raise ValueError on unknown Entity sub-object keys."""
+        from scripts.database import create_memory
+        with pytest.raises(ValueError, match="Unknown keys for Entity"):
+            create_memory(db_conn, {
+                "context": "A",
+                "entities": [{"name": "Redis", "description": "cache"}],
+            })
+
+    def test_save_raises_on_unknown_subobject_key_in_active_tasks(self, db_conn):
+        """Harvester's exact reproducer: active_tasks with id/subject keys
+        instead of task/status/priority must raise ValueError on save."""
+        from scripts.database import create_memory
+        with pytest.raises(ValueError, match="Unknown keys for TaskItem"):
+            create_memory(db_conn, {
+                "context": "harvester repro",
+                "active_tasks": [
+                    {"id": "abc", "subject": "foo"},
+                    {"id": "def", "subject": "bar"},
+                ],
+            })
+
+    def test_save_raises_on_unknown_subobject_key_in_decisions(self, db_conn):
+        """Decisions path also strict on save."""
+        from scripts.database import create_memory
+        with pytest.raises(ValueError, match="Unknown keys for Decision"):
+            create_memory(db_conn, {
+                "context": "A",
+                "decisions": [{"decision": "D1", "bogus_field": "x"}],
+            })
+
+    def test_save_atomicity_on_unknown_subobject_key(self, db_conn):
+        """A raise during canonicalization must leave the memories table
+        unchanged — no partial row inserted. Validation-before-write."""
+        from scripts.database import create_memory
+        rows_before = db_conn.execute(
+            "SELECT COUNT(*) FROM memories"
+        ).fetchone()[0]
+        with pytest.raises(ValueError):
+            create_memory(db_conn, {
+                "context": "should not persist",
+                "entities": [{"name": "X", "bogus": "y"}],
+            })
+        rows_after = db_conn.execute(
+            "SELECT COUNT(*) FROM memories"
+        ).fetchone()[0]
+        assert rows_after == rows_before
+
+    def test_save_canonicalizes_dict_items_on_write(self, db_conn):
+        """
+        The save path round-trips each dict-list item through its dataclass,
+        so the stored shape is canonical — defaults are populated and
+        None-vs-missing aliasing is resolved to a single shape. Symmetric
+        with update_memory's merge path.
+        """
+        from scripts.database import create_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "context": "canonicalization check",
+            "active_tasks": [{"task": "T1"}],
+            "entities": [{"name": "Redis"}],
+            "decisions": [{"decision": "D1"}],
+        })
+        result = get_memory(db_conn, mem_id)
+        # TaskItem defaults status='pending'
+        assert result["active_tasks"] == [{"task": "T1", "status": "pending"}]
+        # Entity canonical shape
+        assert result["entities"][0]["name"] == "Redis"
+        # Decision canonical shape
+        assert result["decisions"][0]["decision"] == "D1"
+
+    def test_save_with_string_shorthand_in_list_fields(self, db_conn):
+        """
+        Regression: string shorthand for list fields (e.g.
+        entities=["Redis"]) must still work after canonicalization. The
+        _canonicalize_dict_item helper routes str inputs through the
+        non-strict cls.from_dict(str) path — bug 3 strictness only applies
+        to dict inputs.
+        """
+        from scripts.database import create_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "context": "string shorthand",
+            "entities": ["Redis", "Postgres"],
+        })
+        result = get_memory(db_conn, mem_id)
+        names = [e["name"] for e in result["entities"]]
+        assert names == ["Redis", "Postgres"]
 
 
 # ---------------------------------------------------------------------------

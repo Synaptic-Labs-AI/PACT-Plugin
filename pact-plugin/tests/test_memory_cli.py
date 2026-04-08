@@ -951,6 +951,31 @@ class TestCliSaveValueError:
         assert err_output["error"] == "ValueError"
         assert "allowed_fields" in err_output
 
+    def test_save_subobject_value_error(self, mock_pact_memory, capsys):
+        """Bug 3 part 2 (#374): unknown sub-object keys on the save path
+        route through the same cmd_save ValueError handler as top-level
+        key errors. Exit code 2, allowed_fields present in envelope.
+        Before the fix, create_memory silently accepted junk sub-object
+        keys so this handler was unreachable for sub-object errors."""
+        mock_pact_memory.save.side_effect = ValueError(
+            "Unknown keys for TaskItem: ['id', 'subject']. "
+            "Allowed keys: notes, priority, status, task"
+        )
+        parser = build_parser()
+        args = parser.parse_args([
+            "save",
+            '{"context":"x","active_tasks":[{"id":"a","subject":"b"}]}',
+        ])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 2
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "ValueError"
+        assert "TaskItem" in err_output["message"]
+        assert "allowed_fields" in err_output
+
 
 # ---------------------------------------------------------------------------
 # Delete Command

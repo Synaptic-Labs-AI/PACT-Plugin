@@ -694,8 +694,28 @@ def create_memory(
     working = {k: v for k, v in memory.items() if k not in ("id", "created_at")}
     _reject_unknown_columns(working, ALLOWED_UPDATE_COLUMNS, operation="save")
 
+    # STRICT sub-object validation — symmetric with update_memory's merge path
+    # (bug 3 part 2, #374). The first bug-3 fix wired strict=True into
+    # _canonicalize_dict_item, but that hook only fires from _merge_with_dedup
+    # inside update_memory. The save ingress bypassed it, so create_memory
+    # silently stored dict-list items with unknown sub-object keys (e.g.
+    # active_tasks=[{"id": "abc", "subject": "foo"}]) as verbatim junk that
+    # read back as empty dataclass instances via the lenient read path.
+    #
+    # Canonicalization runs BEFORE _serialize_json_fields so that any raise
+    # leaves the DB untouched (validation-before-write invariant). String
+    # shorthand (e.g. entities=["Redis"]) still works — _canonicalize_dict_item
+    # routes str inputs through the non-strict cls.from_dict(str) path.
+    normalized = dict(memory)
+    for field in DICT_LIST_FIELDS:
+        items = normalized.get(field)
+        if items:
+            normalized[field] = [
+                _canonicalize_dict_item(field, item) for item in items
+            ]
+
     # Prepare data with JSON serialization
-    data = _serialize_json_fields(memory)
+    data = _serialize_json_fields(normalized)
 
     # Set timestamps
     now = datetime.now(timezone.utc).isoformat()
