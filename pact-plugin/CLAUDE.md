@@ -154,10 +154,12 @@ When a user requests work without specifying a workflow, invoke the appropriate 
 
 ### Memory Management
 
-Three independent decisions govern where memory goes:
+Whenever you have an insight worth remembering, save it as a memory.
 
-- **User/feedback/project/reference fact?** → Write to `MEMORY.md` and individual memory files directly via the `Write` tool. Only the first 200 lines / 25KB of `MEMORY.md` auto-load at session start; content past that is still readable on demand.
-- **Durable cross-session project knowledge** (architectural decisions, recurring patterns, calibration data)? → Delegate to the secretary — query via `SendMessage` for reads; delegate saves via harvest triggers or ad-hoc save requests.
+Ask these three questions to decide where to save the memory:
+
+- **Context you need loaded at every session start?** (user profile, feedback/corrections, project state, external references) → Save to auto-memory per the auto-memory protocol (documented in the `# auto memory` system prompt section loaded at session start). Only the first 200 lines / 25KB of `MEMORY.md` auto-load; content past that is still readable on demand.
+- **Queryable knowledge for on-demand retrieval by any agent?** (architectural decisions, recurring patterns, calibration data) → Delegate to the secretary — query via `SendMessage` for reads; delegate saves via harvest triggers or ad-hoc save requests.
 - **Agent-specific expertise?** → Skip — specialists manage their own accumulated domain knowledge.
 
 #### Querying the Secretary
