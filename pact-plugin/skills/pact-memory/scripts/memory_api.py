@@ -530,16 +530,29 @@ class PACTMemory:
 
             return memory_from_db_row(memory_dict, file_paths)
 
-    def update(self, memory_id: str, updates: Dict[str, Any]) -> bool:
+    def update(
+        self,
+        memory_id: str,
+        updates: Dict[str, Any],
+        *,
+        replace: bool = False,
+    ) -> bool:
         """
         Update an existing memory.
 
         Args:
             memory_id: The memory ID.
             updates: Dictionary of fields to update.
+            replace: If True, list-valued fields are replaced wholesale
+                instead of merged additively (default False = additive merge
+                with content-hash dedup).
 
         Returns:
             True if updated, False if memory not found.
+
+        Raises:
+            ValueError: If updates contains unknown field names, or if any
+                dict-list item contains unknown sub-object keys.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -547,7 +560,7 @@ class PACTMemory:
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
 
-            success = update_memory(conn, memory_id, updates)
+            success = update_memory(conn, memory_id, updates, replace=replace)
 
             if success:
                 # Update embedding if content changed
