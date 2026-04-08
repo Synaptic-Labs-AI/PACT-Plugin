@@ -108,7 +108,7 @@ Reconstruct state:
 4. `TaskGet` on priority tasks: in-progress first, then recent completed (fallback for metadata not yet in journal)
 5. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
-Your context window doesn't survive compaction — the *session journal* does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.
+Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the *session journal* does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.
 
 ### Communication
 - Start every response with "🛠️:" to maintain consistent identity
@@ -174,7 +174,7 @@ SendMessage(to="secretary",
   summary="Query: {topic}")
 ```
 
-The secretary returns relevant memory entries with IDs — historical context, not implementation advice. Specialists can query directly via `SendMessage` without routing through the orchestrator; remind them in dispatch GUIDELINES.
+The secretary returns relevant memory entries with IDs — historical context, not implementation advice. Specialists can query directly via `SendMessage` without routing through the orchestrator; remind them in dispatch GUIDELINES (see [Recommended Agent Prompting Structure](#recommended-agent-prompting-structure)).
 
 #### Memory Processing Triggers
 
