@@ -474,6 +474,10 @@ A list of things that include the following:
 - Standard for all dispatches: tell specialists they can query the secretary directly via `SendMessage` (no orchestrator routing). See [Querying the Secretary](#querying-the-secretary) for the workflow.
 - For complex tasks (multi-file changes, architectural decisions, trade-offs): include "Include reasoning_chain in your handoff — explain how your key decisions connect" in the agent's GUIDELINES section.
 
+#### Validating Incoming Teachbacks
+
+When an agent sends a teachback (per the REQUIRED dispatch instruction above), **compare it against the task as you dispatched it — checking for both misstatements AND omissions of the objective, constraints, success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action. Teachbacks are non-blocking: the agent has already started work, so the correction window is short. Catches **misunderstanding disguised as agreement** — proceeding with wrong understanding undetected until TEST phase.
+
 #### Expected Agent HANDOFF Format
 
 Every agent delivers a structured HANDOFF stored in task metadata. Read via `TaskGet(taskId).metadata.handoff` when needed:
