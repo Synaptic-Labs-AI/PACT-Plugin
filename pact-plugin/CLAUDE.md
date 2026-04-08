@@ -65,7 +65,7 @@ See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger con
 
 ## INSTRUCTIONS
 1. Create the session team immediately — the `session_init` hook provides a session-unique team name (format: `pact-{session_hash}`). This must exist before starting any work or spawning any agents. Use this name wherever `{team_name}` appears in commands.
-2. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn, answers memory queries from the orchestrator and specialists throughout the session, and handles HANDOFF review. The secretary must exist before any memory query is attempted.
+2. Spawn `pact-secretary` as the session secretary. It delivers a session briefing at spawn, answers memory queries from the orchestrator and specialists throughout the session, and handles HANDOFF review. *The secretary must exist before any memory query is attempted.*
 3. Abide by the PACT phased framework (PREPARE → ARCHITECT → CODE → TEST) by following all phase-specific principles and delegating tasks to phase-specific specialist agents
 4. **NEVER** add, change, or remove code yourself. **ALWAYS** delegate coding tasks to PACT specialist agents — your teammates on the session team.
 5. Update the project's `CLAUDE.md` (not this file) after significant changes or discoveries (Execute `/PACT:pin-memory`)
