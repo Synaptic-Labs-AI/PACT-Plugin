@@ -350,6 +350,70 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
 
 
 # =============================================================================
+# Column allow-list (issue #374 — bug 2 fix)
+# =============================================================================
+#
+# The `memories` table allows the following columns in write paths. Any unknown
+# key passed to save_memory() or update_memory() raises ValueError instead of
+# being silently dropped (which was the old bug 2 behavior). This matters
+# because typos in payloads — especially sub-object keys that looked like
+# top-level keys (`description` instead of `notes`) — used to disappear with
+# no warning, causing silent data loss.
+#
+# `id` and `created_at` are intentionally excluded from the update allow-list:
+# update_memory() pops them from the payload BEFORE validation so callers can
+# harmlessly pass a full memory dict through without tripping validation. This
+# preserves the existing "id/created_at silently ignored on update" contract
+# (test_ignores_id_and_created_at). create_memory() handles `id` separately
+# via memory.get("id") before the validation step.
+SCALAR_FIELDS = frozenset({
+    "context", "goal", "project_id", "session_id", "updated_at",
+})
+
+STRING_LIST_FIELDS = frozenset({
+    "lessons_learned", "reasoning_chains",
+    "agreements_reached", "disagreements_resolved",
+})
+
+DICT_LIST_FIELDS = frozenset({
+    "active_tasks", "decisions", "entities",
+})
+
+LIST_FIELDS = STRING_LIST_FIELDS | DICT_LIST_FIELDS
+
+# All columns a caller may set via update_memory (id/created_at handled specially).
+ALLOWED_UPDATE_COLUMNS = SCALAR_FIELDS | LIST_FIELDS
+
+# Columns create_memory/save_memory may set; adds `id` and `created_at` which
+# are legal on create but not on update.
+ALLOWED_CREATE_COLUMNS = ALLOWED_UPDATE_COLUMNS | frozenset({"id", "created_at"})
+
+
+def _reject_unknown_columns(
+    updates: Dict[str, Any],
+    allowed: frozenset,
+    operation: str,
+) -> None:
+    """
+    Raise ValueError if `updates` contains any keys not in `allowed`.
+
+    The error message lists both the unknown keys (for debugging) and the
+    allowed-field set (for discoverability). This is the primary public
+    contract for bug 2 — callers rely on the message shape in the JSON
+    error envelope rendered by cli.py::cmd_update.
+    """
+    unknown = sorted(set(updates) - allowed)
+    if not unknown:
+        return
+    allowed_list = ", ".join(sorted(allowed))
+    unknown_list = ", ".join(repr(k) for k in unknown)
+    raise ValueError(
+        f"Unknown memory field(s) for {operation}: {unknown_list}. "
+        f"Allowed fields: {allowed_list}"
+    )
+
+
+# =============================================================================
 # JSON Field Helpers
 # =============================================================================
 
@@ -441,6 +505,13 @@ def create_memory(
     # Generate ID if not provided
     memory_id = memory.get("id") or generate_id()
 
+    # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
+    # Strip id/created_at from the validation view: id is handled above, and
+    # create_memory writes created_at itself. Both are legitimate keys in a
+    # create payload; they just aren't "unknown".
+    working = {k: v for k, v in memory.items() if k not in ("id", "created_at")}
+    _reject_unknown_columns(working, ALLOWED_UPDATE_COLUMNS, operation="save")
+
     # Prepare data with JSON serialization
     data = _serialize_json_fields(memory)
 
@@ -526,29 +597,24 @@ def update_memory(
     if get_memory(conn, memory_id) is None:
         return False
 
+    # Strip id/created_at BEFORE validation so callers can pass a full memory
+    # dict through without tripping validation (preserves the
+    # test_ignores_id_and_created_at contract).
+    working = {k: v for k, v in updates.items() if k not in ("id", "created_at")}
+
+    # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
+    # The old code silently filtered unknown keys to the whitelist; that was
+    # the bug. See _reject_unknown_columns for the error contract.
+    _reject_unknown_columns(working, ALLOWED_UPDATE_COLUMNS, operation="update")
+
     # Prepare updates with JSON serialization
-    data = _serialize_json_fields(updates)
-
-    # Build dynamic UPDATE statement
-    # Exclude id and created_at from updates
-    data.pop("id", None)
-    data.pop("created_at", None)
-
-    # Whitelist of columns allowed in SET clause to prevent SQL injection
-    # via crafted dict keys. Must match the memories table schema.
-    ALLOWED_COLUMNS = {
-        "context", "goal", "active_tasks", "lessons_learned",
-        "decisions", "entities", "reasoning_chains",
-        "agreements_reached", "disagreements_resolved",
-        "project_id", "session_id", "updated_at",
-    }
-    data = {k: v for k, v in data.items() if k in ALLOWED_COLUMNS}
+    data = _serialize_json_fields(working)
 
     # Always update updated_at
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     if not data:
-        return True  # Nothing to update
+        return True  # Nothing to update (id/created_at only)
 
     set_clauses = [f"{key} = ?" for key in data.keys()]
     values = list(data.values()) + [memory_id]

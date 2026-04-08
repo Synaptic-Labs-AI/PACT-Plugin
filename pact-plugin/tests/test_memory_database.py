@@ -328,50 +328,113 @@ class TestMaintenance:
 
 
 # ---------------------------------------------------------------------------
-# ALLOWED_COLUMNS whitelist (Item 12)
+# Bug 2 fix (#374) — unknown column keys raise ValueError instead of silent drop
 # ---------------------------------------------------------------------------
+#
+# Before PR #374's commit 1, update_memory silently filtered unknown dict keys
+# via a hardcoded ALLOWED_COLUMNS set. A typo in the payload (e.g. `descrption`
+# instead of `description`, or `description` when the real field is `notes`)
+# would disappear with no warning — the CLI returned {"ok": true} on silent
+# data loss.
+#
+# New contract: unknown top-level keys raise ValueError BEFORE any DB write,
+# with an error message that names the offending key AND the allowed-field set.
+# The raise happens outside any transaction so no partial state is left
+# behind (atomicity).
 
-class TestAllowedColumnsWhitelist:
-    """Verify update_memory filters unknown column keys."""
+class TestUnknownColumnsRaise:
+    """Verify update_memory and save_memory (create_memory) raise on unknown keys."""
 
-    def test_unknown_columns_are_filtered(self, db_conn):
-        """Unknown dict keys should be silently dropped, not injected into SQL."""
+    def test_update_raises_on_unknown_key(self, db_conn):
+        """Unknown key in update payload must raise ValueError (bug 2 fix)."""
+        from scripts.database import create_memory, update_memory
+        mem_id = create_memory(db_conn, {"context": "Original"})
+        with pytest.raises(ValueError, match="Unknown memory field"):
+            update_memory(db_conn, mem_id, {"bogus_field": "x"})
+
+    def test_update_raises_on_sql_injection_attempt(self, db_conn):
+        """SQL-injection-shaped keys still raise (no silent drop regression)."""
+        from scripts.database import create_memory, update_memory
+        mem_id = create_memory(db_conn, {"context": "Original"})
+        with pytest.raises(ValueError, match="Unknown memory field"):
+            update_memory(db_conn, mem_id, {
+                "evil_column": "DROP TABLE memories",
+                "'; DROP TABLE memories; --": "injection attempt",
+            })
+
+    def test_update_error_lists_unknown_and_allowed(self, db_conn):
+        """Error message must name the bad keys AND the allowed set."""
+        from scripts.database import create_memory, update_memory
+        mem_id = create_memory(db_conn, {"context": "Test"})
+        with pytest.raises(ValueError) as excinfo:
+            update_memory(db_conn, mem_id, {"nonexistent_field": "x"})
+        msg = str(excinfo.value)
+        assert "nonexistent_field" in msg
+        assert "Allowed fields" in msg
+        # Allowed set must include at least the well-known columns so users
+        # can discover what they meant.
+        assert "context" in msg
+        assert "lessons_learned" in msg
+
+    def test_update_atomicity_on_unknown_key(self, db_conn):
+        """
+        A rejected update must leave the row unchanged.
+        If a payload mixes a valid field (context) with an unknown field (bogus),
+        the ValueError must be raised before any write, so the existing row
+        keeps its original value.
+        """
         from scripts.database import create_memory, update_memory, get_memory
         mem_id = create_memory(db_conn, {"context": "Original"})
-        # Attempt to update with a mix of valid and invalid keys
-        result = update_memory(db_conn, mem_id, {
-            "context": "Updated",
-            "evil_column": "DROP TABLE memories",
-            "'; DROP TABLE memories; --": "injection attempt",
-        })
-        assert result is True
-        mem = get_memory(db_conn, mem_id)
-        assert mem["context"] == "Updated"
+        with pytest.raises(ValueError):
+            update_memory(db_conn, mem_id, {"context": "Updated", "bogus": "x"})
+        # Row must be unchanged — no partial apply.
+        assert get_memory(db_conn, mem_id)["context"] == "Original"
 
-    def test_only_whitelisted_columns_applied(self, db_conn):
-        """Only columns in ALLOWED_COLUMNS should be written."""
+    def test_update_only_valid_keys_succeeds(self, db_conn):
+        """Happy path: well-formed updates still work (no regression)."""
         from scripts.database import create_memory, update_memory, get_memory
         mem_id = create_memory(db_conn, {"context": "Test"})
-        update_memory(db_conn, mem_id, {
-            "goal": "New goal",
-            "nonexistent_field": "should be ignored",
-        })
-        mem = get_memory(db_conn, mem_id)
-        assert mem["goal"] == "New goal"
-        # Verify the table still has correct schema (no extra columns)
-        cursor = db_conn.execute("PRAGMA table_info(memories)")
-        col_names = {row[1] for row in cursor.fetchall()}
-        assert "nonexistent_field" not in col_names
+        assert update_memory(db_conn, mem_id, {"goal": "New goal"}) is True
+        assert get_memory(db_conn, mem_id)["goal"] == "New goal"
 
-    def test_id_and_created_at_excluded(self, db_conn):
-        """id and created_at should not be updatable even though they exist."""
+    def test_save_raises_on_unknown_key(self, db_conn):
+        """
+        save_memory (create_memory) is symmetric with update_memory.
+
+        Before PR #374, create_memory silently dropped unknown top-level keys
+        because _serialize_json_fields preserved them but the INSERT only read
+        named columns via data.get(...). Now unknown keys raise ValueError at
+        the validation step, before any DB write.
+        """
+        from scripts.database import create_memory
+        with pytest.raises(ValueError, match="Unknown memory field"):
+            create_memory(db_conn, {"context": "Test", "bogus_field": "x"})
+
+    def test_save_allows_id_and_created_at(self, db_conn):
+        """id and created_at are legal on create (not 'unknown')."""
+        from scripts.database import create_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "id": "explicit-id",
+            "context": "Test",
+        })
+        assert mem_id == "explicit-id"
+        assert get_memory(db_conn, mem_id)["context"] == "Test"
+
+    def test_id_and_created_at_excluded_from_update(self, db_conn):
+        """id and created_at are silently stripped from update payloads (pre-validation).
+
+        This preserves the historical contract that callers can pass a full
+        memory dict (including id/created_at from a prior get()) through
+        update_memory without tripping validation. They are NOT persisted.
+        """
         from scripts.database import create_memory, update_memory, get_memory
         mem_id = create_memory(db_conn, {"context": "Test"})
         original = get_memory(db_conn, mem_id)
-        update_memory(db_conn, mem_id, {
+        # No ValueError — id/created_at are stripped before validation.
+        assert update_memory(db_conn, mem_id, {
             "id": "hijacked-id",
             "created_at": "1970-01-01T00:00:00",
-        })
+        }) is True
         after = get_memory(db_conn, mem_id)
         assert after["id"] == mem_id
         assert after["created_at"] == original["created_at"]
