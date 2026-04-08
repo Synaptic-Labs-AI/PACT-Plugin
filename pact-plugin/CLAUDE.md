@@ -57,7 +57,7 @@ Certain conditions bypass normal orchestration and escalate directly to user:
 | **HALT** | SECURITY, DATA, ETHICS | All work stops; user must acknowledge before resuming |
 | **ALERT** | QUALITY, SCOPE, META-BLOCK | Work pauses; user decides next action |
 
-**Any agent** can emit algedonic signals when they recognize viability threats. You **MUST** surface them to the user immediately—cannot suppress or delay.
+**Any agent** can emit algedonic signals when they recognize viability threats. As orchestrator, you **MUST** surface them to the user immediately—cannot suppress or delay.
 
 See @~/.claude/protocols/pact-plugin/algedonic.md for full protocol, trigger conditions, and signal format.
 
