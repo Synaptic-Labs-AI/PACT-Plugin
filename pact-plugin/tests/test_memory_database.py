@@ -420,6 +420,16 @@ class TestUnknownColumnsRaise:
         assert mem_id == "explicit-id"
         assert get_memory(db_conn, mem_id)["context"] == "Test"
 
+    def test_update_json_fields_additive_on_empty(self, db_conn):
+        """
+        Updating a memory whose list field is empty simply sets it — no
+        duplication surprise from the dedup merge path.
+        """
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"context": "Test"})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["New lesson"]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["New lesson"]
+
     def test_id_and_created_at_excluded_from_update(self, db_conn):
         """id and created_at are silently stripped from update payloads (pre-validation).
 
@@ -438,6 +448,278 @@ class TestUnknownColumnsRaise:
         after = get_memory(db_conn, mem_id)
         assert after["id"] == mem_id
         assert after["created_at"] == original["created_at"]
+
+    def test_update_raises_on_unknown_subobject_key_in_entities(self, db_conn):
+        """
+        End-to-end: unknown sub-object keys in dict list fields raise
+        ValueError via the bug-3 strict-from-dict path that fires inside
+        _canonicalize_dict_item during the merge. Row stays unchanged.
+        """
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"context": "A"})
+        with pytest.raises(ValueError, match="Unknown keys for Entity"):
+            update_memory(db_conn, mem_id, {
+                "entities": [{"name": "Redis", "description": "cache"}],
+            })
+        # Row unchanged (atomicity — the raise happened outside the transaction).
+        assert get_memory(db_conn, mem_id)["context"] == "A"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 fix (#374) — additive-by-default list merge with content-hash dedup
+# ---------------------------------------------------------------------------
+#
+# Before PR #374, updating a list field replaced it wholesale: passing
+# {"lessons_learned": ["c"]} to a memory whose lessons_learned was
+# ["a", "b"] would overwrite it to ["c"], silently losing the two existing
+# items. The pinned recovery protocol told every session to
+# read-merge-write-back, which was a clunky workaround.
+#
+# New default behavior: list fields append with content-hash dedup.
+# Repeat calls are idempotent. The legacy wholesale-replace is available
+# via replace=True.
+
+class TestBug1AdditiveListMerge:
+    """Additive merge + dedup for list fields. Default behavior."""
+
+    # --- String list fields -----------------------------------------------
+
+    def test_append_string_list_to_existing(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a", "b"]})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["c"]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a", "b", "c"]
+
+    def test_dedup_string_list_overlap(self, db_conn):
+        """b already exists — it should NOT be duplicated."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a", "b"]})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["b", "c"]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a", "b", "c"]
+
+    def test_dedup_within_incoming_string_batch(self, db_conn):
+        """A caller sending [a, a, b] gets [a, b]."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": []})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["a", "a", "b"]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a", "b"]
+
+    def test_dedup_strips_whitespace(self, db_conn):
+        """'  a  ' and 'a' collide (hash over stripped string)."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a"]})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["  a  "]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a"]
+
+    def test_repeat_update_is_idempotent(self, db_conn):
+        """Calling update twice with the same incoming list produces stable state."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a"]})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["b", "c"]})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["b", "c"]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a", "b", "c"]
+
+    def test_order_preserved_existing_before_incoming(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["x", "y"]})
+        update_memory(db_conn, mem_id, {"lessons_learned": ["a", "b"]})
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["x", "y", "a", "b"]
+
+    # --- Dict list fields -------------------------------------------------
+
+    def test_append_dict_list_preserves_nested_updates(self, db_conn):
+        """
+        Rationale (architect §2): dedup by `name` alone would collapse
+        legitimate nested-field updates. Entity{name:"X",notes:"old"} and
+        Entity{name:"X",notes:"new"} are DIFFERENT entries; both preserved.
+        """
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "entities": [{"name": "Redis", "notes": "old"}],
+        })
+        update_memory(db_conn, mem_id, {
+            "entities": [{"name": "Redis", "notes": "new"}],
+        })
+        ents = get_memory(db_conn, mem_id)["entities"]
+        assert len(ents) == 2
+        assert {"name": "Redis", "notes": "old"} in ents
+        assert {"name": "Redis", "notes": "new"} in ents
+
+    def test_dedup_dict_list_exact_duplicate(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "entities": [{"name": "Redis", "notes": "n"}],
+        })
+        update_memory(db_conn, mem_id, {
+            "entities": [{"name": "Redis", "notes": "n"}],
+        })
+        assert len(get_memory(db_conn, mem_id)["entities"]) == 1
+
+    def test_dedup_dict_list_none_vs_missing_optional(self, db_conn):
+        """
+        {"name": "X"} and {"name": "X", "type": None} must collide. The
+        dataclass round-trip in _canonicalize_dict_item drops falsy
+        optionals in to_dict(), so both canonicalize to {"name": "X"}.
+        """
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"entities": [{"name": "X"}]})
+        update_memory(db_conn, mem_id, {
+            "entities": [{"name": "X", "type": None}],
+        })
+        assert len(get_memory(db_conn, mem_id)["entities"]) == 1
+
+    def test_dedup_active_tasks(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "active_tasks": [{"task": "T1"}],
+        })
+        update_memory(db_conn, mem_id, {
+            "active_tasks": [{"task": "T1"}, {"task": "T2"}],
+        })
+        tasks = get_memory(db_conn, mem_id)["active_tasks"]
+        assert len(tasks) == 2
+        assert {"task": "T1", "status": "pending"} in tasks
+        assert {"task": "T2", "status": "pending"} in tasks
+
+    def test_dedup_decisions(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "decisions": [{"decision": "Use Redis", "rationale": "fast"}],
+        })
+        update_memory(db_conn, mem_id, {
+            "decisions": [{"decision": "Use Redis", "rationale": "fast"}],
+        })
+        assert len(get_memory(db_conn, mem_id)["decisions"]) == 1
+
+
+class TestBug1ReplaceKwarg:
+    """replace=True restores legacy wholesale-replace behavior."""
+
+    def test_replace_clobbers_string_list(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a", "b", "c"]})
+        update_memory(
+            db_conn, mem_id,
+            {"lessons_learned": ["new"]},
+            replace=True,
+        )
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["new"]
+
+    def test_replace_still_dedups_within_incoming(self, db_conn):
+        """replace=True still dedups duplicate items within the new batch."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["old"]})
+        update_memory(
+            db_conn, mem_id,
+            {"lessons_learned": ["a", "a", "b"]},
+            replace=True,
+        )
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a", "b"]
+
+    def test_replace_clobbers_dict_list(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "entities": [{"name": "OldA"}, {"name": "OldB"}],
+        })
+        update_memory(
+            db_conn, mem_id,
+            {"entities": [{"name": "NewOnly"}]},
+            replace=True,
+        )
+        assert get_memory(db_conn, mem_id)["entities"] == [{"name": "NewOnly"}]
+
+    def test_replace_validates_sub_object_keys(self, db_conn):
+        """Even under replace, strict from_dict validation still runs."""
+        from scripts.database import create_memory, update_memory
+        mem_id = create_memory(db_conn, {"entities": [{"name": "X"}]})
+        with pytest.raises(ValueError, match="Unknown keys for Entity"):
+            update_memory(
+                db_conn, mem_id,
+                {"entities": [{"name": "X", "bogus": "y"}]},
+                replace=True,
+            )
+
+
+class TestBug1ScalarVsListSemantics:
+    """Scalar fields still replace even when list fields merge."""
+
+    def test_scalar_fields_replace_not_merge(self, db_conn):
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"context": "old", "goal": "old goal"})
+        update_memory(db_conn, mem_id, {"context": "new"})
+        result = get_memory(db_conn, mem_id)
+        assert result["context"] == "new"
+        assert result["goal"] == "old goal"
+
+    def test_mixed_scalar_and_list_update(self, db_conn):
+        """One call: scalar replaces, list appends."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {
+            "context": "old",
+            "lessons_learned": ["a"],
+        })
+        update_memory(db_conn, mem_id, {
+            "context": "new",
+            "lessons_learned": ["b"],
+        })
+        result = get_memory(db_conn, mem_id)
+        assert result["context"] == "new"
+        assert result["lessons_learned"] == ["a", "b"]
+
+
+class TestBug1HashStability:
+    """Content-hash key properties."""
+
+    def test_hash_stable_across_calls(self):
+        from scripts.database import _content_hash
+        h1 = _content_hash("lessons_learned", "abc")
+        h2 = _content_hash("lessons_learned", "abc")
+        assert h1 == h2
+
+    def test_hash_dict_order_independent(self):
+        """{a:1, b:2} and {b:2, a:1} must hash to the same key."""
+        from scripts.database import _content_hash
+        h1 = _content_hash("entities", {"name": "X", "type": "svc"})
+        h2 = _content_hash("entities", {"type": "svc", "name": "X"})
+        assert h1 == h2
+
+    def test_hash_differs_on_content_change(self):
+        from scripts.database import _content_hash
+        h1 = _content_hash("lessons_learned", "abc")
+        h2 = _content_hash("lessons_learned", "abd")
+        assert h1 != h2
+
+
+class TestBug1TransactionalAtomicity:
+    """Rejected updates must leave the row unchanged."""
+
+    def test_sub_object_validation_failure_rolls_back(self, db_conn):
+        """
+        Passing a mix of a valid list item and an invalid one (unknown
+        sub-object key) must raise ValueError WITHOUT writing ANY items
+        to the row. Validation runs outside the BEGIN IMMEDIATE so the
+        transaction is never started.
+        """
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"entities": [{"name": "Existing"}]})
+        with pytest.raises(ValueError):
+            update_memory(db_conn, mem_id, {
+                "entities": [
+                    {"name": "Good"},
+                    {"name": "Bad", "bogus": "y"},
+                ],
+            })
+        result = get_memory(db_conn, mem_id)
+        assert result["entities"] == [{"name": "Existing"}]
+
+    def test_list_type_coercion_failure_raises(self, db_conn):
+        """A non-list value for a list field raises ValueError cleanly."""
+        from scripts.database import create_memory, update_memory, get_memory
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a"]})
+        with pytest.raises(ValueError, match="must be a list"):
+            update_memory(db_conn, mem_id, {"lessons_learned": "not a list"})
+        # Row unchanged
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["a"]
 
 
 # ---------------------------------------------------------------------------

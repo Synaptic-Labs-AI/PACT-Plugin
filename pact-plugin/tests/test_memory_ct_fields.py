@@ -552,33 +552,73 @@ class TestModelCTFieldsEdgeCases:
         assert storage["disagreements_resolved"] == []
 
 
-class TestUpdateOverwriteCTFields:
-    """Test that CT fields can be overwritten via update_memory."""
+class TestUpdateCTFieldsAdditiveAndReplace:
+    """
+    Bug 1 (#374): CT fields now append-with-dedup by default. The legacy
+    wholesale-replace behavior is available via replace=True.
+    """
 
-    def test_overwrite_ct_fields(self, db_conn):
-        """Create a memory with CT fields, update them, verify new values returned."""
-        original = {
+    def test_append_ct_fields_by_default(self, db_conn):
+        """Default update appends new items to existing CT lists."""
+        memory_id = create_memory(db_conn, {
             "context": "Original context",
             "reasoning_chains": ["original chain"],
             "agreements_reached": ["original agreement"],
             "disagreements_resolved": ["original resolution"],
-        }
-        memory_id = create_memory(db_conn, original)
+        })
 
-        # Overwrite with new values
-        updated = update_memory(db_conn, memory_id, {
+        assert update_memory(db_conn, memory_id, {
+            "reasoning_chains": ["new chain A", "new chain B"],
+            "agreements_reached": ["new agreement"],
+            "disagreements_resolved": ["new resolution"],
+        }) is True
+
+        retrieved = get_memory(db_conn, memory_id)
+        assert retrieved["reasoning_chains"] == [
+            "original chain", "new chain A", "new chain B",
+        ]
+        assert retrieved["agreements_reached"] == [
+            "original agreement", "new agreement",
+        ]
+        assert retrieved["disagreements_resolved"] == [
+            "original resolution", "new resolution",
+        ]
+        # Scalar fields still replace (context is unchanged here only because
+        # we didn't pass it in this update).
+        assert retrieved["context"] == "Original context"
+
+    def test_replace_ct_fields_with_replace_kwarg(self, db_conn):
+        """replace=True restores legacy wholesale-replace behavior."""
+        memory_id = create_memory(db_conn, {
+            "context": "Original context",
+            "reasoning_chains": ["original chain"],
+            "agreements_reached": ["original agreement"],
+            "disagreements_resolved": ["original resolution"],
+        })
+
+        assert update_memory(db_conn, memory_id, {
             "reasoning_chains": ["updated chain A", "updated chain B"],
             "agreements_reached": ["updated agreement"],
             "disagreements_resolved": ["updated resolution"],
-        })
-        assert updated is True
+        }, replace=True) is True
 
         retrieved = get_memory(db_conn, memory_id)
-        assert retrieved["reasoning_chains"] == ["updated chain A", "updated chain B"]
+        assert retrieved["reasoning_chains"] == [
+            "updated chain A", "updated chain B",
+        ]
         assert retrieved["agreements_reached"] == ["updated agreement"]
         assert retrieved["disagreements_resolved"] == ["updated resolution"]
-        # Original context should be untouched
         assert retrieved["context"] == "Original context"
+
+    def test_append_ct_fields_dedups_duplicate_items(self, db_conn):
+        """Appending an item that already exists is a no-op (content-hash dedup)."""
+        memory_id = create_memory(db_conn, {
+            "reasoning_chains": ["A", "B"],
+        })
+        update_memory(db_conn, memory_id, {
+            "reasoning_chains": ["B", "C"],  # "B" is a duplicate
+        })
+        assert get_memory(db_conn, memory_id)["reasoning_chains"] == ["A", "B", "C"]
 
 
 class TestFormatEntryFieldOrder:
