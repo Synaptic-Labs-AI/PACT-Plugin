@@ -46,8 +46,6 @@ The **user is ultimate policy authority**. Escalate to user when:
 - S3/S4 tension cannot be resolved (execution vs adaptation)
 - Non-negotiable boundaries are unclear
 
-The orchestrator operates *within* policy, not *above* it.
-
 ### Algedonic Signals (Emergency Bypass)
 
 Certain conditions bypass normal orchestration and escalate directly to user:
@@ -390,8 +388,6 @@ If you catch yourself mid-violation (already edited application code):
 2. **Revert** — Undo uncommitted changes (`git checkout -- <file>`)
 3. **Delegate** — Hand the task to the appropriate specialist
 4. **Note** — Briefly acknowledge the near-violation for learning
-
-This is not punitive—it's corrective. The goal is maintaining role boundaries.
 
 ### Delegate to Specialist Agents
 
