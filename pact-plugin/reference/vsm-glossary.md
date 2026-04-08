@@ -383,6 +383,7 @@ These terms are specific to PACT's implementation of VSM concepts.
 | System | Horizon | Focus |
 |--------|---------|-------|
 | **S1** | Minutes | Current subtask (agent implementation) |
+| **S2** | Parallel dispatch | Coordination across parallel specialists (boundary/convention enforcement during concurrent dispatch) |
 | **S3** | Hours | Current task/phase (orchestrator coordination) |
 | **S4** | Days | Current milestone/sprint (planning, adaptation) |
 | **S5** | Persistent | Project identity (values, non-negotiables) |
@@ -440,7 +441,7 @@ These terms are specific to PACT's implementation of VSM concepts.
 | META-BLOCK | 3+ imPACT cycles → ALERT | Escalation to user |
 | Override Protocol | HALT continuation procedure | Justified risk acceptance |
 | Research Spike | Extreme variety exploration | Pre-implementation recon |
-| Temporal Horizon | Time scale for each VSM system | S1=min, S3=hrs, S4=days, S5=persistent |
+| Temporal Horizon | Time scale for each VSM system | S1=min, S2=concurrent, S3=hrs, S4=days, S5=persistent |
 | Variety Score | 4-16 complexity assessment | Workflow ceremony selector |
 
 ---

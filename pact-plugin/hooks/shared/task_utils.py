@@ -1,8 +1,7 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: compaction_refresh.py, validate_handoff.py, phase_completion.py,
-         session_init.py
+Used by: compaction_refresh.py, phase_completion.py, session_init.py
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
@@ -77,14 +76,6 @@ def find_feature_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
     Returns:
         Feature task dict, or None if not found
     """
-    # Look for tasks with no blockedBy that have children
-    task_ids = {t.get("id") for t in tasks if t.get("id")}
-    blocked_by_ids = set()
-    for task in tasks:
-        blocked_by = task.get("blockedBy", [])
-        if blocked_by:
-            blocked_by_ids.update(blocked_by)
-
     # Feature task is one that blocks others but isn't blocked itself
     # (or has status in_progress at top level)
     for task in tasks:
