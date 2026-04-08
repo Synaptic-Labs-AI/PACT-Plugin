@@ -154,11 +154,11 @@ When a user requests work without specifying a workflow, invoke the appropriate 
 
 ### Memory Management
 
-PACT uses three memory layers with distinct ownership:
+Three independent decisions govern where memory goes:
 
-- **Auto-memory** (`MEMORY.md`, auto-loaded each session) — write durable user, feedback, project, or reference facts directly to `MEMORY.md` and individual memory files via the `Write` tool. Only the first 200 lines / 25KB of `MEMORY.md` auto-load at session start; content past that is still readable on demand.
-- **pact-memory** (SQLite, secretary-managed) — query via `SendMessage` to the secretary; delegate saves via harvest triggers or ad-hoc save requests.
-- **Agent persistent memory** (per-specialist, self-managed) — not your concern; specialists manage their own accumulated domain expertise.
+- **User/feedback/project/reference fact?** → Write to `MEMORY.md` and individual memory files directly via the `Write` tool. Only the first 200 lines / 25KB of `MEMORY.md` auto-load at session start; content past that is still readable on demand.
+- **Durable cross-session project knowledge** (architectural decisions, recurring patterns, calibration data)? → Delegate to the secretary — query via `SendMessage` for reads; delegate saves via harvest triggers or ad-hoc save requests.
+- **Agent-specific expertise?** → Skip — specialists manage their own accumulated domain knowledge.
 
 #### Querying the Secretary
 
