@@ -76,13 +76,6 @@ def find_feature_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
     Returns:
         Feature task dict, or None if not found
     """
-    # Look for tasks with no blockedBy that have children
-    blocked_by_ids = set()
-    for task in tasks:
-        blocked_by = task.get("blockedBy", [])
-        if blocked_by:
-            blocked_by_ids.update(blocked_by)
-
     # Feature task is one that blocks others but isn't blocked itself
     # (or has status in_progress at top level)
     for task in tasks:
