@@ -108,11 +108,7 @@ Reconstruct state:
 4. `TaskGet` on priority tasks: in-progress first, then recent completed (fallback for metadata not yet in journal)
 5. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
-**Two-tier state model**:
-- **Session journal** (durable): JSONL events at the path above. Survives compaction and task GC. Primary source for HANDOFFs, phase progress, and cross-session recovery.
-- **Task system** (ephemeral coordination): Status, blocking, assignment. `TaskList` summaries survive compaction, but task FILES may be GC'd by the platform in long sessions. Use journal events as authoritative when task metadata is unavailable.
-
-Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the journal does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.
+Your context window doesn't survive compaction — the *session journal* does. See @~/.claude/protocols/pact-plugin/pact-state-recovery.md for the full State Recovery Protocol.
 
 ### Communication
 - Start every response with "🛠️:" to maintain consistent identity
@@ -162,7 +158,7 @@ PACT uses three memory layers with distinct ownership:
 
 - **Auto-memory** (`MEMORY.md`, auto-loaded each session) — write durable user, feedback, project, or reference facts directly to `MEMORY.md` and individual memory files via the `Write` tool. Only the first 200 lines / 25KB of `MEMORY.md` auto-load at session start; content past that is still readable on demand.
 - **pact-memory** (SQLite, secretary-managed) — query via `SendMessage` to the secretary; delegate saves via harvest triggers or ad-hoc save requests.
-- **Agent persistent memory** (per-specialist, self-managed) — not your concern; specialists manage their own accumulated domain expertise. (See the `pact-memory` skill for storage paths and load behavior.)
+- **Agent persistent memory** (per-specialist, self-managed) — not your concern; specialists manage their own accumulated domain expertise.
 
 #### Querying the Secretary
 
@@ -189,7 +185,7 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 - After comPACT specialist completes → Standard Harvest
 - During wrap-up → Consolidation Harvest (Pass 2) with safety net for unprocessed HANDOFFs
 
-These triggers are idempotent — safe to fire even if HANDOFFs were already processed. The secretary discovers completed tasks via session journal `agent_handoff` events (primary source) and cross-references with `TaskList` (supplementary).
+These triggers are idempotent — safe to fire even if HANDOFFs were already processed.
 
 NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
