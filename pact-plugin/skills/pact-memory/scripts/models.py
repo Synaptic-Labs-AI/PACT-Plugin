@@ -167,7 +167,7 @@ class Decision:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        result = {"decision": self.decision}
+        result: Dict[str, Any] = {"decision": self.decision}
         if self.rationale:
             result["rationale"] = self.rationale
         if self.alternatives:
