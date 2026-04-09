@@ -977,6 +977,82 @@ class TestCliSaveValueError:
         assert "allowed_fields" in err_output
 
 
+class TestCliSystemErrorPathScrubbing:
+    """SYSTEM_ERROR envelope scrubs $HOME from exception messages (#374 R2-3a).
+
+    main() wraps handler exceptions and rewrites str(exc) with
+    os.path.expanduser("~") replaced by "~" before emitting the SYSTEM_ERROR
+    envelope (cli.py:326). Without scrubbing, absolute paths from internal
+    exception messages would leak user home paths into stderr where JSON
+    envelopes are commonly piped into shared logs.
+
+    Regression-guards commit f4c0d7d: "fix(pact-memory): SYSTEM_ERROR
+    envelope path scrubbing".
+    """
+
+    def test_system_error_scrubs_home_path(self, capsys):
+        """str(exc) containing expanduser('~') is rewritten to '~' in envelope."""
+        home = os.path.expanduser("~")
+        # Exception message embeds the expanded home path inside a plausible
+        # internal path — this is what a raw sqlite/OSError would contain.
+        leaky_path = os.path.join(home, ".claude", "pact-memory", "memory.db")
+        leaky_message = f"unable to open database file: {leaky_path}"
+
+        mock = MagicMock()
+        mock.save.side_effect = RuntimeError(leaky_message)
+        memory_dict = make_cli_memory_dict()
+
+        with patch("scripts.cli.PACTMemory", return_value=mock):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["save", json.dumps(memory_dict)])
+        assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "SYSTEM_ERROR"
+
+        msg = err_output["message"]
+        # Positive: the scrubbed "~" marker is present where the home used to be.
+        assert "~/.claude/pact-memory/memory.db" in msg
+        # Negative: the expanded absolute home path must NOT appear.
+        assert home not in msg, (
+            f"SYSTEM_ERROR envelope leaked absolute home path: {msg!r}"
+        )
+
+    def test_system_error_scrubs_realpath_home_form(self, capsys):
+        """macOS symlink-resolved $HOME form is also scrubbed.
+
+        On macOS, os.path.expanduser('~') may differ from the raw HOME env var
+        due to /var → /private/var or /tmp → /private/tmp symlinks. cli.py
+        scrubs by replacing os.path.expanduser('~') with '~' — this test asserts
+        that same form is what gets scrubbed when the exception message came
+        from a call site that used expanduser('~') as its path base.
+        """
+        expanded_home = os.path.expanduser("~")
+        # Build a leaky path using the expanduser form — this is the form
+        # cli.py's str(exc).replace(expanduser('~'), '~') will rewrite.
+        leaky_path = os.path.join(expanded_home, "Library", "logs", "memory.log")
+        leaky_message = f"permission denied writing {leaky_path}"
+
+        mock = MagicMock()
+        mock.save.side_effect = OSError(leaky_message)
+        memory_dict = make_cli_memory_dict()
+
+        with patch("scripts.cli.PACTMemory", return_value=mock):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["save", json.dumps(memory_dict)])
+        assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        msg = err_output["message"]
+        assert "~/Library/logs/memory.log" in msg
+        assert expanded_home not in msg, (
+            f"SYSTEM_ERROR envelope leaked expanded home path: {msg!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Delete Command
 # ---------------------------------------------------------------------------

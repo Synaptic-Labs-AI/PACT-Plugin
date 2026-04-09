@@ -1200,17 +1200,30 @@ class TestBug1LegacyRowGracefulDegradation:
 
     def test_legacy_row_additive_update_uses_safety_valve(self, db_conn, caplog):
         """
-        A legacy row with a stray sub-object key in `entities` must still
-        accept additive updates through update_memory. The _merge_with_dedup
-        safety valve (try/except → repr() fallback) should fire for the
-        legacy item so the merge succeeds and the new item is appended.
+        A legacy row with a genuinely uncanonicalizable sub-object in
+        `entities` must still accept additive updates through update_memory.
+        The _merge_with_dedup safety valve (try/except → repr() fallback)
+        should fire for the legacy item so the merge succeeds and the new
+        item is appended.
+
+        Fixture choice (post-R2-5): we use a non-dict, non-str item (a raw
+        integer) to defeat BOTH strict AND lenient canonicalization. R2-5
+        added a lenient path that drops unknown keys on legacy dicts, so a
+        plain stray-key dict no longer triggers the safety valve — the
+        lenient path succeeds and no WARNING fires. A non-dict/non-str
+        item hits the TypeError branch of _canonicalize_dict_item in
+        BOTH modes, forcing the repr() fallback and the WARNING log.
         """
         import logging
         from scripts.database import get_memory, update_memory
 
-        # Inject a legacy row: entities has one item with a stray key.
+        # Inject a legacy row: entities has one non-dict, non-str item
+        # (raw integer). This cannot be canonicalized via Entity.from_dict
+        # in either strict or lenient mode — _canonicalize_dict_item raises
+        # TypeError on non-dict/non-str input, which forces the safety
+        # valve repr() fallback in _merge_with_dedup.
         payload_entities = json.dumps(
-            [{"name": "LegacyRedis", "stray": "pre-374 junk"}]
+            [42]
         )
         db_conn.execute(
             """
@@ -1235,9 +1248,7 @@ class TestBug1LegacyRowGracefulDegradation:
         # Safety valve: the legacy item must be preserved verbatim because
         # we cannot canonicalize it; the new item is appended.
         assert len(ents) == 2, f"expected 2 entities (1 legacy + 1 new), got {ents}"
-        legacy_present = any(
-            isinstance(e, dict) and e.get("name") == "LegacyRedis" for e in ents
-        )
+        legacy_present = any(e == 42 for e in ents)
         new_present = any(
             isinstance(e, dict) and e.get("name") == "NewEntity" for e in ents
         )
@@ -1433,3 +1444,197 @@ class TestBug1ValidationBeforeTransactionInvariant:
 
         assert self._snapshot_row(db_conn, mem_id) == pre_snapshot
         assert db_conn.total_changes == pre_changes
+
+
+class TestBug1EmptyListBranches:
+    """Empty list-field update branches (#374 R2-3c).
+
+    Two distinct documented branches in update_memory's list-field loop —
+    neither had direct coverage in round 1:
+
+    1. replace=True + empty list  → field is CLEARED (load-bearing contract
+       at database.py:866-869). This is the "clear this field" semantic.
+    2. replace=False + empty list → SHORT-CIRCUIT (F6 at database.py:874-876).
+       The loop `continue`s, nothing enters normalized[], and if only that
+       key was touched the whole update becomes a no-op that returns True
+       without bumping updated_at.
+    """
+
+    def _get_updated_at(self, db_conn, mem_id):
+        """Read updated_at directly (get_memory strips it via MemoryObject)."""
+        row = db_conn.execute(
+            "SELECT updated_at FROM memories WHERE id = ?", (mem_id,),
+        ).fetchone()
+        return row["updated_at"] if row else None
+
+    def test_replace_true_with_empty_list_clears_field(self, db_conn):
+        """replace=True + [] clears the field (docstring:866-869)."""
+        from scripts.database import create_memory, update_memory, get_memory
+
+        mem_id = create_memory(
+            db_conn, {"lessons_learned": ["item1", "item2"]},
+        )
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == ["item1", "item2"]
+
+        result = update_memory(
+            db_conn, mem_id, {"lessons_learned": []}, replace=True,
+        )
+
+        assert result is True
+        assert get_memory(db_conn, mem_id)["lessons_learned"] == [], (
+            "replace=True with empty list must CLEAR the field — this is "
+            "the documented 'clear this field' contract at database.py:866-869"
+        )
+
+    def test_additive_empty_list_short_circuit(self, db_conn):
+        """
+        F6 (#374 remediation, database.py:874-876): on the additive path,
+        an empty incoming list is a no-op. The loop `continue`s; if nothing
+        else was in the payload, normalized stays empty and the function
+        returns True without bumping updated_at.
+        """
+        from scripts.database import create_memory, update_memory, get_memory
+
+        mem_id = create_memory(db_conn, {"lessons_learned": ["item1"]})
+        pre_updated_at = self._get_updated_at(db_conn, mem_id)
+        pre_changes = db_conn.total_changes
+
+        result = update_memory(db_conn, mem_id, {"lessons_learned": []})
+
+        assert result is True, (
+            "empty-list additive no-op must return True (the update is "
+            "semantically successful — zero items to add)"
+        )
+        post = get_memory(db_conn, mem_id)
+        assert post["lessons_learned"] == ["item1"], (
+            "existing items must be untouched by an empty additive update"
+        )
+        assert self._get_updated_at(db_conn, mem_id) == pre_updated_at, (
+            "updated_at must NOT be bumped — F6 short-circuit skips the "
+            "UPDATE statement entirely"
+        )
+        assert db_conn.total_changes == pre_changes, (
+            f"no write should be attempted (total_changes moved "
+            f"{pre_changes}→{db_conn.total_changes})"
+        )
+
+
+class TestBug1ContentNoopSuppressesUpdatedAt:
+    """Content no-op suppresses updated_at bump (#374 R2-4).
+
+    When an additive update's incoming items are ALL already-present
+    duplicates, the content-hash dedup reduces the merge result to the
+    existing list. The current round-1 behavior still writes the row
+    (bumping updated_at) because the short-circuit only skipped the empty
+    incoming list, not the empty-merge-diff case.
+
+    This test expresses the DESIRED behavior after task #10's fix: when
+    the additive merge produces no new content, skip the UPDATE entirely
+    so updated_at stays stable.
+
+    If task #10 has not yet landed, this test WILL fail. That's expected —
+    it's the red-before-green for R2-4.
+    """
+
+    def _get_updated_at(self, db_conn, mem_id):
+        row = db_conn.execute(
+            "SELECT updated_at FROM memories WHERE id = ?", (mem_id,),
+        ).fetchone()
+        return row["updated_at"] if row else None
+
+    def test_additive_all_duplicates_suppresses_updated_at(self, db_conn):
+        """Calling update with an item that already exists is a true no-op."""
+        from scripts.database import create_memory, update_memory, get_memory
+
+        mem_id = create_memory(db_conn, {"lessons_learned": ["item1"]})
+        pre_updated_at = self._get_updated_at(db_conn, mem_id)
+
+        # Send the same item again — after dedup, merge result == existing.
+        result = update_memory(db_conn, mem_id, {"lessons_learned": ["item1"]})
+
+        assert result is True, (
+            "semantically successful no-op update must return True"
+        )
+
+        post = get_memory(db_conn, mem_id)
+        assert post["lessons_learned"] == ["item1"], (
+            "no duplication: dedup must collapse the incoming duplicate"
+        )
+
+        post_updated_at = self._get_updated_at(db_conn, mem_id)
+        assert post_updated_at == pre_updated_at, (
+            f"updated_at must NOT be bumped when the additive merge "
+            f"produces no new content (pre={pre_updated_at!r}, "
+            f"post={post_updated_at!r}). Task #10 should skip the UPDATE "
+            "statement when the merged result equals the existing list."
+        )
+
+
+class TestBug1EmbeddingSkipOnIdempotentUpdate:
+    """M7 idempotent embedding-skip (#374 R2-3b).
+
+    PACTMemory.update snapshots CONTENT_FIELDS before calling update_memory.
+    If the additive merge produces no diff (repeat call with identical
+    payload), _content_fields_changed returns False and _store_embedding is
+    NOT called a second time.
+
+    Regression-guards commit 2336d2d: "fix(pact-memory): skip embedding
+    regen on idempotent updates".
+    """
+
+    def test_repeat_update_with_same_payload_skips_embedding_regen(
+        self, tmp_path,
+    ):
+        """Second identical update must NOT call _store_embedding."""
+        sys.path.insert(
+            0,
+            os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'),
+        )
+        from scripts.memory_api import PACTMemory
+
+        db_path = tmp_path / "embed_skip_test.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(
+                 PACTMemory, "_store_embedding", autospec=True,
+             ) as mock_store:
+            memory = PACTMemory(
+                project_id="test-project",
+                session_id="test-session",
+                db_path=db_path,
+            )
+
+            # Create a memory with CONTENT_FIELDS content. The save() path
+            # also calls _store_embedding — record that baseline so we can
+            # assert the *update*-side call count.
+            memory_id = memory.save({
+                "context": "embedding skip test",
+                "lessons_learned": ["lesson-A"],
+            })
+            save_side_calls = mock_store.call_count
+
+            # First update: adds a new item — merge produces a diff, so
+            # _store_embedding SHOULD be called.
+            memory.update(memory_id, {"lessons_learned": ["lesson-B"]})
+            first_update_calls = mock_store.call_count - save_side_calls
+            assert first_update_calls == 1, (
+                f"first update with new content should regen embedding "
+                f"(got {first_update_calls} calls)"
+            )
+
+            # Second update with the SAME payload: all items already exist,
+            # merge result equals existing, _content_fields_changed returns
+            # False, and _store_embedding MUST NOT be called again.
+            memory.update(memory_id, {"lessons_learned": ["lesson-B"]})
+            second_update_calls = (
+                mock_store.call_count - save_side_calls - first_update_calls
+            )
+            assert second_update_calls == 0, (
+                f"repeat update with identical payload must skip embedding "
+                f"regen (got {second_update_calls} extra calls — M7 "
+                "optimization is not firing)"
+            )
