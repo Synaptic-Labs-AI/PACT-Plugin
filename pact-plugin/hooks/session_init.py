@@ -82,8 +82,8 @@ from shared.session_resume import (
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Sidecar file for full orchestrator instructions (lead-only, written by hook)
-_ORCHESTRATOR_SIDECAR = Path.home() / ".claude" / "pact-orchestrator.md"
+# Fallback sidecar path when session_dir is unavailable (e.g., malformed stdin)
+_ORCHESTRATOR_SIDECAR_FALLBACK = Path.home() / ".claude" / "pact-orchestrator.md"
 
 
 def _read_full_orchestrator_source() -> str | None:
@@ -105,27 +105,40 @@ def _read_full_orchestrator_source() -> str | None:
         return None
 
 
-def _write_orchestrator_sidecar() -> bool:
+def _write_orchestrator_sidecar() -> tuple[bool, str]:
     """Write full orchestrator instructions to sidecar file for lead to Read.
 
-    The sidecar file at ~/.claude/pact-orchestrator.md contains the full
-    orchestrator instructions that were removed from the on-disk kernel.
+    Writes to the session directory ({session_dir}/pact-orchestrator.md) to
+    avoid race conditions on concurrent starts. Falls back to the shared
+    path (~/.claude/pact-orchestrator.md) if session_dir is unavailable.
+
     The lead reads this file via the Read tool after the hook returns a
     pointer in additionalContext.
 
-    Returns True if write succeeded, False otherwise.
+    Returns (success, actual_path) tuple — success is True if write succeeded,
+    actual_path is the path that was written (or attempted) for use in pointer
+    messages.
     """
     content = _read_full_orchestrator_source()
     if not content:
-        return False
+        return False, ""
+
+    # Prefer session-scoped path; fall back to shared path
+    session_dir = get_session_dir()
+    if session_dir:
+        sidecar_path = Path(session_dir) / "pact-orchestrator.md"
+    else:
+        sidecar_path = _ORCHESTRATOR_SIDECAR_FALLBACK
+
     try:
-        _ORCHESTRATOR_SIDECAR.write_text(content, encoding="utf-8")
-        os.chmod(str(_ORCHESTRATOR_SIDECAR), 0o600)
-        return True
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_path.write_text(content, encoding="utf-8")
+        os.chmod(str(sidecar_path), 0o600)
+        return True, str(sidecar_path)
     except (IOError, OSError) as e:
         print(f"session_init: failed to write orchestrator sidecar: {e}",
               file=sys.stderr)
-        return False
+        return False, str(sidecar_path)
 
 
 def check_pinned_staleness():
@@ -386,9 +399,10 @@ def main():
 
         # 2b. Write full orchestrator instructions for lead to Read (teammates skip)
         if not is_teammate and not is_context_reset:
-            if _write_orchestrator_sidecar():
+            sidecar_ok, sidecar_path = _write_orchestrator_sidecar()
+            if sidecar_ok:
                 context_parts.insert(0,
-                    'PACT orchestrator instructions written to ~/.claude/pact-orchestrator.md. '
+                    f'PACT orchestrator instructions written to {sidecar_path}. '
                     'Read this file NOW to load your full operating instructions. '
                     'Do not proceed until you have read it.'
                 )
@@ -535,11 +549,12 @@ def main():
         # The sidecar file persists on disk from initial startup; re-write it in case the
         # plugin was updated mid-session, then re-deliver the pointer.
         if is_context_reset and not is_teammate:
-            _write_orchestrator_sidecar()
-            context_parts.insert(0,
-                'POST-COMPACTION: Read ~/.claude/pact-orchestrator.md to reload '
-                'your full PACT orchestrator instructions.'
-            )
+            compact_ok, compact_sidecar_path = _write_orchestrator_sidecar()
+            if compact_sidecar_path:
+                context_parts.insert(0,
+                    f'POST-COMPACTION: Read {compact_sidecar_path} to reload '
+                    'your full PACT orchestrator instructions.'
+                )
 
         if source == "compact" and team_exists:
             # Post-compaction: context window was compacted, guide state recovery

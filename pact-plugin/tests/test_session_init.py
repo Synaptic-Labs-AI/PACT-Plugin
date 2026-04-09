@@ -1995,111 +1995,158 @@ class TestReadFullOrchestratorSource:
 
 class TestWriteOrchestratorSidecar:
     """Tests for _write_orchestrator_sidecar() — writes full orchestrator
-    instructions to ~/.claude/pact-orchestrator.md for the lead to Read.
+    instructions to {session_dir}/pact-orchestrator.md for the lead to Read.
+    Falls back to ~/.claude/pact-orchestrator.md when session_dir unavailable.
 
-    Returns True on success, False on failure. Sets file permissions to 0o600.
+    Returns (success, actual_path) tuple. Sets file permissions to 0o600.
 
-    Note: _ORCHESTRATOR_SIDECAR is a module-level constant computed at import
-    time from Path.home(). monkeypatch.setattr(Path, "home", ...) does NOT
-    affect it. We must patch session_init._ORCHESTRATOR_SIDECAR directly to
-    redirect the write to tmp_path.
+    The function calls get_session_dir() to determine the sidecar path.
+    We patch session_init.get_session_dir to control which path is used.
     """
 
-    def test_writes_sidecar_file_successfully(self, monkeypatch, tmp_path):
-        """Should write content to the sidecar path."""
-        import session_init
+    def test_writes_sidecar_to_session_dir(self, tmp_path):
+        """Should write content to {session_dir}/pact-orchestrator.md."""
         from session_init import _write_orchestrator_sidecar
 
-        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
-        (tmp_path / ".claude").mkdir(parents=True)
-        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+        session_dir = tmp_path / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
 
         orchestrator_content = "# Full Orchestrator\nAll instructions."
         with patch("session_init._read_full_orchestrator_source",
-                   return_value=orchestrator_content):
-            result = _write_orchestrator_sidecar()
+                   return_value=orchestrator_content), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)):
+            ok, path = _write_orchestrator_sidecar()
 
-        assert result is True
+        sidecar = session_dir / "pact-orchestrator.md"
+        assert ok is True
+        assert path == str(sidecar)
         assert sidecar.exists()
         assert sidecar.read_text(encoding="utf-8") == orchestrator_content
 
-    def test_sets_file_permissions_to_600(self, monkeypatch, tmp_path):
-        """Should set sidecar file permissions to 0o600 (owner read/write only)."""
-        import stat
+    def test_falls_back_to_shared_path_when_no_session_dir(self, monkeypatch, tmp_path):
+        """Should fall back to ~/.claude/pact-orchestrator.md when session_dir is None."""
         import session_init
         from session_init import _write_orchestrator_sidecar
 
-        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        fallback = tmp_path / ".claude" / "pact-orchestrator.md"
         (tmp_path / ".claude").mkdir(parents=True)
-        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR_FALLBACK", fallback)
 
         with patch("session_init._read_full_orchestrator_source",
-                   return_value="content"):
+                   return_value="content"), \
+             patch("session_init.get_session_dir",
+                   return_value=None):
+            ok, path = _write_orchestrator_sidecar()
+
+        assert ok is True
+        assert path == str(fallback)
+        assert fallback.exists()
+
+    def test_sets_file_permissions_to_600(self, tmp_path):
+        """Should set sidecar file permissions to 0o600 (owner read/write only)."""
+        import stat
+        from session_init import _write_orchestrator_sidecar
+
+        session_dir = tmp_path / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value="content"), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)):
             _write_orchestrator_sidecar()
 
+        sidecar = session_dir / "pact-orchestrator.md"
         mode = stat.S_IMODE(sidecar.stat().st_mode)
         assert mode == 0o600
 
-    def test_returns_false_when_source_unavailable(self, monkeypatch, tmp_path):
-        """Should return False when _read_full_orchestrator_source returns None."""
-        import session_init
+    def test_returns_false_empty_path_when_source_unavailable(self, tmp_path):
+        """Should return (False, '') when _read_full_orchestrator_source returns None."""
         from session_init import _write_orchestrator_sidecar
 
-        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
-        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+        session_dir = tmp_path / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
 
         with patch("session_init._read_full_orchestrator_source",
-                   return_value=None):
-            result = _write_orchestrator_sidecar()
+                   return_value=None), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)):
+            ok, path = _write_orchestrator_sidecar()
 
-        assert result is False
-        assert not sidecar.exists()
+        assert ok is False
+        assert path == ""
+        assert not (session_dir / "pact-orchestrator.md").exists()
 
-    def test_returns_false_when_source_empty(self, monkeypatch, tmp_path):
-        """Should return False when _read_full_orchestrator_source returns empty string."""
-        import session_init
+    def test_returns_false_empty_path_when_source_empty(self, tmp_path):
+        """Should return (False, '') when source returns empty string."""
         from session_init import _write_orchestrator_sidecar
 
-        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
-        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+        session_dir = tmp_path / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
 
         with patch("session_init._read_full_orchestrator_source",
-                   return_value=""):
-            result = _write_orchestrator_sidecar()
+                   return_value=""), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)):
+            ok, path = _write_orchestrator_sidecar()
 
-        assert result is False
+        assert ok is False
+        assert path == ""
 
-    def test_returns_false_on_write_error(self, monkeypatch, tmp_path):
-        """Should return False on IOError writing the sidecar file."""
-        import session_init
+    def test_returns_false_with_path_on_write_error(self, tmp_path):
+        """Should return (False, attempted_path) on write error."""
         from session_init import _write_orchestrator_sidecar
 
-        # Point to a non-existent directory so write_text fails
-        sidecar = tmp_path / "no-such-dir" / "pact-orchestrator.md"
-        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+        session_dir = tmp_path / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
+        sidecar = session_dir / "pact-orchestrator.md"
 
         with patch("session_init._read_full_orchestrator_source",
-                   return_value="content"):
-            result = _write_orchestrator_sidecar()
+                   return_value="content"), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)), \
+             patch.object(Path, "write_text",
+                          side_effect=OSError("disk full")):
+            ok, path = _write_orchestrator_sidecar()
 
-        assert result is False
+        assert ok is False
+        assert path == str(sidecar)
 
-    def test_overwrites_existing_sidecar(self, monkeypatch, tmp_path):
+    def test_overwrites_existing_sidecar(self, tmp_path):
         """Should overwrite existing sidecar file (no accumulation)."""
-        import session_init
         from session_init import _write_orchestrator_sidecar
 
-        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
-        (tmp_path / ".claude").mkdir(parents=True)
+        session_dir = tmp_path / "sessions" / "test-session"
+        session_dir.mkdir(parents=True)
+        sidecar = session_dir / "pact-orchestrator.md"
         sidecar.write_text("old content", encoding="utf-8")
-        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
 
         with patch("session_init._read_full_orchestrator_source",
-                   return_value="new content"):
-            result = _write_orchestrator_sidecar()
+                   return_value="new content"), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)):
+            ok, path = _write_orchestrator_sidecar()
 
-        assert result is True
+        assert ok is True
+        assert path == str(sidecar)
         assert sidecar.read_text(encoding="utf-8") == "new content"
+
+    def test_creates_session_dir_if_missing(self, tmp_path):
+        """Should create session_dir parent via mkdir(parents=True) if needed."""
+        from session_init import _write_orchestrator_sidecar
+
+        session_dir = tmp_path / "sessions" / "new-session"
+        # Do NOT mkdir — function should create it
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value="content"), \
+             patch("session_init.get_session_dir",
+                   return_value=str(session_dir)):
+            ok, path = _write_orchestrator_sidecar()
+
+        assert ok is True
+        assert (session_dir / "pact-orchestrator.md").exists()
 
 
 class TestSidecarDeliveryIntegration:
@@ -2128,8 +2175,9 @@ class TestSidecarDeliveryIntegration:
         """Helper: run main() with given source and agent_id.
 
         If plugin_root_content is provided, creates a plugin dir with CLAUDE.md
-        containing that content AND patches _ORCHESTRATOR_SIDECAR to write to
-        tmp_path. If None, mocks _write_orchestrator_sidecar to return True.
+        containing that content AND patches get_session_dir to direct the
+        sidecar write to tmp_path. If None, mocks _write_orchestrator_sidecar
+        to return (True, path).
 
         Returns (output_dict, sidecar_path).
         """
@@ -2140,7 +2188,8 @@ class TestSidecarDeliveryIntegration:
         (tmp_path / "project").mkdir(exist_ok=True)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        session_dir = tmp_path / "sessions" / "test-session"
+        sidecar = session_dir / "pact-orchestrator.md"
 
         # Set up plugin root with CLAUDE.md if content provided
         if plugin_root_content is not None:
@@ -2149,8 +2198,9 @@ class TestSidecarDeliveryIntegration:
             (plugin_dir / "CLAUDE.md").write_text(
                 plugin_root_content, encoding="utf-8")
             monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_dir))
-            # Patch module-level constant so writes go to tmp_path
-            monkeypatch.setattr(si_mod, "_ORCHESTRATOR_SIDECAR", sidecar)
+            # Patch get_session_dir so sidecar writes go to tmp_path
+            monkeypatch.setattr(si_mod, "get_session_dir",
+                                lambda: str(session_dir))
         else:
             monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "")
 
@@ -2161,13 +2211,13 @@ class TestSidecarDeliveryIntegration:
         if agent_id is not None:
             stdin_data["agent_id"] = agent_id
 
-        # Pre-create team dir for compact paths
-        if source in ("compact", "clear"):
+        # Pre-create team dir for compact/clear/resume paths
+        if source in ("compact", "clear", "resume"):
             team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
             team_dir.mkdir(parents=True, exist_ok=True)
             (team_dir / "config.json").write_text('{"members": []}')
 
-        # Ensure .claude dir exists for sidecar writes
+        # Ensure .claude dir exists for fallback sidecar writes
         (tmp_path / ".claude").mkdir(parents=True, exist_ok=True)
 
         patches = [
@@ -2185,7 +2235,7 @@ class TestSidecarDeliveryIntegration:
             # Mock sidecar write when no real plugin content
             patches.append(
                 patch("session_init._write_orchestrator_sidecar",
-                      return_value=True)
+                      return_value=(True, str(sidecar)))
             )
 
         for p in patches:
@@ -2360,3 +2410,32 @@ class TestSidecarDeliveryIntegration:
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert "pact-orchestrator.md" in additional
         assert "POST-COMPACTION" in additional
+
+    def test_lead_resume_includes_sidecar_pointer(self, monkeypatch, tmp_path):
+        """Lead resume: should deliver sidecar pointer (same code path as startup).
+
+        Resume is not a context reset (is_context_reset=False), so it hits the
+        same conditional branch as startup: `not is_teammate and not is_context_reset`.
+        This test explicitly covers the resume source to prevent regression if
+        the condition logic changes.
+        """
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="resume", agent_id=None,
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "pact-orchestrator.md" in additional
+        assert "Read this file NOW" in additional
+
+    def test_lead_resume_writes_sidecar_file(self, monkeypatch, tmp_path):
+        """Lead resume: should write sidecar file to disk with real plugin content."""
+        content = "# Full Orchestrator Instructions\nAll the details."
+        output, sidecar = self._run_main(
+            monkeypatch, tmp_path,
+            source="resume", agent_id=None,
+            plugin_root_content=content,
+        )
+
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == content
