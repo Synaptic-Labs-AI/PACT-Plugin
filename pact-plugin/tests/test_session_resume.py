@@ -127,14 +127,14 @@ class TestUpdateSessionInfo:
             "session-789",
             "pact-session3",
             session_dir="/tmp/sessions/abc",
-            plugin_root="/opt/plugins/PACT/3.16.1",
+            plugin_root="/opt/plugins/PACT/3.17.0",
         )
 
         assert result == "Session info created in new project CLAUDE.md"
         content = target.read_text()
         assert "Session dir:" in content
         assert "Plugin root:" in content
-        assert "/opt/plugins/PACT/3.16.1" in content
+        assert "/opt/plugins/PACT/3.17.0" in content
 
     def test_replaces_existing_session_block(self, tmp_path, monkeypatch):
         """Should replace content between session markers."""

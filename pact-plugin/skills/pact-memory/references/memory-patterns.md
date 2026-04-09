@@ -270,26 +270,42 @@ include_tracked=False  # We're explicitly providing files
 
 ## Pattern 8: Incremental Learning
 
-Update memories as understanding evolves.
+Update memories as understanding evolves. `memory.update()` merges list-valued
+fields additively with content-hash deduplication, so you can pass just the new
+items — no read-merge-write-back required.
 
 ```python
-# Get existing memory
-mem = memory.get("abc123")
-
-# Add new lessons learned
-existing_lessons = mem.lessons_learned if mem.lessons_learned else []
-new_lessons = existing_lessons + [
-    "Redis cluster mode requires different connection handling",
-    "Sentinel provides better HA than standalone Redis"
-]
-
+# Append new lessons and a new entity to memory abc123.
+# The existing lessons_learned and entities are preserved; duplicates (by
+# content hash) are silently deduplicated, so this call is idempotent.
 memory.update("abc123", {
-    "lessons_learned": new_lessons,
-    "entities": mem.entities + [
-        {"name": "RedisSentinel", "type": "component", "notes": "HA setup"}
-    ]
+    "lessons_learned": [
+        "Redis cluster mode requires different connection handling",
+        "Sentinel provides better HA than standalone Redis",
+    ],
+    "entities": [
+        {"name": "RedisSentinel", "type": "component", "notes": "HA setup"},
+    ],
 })
 ```
+
+**Content-hash dedup makes incremental learning cheap.** Calling `update()`
+twice with the same lesson stores it once. You don't need to check "did I
+already save this?" — just call `update` and let the merge handle it.
+
+**When you genuinely want wholesale replacement** (e.g. removing a stale item
+from a list), pass `replace=True`:
+
+```python
+# Replace the entire lessons_learned column with exactly this one item.
+# Any existing lessons are discarded.
+memory.update("abc123", {"lessons_learned": ["Only lesson that matters"]}, replace=True)
+```
+
+> ⚠️ Before this behavior existed (pre-#374), partial list updates silently
+> clobbered the entire column. If you see code that reads → merges in Python →
+> writes back, it's obsolete — delete the read/merge scaffolding and pass just
+> the new items directly to `update()`.
 
 ## Anti-Patterns to Avoid
 

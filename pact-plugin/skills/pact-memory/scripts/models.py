@@ -13,9 +13,65 @@ Used by:
 """
 
 import json
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass, field, fields as dataclass_fields
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Union
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Bug 3 fix (#374) — strict-on-write / lenient-on-read key validation
+# =============================================================================
+#
+# Entity, Decision, and TaskItem previously constructed from a dict via
+# data.get(key) for each known field and silently dropped any unknown sub-
+# object key. A payload like `{"name": "X", "description": "Y"}` would
+# construct an Entity with name="X" and lose the `description` value (the
+# real field is `notes`) — another silent data-loss mode.
+#
+# Fix: asymmetric strict mode.
+#   - Write paths (update_memory, save_memory via _canonicalize_dict_item in
+#     commit 3) pass strict=True. Unknown keys raise ValueError with a
+#     message that names the offending key(s) and the allowed keys.
+#   - Read paths (MemoryObject.from_dict called from _deserialize_json_fields)
+#     pass strict=False (the default). Unknown keys are dropped with a
+#     logger.warning so operators can detect drift. This guards against the
+#     "legacy DB row with a stray key becomes unreadable under blanket strict
+#     mode" failure mode (preparer §3b).
+
+
+def _validate_from_dict_keys(
+    cls: type,
+    allowed: frozenset,
+    data: Dict[str, Any],
+    *,
+    strict: bool,
+    context: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Check `data`'s keys against `allowed`. In strict mode, raise ValueError on
+    any unknown key. In lenient mode, drop unknown keys and log a warning.
+
+    Returns a (potentially cleaned) copy of `data` where every key is allowed.
+    """
+    unknown = sorted(set(data.keys()) - allowed)
+    if not unknown:
+        return data
+    if strict:
+        raise ValueError(
+            f"Unknown keys for {cls.__name__}: {unknown}. "
+            f"Allowed keys: {sorted(allowed)}"
+            + (f" (in memory {context})" if context else "")
+        )
+    logger.warning(
+        "Dropping unknown keys %s from %s%s",
+        unknown,
+        cls.__name__,
+        f" in memory {context}" if context else "",
+    )
+    return {k: v for k, v in data.items() if k in allowed}
 
 
 @dataclass
@@ -32,11 +88,32 @@ class TaskItem:
     status: str = "pending"
     priority: Optional[str] = None
 
+    # Populated after class body from dataclass fields (F3 remediation).
+    _ALLOWED_KEYS: ClassVar[FrozenSet[str]]
+
     @classmethod
-    def from_dict(cls, data: Union[Dict[str, Any], str]) -> "TaskItem":
-        """Create TaskItem from dict or string."""
+    def from_dict(
+        cls,
+        data: Union[Dict[str, Any], str],
+        *,
+        strict: bool = False,
+        memory_id: Optional[str] = None,
+    ) -> "TaskItem":
+        """
+        Create TaskItem from dict or string.
+
+        Args:
+            data: Either a plain string (treated as the task description) or a
+                dict with keys in {task, status, priority}.
+            strict: If True, unknown dict keys raise ValueError. Default False
+                preserves lenient read-path behavior (drop + warn).
+            memory_id: Optional context for error/warning messages.
+        """
         if isinstance(data, str):
             return cls(task=data)
+        data = _validate_from_dict_keys(
+            cls, cls._ALLOWED_KEYS, data, strict=strict, context=memory_id,
+        )
         return cls(
             task=data.get("task", ""),
             status=data.get("status", "pending"),
@@ -65,11 +142,23 @@ class Decision:
     rationale: Optional[str] = None
     alternatives: Optional[List[str]] = None
 
+    # Populated after class body from dataclass fields (F3 remediation).
+    _ALLOWED_KEYS: ClassVar[FrozenSet[str]]
+
     @classmethod
-    def from_dict(cls, data: Union[Dict[str, Any], str]) -> "Decision":
-        """Create Decision from dict or string."""
+    def from_dict(
+        cls,
+        data: Union[Dict[str, Any], str],
+        *,
+        strict: bool = False,
+        memory_id: Optional[str] = None,
+    ) -> "Decision":
+        """Create Decision from dict or string. See TaskItem.from_dict for arg docs."""
         if isinstance(data, str):
             return cls(decision=data)
+        data = _validate_from_dict_keys(
+            cls, cls._ALLOWED_KEYS, data, strict=strict, context=memory_id,
+        )
         return cls(
             decision=data.get("decision", ""),
             rationale=data.get("rationale"),
@@ -78,7 +167,7 @@ class Decision:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        result = {"decision": self.decision}
+        result: Dict[str, Any] = {"decision": self.decision}
         if self.rationale:
             result["rationale"] = self.rationale
         if self.alternatives:
@@ -100,11 +189,23 @@ class Entity:
     type: Optional[str] = None
     notes: Optional[str] = None
 
+    # Populated after class body from dataclass fields (F3 remediation).
+    _ALLOWED_KEYS: ClassVar[FrozenSet[str]]
+
     @classmethod
-    def from_dict(cls, data: Union[Dict[str, Any], str]) -> "Entity":
-        """Create Entity from dict or string."""
+    def from_dict(
+        cls,
+        data: Union[Dict[str, Any], str],
+        *,
+        strict: bool = False,
+        memory_id: Optional[str] = None,
+    ) -> "Entity":
+        """Create Entity from dict or string. See TaskItem.from_dict for arg docs."""
         if isinstance(data, str):
             return cls(name=data)
+        data = _validate_from_dict_keys(
+            cls, cls._ALLOWED_KEYS, data, strict=strict, context=memory_id,
+        )
         return cls(
             name=data.get("name", ""),
             type=data.get("type"),
@@ -119,6 +220,24 @@ class Entity:
         if self.notes:
             result["notes"] = self.notes
         return result
+
+
+def _populate_allowed_keys(cls: type) -> None:
+    """
+    Set cls._ALLOWED_KEYS to a frozenset derived from the dataclass fields.
+
+    F3 remediation (#374): previously each sub-object class hardcoded its
+    _ALLOWED_KEYS as a literal frozenset, which drifted from the dataclass
+    fields whenever a field was added or renamed. A test guarded the drift,
+    but the drift was still possible at edit time. Deriving the set from
+    dataclass_fields() removes the duplication entirely.
+    """
+    cls._ALLOWED_KEYS = frozenset(f.name for f in dataclass_fields(cls))
+
+
+_populate_allowed_keys(TaskItem)
+_populate_allowed_keys(Decision)
+_populate_allowed_keys(Entity)
 
 
 def _parse_string_list(raw: Any) -> List[str]:
