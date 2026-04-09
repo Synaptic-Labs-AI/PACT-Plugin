@@ -1084,6 +1084,66 @@ class TestBug1ConcurrentWriterRace:
         # seed + x + y + z (y deduped across writers). Second round adds nothing.
         assert sorted(lessons) == ["seed", "x", "y", "z"], f"got {lessons}"
 
+    def test_three_writer_concurrent_race(self, tmp_path):
+        """
+        Three threads each add a distinct lesson and release simultaneously
+        from a Barrier(3). After all writers finish, the row must contain
+        ALL three new items plus the seed — proving union semantics hold
+        under deeper write contention than the two-writer case. If
+        BEGIN IMMEDIATE serialization were broken, at least one writer's
+        merge would clobber another's and the final list would be short.
+        """
+        import threading
+        from scripts import database as db_mod
+
+        db_path, mem_id = self._make_real_db(tmp_path)
+
+        barrier = threading.Barrier(3)
+        errors: list[BaseException] = []
+
+        def writer(item: str) -> None:
+            try:
+                conn = db_mod.get_connection(db_path=db_path)
+                try:
+                    barrier.wait(timeout=5)
+                    db_mod.update_memory(
+                        conn, mem_id, {"lessons_learned": [item]},
+                    )
+                finally:
+                    conn.close()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t_a = threading.Thread(target=writer, args=("alpha",))
+        t_b = threading.Thread(target=writer, args=("bravo",))
+        t_c = threading.Thread(target=writer, args=("charlie",))
+        t_a.start()
+        t_b.start()
+        t_c.start()
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
+        t_c.join(timeout=10)
+
+        assert not t_a.is_alive(), "writer A stalled (BEGIN IMMEDIATE deadlock?)"
+        assert not t_b.is_alive(), "writer B stalled (BEGIN IMMEDIATE deadlock?)"
+        assert not t_c.is_alive(), "writer C stalled (BEGIN IMMEDIATE deadlock?)"
+        assert not errors, f"writers raised: {errors!r}"
+
+        conn = db_mod.get_connection(db_path=db_path)
+        try:
+            row = db_mod.get_memory(conn, mem_id)
+        finally:
+            conn.close()
+
+        lessons = row["lessons_learned"]
+        assert "seed" in lessons, "initial seed was clobbered"
+        assert "alpha" in lessons, f"writer A lost: {lessons}"
+        assert "bravo" in lessons, f"writer B lost: {lessons}"
+        assert "charlie" in lessons, f"writer C lost: {lessons}"
+        assert len(lessons) == 4, (
+            f"expected 4 unique items (seed + 3 writers), got {lessons}"
+        )
+
 
 class TestBug1LegacyRowGracefulDegradation:
     """
