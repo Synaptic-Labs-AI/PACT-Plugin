@@ -823,21 +823,31 @@ def update_memory(
 
     # Bug 1: normalize list fields and canonicalize dict items. This is the
     # point where from_dict(strict=True) fires for sub-object validation (bug
-    # 3 write path). Validation runs OUTSIDE the transaction so any raise
-    # leaves the DB completely untouched — no half-applied state.
+    # 3 write path). Any raise leaves the DB unchanged — validation runs
+    # before the transaction on the replace path, and within BEGIN IMMEDIATE
+    # + rollback on the additive path.
     normalized: Dict[str, Any] = {}
     touched_lists: Set[str] = set()
     for key, value in working.items():
         if key in LIST_FIELDS:
             normalized[key] = _normalize_list_field(key, value)
-            touched_lists.add(key)
             if replace:
                 # Even on replace, dedup within the incoming batch and run
                 # sub-object validation (so a caller sending duplicate items
-                # still gets a deduped, validated write).
+                # still gets a deduped, validated write). touched_lists is
+                # only consulted on the additive merge path below, so we
+                # skip adding to it here.
                 normalized[key] = _merge_with_dedup(key, [], normalized[key])
+            else:
+                touched_lists.add(key)
         else:
             normalized[key] = value
+
+    # Nothing to write (e.g. payload contained only id/created_at, which were
+    # stripped above). Return True without bumping updated_at — an id-only
+    # call should be a no-op, not a touch.
+    if not normalized:
+        return True
 
     # If we have list fields to merge additively, we need a SELECT + UPDATE
     # transaction under BEGIN IMMEDIATE. Default sqlite3 isolation is
@@ -845,54 +855,48 @@ def update_memory(
     # statement — leaving a race window between our SELECT (merge read) and
     # our UPDATE. BEGIN IMMEDIATE grabs the write lock at BEGIN so no other
     # writer can slip in.
-    needs_merge = touched_lists and not replace
+    needs_merge = bool(touched_lists)
     try:
         if needs_merge:
             conn.execute("BEGIN IMMEDIATE")
-            try:
-                cols = sorted(touched_lists)
-                placeholders = ", ".join(cols)
-                cursor = conn.execute(
-                    f"SELECT {placeholders} FROM memories WHERE id = ?",
-                    (memory_id,),
-                )
-                row = cursor.fetchone()
-                current = _deserialize_json_fields(dict(row)) if row else {}
-                for key in touched_lists:
-                    existing = current.get(key) or []
-                    if isinstance(existing, str):
-                        # Defensive: a legacy row where JSON deserialization
-                        # didn't resolve (e.g. stored as a plain string).
-                        try:
-                            existing = json.loads(existing)
-                        except (json.JSONDecodeError, TypeError):
-                            existing = []
-                    if not isinstance(existing, list):
+            cols = sorted(touched_lists)
+            placeholders = ", ".join(cols)
+            cursor = conn.execute(
+                f"SELECT {placeholders} FROM memories WHERE id = ?",
+                (memory_id,),
+            )
+            row = cursor.fetchone()
+            current = _deserialize_json_fields(dict(row)) if row else {}
+            for key in touched_lists:
+                existing = current.get(key) or []
+                if isinstance(existing, str):
+                    # Defensive: a legacy row where JSON deserialization
+                    # didn't resolve (e.g. stored as a plain string).
+                    try:
+                        existing = json.loads(existing)
+                    except (json.JSONDecodeError, TypeError):
                         existing = []
-                    normalized[key] = _merge_with_dedup(
-                        key, existing, normalized[key],
-                    )
-
-                # Serialize and write inside the same transaction.
-                data = _serialize_json_fields(normalized)
-                data["updated_at"] = datetime.now(timezone.utc).isoformat()
-                set_clauses = [f"{k} = ?" for k in data.keys()]
-                values = list(data.values()) + [memory_id]
-                conn.execute(
-                    f"UPDATE memories SET {', '.join(set_clauses)} WHERE id = ?",
-                    values,
+                if not isinstance(existing, list):
+                    existing = []
+                normalized[key] = _merge_with_dedup(
+                    key, existing, normalized[key],
                 )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+
+            # Serialize and write inside the same transaction.
+            data = _serialize_json_fields(normalized)
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            set_clauses = [f"{k} = ?" for k in data.keys()]
+            values = list(data.values()) + [memory_id]
+            conn.execute(
+                f"UPDATE memories SET {', '.join(set_clauses)} WHERE id = ?",
+                values,
+            )
+            conn.commit()
         else:
             # Replace-only or no list fields: no merge-read hazard, so a
             # plain commit is fine.
             data = _serialize_json_fields(normalized)
             data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            if not data:
-                return True  # Nothing to update (id/created_at only)
             set_clauses = [f"{k} = ?" for k in data.keys()]
             values = list(data.values()) + [memory_id]
             conn.execute(
@@ -901,8 +905,8 @@ def update_memory(
             )
             conn.commit()
     except Exception:
-        # Safety net: ensure we don't leave an open implicit transaction
-        # in case of unexpected errors on the non-merge path.
+        # Safety net: roll back any open transaction (additive merge or
+        # implicit on the replace path) so a partial write never persists.
         try:
             conn.rollback()
         except sqlite3.Error:
