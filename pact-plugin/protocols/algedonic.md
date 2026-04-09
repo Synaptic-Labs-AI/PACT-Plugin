@@ -92,7 +92,7 @@ Under Agent Teams, teammates have access to Task tools (`TaskGet`, `TaskUpdate`,
 2. Send the signal to the lead via `SendMessage` (using the Signal Format above):
    ```
    SendMessage(to="lead",
-     content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     message="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial handoff with whatever work was completed
@@ -150,8 +150,8 @@ On receiving an algedonic signal:
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
 2. For **HALT**: Broadcast stop to all teammates, then await user acknowledgment:
    ```
-   SendMessage(type="broadcast",
-     content="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+   SendMessage(to="*",
+     message="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
      summary="HALT: {category}")
    ```
 3. For **ALERT**: Pause current work, present options to user
@@ -160,7 +160,7 @@ On receiving an algedonic signal:
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Broadcast stop** — `SendMessage(type="broadcast", ...)` ensures all teammates receive the HALT simultaneously (see step 2 above)
+1. **Broadcast stop** — `SendMessage(to="*", ...)` ensures all teammates receive the HALT simultaneously (see step 2 above)
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress

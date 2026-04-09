@@ -64,7 +64,7 @@
 | Redo prior phase | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
 | Augment present phase | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
 | Invoke rePACT | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
-| Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
+| Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(task_id=taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
 | Not truly blocked | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | Escalate to user | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 

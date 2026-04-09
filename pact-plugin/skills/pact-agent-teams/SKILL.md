@@ -74,7 +74,7 @@ When the lead requests progress monitoring in your dispatch, send brief progress
 
 ## Message Prefix Convention
 
-**Prefix all `SendMessage` `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+**Prefix all `SendMessage` `message`** with `[{sender}→{recipient}]` (use `all` as recipient when `to="*"`). Do not prefix `summary`.
 
 ### Message Authenticity
 
@@ -113,7 +113,7 @@ When your work is done:
    ```
    If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
 2. **Complete task — BOTH actions required, in this order**:
-   a. `SendMessage(to="lead", content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
+   a. `SendMessage(to="lead", message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
    b. `TaskUpdate(taskId, status="completed")`
 
    > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the TaskCompleted hook only fires after TaskUpdate, which triggers HANDOFF capture for institutional memory. Skipping (b) means your work is invisible to the memory system.
@@ -178,7 +178,7 @@ If you cannot proceed:
 2. **`SendMessage`** the blocker to the lead:
    ```
    SendMessage(to="lead",
-     content="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+     message="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -194,7 +194,7 @@ When you detect a viability threat (security, data integrity, ethics):
 2. **`SendMessage`** the signal to the lead:
    ```
    SendMessage(to="lead",
-     content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+     message="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed

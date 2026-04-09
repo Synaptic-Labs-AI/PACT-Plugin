@@ -730,7 +730,7 @@ On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
-**HALT handling**: On HALT signal, immediately `SendMessage(type="broadcast", content="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.", summary="HALT: {category}")` to stop all running teammates before presenting to user.
+**HALT handling**: On HALT signal, immediately `SendMessage(to="*", message="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.", summary="HALT: {category}")` to stop all running teammates before presenting to user.
 
 ### Blocker Recovery: Resume vs. Fresh Spawn
 
