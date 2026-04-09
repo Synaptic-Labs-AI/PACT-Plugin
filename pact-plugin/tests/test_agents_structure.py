@@ -591,3 +591,114 @@ class TestRequiredSkillsCondensed:
             assert "skills:" in text, (
                 "pact-secretary.md should have skills: in frontmatter"
             )
+
+
+class TestTeachbackMicroSkillExtraction:
+    """Tests for the teachback micro-skill extraction (#385).
+
+    The teachback protocol was extracted from pact-agent-teams into a
+    standalone pact-teachback skill. Every agent eager-loads it via
+    frontmatter so the teachback format is always available at spawn.
+
+    These tests pin the extraction against silent regression:
+      - T1: pact-teachback skill file exists with valid structure
+      - T2: skill is under size budget (micro-skill, <1.5K chars)
+      - T3: skill contains the actual protocol (not just metadata)
+      - T4: every agent has pact-teachback in frontmatter skills
+      - T5: pact-agent-teams no longer contains the full teachback protocol
+      - T6: pact-agent-teams still references the extracted skill
+    """
+
+    SKILLS_DIR = Path(__file__).parent.parent / "skills"
+    AGENTS_DIR = Path(__file__).parent.parent / "agents"
+
+    # Micro-skill size budget: teachback protocol should be compact
+    MAX_SKILL_BYTES = 2048
+
+    # Key protocol elements that must be in the extracted skill
+    REQUIRED_PROTOCOL_ELEMENTS = [
+        "SendMessage",           # Communication tool reference
+        "teachback_sent",        # Metadata flag
+        "gate",                  # Gate semantics (teachback is a gate)
+    ]
+
+    # Lines that indicate full protocol content (not a stub).
+    # If pact-agent-teams contains these, the extraction is incomplete.
+    FULL_PROTOCOL_MARKERS = [
+        "Send as your **first message**",
+        "Keep concise: 3-6 bullet points",
+        "Non-blocking: proceed with work after sending",
+    ]
+
+    @pytest.fixture
+    def teachback_skill(self):
+        skill_md = self.SKILLS_DIR / "pact-teachback" / "SKILL.md"
+        assert skill_md.is_file(), "pact-teachback/SKILL.md missing"
+        return skill_md
+
+    @pytest.fixture
+    def agent_teams_skill(self):
+        skill_md = self.SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
+        assert skill_md.is_file(), "pact-agent-teams/SKILL.md missing"
+        return skill_md
+
+    def test_teachback_skill_exists_with_valid_frontmatter(self, teachback_skill):
+        """T1: skill file exists with name and description in frontmatter."""
+        text = teachback_skill.read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        assert fm is not None, "pact-teachback SKILL.md has no valid frontmatter"
+        assert fm.get("name") == "pact-teachback", (
+            f"Expected name 'pact-teachback', got {fm.get('name')!r}"
+        )
+        assert "description" in fm, "pact-teachback missing description"
+
+    def test_teachback_skill_under_size_budget(self, teachback_skill):
+        """T2: micro-skill must be compact (<2KB)."""
+        size = teachback_skill.stat().st_size
+        assert size <= self.MAX_SKILL_BYTES, (
+            f"pact-teachback is {size} bytes, exceeding {self.MAX_SKILL_BYTES} "
+            f"byte micro-skill budget. If the protocol grew legitimately, "
+            f"update MAX_SKILL_BYTES with justification."
+        )
+
+    def test_teachback_skill_contains_protocol(self, teachback_skill):
+        """T3: skill must contain actual protocol, not just metadata."""
+        text = teachback_skill.read_text(encoding="utf-8")
+        for element in self.REQUIRED_PROTOCOL_ELEMENTS:
+            assert element in text, (
+                f"pact-teachback missing required protocol element: "
+                f"{element!r}. The skill must contain the actual teachback "
+                f"protocol, not just a pointer."
+            )
+
+    def test_all_agents_have_teachback_in_frontmatter(self, agent_files):
+        """T4: every agent must eager-load pact-teachback via frontmatter."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            skill_names = TestLazyLoadedAgentTeams._extract_skill_names(text)
+            assert "pact-teachback" in skill_names, (
+                f"{f.stem}: pact-teachback must be in frontmatter skills "
+                f"(eager-loaded at spawn). Found skills: {skill_names!r}"
+            )
+
+    def test_agent_teams_no_full_teachback_protocol(self, agent_teams_skill):
+        """T5: pact-agent-teams must not contain the full teachback protocol.
+
+        After extraction, pact-agent-teams should have a slim stub/pointer
+        to the pact-teachback skill, not the full protocol content.
+        """
+        text = agent_teams_skill.read_text(encoding="utf-8")
+        for marker in self.FULL_PROTOCOL_MARKERS:
+            assert marker not in text, (
+                f"pact-agent-teams still contains full teachback protocol "
+                f"marker: {marker!r}. The protocol should have been "
+                f"extracted to pact-teachback skill (#385)."
+            )
+
+    def test_agent_teams_references_teachback_skill(self, agent_teams_skill):
+        """T6: pact-agent-teams must reference the extracted skill."""
+        text = agent_teams_skill.read_text(encoding="utf-8")
+        assert "pact-teachback" in text, (
+            "pact-agent-teams should reference pact-teachback skill "
+            "as a pointer so agents know where the protocol lives."
+        )
