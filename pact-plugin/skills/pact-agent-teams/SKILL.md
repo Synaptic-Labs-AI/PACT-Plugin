@@ -113,7 +113,7 @@ When your work is done:
    ```
    If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
 2. **Complete task — BOTH actions required, in this order**:
-   a. `SendMessage(type="message", recipient="lead", content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
+   a. `SendMessage(to="lead", content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
    b. `TaskUpdate(taskId, status="completed")`
 
    > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the TaskCompleted hook only fires after TaskUpdate, which triggers HANDOFF capture for institutional memory. Skipping (b) means your work is invisible to the memory system.
@@ -144,7 +144,7 @@ Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — incl
 
 ## Peer Communication
 
-Use `SendMessage(type="message", recipient="teammate-name")` for direct coordination.
+Use `SendMessage(to="teammate-name")` for direct coordination.
 Discover teammates via `~/.claude/teams/{team-name}/config.json` or from peer names
 in your task description.
 
@@ -177,7 +177,7 @@ If you cannot proceed:
 1. **Stop work immediately**
 2. **`SendMessage`** the blocker to the lead:
    ```
-   SendMessage(type="message", recipient="lead",
+   SendMessage(to="lead",
      content="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
@@ -193,7 +193,7 @@ When you detect a viability threat (security, data integrity, ethics):
 1. **Stop work immediately**
 2. **`SendMessage`** the signal to the lead:
    ```
-   SendMessage(type="message", recipient="lead",
+   SendMessage(to="lead",
      content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```

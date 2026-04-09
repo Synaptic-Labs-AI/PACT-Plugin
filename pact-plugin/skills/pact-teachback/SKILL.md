@@ -13,7 +13,7 @@ task (`Read`, `Glob`, `Grep`) is permitted before teachback.
 
 **Format**:
 ```
-SendMessage(type="message", recipient="lead",
+SendMessage(to="lead",
   content="[{sender}->lead] Teachback:\n- Building: {what}\n- Key constraints: {constraints}\n- Approach: {approach, briefly}\nProceeding unless corrected.",
   summary="Teachback: {1-line}")
 ```
