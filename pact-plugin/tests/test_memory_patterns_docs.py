@@ -103,18 +103,47 @@ class _FakeMemory:
     and would make this test flaky across machines. The shim isolates the
     contract we care about: "does `memory.update(id, dict, replace=...)`
     succeed against a valid memory row?".
+
+    Placeholder convention: Pattern 8 examples in memory-patterns.md use
+    "abc123" as the memory ID. The shim's _id_map remaps that placeholder
+    to the live fixture row id. If you change the placeholder in
+    memory-patterns.md, update _id_map here too — otherwise the methods
+    below will raise KeyError loudly rather than silently exercising the
+    wrong code path.
     """
 
     def __init__(self, conn, memory_id):
         self._conn = conn
         self._memory_id = memory_id
+        # Placeholder convention: Pattern 8 examples use "abc123" as the
+        # memory ID. If you change the placeholder in memory-patterns.md,
+        # update _id_map here too.
+        self._id_map = {"abc123": memory_id}
+
+    def _resolve(self, memory_id, method):
+        actual_id = self._id_map.get(memory_id)
+        if actual_id is None:
+            raise KeyError(
+                f"_FakeMemory.{method}: unknown memory_id {memory_id!r}. "
+                f"If Pattern 8 docs changed the placeholder from 'abc123', "
+                f"update this shim's _id_map. Known: {list(self._id_map)}"
+            )
+        return actual_id
 
     def update(self, memory_id, updates, *, replace=False):
         from scripts.database import update_memory
-        # The doc uses a literal "abc123" id; rewrite to our real fixture id.
-        if memory_id == "abc123":
-            memory_id = self._memory_id
-        return update_memory(self._conn, memory_id, updates, replace=replace)
+        actual_id = self._resolve(memory_id, "update")
+        return update_memory(self._conn, actual_id, updates, replace=replace)
+
+    def get(self, memory_id):
+        from scripts.database import get_memory
+        actual_id = self._resolve(memory_id, "get")
+        return get_memory(self._conn, actual_id)
+
+    def delete(self, memory_id):
+        from scripts.database import delete_memory
+        actual_id = self._resolve(memory_id, "delete")
+        return delete_memory(self._conn, actual_id)
 
 
 @pytest.fixture
