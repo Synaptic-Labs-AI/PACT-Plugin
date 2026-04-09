@@ -1243,13 +1243,36 @@ class TestBug1LegacyRowGracefulDegradation:
         )
         assert legacy_present, f"legacy item lost during merge: {ents}"
         assert new_present, f"new item not merged: {ents}"
-        # Verify the safety-valve WARNING fired.
-        assert any(
-            "Legacy" in rec.getMessage() and "canonicalization" in rec.getMessage()
-            for rec in caplog.records
-        ), (
-            "expected safety-valve WARNING from _merge_with_dedup, got: "
-            f"{[r.getMessage() for r in caplog.records]}"
+        # Verify the safety-valve WARNING fired with structured field
+        # assertions, not just message-text matching. We check the LogRecord's
+        # numeric level (levelno) and logger name to confirm the warning came
+        # from the database module at WARNING severity — this catches drift
+        # where someone downgrades the log to INFO or moves the call site to
+        # a different module without realizing the test only inspected text.
+        safety_valve_records = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "Legacy" in rec.getMessage()
+            and "canonicalization" in rec.getMessage()
+        ]
+        assert len(safety_valve_records) >= 1, (
+            "expected at least one WARNING-level safety-valve log from "
+            "_merge_with_dedup, got: "
+            f"{[(r.levelname, r.name, r.getMessage()) for r in caplog.records]}"
+        )
+        rec = safety_valve_records[0]
+        assert rec.levelno == logging.WARNING, (
+            f"safety-valve log emitted at {rec.levelname}, expected WARNING"
+        )
+        assert rec.levelname == "WARNING", (
+            f"safety-valve levelname is {rec.levelname!r}, expected 'WARNING'"
+        )
+        # The logger name should carry a meaningful module prefix so operators
+        # can filter by source. Accept either the database module or the
+        # broader scripts package, but reject root/empty/unrelated loggers.
+        assert "database" in rec.name or "scripts" in rec.name, (
+            f"safety-valve logger name {rec.name!r} lacks a database/scripts "
+            "prefix — check the logger configuration in scripts/database.py"
         )
 
 
