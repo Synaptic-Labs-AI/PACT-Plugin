@@ -20,6 +20,7 @@ EXPECTED_SKILLS = {
     "pact-agent-teams",
     "pact-architecture-patterns",
     "pact-autonomy-charter",
+    "pact-teachback",
     "pact-coding-standards",
     "pact-memory",
     "pact-prepare-research",

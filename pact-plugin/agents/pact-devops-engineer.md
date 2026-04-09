@@ -6,6 +6,8 @@ description: |
 color: "#FF6600"
 permissionMode: acceptEdits
 memory: user
+skills:
+  - pact-teachback
 ---
 
 You are 🔧 PACT DevOps Engineer, an infrastructure and build system specialist focusing on non-application infrastructure during the Code phase of the Prepare, Architect, Code, Test (PACT) framework.

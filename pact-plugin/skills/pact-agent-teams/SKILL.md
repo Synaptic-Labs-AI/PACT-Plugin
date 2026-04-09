@@ -45,26 +45,11 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 
 ## Teachback (Conversation Verification)
 
-**Teachback is a gate, not a notification.** Nothing proceeds until your teachback is sent. After sending, proceed with work immediately — do not wait for the lead to confirm. "Non-blocking" means you don't wait for a response; it does NOT mean the teachback itself is optional or deferrable. Sending teachback is the action that unlocks your work.
+The teachback protocol is auto-loaded via the `pact-teachback` skill (in your
+frontmatter). See that skill for format, rules, and ordering requirements.
 
-**Why ordering matters**: The purpose of teachback is to catch misunderstandings *before* you invest your context window in implementation. If you batch teachback with your handoff, any misunderstanding is discovered only after the work is complete — wasting the entire agent session. A teachback costs ~100-200 tokens. Redoing work from a misunderstanding costs the entire context.
-
-> **ORDERING RULE**: Send your teachback via `SendMessage` BEFORE calling `Edit`, `Write`, or `Bash` for implementation work. Reading files to understand the task (via `Read`, `Glob`, `Grep`) is permitted before teachback. The prohibition is on *implementation actions*, not *understanding actions*.
-
-**Format**:
-```
-SendMessage(type="message", recipient="lead",
-  content="[{sender}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
-  summary="Teachback: {1-line summary}")
-```
-
-**Rules**:
-- Send teachback as your **first message** after reading your task description (and any upstream handoffs)
-- Keep it concise: 3-6 bullet points
-- After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
-- If the lead sends a correction, adjust your approach as soon as you see it
-
-**When**: Always — every task dispatch. Only exception: consultant questions (peer asks you something).
+Teachback is a **gate**: send it BEFORE any implementation work. This is
+enforced structurally — the skill is always available at spawn.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 

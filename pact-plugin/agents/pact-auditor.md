@@ -8,6 +8,7 @@ color: "#4169E1"
 permissionMode: byDefault
 memory: user
 skills:
+  - pact-teachback
   - pact-architecture-patterns
 ---
 

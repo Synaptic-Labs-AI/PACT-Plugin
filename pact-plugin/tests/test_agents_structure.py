@@ -124,8 +124,10 @@ class TestLazyLoadedAgentTeams:
 
     # Upper bound on eager-loaded skills per agent. Currently the secretary
     # carries 2 (pact-memory, pact-handoff-harvest) and all other agents
-    # carry 0. Bumping this threshold should be a deliberate, reviewed choice.
-    MAX_FRONTMATTER_SKILLS = 2
+    # carry 1 (pact-teachback). Secretary carries 3 (teachback + memory +
+    # handoff-harvest), auditor carries 2 (teachback + architecture-patterns).
+    # Bumping this threshold should be a deliberate, reviewed choice.
+    MAX_FRONTMATTER_SKILLS = 3
 
     @staticmethod
     def _extract_skill_names(text):

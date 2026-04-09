@@ -31,6 +31,7 @@ color: "#708090"
 permissionMode: acceptEdits
 memory: user
 skills:
+  - pact-teachback
   - pact-memory
   - pact-handoff-harvest
 ---
