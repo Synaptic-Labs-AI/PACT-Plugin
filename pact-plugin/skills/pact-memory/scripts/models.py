@@ -16,7 +16,7 @@ import json
 import logging
 from dataclasses import dataclass, field, fields as dataclass_fields
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,8 @@ class TaskItem:
     status: str = "pending"
     priority: Optional[str] = None
 
-    _ALLOWED_KEYS = frozenset({"task", "status", "priority"})
+    # Populated after class body from dataclass fields (F3 remediation).
+    _ALLOWED_KEYS: ClassVar[FrozenSet[str]]
 
     @classmethod
     def from_dict(
@@ -141,7 +142,8 @@ class Decision:
     rationale: Optional[str] = None
     alternatives: Optional[List[str]] = None
 
-    _ALLOWED_KEYS = frozenset({"decision", "rationale", "alternatives"})
+    # Populated after class body from dataclass fields (F3 remediation).
+    _ALLOWED_KEYS: ClassVar[FrozenSet[str]]
 
     @classmethod
     def from_dict(
@@ -187,7 +189,8 @@ class Entity:
     type: Optional[str] = None
     notes: Optional[str] = None
 
-    _ALLOWED_KEYS = frozenset({"name", "type", "notes"})
+    # Populated after class body from dataclass fields (F3 remediation).
+    _ALLOWED_KEYS: ClassVar[FrozenSet[str]]
 
     @classmethod
     def from_dict(
@@ -217,6 +220,24 @@ class Entity:
         if self.notes:
             result["notes"] = self.notes
         return result
+
+
+def _populate_allowed_keys(cls: type) -> None:
+    """
+    Set cls._ALLOWED_KEYS to a frozenset derived from the dataclass fields.
+
+    F3 remediation (#374): previously each sub-object class hardcoded its
+    _ALLOWED_KEYS as a literal frozenset, which drifted from the dataclass
+    fields whenever a field was added or renamed. A test guarded the drift,
+    but the drift was still possible at edit time. Deriving the set from
+    dataclass_fields() removes the duplication entirely.
+    """
+    cls._ALLOWED_KEYS = frozenset(f.name for f in dataclass_fields(cls))
+
+
+_populate_allowed_keys(TaskItem)
+_populate_allowed_keys(Decision)
+_populate_allowed_keys(Entity)
 
 
 def _parse_string_list(raw: Any) -> List[str]:
