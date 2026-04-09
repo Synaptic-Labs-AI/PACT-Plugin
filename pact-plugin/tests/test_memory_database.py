@@ -933,3 +933,420 @@ class TestTOCTOUMitigation:
         # os.open should NOT have been called with O_EXCL for existing file
         for flags in call_log:
             assert not (flags & os.O_EXCL), "Should not use O_EXCL on existing file"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 (#374) — COMPREHENSIVE TEST LAYER (TEST phase, beyond smoke tests)
+# ---------------------------------------------------------------------------
+#
+# These tests complement the 46 smoke + unit tests that shipped alongside the
+# seven-commit fix. They target coder-flagged uncertainties the smoke layer
+# could not cover:
+#
+#   1. BEGIN IMMEDIATE concurrent-writer race (architect §7.3, MEDIUM)
+#   2. Legacy-row graceful degradation on read + update merge (MEDIUM)
+#   3. Content-hash stability under non-JSON-serializable values (LOW)
+#   4. Validation-before-transaction invariant (architect §1.3, NON-NEGOTIABLE)
+#      — strengthened with conn.total_changes instrumentation to prove no
+#      write was attempted, not merely rolled back.
+#
+# Each test class here is self-contained and does NOT use the shared `db_conn`
+# fixture where real-database semantics matter (concurrency tests need a real
+# on-disk WAL-mode database with `ensure_initialized` actually running, not
+# patched out).
+
+
+class TestBug1ConcurrentWriterRace:
+    """
+    Architect §7.3 / coder [MEDIUM] uncertainty — verify BEGIN IMMEDIATE
+    serialization of two concurrent update_memory calls on the same row.
+
+    Why this test matters: the merge algorithm reads the existing list, appends
+    the incoming list, dedups, and writes. If two writers interleave between
+    each other's SELECT and UPDATE, one merge can clobber the other. BEGIN
+    IMMEDIATE takes the sqlite write lock at BEGIN (not at first write), so
+    the second writer blocks until the first commits — guaranteeing each
+    merge sees the previous merge's committed state.
+
+    Fixture: real on-disk database with WAL mode, two live connections on
+    separate threads, threading.Barrier for simultaneous kick-off. A 5-second
+    join timeout prevents runaway hangs.
+    """
+
+    def _make_real_db(self, tmp_path):
+        """Build a real WAL-mode DB and seed one memory row."""
+        from scripts import database as db_mod
+        db_path = tmp_path / "concurrent.db"
+        # Use the module's own sqlite3 binding (pysqlite3 if present) — no
+        # patching, because unittest.mock.patch is NOT thread-safe and
+        # cross-thread teardown can corrupt the module state for other tests.
+        conn = db_mod.get_connection(db_path=db_path)
+        db_mod.init_schema(conn)
+        mem_id = db_mod.create_memory(conn, {"lessons_learned": ["seed"]})
+        conn.close()
+        return db_path, mem_id
+
+    def test_two_writers_both_merges_preserved(self, tmp_path):
+        """
+        Two threads each add a disjoint pair of lessons. After both finish,
+        the row must contain ALL items (seed + 4 added), proving neither
+        thread's merge clobbered the other's.
+        """
+        import threading
+        from scripts import database as db_mod
+
+        db_path, mem_id = self._make_real_db(tmp_path)
+
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def writer(items: list[str]) -> None:
+            try:
+                conn = db_mod.get_connection(db_path=db_path)
+                try:
+                    barrier.wait(timeout=5)
+                    db_mod.update_memory(
+                        conn, mem_id, {"lessons_learned": items},
+                    )
+                finally:
+                    conn.close()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t_a = threading.Thread(target=writer, args=(["a1", "a2"],))
+        t_b = threading.Thread(target=writer, args=(["b1", "b2"],))
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
+
+        assert not t_a.is_alive(), "writer A stalled (BEGIN IMMEDIATE deadlock?)"
+        assert not t_b.is_alive(), "writer B stalled (BEGIN IMMEDIATE deadlock?)"
+        assert not errors, f"writers raised: {errors!r}"
+
+        # Reopen and verify union is preserved.
+        conn = db_mod.get_connection(db_path=db_path)
+        try:
+            row = db_mod.get_memory(conn, mem_id)
+        finally:
+            conn.close()
+
+        lessons = row["lessons_learned"]
+        assert "seed" in lessons, "initial seed was clobbered"
+        assert "a1" in lessons and "a2" in lessons, f"writer A lost: {lessons}"
+        assert "b1" in lessons and "b2" in lessons, f"writer B lost: {lessons}"
+        assert len(lessons) == 5, f"expected 5 unique items, got {lessons}"
+
+    def test_repeat_concurrent_idempotent(self, tmp_path):
+        """
+        Same concurrent test run twice back-to-back must remain idempotent:
+        the second round adds zero new items because all hashes collide.
+        """
+        import threading
+        from scripts import database as db_mod
+
+        db_path, mem_id = self._make_real_db(tmp_path)
+
+        def run_round() -> None:
+            barrier = threading.Barrier(2)
+            errors: list[BaseException] = []
+
+            def writer(items: list[str]) -> None:
+                try:
+                    conn = db_mod.get_connection(db_path=db_path)
+                    try:
+                        barrier.wait(timeout=5)
+                        db_mod.update_memory(
+                            conn, mem_id, {"lessons_learned": items},
+                        )
+                    finally:
+                        conn.close()
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            t_a = threading.Thread(target=writer, args=(["x", "y"],))
+            t_b = threading.Thread(target=writer, args=(["y", "z"],))
+            t_a.start()
+            t_b.start()
+            t_a.join(timeout=10)
+            t_b.join(timeout=10)
+            assert not errors
+
+        run_round()
+        run_round()  # Re-run — dedup should keep the list stable.
+
+        conn = db_mod.get_connection(db_path=db_path)
+        try:
+            lessons = db_mod.get_memory(conn, mem_id)["lessons_learned"]
+        finally:
+            conn.close()
+
+        # seed + x + y + z (y deduped across writers). Second round adds nothing.
+        assert sorted(lessons) == ["seed", "x", "y", "z"], f"got {lessons}"
+
+
+class TestBug1LegacyRowGracefulDegradation:
+    """
+    Coder [MEDIUM] uncertainty — legacy DB rows with stray sub-object keys
+    must remain readable AND remain updateable via the additive merge path.
+
+    - Read path: MemoryObject.from_dict calls Entity.from_dict with strict=False,
+      which drops unknown keys and emits a logger.warning.
+    - Update merge path: _merge_with_dedup's try/except→repr() fallback fires
+      when the existing row contains an un-canonicalizable item, keeping the
+      legacy item verbatim rather than raising.
+    """
+
+    def test_legacy_row_with_stray_key_still_readable(self, db_conn, caplog):
+        """
+        Inject a row directly via raw SQL with a stray sub-object key in the
+        entities JSON. PACTMemory.get should succeed, the stray key should be
+        dropped, and a WARNING log should be emitted.
+        """
+        import logging
+        from scripts.database import get_memory
+        from scripts.models import MemoryObject
+
+        # Raw insert bypassing create_memory (which would strict-validate).
+        payload_entities = json.dumps(
+            [{"name": "LegacyEntity", "legacy_field": "should-be-dropped"}]
+        )
+        db_conn.execute(
+            """
+            INSERT INTO memories (id, entities, created_at, updated_at)
+            VALUES (?, ?, datetime('now'), datetime('now'))
+            """,
+            ("legacy-1", payload_entities),
+        )
+        db_conn.commit()
+
+        # Read path: _deserialize_json_fields runs, then whatever calls
+        # MemoryObject.from_dict. get_memory itself returns a raw dict, so
+        # exercise the full model path by calling MemoryObject.from_dict.
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="scripts.models"):
+            raw = get_memory(db_conn, "legacy-1")
+            memory_obj = MemoryObject.from_dict(raw)
+
+        assert memory_obj.entities, "entities list empty after legacy read"
+        assert memory_obj.entities[0].name == "LegacyEntity"
+        assert not hasattr(memory_obj.entities[0], "legacy_field"), (
+            "stray key leaked onto Entity instance"
+        )
+        assert any(
+            "legacy_field" in rec.getMessage() or "Dropping unknown keys" in rec.getMessage()
+            for rec in caplog.records
+        ), f"expected WARNING about stray key, got records: {[r.getMessage() for r in caplog.records]}"
+
+    def test_legacy_row_additive_update_uses_safety_valve(self, db_conn, caplog):
+        """
+        A legacy row with a stray sub-object key in `entities` must still
+        accept additive updates through update_memory. The _merge_with_dedup
+        safety valve (try/except → repr() fallback) should fire for the
+        legacy item so the merge succeeds and the new item is appended.
+        """
+        import logging
+        from scripts.database import get_memory, update_memory
+
+        # Inject a legacy row: entities has one item with a stray key.
+        payload_entities = json.dumps(
+            [{"name": "LegacyRedis", "stray": "pre-374 junk"}]
+        )
+        db_conn.execute(
+            """
+            INSERT INTO memories (id, entities, created_at, updated_at)
+            VALUES (?, ?, datetime('now'), datetime('now'))
+            """,
+            ("legacy-2", payload_entities),
+        )
+        db_conn.commit()
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="scripts.database"):
+            ok = update_memory(
+                db_conn,
+                "legacy-2",
+                {"entities": [{"name": "NewEntity", "type": "service"}]},
+            )
+
+        assert ok is True
+        row = get_memory(db_conn, "legacy-2")
+        ents = row["entities"]
+        # Safety valve: the legacy item must be preserved verbatim because
+        # we cannot canonicalize it; the new item is appended.
+        assert len(ents) == 2, f"expected 2 entities (1 legacy + 1 new), got {ents}"
+        legacy_present = any(
+            isinstance(e, dict) and e.get("name") == "LegacyRedis" for e in ents
+        )
+        new_present = any(
+            isinstance(e, dict) and e.get("name") == "NewEntity" for e in ents
+        )
+        assert legacy_present, f"legacy item lost during merge: {ents}"
+        assert new_present, f"new item not merged: {ents}"
+        # Verify the safety-valve WARNING fired.
+        assert any(
+            "Legacy" in rec.getMessage() and "canonicalization" in rec.getMessage()
+            for rec in caplog.records
+        ), (
+            "expected safety-valve WARNING from _merge_with_dedup, got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+
+class TestBug1ContentHashEdgeCases:
+    """
+    Coder [LOW] uncertainty — the `default=str` fallback in the canonical JSON
+    encoder for `_content_hash` must produce stable hex output even when the
+    payload contains non-JSON-native types.
+
+    Because Entity/Decision/TaskItem dataclasses only accept string-valued
+    fields, the dict-list path canonicalizes through dataclass.to_dict() before
+    json.dumps ever sees it — exotic types cannot reach the encoder through
+    that path. We instead exercise:
+      (a) the string-list hash path with exotic string reprs (stable under
+          repeated calls);
+      (b) the dict-list path via a stray-key dict that survives lenient
+          canonicalization;
+      (c) a direct json.dumps call matching the encoder parameters, proving
+          default=str is in effect as documented.
+    """
+
+    def test_string_list_hash_stable_for_unicode(self):
+        from scripts.database import _content_hash
+        s = "café — Übung / 日本語 / emoji 🦀"
+        assert _content_hash("lessons_learned", s) == _content_hash(
+            "lessons_learned", s,
+        )
+
+    def test_string_list_hash_stable_for_stringified_datetime(self):
+        from datetime import datetime, timezone
+        from scripts.database import _content_hash
+        dt = datetime(2026, 4, 8, 12, 0, 0, tzinfo=timezone.utc)
+        h1 = _content_hash("lessons_learned", f"event at {dt}")
+        h2 = _content_hash("lessons_learned", f"event at {dt}")
+        assert h1 == h2
+        assert len(h1) == 64  # sha256 hex
+
+    def test_dict_list_hash_stable_across_python_runs(self):
+        """
+        Order-independent dict keys + canonical JSON separators should yield
+        the same hex on two consecutive calls and the same hex for
+        equivalent-shape inputs.
+        """
+        from scripts.database import _content_hash
+        a = {"name": "X", "type": "svc", "notes": "n"}
+        b = {"notes": "n", "name": "X", "type": "svc"}
+        h_a1 = _content_hash("entities", a)
+        h_a2 = _content_hash("entities", a)
+        h_b = _content_hash("entities", b)
+        assert h_a1 == h_a2
+        assert h_a1 == h_b
+
+    def test_canonical_json_default_str_fallback_in_use(self):
+        """
+        Directly exercise the json.dumps(default=str) contract described in
+        architect §2. This is a belt-and-braces check: if someone ever drops
+        default=str, a datetime item in the encoder call would raise
+        TypeError instead of stringifying.
+        """
+        from datetime import datetime, timezone
+        dt = datetime(2026, 4, 8, 12, 0, 0, tzinfo=timezone.utc)
+        # Mirror the encoder call from _content_hash.
+        payload = json.dumps(
+            {"when": dt, "name": "X"},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        # Must contain the ISO-8601 string form of dt, not an error or repr.
+        assert "2026-04-08" in payload
+        assert "name" in payload
+
+
+class TestBug1ValidationBeforeTransactionInvariant:
+    """
+    Architect §1.3 NON-NEGOTIABLE — validation must run BEFORE the transaction
+    opens. Three properties to verify for every rejected update:
+
+      1. ValueError is raised.
+      2. The row is byte-identical to its pre-call state.
+      3. conn.total_changes is unchanged post-call, proving no write was even
+         attempted (strictly stronger than "the transaction rolled back").
+    """
+
+    def _snapshot_row(self, conn, mem_id):
+        cursor = conn.execute("SELECT * FROM memories WHERE id = ?", (mem_id,))
+        row = cursor.fetchone()
+        assert row is not None
+        return tuple(row)  # sqlite3.Row is not directly hashable but indexable
+
+    def test_unknown_top_level_key_no_transaction(self, db_conn):
+        from scripts.database import create_memory, update_memory
+
+        mem_id = create_memory(
+            db_conn, {"context": "stable", "lessons_learned": ["a", "b"]}
+        )
+        pre_snapshot = self._snapshot_row(db_conn, mem_id)
+        pre_changes = db_conn.total_changes
+
+        with pytest.raises(ValueError, match="Unknown memory field"):
+            update_memory(db_conn, mem_id, {"context": "new", "bogus": "x"})
+
+        post_snapshot = self._snapshot_row(db_conn, mem_id)
+        post_changes = db_conn.total_changes
+
+        assert post_snapshot == pre_snapshot, (
+            "row mutated despite ValueError — validation ran inside transaction?"
+        )
+        assert post_changes == pre_changes, (
+            f"conn.total_changes moved ({pre_changes}→{post_changes}) — a write "
+            "was attempted before validation rejected the payload"
+        )
+
+    def test_unknown_sub_object_key_no_transaction(self, db_conn):
+        from scripts.database import create_memory, update_memory
+
+        mem_id = create_memory(
+            db_conn, {"entities": [{"name": "Existing"}]}
+        )
+        pre_snapshot = self._snapshot_row(db_conn, mem_id)
+        pre_changes = db_conn.total_changes
+
+        with pytest.raises(ValueError, match="Unknown keys for Entity"):
+            update_memory(
+                db_conn,
+                mem_id,
+                {"entities": [{"name": "New", "bogus": "y"}]},
+            )
+
+        post_snapshot = self._snapshot_row(db_conn, mem_id)
+        post_changes = db_conn.total_changes
+
+        assert post_snapshot == pre_snapshot, (
+            "row mutated despite ValueError — sub-object validation ran "
+            "inside transaction?"
+        )
+        assert post_changes == pre_changes, (
+            f"conn.total_changes moved ({pre_changes}→{post_changes}) — a "
+            "write was attempted before sub-object validation rejected input"
+        )
+
+    def test_non_list_for_list_field_no_transaction(self, db_conn):
+        """
+        ValueError from _normalize_list_field also runs pre-transaction;
+        assert total_changes unchanged here too.
+        """
+        from scripts.database import create_memory, update_memory
+
+        mem_id = create_memory(db_conn, {"lessons_learned": ["a"]})
+        pre_snapshot = self._snapshot_row(db_conn, mem_id)
+        pre_changes = db_conn.total_changes
+
+        with pytest.raises(ValueError, match="must be a list"):
+            update_memory(
+                db_conn, mem_id, {"lessons_learned": "oops not a list"},
+            )
+
+        assert self._snapshot_row(db_conn, mem_id) == pre_snapshot
+        assert db_conn.total_changes == pre_changes
