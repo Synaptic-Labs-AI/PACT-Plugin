@@ -106,7 +106,7 @@ def update_claude_md() -> str | None:
     if not plugin_root.exists():
         return None
 
-    source_file = plugin_root / "CLAUDE.md"
+    source_file = plugin_root / "CLAUDE-kernel.md"
     if not source_file.exists():
         return None
 

@@ -4,7 +4,7 @@ Tests for shared/claude_md_manager.py -- CLAUDE.md file manipulation.
 Tests cover:
 update_claude_md():
 1. Returns None when CLAUDE_PLUGIN_ROOT doesn't exist
-2. Returns None when source CLAUDE.md doesn't exist
+2. Returns None when source CLAUDE-kernel.md doesn't exist
 3. Creates target CLAUDE.md when it doesn't exist
 4. Updates existing PACT block between markers
 5. Returns None when PACT block is already up to date
@@ -45,12 +45,12 @@ class TestUpdateClaudeMd:
         assert result is None
 
     def test_returns_none_when_source_missing(self, tmp_path, monkeypatch):
-        """Should return None when plugin CLAUDE.md doesn't exist."""
+        """Should return None when plugin CLAUDE-kernel.md doesn't exist."""
         from shared.claude_md_manager import update_claude_md
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        # No CLAUDE.md in plugin root
+        # No CLAUDE-kernel.md in plugin root
 
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
 
@@ -64,7 +64,7 @@ class TestUpdateClaudeMd:
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        (plugin_root / "CLAUDE.md").write_text("# PACT Orchestrator\nContent here")
+        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT Orchestrator\nContent here")
 
         claude_dir = tmp_path / "home" / ".claude"
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
@@ -86,7 +86,7 @@ class TestUpdateClaudeMd:
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        (plugin_root / "CLAUDE.md").write_text("# PACT v2\nNew content")
+        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT v2\nNew content")
 
         claude_dir = tmp_path / "home" / ".claude"
         claude_dir.mkdir(parents=True)
@@ -119,7 +119,7 @@ class TestUpdateClaudeMd:
         source_content = "# PACT\nSame content"
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        (plugin_root / "CLAUDE.md").write_text(source_content)
+        (plugin_root / "CLAUDE-kernel.md").write_text(source_content)
 
         start = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
         end = "<!-- PACT_END -->"
@@ -142,7 +142,7 @@ class TestUpdateClaudeMd:
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        (plugin_root / "CLAUDE.md").write_text("# PACT content")
+        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT content")
 
         claude_dir = tmp_path / "home" / ".claude"
         claude_dir.mkdir(parents=True)
@@ -172,7 +172,7 @@ class TestUpdateClaudeMd:
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        (plugin_root / "CLAUDE.md").write_text("# PACT v2\nNew content")
+        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT v2\nNew content")
 
         start = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
         end = "<!-- PACT_END -->"
@@ -237,7 +237,7 @@ class TestUpdateClaudeMd:
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        (plugin_root / "CLAUDE.md").write_text("# PACT Setup")
+        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT Setup")
 
         claude_dir = tmp_path / "home" / ".claude"
         claude_dir.mkdir(parents=True)
@@ -387,7 +387,7 @@ class TestUpdateClaudeMdErrorPaths:
 
         plugin_root = tmp_path / "plugin"
         plugin_root.mkdir()
-        source = plugin_root / "CLAUDE.md"
+        source = plugin_root / "CLAUDE-kernel.md"
         source.write_text("content")
 
         claude_dir = tmp_path / "home" / ".claude"
