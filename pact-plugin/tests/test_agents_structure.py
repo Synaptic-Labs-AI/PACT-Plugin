@@ -106,3 +106,106 @@ class TestAgentBody:
             # Check frontmatter has skills or body references skills
             assert "skill" in text.lower(), f"{f.name} doesn't reference skills"
 
+
+class TestLazyLoadedAgentTeams:
+    """
+    Regression guards for the #361 spawn-overhead reduction.
+
+    The `pact-agent-teams` skill was removed from agent frontmatter to
+    eliminate per-spawn eager-load cost. In its place, each agent now carries
+    an AGENT TEAMS PROTOCOL block in the body instructing the agent to invoke
+    `Skill("PACT:pact-agent-teams")` before its first team-tool call.
+
+    These tests pin the refactor against silent regression:
+      - M3: no agent frontmatter may list `pact-agent-teams` under `skills:`
+      - M4: every agent body must reference the lazy-load pointer
+      - F3: no agent frontmatter may declare more than MAX_FRONTMATTER_SKILLS
+    """
+
+    # Upper bound on eager-loaded skills per agent. Currently the secretary
+    # carries 2 (pact-memory, pact-handoff-harvest) and all other agents
+    # carry 0. Bumping this threshold should be a deliberate, reviewed choice.
+    MAX_FRONTMATTER_SKILLS = 2
+
+    @staticmethod
+    def _extract_skill_names(text):
+        """Extract the raw `skills:` block from frontmatter and parse skill
+        names. The shared `parse_frontmatter` helper flattens multiline lists
+        into a single continuation string, so list-item names are recovered
+        here by splitting the raw frontmatter on `- ` markers within the
+        `skills:` block. Returns a list of skill-name strings (may be empty).
+
+        This is scoped to this test class rather than extended in helpers.py
+        to avoid destabilizing other tests that rely on the flattened form.
+        """
+        if not text.startswith("---"):
+            return []
+        try:
+            end = text.index("---", 3)
+        except ValueError:
+            return []
+        fm_text = text[3:end]
+        lines = fm_text.split("\n")
+        skills = []
+        in_skills = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("skills:"):
+                in_skills = True
+                continue
+            if in_skills:
+                # Continuation lines are indented list items: "  - name"
+                if line.startswith(" ") or line.startswith("\t"):
+                    s = stripped.lstrip("-").strip()
+                    if s:
+                        skills.append(s)
+                else:
+                    # Non-indented line ends the skills block
+                    in_skills = False
+        return skills
+
+    @pytest.fixture
+    def all_agents(self, agent_files):
+        agents = {}
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            fm = parse_frontmatter(text)
+            if fm:
+                skill_names = self._extract_skill_names(text)
+                agents[f.stem] = (fm, text, skill_names)
+        return agents
+
+    def test_agent_teams_not_in_frontmatter(self, all_agents):
+        """M3: `pact-agent-teams` must not appear in any agent's frontmatter."""
+        for name, (_fm, _text, skill_names) in all_agents.items():
+            assert "pact-agent-teams" not in skill_names, (
+                f"{name}: pact-agent-teams must be lazy-loaded, not declared "
+                f"in frontmatter (see #361). Found skills: {skill_names!r}"
+            )
+
+    def test_agent_teams_protocol_block_present(self, all_agents):
+        """M4: the lazy-load pointer block must exist in every agent body."""
+        for name, (_fm, text, _skills) in all_agents.items():
+            assert "AGENT TEAMS PROTOCOL" in text, (
+                f"{name}: missing '# AGENT TEAMS PROTOCOL' section. "
+                f"Without it, the agent has no instruction to load "
+                f"pact-agent-teams before first team-tool use."
+            )
+            assert 'Skill("PACT:pact-agent-teams")' in text, (
+                f"{name}: AGENT TEAMS PROTOCOL block must reference "
+                f'Skill("PACT:pact-agent-teams") so the agent knows '
+                f"which skill to invoke."
+            )
+
+    def test_frontmatter_skill_count_capped(self, all_agents):
+        """F3: no agent may declare more than MAX_FRONTMATTER_SKILLS."""
+        for name, (_fm, _text, skill_names) in all_agents.items():
+            count = len(skill_names)
+            assert count <= self.MAX_FRONTMATTER_SKILLS, (
+                f"{name}: {count} frontmatter skills exceeds cap of "
+                f"{self.MAX_FRONTMATTER_SKILLS}. Per-spawn eager-load cost "
+                f"must stay bounded (see #361). Move additional skills to "
+                f"lazy-load via Skill() invocation in the agent body. "
+                f"Skills found: {skill_names!r}"
+            )
+

@@ -16,8 +16,9 @@ You are PACT Auditor, a concurrent quality observer during the Code phase of the
 # AGENT TEAMS PROTOCOL
 
 This agent communicates with the team via `SendMessage`, `TaskList`, `TaskGet`,
-`TaskUpdate`, and other team tools. **Before calling any of these for the first
-time, invoke the Skill tool: `Skill("PACT:pact-agent-teams")`** to load the full
+`TaskUpdate`, and other team tools. **On first use of any of these tools after
+spawn (or after reuse for a new task), invoke the Skill tool:
+`Skill("PACT:pact-agent-teams")`** to load the full
 communication protocol (teachback, progress signals, message format, lifecycle,
 HANDOFF format). This skill was previously eager-loaded via frontmatter; it is
 now lazy-loaded to reduce per-spawn context overhead (see issue #361).

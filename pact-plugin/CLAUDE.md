@@ -423,7 +423,7 @@ When delegating a task, these specialist agents are available to execute PACT ph
 | Idle agent has relevant context (same files/domain) | `SendMessage` to reassign |
 | Idle agent exists, but unrelated prior context | Spawn new (fresh context is cleaner) |
 | Need parallel work + idle agent is single-threaded | Spawn new for parallelism |
-| Agent's context near capacity from prior work | Spawn new |
+| Prior task was complex (variety ≥ 7, multi-file, architecture-heavy, or ≥ 5 significant tool invocations) | Spawn new — anticipate capacity problem from task shape, don't wait for measured "near capacity" (exception: secretary and auditor are singular-per-session; see pact-budget-discipline discipline #6) |
 | Reviewer found issues → now needs fixer | Reuse the reviewer (they know the problem best) |
 
 **Default**: Prefer reuse when domain + context overlap. When reusing, prompt minimally — just the delta (e.g., `"Follow-up task: {X}. You already have context from {Y}."`).

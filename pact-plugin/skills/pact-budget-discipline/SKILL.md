@@ -13,7 +13,7 @@ description: |
 # Budget Discipline for PACT Orchestrators
 
 This skill codifies the six orchestrator behaviors from issue #366. It is
-**lazy-loaded** — no per-spawn cost. Invoke it via `Skill("pact-budget-discipline")`
+**lazy-loaded** — no per-spawn cost. Invoke it via `Skill("PACT:pact-budget-discipline")`
 when a session is context-pressured, long-running, or multi-specialist.
 
 These disciplines were observed empirically during the PR #350 review session
@@ -27,7 +27,7 @@ backing from the session that surfaced it.
 
 ## When to Invoke This Skill
 
-Invoke `Skill("pact-budget-discipline")` at the start of a session when any of
+Invoke `Skill("PACT:pact-budget-discipline")` at the start of a session when any of
 the following are true:
 
 - Variety score is ≥ 7 on the initial task or any dispatched phase
@@ -212,10 +212,12 @@ time per #364. A swarm of smaller specialists — one per commit-pair group —
 would have avoided the compaction cycles entirely. Each sub-agent would have
 received a clean ~200K budget for a focused <60K-token task.
 
-**Refinement to the CLAUDE.md Reuse-vs-Spawn matrix**: replace the reactive
-"Agent's context near capacity from prior work → Spawn new" row with a
-proactive anticipation rule. The matrix edit is included as part of this
-PR's commit 4.
+**Refinement to the CLAUDE.md Reuse-vs-Spawn matrix**: the reactive
+"Agent's context near capacity from prior work → Spawn new" row has been
+replaced with a proactive anticipation rule that triggers on task shape
+(variety ≥ 7, multi-file, architecture-heavy, or ≥ 5 significant tool
+invocations) rather than measured capacity. The matrix edit lives in
+`pact-plugin/CLAUDE.md` under the Reuse vs. Spawn Decision heading.
 
 **Scope of the rule**: The refinement applies to reuse *across tasks within
 a session*, not to turn-to-turn continuation within a single task. An agent
