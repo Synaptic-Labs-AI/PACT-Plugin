@@ -1920,3 +1920,443 @@ class TestPluginRootEnvWiring:
         assert data["plugin_root"] == plugin_root_value
         assert data["session_id"] == session_id
         assert data["team_name"] == "pact-ccdd3344"
+
+
+class TestReadFullOrchestratorSource:
+    """Tests for _read_full_orchestrator_source() — reads full orchestrator
+    instructions from plugin source directory.
+
+    The function reads pact-plugin/CLAUDE.md from the directory pointed to by
+    CLAUDE_PLUGIN_ROOT env var. Returns the file content or None on failure.
+    """
+
+    def test_returns_content_when_source_exists(self, monkeypatch, tmp_path):
+        """Should read and return CLAUDE.md content from plugin root."""
+        from session_init import _read_full_orchestrator_source
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        source = plugin_root / "CLAUDE.md"
+        source.write_text("# Full orchestrator\nInstructions here.", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        result = _read_full_orchestrator_source()
+
+        assert result == "# Full orchestrator\nInstructions here."
+
+    def test_returns_none_when_env_var_missing(self, monkeypatch):
+        """Should return None when CLAUDE_PLUGIN_ROOT is not set."""
+        from session_init import _read_full_orchestrator_source
+
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+
+        result = _read_full_orchestrator_source()
+
+        assert result is None
+
+    def test_returns_none_when_env_var_empty(self, monkeypatch):
+        """Should return None when CLAUDE_PLUGIN_ROOT is empty string."""
+        from session_init import _read_full_orchestrator_source
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "")
+
+        result = _read_full_orchestrator_source()
+
+        assert result is None
+
+    def test_returns_none_when_source_file_missing(self, monkeypatch, tmp_path):
+        """Should return None when CLAUDE.md doesn't exist in plugin root."""
+        from session_init import _read_full_orchestrator_source
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        # Don't create CLAUDE.md
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        result = _read_full_orchestrator_source()
+
+        assert result is None
+
+    def test_returns_none_on_read_error(self, monkeypatch, tmp_path):
+        """Should return None on IOError/OSError reading the file."""
+        from session_init import _read_full_orchestrator_source
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        source = plugin_root / "CLAUDE.md"
+        source.write_text("content", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        with patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+            result = _read_full_orchestrator_source()
+
+        assert result is None
+
+
+class TestWriteOrchestratorSidecar:
+    """Tests for _write_orchestrator_sidecar() — writes full orchestrator
+    instructions to ~/.claude/pact-orchestrator.md for the lead to Read.
+
+    Returns True on success, False on failure. Sets file permissions to 0o600.
+
+    Note: _ORCHESTRATOR_SIDECAR is a module-level constant computed at import
+    time from Path.home(). monkeypatch.setattr(Path, "home", ...) does NOT
+    affect it. We must patch session_init._ORCHESTRATOR_SIDECAR directly to
+    redirect the write to tmp_path.
+    """
+
+    def test_writes_sidecar_file_successfully(self, monkeypatch, tmp_path):
+        """Should write content to the sidecar path."""
+        import session_init
+        from session_init import _write_orchestrator_sidecar
+
+        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        (tmp_path / ".claude").mkdir(parents=True)
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+
+        orchestrator_content = "# Full Orchestrator\nAll instructions."
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value=orchestrator_content):
+            result = _write_orchestrator_sidecar()
+
+        assert result is True
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == orchestrator_content
+
+    def test_sets_file_permissions_to_600(self, monkeypatch, tmp_path):
+        """Should set sidecar file permissions to 0o600 (owner read/write only)."""
+        import stat
+        import session_init
+        from session_init import _write_orchestrator_sidecar
+
+        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        (tmp_path / ".claude").mkdir(parents=True)
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value="content"):
+            _write_orchestrator_sidecar()
+
+        mode = stat.S_IMODE(sidecar.stat().st_mode)
+        assert mode == 0o600
+
+    def test_returns_false_when_source_unavailable(self, monkeypatch, tmp_path):
+        """Should return False when _read_full_orchestrator_source returns None."""
+        import session_init
+        from session_init import _write_orchestrator_sidecar
+
+        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value=None):
+            result = _write_orchestrator_sidecar()
+
+        assert result is False
+        assert not sidecar.exists()
+
+    def test_returns_false_when_source_empty(self, monkeypatch, tmp_path):
+        """Should return False when _read_full_orchestrator_source returns empty string."""
+        import session_init
+        from session_init import _write_orchestrator_sidecar
+
+        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value=""):
+            result = _write_orchestrator_sidecar()
+
+        assert result is False
+
+    def test_returns_false_on_write_error(self, monkeypatch, tmp_path):
+        """Should return False on IOError writing the sidecar file."""
+        import session_init
+        from session_init import _write_orchestrator_sidecar
+
+        # Point to a non-existent directory so write_text fails
+        sidecar = tmp_path / "no-such-dir" / "pact-orchestrator.md"
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value="content"):
+            result = _write_orchestrator_sidecar()
+
+        assert result is False
+
+    def test_overwrites_existing_sidecar(self, monkeypatch, tmp_path):
+        """Should overwrite existing sidecar file (no accumulation)."""
+        import session_init
+        from session_init import _write_orchestrator_sidecar
+
+        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+        (tmp_path / ".claude").mkdir(parents=True)
+        sidecar.write_text("old content", encoding="utf-8")
+        monkeypatch.setattr(session_init, "_ORCHESTRATOR_SIDECAR", sidecar)
+
+        with patch("session_init._read_full_orchestrator_source",
+                   return_value="new content"):
+            result = _write_orchestrator_sidecar()
+
+        assert result is True
+        assert sidecar.read_text(encoding="utf-8") == "new content"
+
+
+class TestSidecarDeliveryIntegration:
+    """Integration tests for sidecar delivery paths in main().
+
+    Tests the lead/teammate × startup/compact matrix:
+    - Lead startup: writes sidecar + pointer in additionalContext
+    - Teammate startup: NO sidecar write, NO pointer
+    - Lead post-compaction: re-writes sidecar + re-delivers pointer
+    - Teammate post-compaction: NO sidecar write
+    - additionalContext pointer is under 10KB
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_pact_context_cache(self, monkeypatch):
+        """Reset pact_context module state before every test."""
+        try:
+            from shared import pact_context
+            pact_context._cache = {}
+            pact_context._context_path = None
+        except Exception:
+            pass
+
+    def _run_main(self, monkeypatch, tmp_path, *, source="startup",
+                  agent_id=None, plugin_root_content=None):
+        """Helper: run main() with given source and agent_id.
+
+        If plugin_root_content is provided, creates a plugin dir with CLAUDE.md
+        containing that content AND patches _ORCHESTRATOR_SIDECAR to write to
+        tmp_path. If None, mocks _write_orchestrator_sidecar to return True.
+
+        Returns (output_dict, sidecar_path).
+        """
+        import session_init as si_mod
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
+        (tmp_path / "project").mkdir(exist_ok=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sidecar = tmp_path / ".claude" / "pact-orchestrator.md"
+
+        # Set up plugin root with CLAUDE.md if content provided
+        if plugin_root_content is not None:
+            plugin_dir = tmp_path / "plugin"
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            (plugin_dir / "CLAUDE.md").write_text(
+                plugin_root_content, encoding="utf-8")
+            monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_dir))
+            # Patch module-level constant so writes go to tmp_path
+            monkeypatch.setattr(si_mod, "_ORCHESTRATOR_SIDECAR", sidecar)
+        else:
+            monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "")
+
+        stdin_data = {
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": source,
+        }
+        if agent_id is not None:
+            stdin_data["agent_id"] = agent_id
+
+        # Pre-create team dir for compact paths
+        if source in ("compact", "clear"):
+            team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+            team_dir.mkdir(parents=True, exist_ok=True)
+            (team_dir / "config.json").write_text('{"members": []}')
+
+        # Ensure .claude dir exists for sidecar writes
+        (tmp_path / ".claude").mkdir(parents=True, exist_ok=True)
+
+        patches = [
+            patch("session_init.setup_plugin_symlinks", return_value=None),
+            patch("session_init.update_claude_md", return_value=None),
+            patch("session_init.ensure_project_memory_md", return_value=None),
+            patch("session_init.check_pinned_staleness", return_value=None),
+            patch("session_init.update_session_info", return_value=None),
+            patch("session_init.get_task_list", return_value=None),
+            patch("session_init.restore_last_session", return_value=None),
+            patch("session_init.check_paused_state", return_value=None),
+        ]
+
+        if plugin_root_content is None:
+            # Mock sidecar write when no real plugin content
+            patches.append(
+                patch("session_init._write_orchestrator_sidecar",
+                      return_value=True)
+            )
+
+        for p in patches:
+            p.start()
+
+        try:
+            with patch("sys.stdin", io.StringIO(json.dumps(stdin_data))), \
+                 patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+            assert exc_info.value.code == 0
+            output = json.loads(mock_stdout.getvalue())
+        finally:
+            for p in patches:
+                p.stop()
+
+        return output, sidecar
+
+    def test_lead_startup_includes_sidecar_pointer(self, monkeypatch, tmp_path):
+        """Lead startup: additionalContext should contain the Read instruction."""
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id=None,
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "pact-orchestrator.md" in additional
+        assert "Read this file NOW" in additional
+
+    def test_lead_startup_writes_sidecar_file(self, monkeypatch, tmp_path):
+        """Lead startup: should write sidecar file to disk with real plugin content."""
+        content = "# Full Orchestrator Instructions\nAll the details."
+        output, sidecar = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id=None,
+            plugin_root_content=content,
+        )
+
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == content
+
+    def test_teammate_startup_no_sidecar_pointer(self, monkeypatch, tmp_path):
+        """Teammate startup: additionalContext should NOT contain sidecar pointer."""
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id="agent-123",
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "pact-orchestrator.md" not in additional
+        assert "Read this file NOW" not in additional
+
+    def test_teammate_startup_no_sidecar_write(self, monkeypatch, tmp_path):
+        """Teammate startup: should NOT write sidecar file to disk."""
+        content = "# Full Orchestrator Instructions"
+        _, sidecar = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id="agent-123",
+            plugin_root_content=content,
+        )
+
+        assert not sidecar.exists()
+
+    def test_lead_compact_includes_sidecar_pointer(self, monkeypatch, tmp_path):
+        """Lead post-compaction: additionalContext should contain reload instruction."""
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="compact", agent_id=None,
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "pact-orchestrator.md" in additional
+        assert "POST-COMPACTION" in additional
+
+    def test_lead_compact_rewrites_sidecar(self, monkeypatch, tmp_path):
+        """Lead post-compaction: should re-write sidecar file (plugin may have updated)."""
+        content = "# Updated Orchestrator"
+        output, sidecar = self._run_main(
+            monkeypatch, tmp_path,
+            source="compact", agent_id=None,
+            plugin_root_content=content,
+        )
+
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == content
+
+    def test_teammate_compact_no_sidecar_pointer(self, monkeypatch, tmp_path):
+        """Teammate post-compaction: additionalContext should NOT contain sidecar Read pointer.
+
+        Note: The general compact recovery message may contain 'POST-COMPACTION'
+        but the sidecar-specific 'Read ~/.claude/pact-orchestrator.md' must NOT
+        appear for teammates.
+        """
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="compact", agent_id="agent-456",
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "pact-orchestrator.md" not in additional
+        assert "Read this file NOW" not in additional
+
+    def test_teammate_compact_no_sidecar_write(self, monkeypatch, tmp_path):
+        """Teammate post-compaction: should NOT write sidecar file."""
+        content = "# Orchestrator Content"
+        _, sidecar = self._run_main(
+            monkeypatch, tmp_path,
+            source="compact", agent_id="agent-456",
+            plugin_root_content=content,
+        )
+
+        assert not sidecar.exists()
+
+    def test_additional_context_pointer_under_10kb(self, monkeypatch, tmp_path):
+        """The additionalContext string including the pointer must be under 10KB.
+
+        The Claude Code additionalContext cap is 10,000 characters. The pointer
+        itself is ~200 chars; combined with other session context it must stay
+        well under the cap.
+        """
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id=None,
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert len(additional) < 10_000, (
+            f"additionalContext is {len(additional)} chars, exceeds 10KB cap"
+        )
+
+    def test_lead_startup_graceful_fallback_no_source(self, monkeypatch, tmp_path):
+        """Lead startup: should not crash when orchestrator source is unavailable."""
+        output, sidecar = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id=None,
+            plugin_root_content=None,  # This mocks _write_orchestrator_sidecar
+        )
+
+        # Should still produce valid output (mocked sidecar returns True)
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert isinstance(additional, str)
+
+    def test_sidecar_pointer_present_in_startup_context(self, monkeypatch, tmp_path):
+        """Lead startup: sidecar pointer should be present in additionalContext.
+
+        The pointer uses context_parts.insert(0, ...) early in main(), but the
+        team instruction is also inserted at position 0 later, pushing the
+        pointer to position 1. Both must be present — the exact ordering between
+        team-create and sidecar-read is an implementation detail.
+        """
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="startup", agent_id=None,
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        # Both the sidecar pointer and team instruction must be present
+        assert "pact-orchestrator.md" in additional
+        assert "pact-aabb1122" in additional
+
+    def test_lead_clear_source_rewrites_sidecar(self, monkeypatch, tmp_path):
+        """Lead clear (/clear command): should also re-deliver sidecar pointer.
+
+        'clear' is treated the same as 'compact' for context reset purposes.
+        """
+        output, _ = self._run_main(
+            monkeypatch, tmp_path,
+            source="clear", agent_id=None,
+        )
+
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "pact-orchestrator.md" in additional
+        assert "POST-COMPACTION" in additional
