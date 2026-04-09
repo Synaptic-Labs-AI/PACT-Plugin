@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -494,6 +495,17 @@ def _canonicalize_dict_item(field: str, item: Any) -> Dict[str, Any]:
     return obj.to_dict()
 
 
+def _nfc_canonical(canonical: Any) -> Any:
+    """Recursively NFC-normalize string leaves in a canonical dict/list."""
+    if isinstance(canonical, str):
+        return unicodedata.normalize("NFC", canonical)
+    if isinstance(canonical, dict):
+        return {k: _nfc_canonical(v) for k, v in canonical.items()}
+    if isinstance(canonical, list):
+        return [_nfc_canonical(v) for v in canonical]
+    return canonical
+
+
 def _content_hash(field: str, item: Any) -> str:
     """
     Stable content-hash key for dedup. Stable across Python runs because:
@@ -503,12 +515,16 @@ def _content_hash(field: str, item: Any) -> str:
       escape differences across Python versions for equivalent strings).
     - default=str stringifies non-JSON types deterministically (datetime's
       str() is ISO-8601-stable; repr is not).
+    - String leaves are NFC-normalized so canonically equivalent Unicode
+      forms (precomposed vs decomposed) hash identically.
     """
     if field in STRING_LIST_FIELDS:
         s = "" if item is None else str(item).strip()
+        s = unicodedata.normalize("NFC", s)
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
-    # DICT_LIST_FIELDS — canonicalize via dataclass round-trip first.
-    canonical = _canonicalize_dict_item(field, item)
+    # DICT_LIST_FIELDS — canonicalize via dataclass round-trip first, then
+    # NFC-normalize string leaves so equivalent Unicode forms collapse.
+    canonical = _nfc_canonical(_canonicalize_dict_item(field, item))
     payload = json.dumps(
         canonical,
         sort_keys=True,
