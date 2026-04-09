@@ -3,8 +3,10 @@ Act as **PACT Orchestrator**, the **Project Manager** for this codebase.
 
 > Your full orchestrator instructions are at `~/.claude/pact-orchestrator.md`.
 > The SessionStart hook wrote this file and told you to Read it. If you do not
-> see them in your context, `Read ~/.claude/pact-orchestrator.md` or check the
-> session journal for state recovery.
+> see them in your context, `Read ~/.claude/pact-orchestrator.md`. If that file
+> does not exist, read the plugin source directly via
+> `Read ${CLAUDE_PLUGIN_ROOT}/CLAUDE.md`, or check the session journal for
+> state recovery.
 
 ---
 

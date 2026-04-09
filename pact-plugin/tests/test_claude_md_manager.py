@@ -548,3 +548,107 @@ class TestEnsureDotClaudeParent:
         ensure_dot_claude_parent(target)
 
         assert target.parent.exists()
+
+
+class TestKernelIntegrity:
+    """Tests for CLAUDE-kernel.md content integrity.
+
+    The slim kernel (pact-plugin/CLAUDE-kernel.md) is the on-disk file that
+    both lead and teammates see. It must contain only the essential policy
+    content and have zero @~/ references (those are delivered via hook to
+    the lead only).
+
+    This lives in test_claude_md_manager.py because CLAUDE-kernel.md is the
+    source file for update_claude_md() — it's part of the CLAUDE.md
+    installation pipeline, not an agent definition.
+    """
+
+    KERNEL_PATH = Path(__file__).parent.parent / "CLAUDE-kernel.md"
+
+    def test_kernel_file_exists(self):
+        """CLAUDE-kernel.md must exist in the plugin directory."""
+        assert self.KERNEL_PATH.exists(), (
+            f"CLAUDE-kernel.md not found at {self.KERNEL_PATH}"
+        )
+
+    def test_kernel_has_zero_at_references(self):
+        """Kernel must have zero @~/.claude/protocols/ references.
+
+        These references would cause protocol files to be loaded for every
+        agent spawn, defeating the purpose of the spawn overhead reduction.
+        """
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        assert "@~/" not in content, (
+            "CLAUDE-kernel.md contains @~/ reference(s). These must be "
+            "removed — protocols are delivered via hook to the lead only."
+        )
+
+    def test_kernel_contains_s5_non_negotiables_table(self):
+        """Kernel must retain the S5 Non-Negotiables table.
+
+        The SACROSANCT rules apply to ALL agents (lead and teammates alike).
+        Removing them from the kernel would create a policy gap.
+        """
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        assert "Non-Negotiables" in content
+        assert "SACROSANCT" in content or "non-negotiable" in content.lower()
+        # Verify the table has key rules
+        assert "Security" in content
+        assert "Quality" in content
+        assert "Ethics" in content
+        assert "Delegation" in content
+        assert "Integrity" in content
+
+    def test_kernel_contains_algedonic_signal_basics(self):
+        """Kernel must retain algedonic signal category table.
+
+        Every agent has Algedonic Authority per the autonomy charter. They
+        need to know the signal categories (HALT/ALERT) and levels.
+        """
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        assert "Algedonic" in content
+        assert "HALT" in content
+        assert "ALERT" in content
+        assert "SECURITY" in content
+        assert "QUALITY" in content
+
+    def test_kernel_contains_mission_statement(self):
+        """Kernel must retain the mission statement as identity anchor."""
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        assert "MISSION" in content
+        assert "PACT Orchestrator" in content
+
+    def test_kernel_contains_bootstrapper_instruction(self):
+        """Kernel must contain the bootstrapper instruction pointing lead to sidecar.
+
+        This is the recovery path: if hook context is lost, the lead can
+        read the kernel and find the path to ~/.claude/pact-orchestrator.md.
+        """
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        assert "pact-orchestrator.md" in content
+
+    def test_kernel_is_under_size_budget(self):
+        """Kernel should be well under 5KB chars (~1.2K tokens).
+
+        The whole point is that this is slim. If it grows beyond ~5KB,
+        the spawn overhead reduction is being eroded.
+        """
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        assert len(content) < 5_000, (
+            f"CLAUDE-kernel.md is {len(content)} chars, exceeds 5KB budget. "
+            f"The kernel should be ~2-3KB to achieve spawn overhead targets."
+        )
+
+    def test_kernel_excludes_orchestrator_only_content(self):
+        """Kernel must NOT contain orchestrator-only sections.
+
+        These sections are delivered via hook to the lead only and must not
+        appear in the kernel that teammates also read.
+        """
+        content = self.KERNEL_PATH.read_text(encoding="utf-8")
+        # Orchestrator-only keywords that should NOT be in kernel
+        assert "Context Economy" not in content
+        assert "Wait in Silence" not in content
+        assert "Guided Dialogue" not in content
+        assert "Always Be Delegating" not in content
+        assert "Agent Teams Dispatch" not in content
