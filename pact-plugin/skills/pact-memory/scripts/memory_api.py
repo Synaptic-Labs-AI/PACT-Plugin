@@ -17,6 +17,7 @@ Note: Memory initialization is lazy-loaded on first use via memory_init.py,
 eliminating startup cost for non-memory users.
 """
 
+import json
 import logging
 import os
 import struct
@@ -91,6 +92,25 @@ CONTENT_FIELDS = {
     "context", "goal", "lessons_learned", "decisions", "entities",
     "reasoning_chains", "agreements_reached", "disagreements_resolved",
 }
+
+
+def _content_fields_changed(
+    before: Dict[str, Any],
+    after: Dict[str, Any],
+    keys: List[str],
+) -> bool:
+    """Return True if any of ``keys`` differs between ``before`` and ``after``.
+
+    Used by ``PACTMemory.update`` (M7, #374 remediation) to skip embedding
+    regeneration when an additive merge produces no actual change. Values are
+    compared via canonical JSON serialization so that dict/list ordering and
+    non-JSON-native types (e.g. datetimes) compare deterministically.
+    """
+    for k in keys:
+        if json.dumps(before.get(k), sort_keys=True, default=str) != \
+           json.dumps(after.get(k), sort_keys=True, default=str):
+            return True
+    return False
 
 
 def _ensure_ready() -> None:
@@ -560,14 +580,27 @@ class PACTMemory:
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
 
+            # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
+            # update so we can detect whether the merge actually changed
+            # any embedding-relevant value. update_memory's additive merge
+            # is idempotent for repeat calls — without this snapshot we'd
+            # regenerate embeddings on every no-op update touching any
+            # CONTENT_FIELDS key, even when the merge produced no diff.
+            content_keys_in_update = [
+                f for f in CONTENT_FIELDS if f in updates
+            ]
+            before_snapshot: Optional[Dict[str, Any]] = None
+            if content_keys_in_update:
+                before_snapshot = get_memory(conn, memory_id) or {}
+
             success = update_memory(conn, memory_id, updates, replace=replace)
 
-            if success:
-                # Update embedding if content changed
-                if any(field in updates for field in CONTENT_FIELDS):
-                    memory_dict = get_memory(conn, memory_id)
-                    if memory_dict:
-                        self._store_embedding(conn, memory_id, memory_dict)
+            if success and content_keys_in_update:
+                memory_dict = get_memory(conn, memory_id)
+                if memory_dict and _content_fields_changed(
+                    before_snapshot or {}, memory_dict, content_keys_in_update,
+                ):
+                    self._store_embedding(conn, memory_id, memory_dict)
 
             return success
 
