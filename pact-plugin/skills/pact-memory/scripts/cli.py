@@ -38,7 +38,7 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
-from scripts.database import ALLOWED_UPDATE_COLUMNS
+from scripts.database import ALLOWED_CREATE_COLUMNS, ALLOWED_UPDATE_COLUMNS
 from scripts.memory_api import PACTMemory
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -86,7 +86,7 @@ def cmd_save(args, db_path=None):
             f"{exc} (Note: 'id' and 'created_at' are accepted on save and "
             f"stripped before validation.)",
             exit_code=2,
-            allowed_fields=sorted(ALLOWED_UPDATE_COLUMNS),
+            allowed_fields=sorted(ALLOWED_CREATE_COLUMNS),
         )
     _success({"memory_id": memory_id})
 

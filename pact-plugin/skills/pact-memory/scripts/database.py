@@ -692,12 +692,12 @@ def create_memory(
     memory_id = memory.get("id") or generate_id()
 
     # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
-    # Strip id/created_at from the validation view: id is handled above, and
-    # create_memory writes created_at itself. Both are legitimate keys in a
-    # create payload; they just aren't "unknown".
-    working = {k: v for k, v in memory.items() if k not in ("id", "created_at")}
+    # ALLOWED_CREATE_COLUMNS includes 'id' and 'created_at' so create payloads
+    # may pass them through; ALLOWED_UPDATE_COLUMNS does not, so update_memory
+    # rejects them. Splitting the allowlists keeps both call sites honest about
+    # which keys are legal at each ingress.
     _reject_unknown_columns(
-        working, ALLOWED_UPDATE_COLUMNS, operation="save", memory_id=memory_id,
+        memory, ALLOWED_CREATE_COLUMNS, operation="save", memory_id=memory_id,
     )
 
     # STRICT sub-object validation — symmetric with update_memory's merge path
@@ -712,13 +712,18 @@ def create_memory(
     # leaves the DB untouched (validation-before-write invariant). String
     # shorthand (e.g. entities=["Redis"]) still works — _canonicalize_dict_item
     # routes str inputs through the non-strict cls.from_dict(str) path.
+    #
+    # Within-batch dedup (M6, #374 remediation): create_memory previously
+    # canonicalized each item but did not deduplicate within the incoming
+    # batch. update_memory dedupes even on replace=True, so the same payload
+    # behaves differently at the create and update ingresses. We now run
+    # _merge_with_dedup with an empty existing list for both dict-list and
+    # string-list fields so the two ingresses are symmetric.
     normalized = dict(memory)
-    for field in DICT_LIST_FIELDS:
+    for field in LIST_FIELDS:
         items = normalized.get(field)
         if items:
-            normalized[field] = [
-                _canonicalize_dict_item(field, item) for item in items
-            ]
+            normalized[field] = _merge_with_dedup(field, [], items)
 
     # Prepare data with JSON serialization
     data = _serialize_json_fields(normalized)
