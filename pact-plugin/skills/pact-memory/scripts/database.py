@@ -859,15 +859,22 @@ def update_memory(
     touched_lists: Set[str] = set()
     for key, value in working.items():
         if key in LIST_FIELDS:
-            normalized[key] = _normalize_list_field(key, value)
+            list_value = _normalize_list_field(key, value)
             if replace:
                 # Even on replace, dedup within the incoming batch and run
                 # sub-object validation (so a caller sending duplicate items
-                # still gets a deduped, validated write). touched_lists is
-                # only consulted on the additive merge path below, so we
-                # skip adding to it here.
-                normalized[key] = _merge_with_dedup(key, [], normalized[key])
+                # still gets a deduped, validated write). On replace, an
+                # empty list is a valid "clear this field" instruction and
+                # MUST proceed; touched_lists is only consulted on the
+                # additive merge path below, so we skip adding to it here.
+                normalized[key] = _merge_with_dedup(key, [], list_value)
             else:
+                # F6 (#374 remediation): on the additive path, an empty
+                # incoming list is a no-op (existing items + zero new items
+                # = existing items). Skip the SELECT + UPDATE entirely.
+                if not list_value:
+                    continue
+                normalized[key] = list_value
                 touched_lists.add(key)
         else:
             normalized[key] = value
