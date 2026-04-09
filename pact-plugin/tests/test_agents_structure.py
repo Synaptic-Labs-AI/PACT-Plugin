@@ -151,6 +151,10 @@ class TestLazyLoadedAgentTeams:
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("skills:"):
+                # Handle inline value: "skills: single-skill"
+                inline = stripped[len("skills:"):].strip()
+                if inline and inline != "|":
+                    skills.append(inline)
                 in_skills = True
                 continue
             if in_skills:
@@ -181,6 +185,15 @@ class TestLazyLoadedAgentTeams:
             assert "pact-agent-teams" not in skill_names, (
                 f"{name}: pact-agent-teams must be lazy-loaded, not declared "
                 f"in frontmatter (see #361). Found skills: {skill_names!r}"
+            )
+
+    def test_request_more_context_not_in_frontmatter(self, all_agents):
+        """request-more-context must be lazy-loaded, not in frontmatter."""
+        for name, (_fm, _text, skill_names) in all_agents.items():
+            assert "request-more-context" not in skill_names, (
+                f"{name}: request-more-context must be lazy-loaded, not "
+                f"declared in frontmatter (see #361). Found skills: "
+                f"{skill_names!r}"
             )
 
     def test_agent_teams_protocol_block_present(self, all_agents):
