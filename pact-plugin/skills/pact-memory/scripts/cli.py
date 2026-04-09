@@ -27,6 +27,7 @@ Commands:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -319,7 +320,11 @@ def main(argv=None):
     except SystemExit:
         raise  # Let _success/_error exits propagate
     except Exception as exc:
-        _error("SYSTEM_ERROR", str(exc), exit_code=2)
+        # Scrub the user's home directory from the message so absolute
+        # paths (e.g. ~/.claude/pact-memory/...) don't leak into stderr
+        # for callers piping the JSON envelope into logs.
+        msg = str(exc).replace(os.path.expanduser("~"), "~")
+        _error("SYSTEM_ERROR", msg, exit_code=2)
 
 
 if __name__ == "__main__":
