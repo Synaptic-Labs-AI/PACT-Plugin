@@ -612,14 +612,16 @@ class TestTeachbackMicroSkillExtraction:
     SKILLS_DIR = Path(__file__).parent.parent / "skills"
     AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
-    # Micro-skill size budget: teachback protocol should be compact
-    MAX_SKILL_BYTES = 2048
+    # Micro-skill size budget: teachback protocol should be compact.
+    # Measured in characters (not bytes) per lead spec.
+    MAX_SKILL_CHARS = 1500
 
     # Key protocol elements that must be in the extracted skill
     REQUIRED_PROTOCOL_ELEMENTS = [
         "SendMessage",           # Communication tool reference
         "teachback_sent",        # Metadata flag
         "gate",                  # Gate semantics (teachback is a gate)
+        "Teachback:",            # Format template marker
     ]
 
     # Lines that indicate full protocol content (not a stub).
@@ -653,12 +655,14 @@ class TestTeachbackMicroSkillExtraction:
         assert "description" in fm, "pact-teachback missing description"
 
     def test_teachback_skill_under_size_budget(self, teachback_skill):
-        """T2: micro-skill must be compact (<2KB)."""
-        size = teachback_skill.stat().st_size
-        assert size <= self.MAX_SKILL_BYTES, (
-            f"pact-teachback is {size} bytes, exceeding {self.MAX_SKILL_BYTES} "
-            f"byte micro-skill budget. If the protocol grew legitimately, "
-            f"update MAX_SKILL_BYTES with justification."
+        """T2: micro-skill must be compact (<1.5K chars)."""
+        text = teachback_skill.read_text(encoding="utf-8")
+        char_count = len(text)
+        assert char_count <= self.MAX_SKILL_CHARS, (
+            f"pact-teachback is {char_count} chars, exceeding "
+            f"{self.MAX_SKILL_CHARS} char micro-skill budget. If the "
+            f"protocol grew legitimately, update MAX_SKILL_CHARS with "
+            f"justification."
         )
 
     def test_teachback_skill_contains_protocol(self, teachback_skill):

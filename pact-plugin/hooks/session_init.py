@@ -550,7 +550,7 @@ def main():
         # plugin was updated mid-session, then re-deliver the pointer.
         if is_context_reset and not is_teammate:
             compact_ok, compact_sidecar_path = _write_orchestrator_sidecar()
-            if compact_sidecar_path:
+            if compact_ok:
                 context_parts.insert(0,
                     f'POST-COMPACTION: Read {compact_sidecar_path} to reload '
                     'your full PACT orchestrator instructions.'
