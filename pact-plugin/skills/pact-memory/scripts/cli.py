@@ -29,6 +29,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 # Path resolution: add the skill root (parent of scripts/) to sys.path
 # so that `from scripts import PACTMemory` works regardless of cwd.
@@ -47,7 +48,7 @@ def _success(result):
     sys.exit(0)
 
 
-def _error(error_type, message, exit_code=1, **extra):
+def _error(error_type, message, exit_code=1, **extra) -> NoReturn:
     """Print an error JSON envelope to stderr and exit with given code.
 
     Any extra kwargs are merged into the envelope (e.g. allowed_fields).
