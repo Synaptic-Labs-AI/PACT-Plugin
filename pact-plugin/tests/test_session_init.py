@@ -1077,6 +1077,90 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         assert "PACT tip" not in system_msg
 
 
+class TestIsUnknownOrMissingSession:
+    """Direct unit tests for _is_unknown_or_missing_session() predicate.
+
+    This security-relevant helper gates disk persistence (write_context,
+    append_event) and CLAUDE.md writes. It must reject None, non-strings,
+    empty strings, whitespace-only strings, and any "unknown-*" sentinel.
+
+    These tests pin the exact boundary contract so regressions surface at
+    the predicate level rather than only in integration test failures.
+    """
+
+    @pytest.mark.parametrize("value", [
+        None,
+        "",
+        "   ",
+        "\t\n",
+    ])
+    def test_rejects_missing_or_blank(self, value):
+        """None, empty, and whitespace-only values are all 'missing'."""
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session(value) is True
+
+    @pytest.mark.parametrize("value", [
+        "unknown",
+        "unknown-abc123",
+        "unknown-a3f9b2c4",
+        "unknownFoo",
+    ])
+    def test_rejects_unknown_sentinels(self, value):
+        """Any string starting with 'unknown' is treated as a sentinel."""
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session(value) is True
+
+    @pytest.mark.parametrize("value", [
+        123,
+        True,
+        False,
+        0,
+        [],
+        {},
+    ])
+    def test_rejects_non_string_types(self, value):
+        """Non-string types (int, bool, list, dict) are rejected."""
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session(value) is True
+
+    @pytest.mark.parametrize("value", [
+        "aabb1122-0000-0000-0000-000000000000",
+        "some-session-id",
+        "a1b2c3d4",
+        "valid",
+    ])
+    def test_accepts_valid_session_ids(self, value):
+        """Real session IDs (non-empty, non-unknown strings) are accepted."""
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session(value) is False
+
+    def test_bool_true_rejected_despite_truthy(self):
+        """bool is a subclass of int in Python — True is truthy but not a string.
+
+        This is a subtle boundary: `not True` is False, so a naive `if not raw_id`
+        check would accept True. The isinstance(raw_id, str) guard catches it.
+        """
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session(True) is True
+
+    def test_whitespace_padded_unknown_still_rejected(self):
+        """Whitespace around 'unknown' prefix: stripped before startswith check."""
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session("  unknown-padded  ") is True
+
+    def test_zero_is_falsy_and_rejected(self):
+        """Integer 0 is falsy — caught by the `not raw_id` check."""
+        from session_init import _is_unknown_or_missing_session
+
+        assert _is_unknown_or_missing_session(0) is True
+
+
 class TestWriteContextIntegration:
     """Integration tests: write_context() call wiring in session_init.main().
 
