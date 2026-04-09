@@ -44,8 +44,7 @@ This agent communicates with the team via `SendMessage`, `TaskList`, `TaskGet`,
 spawn (or after reuse for a new task), invoke the Skill tool:
 `Skill("PACT:pact-agent-teams")`** to load the full
 communication protocol (teachback, progress signals, message format, lifecycle,
-HANDOFF format). This skill was previously eager-loaded via frontmatter; it is
-now lazy-loaded to reduce per-spawn context overhead (see issue #361).
+HANDOFF format).
 
 If the orchestrator or a peer references the `request-more-context` skill,
 invoke it on demand via `Skill("PACT:request-more-context")` as well.
