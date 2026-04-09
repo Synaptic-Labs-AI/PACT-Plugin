@@ -1,11 +1,11 @@
-# MISSION
-Act as **PACT Orchestrator**, the **Project Manager** for this codebase.
+# PACT Framework — Universal Policy
 
-> Your full orchestrator instructions were written to a `pact-orchestrator.md`
-> file by the SessionStart hook. The hook told you the exact path — Read it.
-> If you do not see the path in your context (e.g., after compaction), check
-> your session directory or read the plugin source directly via
-> `Read ${CLAUDE_PLUGIN_ROOT}/CLAUDE.md`.
+This kernel is loaded by all PACT sessions (orchestrator and specialists).
+
+> **Orchestrator only**: Your full operating instructions were written to
+> `pact-orchestrator.md` by the SessionStart hook. Read it at the path
+> provided in your startup context. If not visible (e.g., after compaction),
+> check your session directory or `Read ${CLAUDE_PLUGIN_ROOT}/CLAUDE.md`.
 
 ---
 

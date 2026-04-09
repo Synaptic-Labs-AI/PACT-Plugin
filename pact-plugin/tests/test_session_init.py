@@ -39,6 +39,7 @@ Note: restore_last_session() and check_resumption_context() are tested
 in test_session_resume.py (canonical location).
 """
 
+import contextlib
 import io
 import json
 import re
@@ -2162,16 +2163,19 @@ class TestWriteOrchestratorSidecar:
         assert path == ""
         assert not (session_dir / "pact-orchestrator.md").exists()
 
-    def test_returns_false_empty_path_when_source_empty(self, tmp_path):
-        """Should return (False, '') when source returns empty string."""
+    def test_returns_false_empty_path_when_source_empty(self, monkeypatch, tmp_path):
+        """Should return (False, '') when plugin CLAUDE.md exists but is empty."""
         from session_init import _write_orchestrator_sidecar
+
+        plugin_root = tmp_path / "plugin"
+        plugin_root.mkdir()
+        (plugin_root / "CLAUDE.md").write_text("", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
 
         session_dir = tmp_path / "sessions" / "test-session"
         session_dir.mkdir(parents=True)
 
-        with patch("session_init._read_full_orchestrator_source",
-                   return_value=""), \
-             patch("session_init.get_session_dir",
+        with patch("session_init.get_session_dir",
                    return_value=str(session_dir)):
             ok, path = _write_orchestrator_sidecar()
 
@@ -2246,13 +2250,14 @@ class TestSidecarDeliveryIntegration:
 
     @pytest.fixture(autouse=True)
     def _reset_pact_context_cache(self, monkeypatch):
-        """Reset pact_context module state before every test."""
-        try:
-            from shared import pact_context
-            pact_context._cache = {}
-            pact_context._context_path = None
-        except Exception:
-            pass
+        """Reset pact_context module state before every test.
+
+        Uses monkeypatch.setattr (consistent with TestPluginRootEnvWiring)
+        so values are automatically restored after each test.
+        """
+        import shared.pact_context as pact_context
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
 
     def _run_main(self, monkeypatch, tmp_path, *, source="startup",
                   agent_id=None, plugin_root_content=None):
@@ -2316,16 +2321,15 @@ class TestSidecarDeliveryIntegration:
         ]
 
         if plugin_root_content is None:
-            # Mock sidecar write when no real plugin content
             patches.append(
                 patch("session_init._write_orchestrator_sidecar",
                       return_value=(True, str(sidecar)))
             )
 
-        for p in patches:
-            p.start()
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
 
-        try:
             with patch("sys.stdin", io.StringIO(json.dumps(stdin_data))), \
                  patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
                 with pytest.raises(SystemExit) as exc_info:
@@ -2333,9 +2337,6 @@ class TestSidecarDeliveryIntegration:
 
             assert exc_info.value.code == 0
             output = json.loads(mock_stdout.getvalue())
-        finally:
-            for p in patches:
-                p.stop()
 
         return output, sidecar
 

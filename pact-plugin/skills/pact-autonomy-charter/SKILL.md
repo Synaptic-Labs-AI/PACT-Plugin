@@ -22,8 +22,8 @@ You must escalate when:
 
 For complex sub-components, you may run a mini PACT cycle within your domain.
 Declare it, execute it, integrate results. Max nesting: 1 level.
-See [pact-s1-autonomy.md](../protocols/pact-s1-autonomy.md) for S1 Autonomy
-& Recursion rules.
+For S1 Autonomy & Recursion rules, read `protocols/pact-s1-autonomy.md`
+(via `Read ~/.claude/protocols/pact-plugin/pact-s1-autonomy.md`).
 
 ## Self-Coordination
 
@@ -44,4 +44,5 @@ Common triggers by domain:
 - **ALERT QUALITY**: Build/tests failing repeatedly, coverage gaps on critical paths
 - **ALERT SCOPE**: Requirements fundamentally misunderstood, task significantly different than expected
 
-See [algedonic.md](../protocols/algedonic.md) for signal format and full trigger list.
+For signal format and full trigger list, read `protocols/algedonic.md`
+(via `Read ~/.claude/protocols/pact-plugin/algedonic.md`).

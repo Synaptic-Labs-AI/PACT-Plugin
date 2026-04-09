@@ -481,6 +481,47 @@ class TestAutonomyCharterExtraction:
             )
 
 
+class TestAutonomyCharterSkillContent:
+    """Content integrity tests for the pact-autonomy-charter skill.
+
+    The shared skill must contain all key sections that were extracted from
+    the per-agent autonomy charter boilerplate. If a section is missing,
+    agents that invoke the skill won't receive the full charter.
+    """
+
+    SKILL_PATH = Path(__file__).parent.parent / "skills" / "pact-autonomy-charter" / "SKILL.md"
+
+    REQUIRED_SECTIONS = [
+        ("authority", "You have authority to:"),
+        ("escalation", "You must escalate when:"),
+        ("nested PACT", "Nested PACT"),
+        ("self-coordination", "Self-Coordination"),
+        ("algedonic", "Algedonic Authority"),
+    ]
+
+    def test_skill_file_exists(self):
+        assert self.SKILL_PATH.is_file(), (
+            "pact-autonomy-charter/SKILL.md missing"
+        )
+
+    @pytest.mark.parametrize("label,marker", REQUIRED_SECTIONS)
+    def test_contains_required_section(self, label, marker):
+        """Each key charter section must be present in the shared skill."""
+        content = self.SKILL_PATH.read_text(encoding="utf-8")
+        assert marker in content, (
+            f"pact-autonomy-charter missing '{label}' section "
+            f"(expected marker: {marker!r})"
+        )
+
+    def test_contains_algedonic_signal_reference(self):
+        """Must reference algedonic.md for the full trigger list."""
+        content = self.SKILL_PATH.read_text(encoding="utf-8")
+        assert "algedonic.md" in content, (
+            "pact-autonomy-charter must reference algedonic.md "
+            "for signal format and full trigger list"
+        )
+
+
 class TestRequiredSkillsCondensed:
     """Tests for REQUIRED SKILLS section condensing (#366 S5).
 

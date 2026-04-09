@@ -612,11 +612,10 @@ class TestKernelIntegrity:
         assert "SECURITY" in content
         assert "QUALITY" in content
 
-    def test_kernel_contains_mission_statement(self):
-        """Kernel must retain the mission statement as identity anchor."""
+    def test_kernel_contains_identity_anchor(self):
+        """Kernel must retain the identity anchor heading."""
         content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "MISSION" in content
-        assert "PACT Orchestrator" in content
+        assert "PACT Framework" in content
 
     def test_kernel_contains_bootstrapper_instruction(self):
         """Kernel must contain the bootstrapper instruction pointing lead to sidecar.
@@ -644,9 +643,16 @@ class TestKernelIntegrity:
 
         These sections are delivered via hook to the lead only and must not
         appear in the kernel that teammates also read.
+
+        MAINTENANCE: when new orchestrator-only sections are added to
+        pact-plugin/CLAUDE.md, add them to the exclusion list below.
+        The 5KB size budget (test_kernel_is_under_size_budget) serves as a
+        backstop — if the kernel grows beyond 5KB, either content leaked in
+        or the budget needs a reviewed increase.
         """
         content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        # Orchestrator-only keywords that should NOT be in kernel
+        # Orchestrator-only keywords that should NOT be in kernel.
+        # Update this list when new orchestrator-only sections are added.
         assert "Context Economy" not in content
         assert "Wait in Silence" not in content
         assert "Guided Dialogue" not in content

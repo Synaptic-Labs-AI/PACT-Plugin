@@ -387,7 +387,7 @@ def main():
             elif symlink_result:
                 context_parts.append(symlink_result)
 
-        # 2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
+        # 2. Updates ~/.claude/CLAUDE.md (merges/installs slim PACT kernel)
         # Context resets (compact/clear): CLAUDE.md is already installed from original session
         if not is_context_reset:
             claude_md_msg = update_claude_md()
