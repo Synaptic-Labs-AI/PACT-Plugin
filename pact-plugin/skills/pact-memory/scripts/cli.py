@@ -82,7 +82,8 @@ def cmd_save(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            str(exc),
+            f"{exc} (Note: 'id' and 'created_at' are accepted on save and "
+            f"stripped before validation.)",
             exit_code=2,
             allowed_fields=sorted(ALLOWED_UPDATE_COLUMNS),
         )
@@ -159,7 +160,8 @@ def cmd_update(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            str(exc),
+            f"{exc} (Note: 'id' and 'created_at' are stripped before update "
+            f"validation.)",
             exit_code=2,
             allowed_fields=sorted(ALLOWED_UPDATE_COLUMNS),
         )

@@ -394,6 +394,7 @@ def _reject_unknown_columns(
     updates: Dict[str, Any],
     allowed: frozenset,
     operation: str,
+    memory_id: Optional[str] = None,
 ) -> None:
     """
     Raise ValueError if `updates` contains any keys not in `allowed`.
@@ -403,13 +404,16 @@ def _reject_unknown_columns(
     contract for bug 2 — callers rely on the message shape in the JSON
     error envelope rendered by cli.py::cmd_update.
     """
+    # The allowed_fields list is intentionally exposed in error envelopes —
+    # it is the primary public contract for bug-2 discoverability.
     unknown = sorted(set(updates) - allowed)
     if not unknown:
         return
     allowed_list = ", ".join(sorted(allowed))
     unknown_list = ", ".join(repr(k) for k in unknown)
+    target = f" (memory {memory_id})" if memory_id else ""
     raise ValueError(
-        f"Unknown memory field(s) for {operation}: {unknown_list}. "
+        f"Unknown memory field(s) for {operation}{target}: {unknown_list}. "
         f"Allowed fields: {allowed_list}"
     )
 
@@ -692,7 +696,9 @@ def create_memory(
     # create_memory writes created_at itself. Both are legitimate keys in a
     # create payload; they just aren't "unknown".
     working = {k: v for k, v in memory.items() if k not in ("id", "created_at")}
-    _reject_unknown_columns(working, ALLOWED_UPDATE_COLUMNS, operation="save")
+    _reject_unknown_columns(
+        working, ALLOWED_UPDATE_COLUMNS, operation="save", memory_id=memory_id,
+    )
 
     # STRICT sub-object validation — symmetric with update_memory's merge path
     # (bug 3 part 2, #374). The first bug-3 fix wired strict=True into
@@ -819,7 +825,9 @@ def update_memory(
     working = {k: v for k, v in updates.items() if k not in ("id", "created_at")}
 
     # Bug 2: STRICT validation — unknown keys raise before any DB write.
-    _reject_unknown_columns(working, ALLOWED_UPDATE_COLUMNS, operation="update")
+    _reject_unknown_columns(
+        working, ALLOWED_UPDATE_COLUMNS, operation="update", memory_id=memory_id,
+    )
 
     # Bug 1: normalize list fields and canonicalize dict items. This is the
     # point where from_dict(strict=True) fires for sub-object validation (bug
