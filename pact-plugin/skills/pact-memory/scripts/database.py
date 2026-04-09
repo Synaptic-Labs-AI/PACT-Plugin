@@ -362,12 +362,12 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
 # top-level keys (`description` instead of `notes`) — used to disappear with
 # no warning, causing silent data loss.
 #
-# `id` and `created_at` are intentionally excluded from the update allow-list:
-# update_memory() pops them from the payload BEFORE validation so callers can
-# harmlessly pass a full memory dict through without tripping validation. This
-# preserves the existing "id/created_at silently ignored on update" contract
-# (test_ignores_id_and_created_at). create_memory() handles `id` separately
-# via memory.get("id") before the validation step.
+# `id`, `created_at`, and `updated_at` are all stripped from caller payloads
+# BEFORE validation (see _STRIPPED_ON_INGRESS below). This preserves the
+# "id/created_at silently ignored on update" contract
+# (test_ignores_id_and_created_at) and extends the same tolerate-then-drop
+# semantics to `updated_at`, which is a server-owned timestamp and must never
+# be set by a caller — update_memory stamps it on every successful write.
 SCALAR_FIELDS = frozenset({
     "context", "goal", "project_id", "session_id", "updated_at",
 })
@@ -383,12 +383,26 @@ DICT_LIST_FIELDS = frozenset({
 
 LIST_FIELDS = STRING_LIST_FIELDS | DICT_LIST_FIELDS
 
-# All columns a caller may set via update_memory (id/created_at handled specially).
+# All columns update_memory may write to the DB (updated_at is server-owned
+# and stamped inside update_memory; it stays in the set because the UPDATE
+# statement sets it).
 ALLOWED_UPDATE_COLUMNS = SCALAR_FIELDS | LIST_FIELDS
 
 # Columns create_memory/save_memory may set; adds `id` and `created_at` which
 # are legal on create but not on update.
 ALLOWED_CREATE_COLUMNS = ALLOWED_UPDATE_COLUMNS | frozenset({"id", "created_at"})
+
+# Server-owned fields stripped from caller payloads BEFORE validation. Passing
+# any of these is tolerated (so callers can round-trip a full memory dict) but
+# their values are dropped — update_memory stamps `updated_at`, and `id` /
+# `created_at` are immutable after creation.
+_STRIPPED_ON_INGRESS = frozenset({"id", "created_at", "updated_at"})
+
+# Caller-facing view of the allowlists: what a user may legitimately put in a
+# save/update payload. Stripped fields are tolerated but excluded here so
+# error envelopes (cli.py) don't list server-owned fields as valid options.
+CALLER_FACING_CREATE_FIELDS = ALLOWED_CREATE_COLUMNS - _STRIPPED_ON_INGRESS
+CALLER_FACING_UPDATE_FIELDS = ALLOWED_UPDATE_COLUMNS - _STRIPPED_ON_INGRESS
 
 
 def _reject_unknown_columns(
@@ -473,21 +487,25 @@ def _get_dict_field_class(field: str) -> type:
     return _DICT_FIELD_CLASS[field]
 
 
-def _canonicalize_dict_item(field: str, item: Any) -> Dict[str, Any]:
+def _canonicalize_dict_item(
+    field: str, item: Any, strict: bool = True,
+) -> Dict[str, Any]:
     """
     Round-trip a dict list item through its dataclass to produce a canonical
-    shape for content hashing. Also provides the write-path strict=True
-    validation hook for bug 3 (unknown sub-object keys → ValueError).
+    shape for content hashing. Also provides the write-path strict validation
+    hook for bug 3 (unknown sub-object keys → ValueError) when strict=True.
 
     - A string input is treated as the primary field value (Entity("X") etc.).
-    - A dict input is validated with strict=True; unknown keys raise.
+    - A dict input is validated with strict=<flag>; strict=True raises on
+      unknown keys (write path), strict=False drops them (read/hash path for
+      legacy rows — see R2-5 in _merge_with_dedup).
     - Anything else raises TypeError to avoid silent data loss.
     """
     cls = _get_dict_field_class(field)
     if isinstance(item, str):
         obj = cls.from_dict(item)
     elif isinstance(item, dict):
-        obj = cls.from_dict(item, strict=True)
+        obj = cls.from_dict(item, strict=strict)
     else:
         raise TypeError(
             f"Invalid item in {field!r}: expected dict or str, got {type(item).__name__}"
@@ -568,15 +586,42 @@ def _merge_with_dedup(
         try:
             h = _content_hash(field, item)
         except (ValueError, TypeError):
-            # Existing row contains an item we can't canonicalize (legacy
-            # stray key, unusual shape). Do NOT raise on the read side —
-            # that would brick updates to legacy rows. Log and keep the
-            # item verbatim, using repr() as a fallback dedup key.
-            logger.warning(
-                "Legacy %s item failed canonicalization; keeping verbatim: %r",
-                field, item,
-            )
-            h = hashlib.sha256(repr(item).encode("utf-8")).hexdigest()
+            # Existing row contains an item the strict canonicalizer rejects
+            # (legacy stray key, unusual shape). Do NOT raise on the read
+            # side — that would brick updates to legacy rows.
+            #
+            # R2-5: before falling back to repr(), try lenient
+            # canonicalization (strict=False drops unknown sub-object keys).
+            # This makes existing legacy items hash-compatible with incoming
+            # items that pass strict validation — preventing asymmetric
+            # dedup where a legacy {"description": ...} row and an incoming
+            # {"notes": ...} row for the same logical entity would never
+            # collide because one hashes via repr() and the other via the
+            # strict canonical form.
+            try:
+                if field in DICT_LIST_FIELDS:
+                    canonical = _nfc_canonical(
+                        _canonicalize_dict_item(field, item, strict=False)
+                    )
+                    payload = json.dumps(
+                        canonical,
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+                else:
+                    # String list fields have no strict/lenient distinction
+                    # (bytes or other exotics fall through to repr).
+                    raise TypeError("non-dict field in lenient path")
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Legacy %s item failed canonicalization (strict + lenient); "
+                    "keeping verbatim: %r",
+                    field, item,
+                )
+                h = hashlib.sha256(repr(item).encode("utf-8")).hexdigest()
             if h in seen:
                 continue
             seen.add(h)
@@ -840,10 +885,11 @@ def update_memory(
     if get_memory(conn, memory_id) is None:
         return False
 
-    # Strip id/created_at BEFORE validation so callers can pass a full memory
-    # dict through without tripping validation (preserves the
-    # test_id_and_created_at_excluded_from_update contract).
-    working = {k: v for k, v in updates.items() if k not in ("id", "created_at")}
+    # Strip server-owned fields (id, created_at, updated_at) BEFORE validation
+    # so callers can pass a full memory dict through without tripping
+    # validation. `updated_at` is stamped by this function on every successful
+    # write, so any caller-supplied value is always dropped.
+    working = {k: v for k, v in updates.items() if k not in _STRIPPED_ON_INGRESS}
 
     # Bug 2: STRICT validation — unknown keys raise before any DB write.
     _reject_unknown_columns(
@@ -892,6 +938,12 @@ def update_memory(
     # our UPDATE. BEGIN IMMEDIATE grabs the write lock at BEGIN so no other
     # writer can slip in.
     needs_merge = bool(touched_lists)
+    # Scalar fields the caller explicitly set. Even if they happen to equal
+    # the current DB value, we still bump updated_at — scalar equality checks
+    # are out of scope for R2-4 (only content-no-op list merges are covered).
+    scalar_fields_present = bool(
+        set(normalized.keys()) - touched_lists
+    )
     try:
         if needs_merge:
             conn.execute("BEGIN IMMEDIATE")
@@ -903,6 +955,10 @@ def update_memory(
             )
             row = cursor.fetchone()
             current = _deserialize_json_fields(dict(row)) if row else {}
+            # Track which merged list fields actually produced a different
+            # result from the existing list. If every incoming item was a
+            # duplicate, merged == existing and there's nothing to write.
+            changed_lists: Set[str] = set()
             for key in touched_lists:
                 existing = current.get(key) or []
                 if isinstance(existing, str):
@@ -914,9 +970,29 @@ def update_memory(
                         existing = []
                 if not isinstance(existing, list):
                     existing = []
-                normalized[key] = _merge_with_dedup(
-                    key, existing, normalized[key],
-                )
+                merged = _merge_with_dedup(key, existing, normalized[key])
+                normalized[key] = merged
+                if merged != existing:
+                    changed_lists.add(key)
+
+            # R2-4: content no-op short-circuit. If no list field actually
+            # changed AND no scalar fields were set, the UPDATE would write
+            # identical data and bump updated_at pointlessly. Close the
+            # transaction and return without touching the row — extends the
+            # "id-only no-op" contract to additive merges where every
+            # incoming item was already present.
+            if not changed_lists and not scalar_fields_present:
+                conn.commit()  # release BEGIN IMMEDIATE write lock
+                return True
+
+            # Drop unchanged list fields from the write payload — no point
+            # rewriting identical JSON blobs — but preserve scalar fields and
+            # any list field that did change.
+            if changed_lists != touched_lists:
+                normalized = {
+                    k: v for k, v in normalized.items()
+                    if k not in touched_lists or k in changed_lists
+                }
 
             # Serialize and write inside the same transaction.
             data = _serialize_json_fields(normalized)

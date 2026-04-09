@@ -38,7 +38,10 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
-from scripts.database import ALLOWED_CREATE_COLUMNS, ALLOWED_UPDATE_COLUMNS
+from scripts.database import (
+    CALLER_FACING_CREATE_FIELDS,
+    CALLER_FACING_UPDATE_FIELDS,
+)
 from scripts.memory_api import PACTMemory
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -58,6 +61,33 @@ def _error(error_type, message, exit_code=1, **extra) -> NoReturn:
     envelope.update(extra)
     print(json.dumps(envelope), file=sys.stderr)
     sys.exit(exit_code)
+
+
+def _scrub(msg: str) -> str:
+    """
+    Replace the user's home directory with '~' in an error message.
+
+    Handles both the raw `~` expansion and the realpath form (which may
+    differ on macOS where `/Users/foo` resolves through `/System/Volumes/Data`
+    or similar). Guards against an empty/unset HOME — if expanduser returns
+    the literal '~', no substitution is applied.
+
+    Applied to caller-visible error envelopes so absolute paths don't leak
+    into stderr for callers piping JSON envelopes into logs.
+    """
+    if not msg:
+        return msg
+    home = os.path.expanduser("~")
+    # Empty HOME → expanduser returns the literal '~'. Don't substitute '~'
+    # for '~' (no-op) and don't realpath an empty path.
+    if home and home != "~":
+        real_home = os.path.realpath(home)
+        # Order matters: replace the longer/realpath form first so partial
+        # overlaps don't leave a trailing suffix.
+        if real_home != home:
+            msg = msg.replace(real_home, "~")
+        msg = msg.replace(home, "~")
+    return msg
 
 
 def cmd_save(args, db_path=None):
@@ -83,10 +113,10 @@ def cmd_save(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            f"{exc} (Note: 'id' and 'created_at' are accepted on save and "
-            f"stripped before validation.)",
+            f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are accepted "
+            f"on save and stripped before validation.)",
             exit_code=2,
-            allowed_fields=sorted(ALLOWED_CREATE_COLUMNS),
+            allowed_fields=sorted(CALLER_FACING_CREATE_FIELDS),
         )
     _success({"memory_id": memory_id})
 
@@ -161,10 +191,10 @@ def cmd_update(args, db_path=None):
     except ValueError as exc:
         _error(
             "ValueError",
-            f"{exc} (Note: 'id' and 'created_at' are stripped before update "
-            f"validation.)",
+            f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are stripped "
+            f"before update validation.)",
             exit_code=2,
-            allowed_fields=sorted(ALLOWED_UPDATE_COLUMNS),
+            allowed_fields=sorted(CALLER_FACING_UPDATE_FIELDS),
         )
     if not success:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
@@ -320,11 +350,11 @@ def main(argv=None):
     except SystemExit:
         raise  # Let _success/_error exits propagate
     except Exception as exc:
-        # Scrub the user's home directory from the message so absolute
-        # paths (e.g. ~/.claude/pact-memory/...) don't leak into stderr
-        # for callers piping the JSON envelope into logs.
-        msg = str(exc).replace(os.path.expanduser("~"), "~")
-        _error("SYSTEM_ERROR", msg, exit_code=2)
+        # Scrub the user's home directory (both the literal expansion and
+        # the realpath form) from the message so absolute paths
+        # (e.g. ~/.claude/pact-memory/...) don't leak into stderr for
+        # callers piping the JSON envelope into logs.
+        _error("SYSTEM_ERROR", _scrub(str(exc)), exit_code=2)
 
 
 if __name__ == "__main__":
