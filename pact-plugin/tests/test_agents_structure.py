@@ -837,6 +837,32 @@ class TestBootstrapCommand:
             f"loads them at command invocation."
         )
 
+    def test_bootstrap_has_exactly_eight_protocol_references(self):
+        """bootstrap.md must contain EXACTLY 8 @${CLAUDE_PLUGIN_ROOT}/protocols/
+        references — one per critical protocol, no duplicates, no extras.
+
+        The presence check above confirms each of the 8 is mentioned at least
+        once. This cardinality check catches the inverse failure mode: a
+        stray duplicate, an accidentally-added 9th protocol reference, or a
+        copy/paste that doubles an existing reference. Eager-load cost scales
+        with reference count, so the 8-reference budget is deliberate.
+        """
+        import re
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        # Count every @${CLAUDE_PLUGIN_ROOT}/protocols/<anything>.md occurrence.
+        # Uses a non-greedy match on the filename segment so each reference is
+        # counted exactly once regardless of surrounding punctuation.
+        pattern = re.compile(
+            r"@\$\{CLAUDE_PLUGIN_ROOT\}/protocols/[A-Za-z0-9_.\-]+\.md"
+        )
+        matches = pattern.findall(text)
+        assert len(matches) == len(self.CRITICAL_PROTOCOLS), (
+            f"bootstrap.md must contain exactly "
+            f"{len(self.CRITICAL_PROTOCOLS)} @${{CLAUDE_PLUGIN_ROOT}}/protocols/ "
+            f"references (one per critical protocol). "
+            f"Found {len(matches)}: {matches}"
+        )
+
     def test_bootstrap_referenced_protocol_files_exist(self):
         """Every protocol referenced in bootstrap.md must exist on disk.
 
