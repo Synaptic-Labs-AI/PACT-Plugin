@@ -899,6 +899,25 @@ class TestTeammateBootstrapCommand:
                 f"does not exist at {path}."
             )
 
+    def test_command_contains_exactly_four_at_references(self):
+        """Spec Section 6.8 requires exactly 4 @${CLAUDE_PLUGIN_ROOT}/ references
+        in teammate-bootstrap.md — no more, no less.
+
+        Presence-only checks (test_command_contains_required_at_references)
+        would silently accept the addition of a 5th or 6th ref, which would
+        cost every spawned teammate extra context tokens on every bootstrap
+        call. The cardinality pin locks the eager-load footprint.
+        """
+        text = self.COMMAND_PATH.read_text(encoding="utf-8")
+        count = text.count("@${CLAUDE_PLUGIN_ROOT}/")
+        assert count == 4, (
+            f"teammate-bootstrap.md must contain exactly 4 "
+            f"@${{CLAUDE_PLUGIN_ROOT}}/ references (spec Section 6.8). "
+            f"Found {count}. The eager-load footprint is load-bearing — "
+            f"every spawned teammate pays the cost of each extra ref on "
+            f"every invocation."
+        )
+
 
 class TestTeammateBootstrapRegisteredInPluginJson:
     """The teammate-bootstrap command must be registered in plugin.json so
@@ -924,4 +943,238 @@ class TestTeammateBootstrapRegisteredInPluginJson:
         assert registered, (
             f"teammate-bootstrap.md not registered in plugin.json commands. "
             f"Found: {commands}"
+        )
+
+
+class TestBootstrapGuardSection:
+    """Spec Section 8 requirement: bootstrap.md must open with a Bootstrap
+    Guard section near the top of the file.
+
+    The guard is an idempotency check — the lead re-invokes the bootstrap
+    skill after compaction to reload protocols, and the guard tells the
+    lead to short-circuit if the full orchestrator instructions are still
+    in context. Without the guard the lead re-loads ~600 lines on every
+    invocation, defeating the purpose of compaction-aware re-invocation.
+    """
+
+    BOOTSTRAP_PATH = (
+        Path(__file__).parent.parent / "commands" / "bootstrap.md"
+    )
+
+    def test_bootstrap_md_exists(self):
+        assert self.BOOTSTRAP_PATH.exists(), (
+            f"bootstrap.md not found at {self.BOOTSTRAP_PATH}"
+        )
+
+    # Spec Section 6.9: the guard must list these recognition markers
+    # verbatim so the lead can check its own context for their presence
+    # before deciding whether to re-load the bootstrap.
+    REQUIRED_RECOGNITION_MARKERS = (
+        "S5 Non-Negotiables",
+        "algedonic protocol",
+        "HALT/ALERT",
+        "communication charter",
+        "variety assessment",
+        "S4 checkpoint",
+        "workflow command",
+    )
+
+    def test_bootstrap_guard_heading_present(self):
+        """The literal `## Bootstrap Guard` heading must be in the file."""
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        assert "## Bootstrap Guard" in text, (
+            "bootstrap.md is missing the `## Bootstrap Guard` heading. "
+            "Spec Section 6.9 requires the guard for compaction-aware "
+            "re-invocation."
+        )
+
+    def test_bootstrap_guard_within_first_30_lines(self):
+        """Spec Section 6.9: the guard must appear within the first 30
+        lines of the file so the lead encounters it before reading the
+        main MISSION content on re-invocation."""
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        head = lines[:30]
+        guard_found = any("## Bootstrap Guard" in line for line in head)
+        assert guard_found, (
+            f"bootstrap.md `## Bootstrap Guard` heading must appear within "
+            f"the first 30 lines (spec Section 6.9). First 30 lines:\n"
+            f"{chr(10).join(head)}"
+        )
+
+    def _guard_section(self, text: str) -> str:
+        """Extract the Bootstrap Guard section body: everything from the
+        `## Bootstrap Guard` heading to the next `---` horizontal rule
+        (which in this file separates the guard from the main MISSION
+        content).
+        """
+        start_marker = "## Bootstrap Guard"
+        start_idx = text.find(start_marker)
+        if start_idx == -1:
+            return ""
+        tail = text[start_idx:]
+        end_idx = tail.find("\n---\n")
+        if end_idx == -1:
+            return "\n".join(tail.splitlines()[:40])
+        return tail[:end_idx]
+
+    def test_bootstrap_guard_contains_all_recognition_markers(self):
+        """Spec Section 6.9: the guard must enumerate the specific
+        recognition markers the lead looks for to decide whether the
+        full orchestrator instructions are already loaded. Each marker
+        must appear literally inside the guard section body, not merely
+        somewhere else in the file.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        guard_body = self._guard_section(text)
+        assert guard_body, (
+            "Failed to extract the Bootstrap Guard section body from "
+            "bootstrap.md — the `## Bootstrap Guard` heading may be "
+            "missing or the section structure may have changed."
+        )
+        missing = [
+            marker
+            for marker in self.REQUIRED_RECOGNITION_MARKERS
+            if marker not in guard_body
+        ]
+        assert not missing, (
+            f"Bootstrap Guard section is missing required recognition "
+            f"markers: {missing}. Spec Section 6.9 requires the guard "
+            f"to enumerate these so the lead can check its own context "
+            f"before re-loading. Guard section body was:\n{guard_body}"
+        )
+
+
+class TestDispatchTemplatePrelude:
+    """Spec Section 8 requirement: the Agent Teams Dispatch template in
+    bootstrap.md must embed the teammate bootstrap prelude inside the
+    `prompt=` parameter.
+
+    This is load-bearing because the dispatch template is what the lead
+    reads when spawning a specialist — if the template is missing the
+    `PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
+    call, spawned teammates will not self-bootstrap and will lack the
+    team-protocol / teachback / algedonic context.
+    """
+
+    BOOTSTRAP_PATH = (
+        Path(__file__).parent.parent / "commands" / "bootstrap.md"
+    )
+
+    def _dispatch_region(self, text: str) -> str:
+        """Extract the region around the Agent Teams Dispatch callout.
+        Returns the chunk starting at the MANDATORY callout and extending
+        ~40 lines forward — enough to cover the dispatch pattern block.
+        """
+        marker = "MANDATORY"
+        idx = text.find(marker)
+        if idx == -1:
+            return ""
+        # Take ~80 lines of context after the marker to cover the
+        # dispatch pattern block.
+        tail = text[idx:]
+        lines = tail.splitlines()[:80]
+        return "\n".join(lines)
+
+    def test_dispatch_template_contains_pact_role_teammate(self):
+        """Spec Section 6.6 / Section 8: the dispatch template must
+        contain the literal placeholder form `PACT ROLE: teammate ({name})`
+        — not just the prefix. The `{name}` placeholder is load-bearing
+        because at dispatch time the lead substitutes the teammate's
+        actual name, which is what the routing block searches for and
+        what appears in the spawned teammate's context.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        region = self._dispatch_region(text)
+        assert region, (
+            "bootstrap.md missing the Agent Teams Dispatch MANDATORY "
+            "callout anchor."
+        )
+        assert "PACT ROLE: teammate ({name})" in region, (
+            "Agent Teams Dispatch template in bootstrap.md must contain "
+            "literal `PACT ROLE: teammate ({name})` (with the exact "
+            "placeholder form) so the lead substitutes the teammate's "
+            "name at dispatch time. Spec Section 6.6."
+        )
+
+    def test_dispatch_template_contains_teammate_bootstrap_skill_call(self):
+        """The dispatch template shows Python source code, so the Skill call
+        appears with backslash-escaped quotes inside the outer prompt="..."
+        literal. Match the on-disk escaped form.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        region = self._dispatch_region(text)
+        assert region, (
+            "bootstrap.md missing the Agent Teams Dispatch MANDATORY "
+            "callout anchor."
+        )
+        assert 'Skill(\\"PACT:teammate-bootstrap\\")' in region, (
+            "Agent Teams Dispatch template in bootstrap.md must invoke "
+            "`Skill(\\\"PACT:teammate-bootstrap\\\")` inside the prompt= "
+            "parameter (escaped because the call is nested inside the "
+            "outer Python prompt string literal). Spec Section 8."
+        )
+
+    def test_dispatch_template_prelude_inside_prompt_parameter(self):
+        """Both markers must co-occur inside the `prompt=` parameter — not
+        just anywhere in the file. The spec explicitly requires the
+        prelude to be embedded in the dispatch prompt so the teammate
+        sees it at spawn.
+
+        The Skill call appears with backslash-escaped quotes because
+        it is nested inside the outer Python prompt= string literal.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        region = self._dispatch_region(text)
+        assert "prompt=" in region, (
+            "Agent Teams Dispatch template in bootstrap.md must expose "
+            "a `prompt=` parameter near the MANDATORY callout."
+        )
+        # Find the prompt= substring and walk forward to locate both
+        # markers within the same prompt literal.
+        prompt_idx = region.find("prompt=")
+        prompt_tail = region[prompt_idx:]
+        assert "PACT ROLE: teammate (" in prompt_tail, (
+            "`PACT ROLE: teammate (` must appear inside the dispatch "
+            "prompt= parameter, not merely elsewhere in bootstrap.md."
+        )
+        assert 'Skill(\\"PACT:teammate-bootstrap\\")' in prompt_tail, (
+            "`Skill(\\\"PACT:teammate-bootstrap\\\")` must appear inside "
+            "the dispatch prompt= parameter (escaped form — nested inside "
+            "the outer Python prompt string literal), not merely elsewhere "
+            "in bootstrap.md."
+        )
+
+    def test_dispatch_template_contains_recovery_after_compaction_language(self):
+        """Spec Section 6.6: the dispatch template must include guidance
+        telling the spawned teammate to re-invoke the teammate bootstrap
+        if its context is compacted and the bootstrap content is no
+        longer present. Without this language, teammates that get
+        compacted mid-task lose their team-protocol / teachback /
+        algedonic content and cannot recover it.
+
+        Literal fragments asserted:
+          - "compacted" — the trigger condition
+          - "re-invoke" — the recovery action
+        Both must appear inside the prompt= parameter, not just
+        elsewhere in bootstrap.md.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        region = self._dispatch_region(text)
+        prompt_idx = region.find("prompt=")
+        assert prompt_idx != -1, (
+            "Dispatch template missing prompt= parameter anchor."
+        )
+        prompt_tail = region[prompt_idx:]
+        assert "compacted" in prompt_tail, (
+            "Dispatch template in bootstrap.md is missing the "
+            "compaction-trigger language ('compacted'). Spec Section 6.6 "
+            "requires the template to tell spawned teammates what to do "
+            "if their context is compacted."
+        )
+        assert "re-invoke" in prompt_tail, (
+            "Dispatch template in bootstrap.md is missing the recovery "
+            "action language ('re-invoke'). Spec Section 6.6 requires "
+            "the template to tell spawned teammates to re-invoke the "
+            "bootstrap skill after compaction."
         )

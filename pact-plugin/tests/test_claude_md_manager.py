@@ -696,3 +696,159 @@ class TestEnsureDotClaudeParent:
         ensure_dot_claude_parent(target)
 
         assert target.parent.exists()
+
+
+class TestMarkerConsistency:
+    """Spec Section 8: cross-file fixture sanity check.
+
+    The _PACT_ROUTING_BLOCK constant in claude_md_manager.py pattern-matches
+    against two role-marker substrings to route agents to the correct
+    bootstrap skill:
+
+      - `PACT ROLE: orchestrator` → PACT:bootstrap
+      - `PACT ROLE: teammate (`   → PACT:teammate-bootstrap
+
+    Meanwhile, three production sites emit these markers:
+
+      - session_init.py `_team_create` / `_team_reuse` emit the
+        orchestrator marker to fresh and resumed lead sessions.
+      - peer_inject.py `_BOOTSTRAP_PRELUDE_TEMPLATE` emits the teammate
+        marker to every newly spawned teammate via SubagentStart hook.
+
+    The marker literals on both sides are plain strings in three
+    different Python files. Nothing except tests prevents someone from
+    editing the routing block's search patterns without also editing
+    the hook emissions (or vice versa). A single-character drift silently
+    breaks routing — the unit tests still pass because each side is
+    internally consistent, but `_PACT_ROUTING_BLOCK`'s guidance would
+    point at a substring the hooks never actually emit.
+
+    This test asserts the emitted strings contain the exact substrings
+    the routing block searches for. Catches drift between the two files.
+    """
+
+    HOOKS_DIR = Path(__file__).parent.parent / "hooks"
+    SESSION_INIT_PATH = HOOKS_DIR / "session_init.py"
+
+    ORCHESTRATOR_MARKER = "PACT ROLE: orchestrator"
+    TEAMMATE_MARKER_PREFIX = "PACT ROLE: teammate ("
+
+    def test_routing_block_contains_orchestrator_marker(self):
+        """_PACT_ROUTING_BLOCK must reference `PACT ROLE: orchestrator`."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+
+        assert self.ORCHESTRATOR_MARKER in _PACT_ROUTING_BLOCK, (
+            f"_PACT_ROUTING_BLOCK is missing the `{self.ORCHESTRATOR_MARKER}` "
+            f"substring — routing logic in spawned leads cannot match "
+            f"what the hooks emit."
+        )
+
+    def test_routing_block_contains_teammate_marker_prefix(self):
+        """_PACT_ROUTING_BLOCK must reference `PACT ROLE: teammate (`."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+
+        assert self.TEAMMATE_MARKER_PREFIX in _PACT_ROUTING_BLOCK, (
+            f"_PACT_ROUTING_BLOCK is missing the "
+            f"`{self.TEAMMATE_MARKER_PREFIX}` substring — routing logic "
+            f"in spawned teammates cannot match what peer_inject emits."
+        )
+
+    def test_session_init_team_create_emits_orchestrator_marker(self):
+        """session_init.py's `_team_create` string literal must contain
+        the exact orchestrator marker that the routing block searches for.
+
+        `_team_create` is a local variable inside a function so we can't
+        import it — assert via source-text read instead.
+        """
+        source = self.SESSION_INIT_PATH.read_text(encoding="utf-8")
+        # Locate the _team_create assignment and verify the orchestrator
+        # marker appears within the literal that follows.
+        assert "_team_create = (" in source, (
+            "session_init.py is missing the `_team_create` assignment — "
+            "schema drift since this test was written. Update the test "
+            "anchor."
+        )
+        create_idx = source.find("_team_create = (")
+        # Take a 2000-char window starting at the assignment to cover
+        # the full string literal (which is ~600 chars).
+        create_region = source[create_idx : create_idx + 2000]
+        assert self.ORCHESTRATOR_MARKER in create_region, (
+            f"session_init.py `_team_create` string literal must contain "
+            f"`{self.ORCHESTRATOR_MARKER}` so fresh lead sessions are "
+            f"routed to the orchestrator bootstrap. Routing-block search "
+            f"pattern drift."
+        )
+
+    def test_session_init_team_reuse_emits_orchestrator_marker(self):
+        """session_init.py's `_team_reuse` string literal must contain
+        the exact orchestrator marker that the routing block searches for.
+        """
+        source = self.SESSION_INIT_PATH.read_text(encoding="utf-8")
+        assert "_team_reuse = (" in source, (
+            "session_init.py is missing the `_team_reuse` assignment — "
+            "schema drift since this test was written. Update the test "
+            "anchor."
+        )
+        reuse_idx = source.find("_team_reuse = (")
+        reuse_region = source[reuse_idx : reuse_idx + 2000]
+        assert self.ORCHESTRATOR_MARKER in reuse_region, (
+            f"session_init.py `_team_reuse` string literal must contain "
+            f"`{self.ORCHESTRATOR_MARKER}` so resumed lead sessions are "
+            f"routed to the orchestrator bootstrap. Routing-block search "
+            f"pattern drift."
+        )
+
+    def test_peer_inject_prelude_template_emits_teammate_marker(self):
+        """peer_inject.py's `_BOOTSTRAP_PRELUDE_TEMPLATE` must, after
+        format() substitution, contain the exact teammate marker prefix
+        the routing block searches for.
+        """
+        from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
+
+        rendered = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name="sample-agent")
+        assert self.TEAMMATE_MARKER_PREFIX in rendered, (
+            f"peer_inject.py `_BOOTSTRAP_PRELUDE_TEMPLATE` (after format) "
+            f"must contain `{self.TEAMMATE_MARKER_PREFIX}` so spawned "
+            f"teammates are routed to the teammate bootstrap. Routing-"
+            f"block search pattern drift."
+        )
+
+    def test_marker_consistency_end_to_end(self):
+        """Single end-to-end check: every marker substring the routing
+        block searches for is actually emitted by at least one production
+        site. Acts as a tripwire if someone adds a new marker pattern
+        to the routing block without wiring up a corresponding emitter.
+        """
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
+
+        session_init_source = self.SESSION_INIT_PATH.read_text(encoding="utf-8")
+        rendered_prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(
+            agent_name="sample-agent"
+        )
+
+        # For each marker the routing block searches for, verify at
+        # least one production emission site contains it.
+        marker_to_emitters = {
+            self.ORCHESTRATOR_MARKER: [
+                ("session_init.py (_team_create/_team_reuse)", session_init_source),
+            ],
+            self.TEAMMATE_MARKER_PREFIX: [
+                ("peer_inject.py (_BOOTSTRAP_PRELUDE_TEMPLATE)", rendered_prelude),
+            ],
+        }
+
+        for marker, emitters in marker_to_emitters.items():
+            assert marker in _PACT_ROUTING_BLOCK, (
+                f"Routing block does not search for `{marker}` — test "
+                f"fixture is stale. Update the test or the routing block."
+            )
+            found_in = [
+                name for name, source in emitters if marker in source
+            ]
+            assert found_in, (
+                f"Routing block searches for `{marker}` but no production "
+                f"emission site contains it. Checked: "
+                f"{[name for name, _ in emitters]}. Routing is broken — "
+                f"the pattern will never match."
+            )
