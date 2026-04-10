@@ -26,6 +26,7 @@
   ],
   "commands": [
     "./commands/bootstrap.md",
+    "./commands/teammate-bootstrap.md",
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
     "./commands/rePACT.md",
