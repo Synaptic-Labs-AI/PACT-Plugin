@@ -1,13 +1,15 @@
 """
 Location: pact-plugin/hooks/shared/claude_md_manager.py
 Summary: CLAUDE.md file manipulation for PACT environment setup.
-Used by: session_init.py during SessionStart hook to install/update
-         the PACT Orchestrator prompt and ensure project memory sections.
+Used by: session_init.py during SessionStart hook to migrate any obsolete
+         kernel block out of the home CLAUDE.md and to keep the project
+         CLAUDE.md routing block canonical.
 
 Manages two CLAUDE.md files:
-1. ~/.claude/CLAUDE.md -- global user config with PACT Orchestrator prompt
+1. ~/.claude/CLAUDE.md -- one-time migration: strip the obsolete
+   PACT_START/PACT_END kernel block left over from prior plugin versions.
 2. {project}/CLAUDE.md -- project-level file (at .claude/CLAUDE.md preferred,
-   or legacy ./CLAUDE.md) with memory sections
+   or legacy ./CLAUDE.md) with memory sections and the PACT_ROUTING block.
 
 Project CLAUDE.md location resolution:
 Claude Code supports two locations for project-level memory:
@@ -19,13 +21,35 @@ default path so creators land at the preferred location.
 """
 
 import os
-import sys
+import re
 from pathlib import Path
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
 _DOT_CLAUDE_RELATIVE = Path(".claude") / "CLAUDE.md"
 _LEGACY_RELATIVE = Path("CLAUDE.md")
+
+_ROUTING_START_MARKER = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+_ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
+
+_PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
+## PACT Routing
+
+Before any other work, determine your PACT role and invoke the appropriate
+bootstrap skill. Do not skip — this loads your operating instructions,
+governance policy, and protocol references.
+
+Check your context for a `PACT ROLE:` marker:
+- `PACT ROLE: orchestrator` → invoke `Skill("PACT:bootstrap")` unless already loaded.
+- `PACT ROLE: teammate (...)` → invoke `Skill("PACT:teammate-bootstrap")` unless already loaded.
+
+No marker present? Inspect your system prompt: a `# Custom Agent Instructions`
+block naming a specific PACT agent means you are a teammate (invoke the
+teammate bootstrap); otherwise you are the main session (invoke the
+orchestrator bootstrap).
+
+Re-invoke after compaction if the bootstrap content is no longer present.
+<!-- PACT_ROUTING_END -->"""
 
 
 def resolve_project_claude_md_path(
@@ -81,98 +105,132 @@ def ensure_dot_claude_parent(path: Path) -> None:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
-def update_claude_md() -> str | None:
+def remove_stale_kernel_block() -> str | None:
     """
-    Update ~/.claude/CLAUDE.md with PACT content.
+    One-time migration: remove the obsolete PACT_START/PACT_END block from
+    ~/.claude/CLAUDE.md if present. Preserves all user content outside the
+    markers.
 
-    Automatically merges or updates the PACT Orchestrator prompt in the user's
-    CLAUDE.md file. Uses explicit markers to manage the PACT section without
-    disturbing other user customizations.
+    Handles the transition from the PR #390 kernel-in-home-dir architecture
+    to the kernel-elimination architecture. Existing installations will have
+    a PACT_START/PACT_END delimited block in ~/.claude/CLAUDE.md from previous
+    plugin versions; this function strips that block cleanly.
 
-    Strategy:
-    1. If file missing -> create with PACT content in markers.
-    2. If markers found -> replace content between markers.
-    3. If no markers but "PACT Orchestrator" found -> assume manual install, warn.
-    4. If no markers and no conflict -> append PACT content with markers.
+    Called from session_init.py on every SessionStart. Idempotent no-op when
+    the markers are absent (i.e., for fresh installs or after first cleanup).
 
     Returns:
-        Status message or None if no change.
+        Status message on successful removal, None on no-op.
     """
-    plugin_root_str = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    if not plugin_root_str:
-        return None
-
-    plugin_root = Path(plugin_root_str)
-    if not plugin_root.exists():
-        return None
-
-    source_file = plugin_root / "CLAUDE-kernel.md"
-    if not source_file.exists():
-        return None
-
     target_file = Path.home() / ".claude" / "CLAUDE.md"
-
-    START_MARKER = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
-    END_MARKER = "<!-- PACT_END -->"
+    if not target_file.exists():
+        return None
 
     try:
-        source_content = source_file.read_text(encoding="utf-8")
-        wrapped_source = f"{START_MARKER}\n{source_content}\n{END_MARKER}"
+        content = target_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
-        # Case 1: Target doesn't exist
-        if not target_file.exists():
-            target_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            target_file.write_text(wrapped_source, encoding="utf-8")
-            os.chmod(str(target_file), 0o600)
-            return "Created CLAUDE.md with PACT Orchestrator"
+    START_MARKER = "<!-- PACT_START:"
+    END_MARKER = "<!-- PACT_END -->"
 
-        target_content = target_file.read_text(encoding="utf-8")
+    if START_MARKER not in content or END_MARKER not in content:
+        return None
 
-        # Case 2: Markers found - update if changed
-        if START_MARKER in target_content and END_MARKER in target_content:
-            # Split on the LAST PACT_START so a corrupted CLAUDE.md with
-            # multiple start markers (e.g., from a prior failed write) doesn't
-            # silently drop intermediate content. Everything before the last
-            # marker is preserved verbatim in `pre`; only the most recent PACT
-            # block is replaced. Warn the user so they know to inspect the file.
-            marker_count = target_content.count(START_MARKER)
-            if marker_count > 1:
-                print(
-                    f"PACT warning: CLAUDE.md contains {marker_count} PACT_START "
-                    f"markers (expected 1). File may be corrupted from a prior "
-                    f"failed write. Using the LAST marker; intermediate content "
-                    f"preserved. Inspect {target_file} and remove stale markers.",
-                    file=sys.stderr,
-                )
-            pre, rest = target_content.rsplit(START_MARKER, 1)
-            if END_MARKER in rest:
-                post = rest.split(END_MARKER, 1)[1]
-                new_full_content = f"{pre}{wrapped_source}{post}"
+    pre_marker, rest = content.split(START_MARKER, 1)
+    if END_MARKER not in rest:
+        return None  # Malformed — leave alone to avoid data loss
 
-                if new_full_content != target_content:
-                    target_file.write_text(new_full_content, encoding="utf-8")
-                    os.chmod(str(target_file), 0o600)
-                    return "PACT Orchestrator updated"
-                return None
+    _, post_marker = rest.split(END_MARKER, 1)
 
-        # Case 3: No markers but content similar to PACT found
-        if "PACT Orchestrator" in target_content:
-            # Check if it looks roughly like what we expect, or just leave it
-            # Returning a message prompts the user to check it
-            return "PACT present but unmanaged (add markers to auto-update)"
+    # Normalize whitespace around the removal point
+    new_content = pre_marker.rstrip() + "\n" + post_marker.lstrip()
 
-        # Case 4: No markers, no specific PACT content -> Append
-        # Ensure we append on a new line
-        if not target_content.endswith("\n"):
-            target_content += "\n"
-
-        new_content = f"{target_content}\n{wrapped_source}"
+    try:
         target_file.write_text(new_content, encoding="utf-8")
         os.chmod(str(target_file), 0o600)
-        return "PACT Orchestrator added to CLAUDE.md"
+        return "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
+    except OSError as e:
+        return f"Failed to remove stale kernel block: {str(e)[:50]}"
 
-    except Exception as e:
-        return f"PACT update failed: {str(e)[:30]}"
+
+def update_pact_routing() -> str | None:
+    """
+    Ensure the project CLAUDE.md contains the canonical PACT_ROUTING block.
+
+    Idempotent: on every SessionStart, find the PACT_ROUTING_START/PACT_ROUTING_END
+    markers in the project CLAUDE.md and replace content between them with the
+    canonical routing block. If markers are absent, insert the block near the
+    top of the file below the title. If the file doesn't exist, defer to
+    ensure_project_memory_md() which creates it with the block in its template.
+
+    Preserves all user content outside the markers.
+
+    Returns:
+        Status message on change, None when no write was needed.
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir:
+        return None
+
+    target_file, source = resolve_project_claude_md_path(project_dir)
+
+    if source == "new_default":
+        # File doesn't exist yet; ensure_project_memory_md() will create it
+        # with the routing block in its template.
+        return None
+
+    try:
+        content = target_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    # Case 1: markers present — replace content between them
+    if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
+        pattern = re.compile(
+            re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
+            re.DOTALL,
+        )
+        new_content = pattern.sub(_PACT_ROUTING_BLOCK, content)
+
+        if new_content == content:
+            return None  # Already canonical
+
+        try:
+            target_file.write_text(new_content, encoding="utf-8")
+            os.chmod(str(target_file), 0o600)
+            return "PACT routing block updated in project CLAUDE.md"
+        except OSError as e:
+            return f"Failed to update PACT routing: {str(e)[:50]}"
+
+    # Case 2: markers absent — insert near the top of the file below the title
+    lines = content.splitlines(keepends=True)
+    insert_idx = 0
+    for i, line in enumerate(lines):
+        if line.startswith("# "):
+            insert_idx = i + 1
+            # Skip any blank lines or short description lines immediately
+            # after the title before inserting.
+            for j in range(i + 1, min(i + 6, len(lines))):
+                if lines[j].startswith("##") or lines[j].startswith("<!--"):
+                    insert_idx = j
+                    break
+                insert_idx = j + 1
+            break
+
+    new_lines = (
+        lines[:insert_idx]
+        + ["\n", _PACT_ROUTING_BLOCK + "\n", "\n"]
+        + lines[insert_idx:]
+    )
+    new_content = "".join(new_lines)
+
+    try:
+        target_file.write_text(new_content, encoding="utf-8")
+        os.chmod(str(target_file), 0o600)
+        return "PACT routing block inserted into project CLAUDE.md"
+    except OSError as e:
+        return f"Failed to insert PACT routing: {str(e)[:50]}"
 
 
 def ensure_project_memory_md() -> str | None:
@@ -204,10 +262,11 @@ def ensure_project_memory_md() -> str | None:
         return None
 
     # Create minimal CLAUDE.md with memory sections at the new default location
-    memory_template = """# Project Memory
+    memory_template = f"""# Project Memory
 
 This file contains project-specific memory managed by the PACT framework.
-The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`.
+
+{_PACT_ROUTING_BLOCK}
 
 <!-- SESSION_START -->
 ## Current Session

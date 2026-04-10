@@ -23,7 +23,11 @@ from .task_utils import (
     find_blockers,
 )
 from .symlinks import setup_plugin_symlinks
-from .claude_md_manager import update_claude_md, ensure_project_memory_md
+from .claude_md_manager import (
+    remove_stale_kernel_block,
+    update_pact_routing,
+    ensure_project_memory_md,
+)
 from .session_resume import (
     update_session_info,
     restore_last_session,
@@ -55,7 +59,8 @@ __all__ = [
     "find_active_agents",
     "find_blockers",
     "setup_plugin_symlinks",
-    "update_claude_md",
+    "remove_stale_kernel_block",
+    "update_pact_routing",
     "ensure_project_memory_md",
     "update_session_info",
     "restore_last_session",

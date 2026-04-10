@@ -30,6 +30,15 @@ _TEACHBACK_REMINDER = (
 )
 
 
+_BOOTSTRAP_PRELUDE_TEMPLATE = (
+    "PACT ROLE: teammate ({agent_name}).\n\n"
+    "FIRST ACTION: Before any other work, invoke Skill(\"PACT:teammate-bootstrap\"). "
+    "This loads the team communication protocol, teachback standards, memory retrieval, "
+    "and algedonic reference. If your context is later compacted and the bootstrap content "
+    "is no longer present, re-invoke the skill before continuing implementation.\n\n"
+)
+
+
 def get_peer_context(
     agent_type: str,
     team_name: str,
@@ -39,8 +48,10 @@ def get_peer_context(
     """
     Build peer context string for a newly spawned agent.
 
-    Includes a teachback timing reminder appended after the peer list
-    to mechanically reinforce the teachback-before-work protocol.
+    Prepends a bootstrap prelude (PACT ROLE marker + FIRST ACTION skill
+    invocation instruction) and appends a teachback timing reminder
+    after the peer list. The PACT ROLE marker is the stable substring
+    used by lead routing logic; empty agent_name falls back to "unknown".
 
     Args:
         agent_type: The spawning agent's type (e.g., "pact-backend-coder")
@@ -49,7 +60,8 @@ def get_peer_context(
         teams_dir: Override for teams directory (for testing)
 
     Returns:
-        Context string with peer list and teachback reminder, or None if no team context
+        Context string with bootstrap prelude, peer list, and teachback
+        reminder, or None if no team context
     """
     if not team_name:
         return None
@@ -86,7 +98,8 @@ def get_peer_context(
             f"You can message them via SendMessage for shared artifacts or blocking questions."
         )
 
-    return peer_context + _TEACHBACK_REMINDER
+    prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=agent_name or "unknown")
+    return prelude + peer_context + _TEACHBACK_REMINDER
 
 
 def main():

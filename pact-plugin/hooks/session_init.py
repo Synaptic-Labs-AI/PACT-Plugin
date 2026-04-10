@@ -7,7 +7,7 @@ Used by: Claude Code settings.json SessionStart hook
 Performs:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
-2. Updates ~/.claude/CLAUDE.md (merges/installs slim PACT kernel)
+2. One-time migration: strips obsolete PACT kernel block from ~/.claude/CLAUDE.md
 3. Ensures project CLAUDE.md exists with memory sections
 4. Checks for stale pinned context (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
@@ -67,7 +67,8 @@ from shared.session_journal import append_event, make_event
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
 from shared.claude_md_manager import (
-    update_claude_md,
+    remove_stale_kernel_block,
+    update_pact_routing,
     ensure_project_memory_md,
     resolve_project_claude_md_path,
 )
@@ -271,7 +272,7 @@ def main():
     Performs PACT environment initialization:
     0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
     1. Creates plugin symlinks for @reference resolution
-    2. Updates ~/.claude/CLAUDE.md (merges/installs slim PACT kernel)
+    2. One-time migration: strips obsolete PACT kernel block from ~/.claude/CLAUDE.md
     3. Ensures project CLAUDE.md exists with memory sections
     4. Checks for stale pinned context entries in project CLAUDE.md
     5. Generates session-unique PACT team name and reminds orchestrator to create it
@@ -322,15 +323,16 @@ def main():
             elif symlink_result:
                 context_parts.append(symlink_result)
 
-        # 2. Updates ~/.claude/CLAUDE.md (merges/installs slim PACT kernel)
-        # Context resets (compact/clear): CLAUDE.md is already installed from original session
-        if not is_context_reset:
-            claude_md_msg = update_claude_md()
-            if claude_md_msg:
-                if "failed" in claude_md_msg.lower() or "unmanaged" in claude_md_msg.lower():
-                    system_messages.append(claude_md_msg)
-                else:
-                    context_parts.append(claude_md_msg)
+        # 2. One-time migration: strip the obsolete PACT kernel block from
+        # ~/.claude/CLAUDE.md if a previous plugin version installed one.
+        # Runs unconditionally on every SessionStart (idempotent no-op when
+        # the markers are absent).
+        kernel_msg = remove_stale_kernel_block()
+        if kernel_msg:
+            if "failed" in kernel_msg.lower():
+                system_messages.append(kernel_msg)
+            else:
+                context_parts.append(kernel_msg)
 
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
@@ -460,13 +462,21 @@ def main():
                 f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
             )
         _team_reuse = (
+            f'PACT ROLE: orchestrator.\n\n'
+            f'Your FIRST action must be: Skill("PACT:bootstrap"). This loads your full '
+            f'operating instructions, governance policy, and critical workflow protocols. '
+            f'Re-invoke if your context is compacted and the bootstrap content is no longer present.\n\n'
             f'Your team is `{team_name}` (existing — resumed session). '
             f'Do not call TeamCreate — the team already exists. '
             f'{_substitutions}'
         )
         _team_create = (
-            f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). '
-            f'Do not read files, explore code, or respond to the user until the team is created. '
+            f'PACT ROLE: orchestrator.\n\n'
+            f'Your FIRST action must be: Skill("PACT:bootstrap"). This loads your full '
+            f'operating instructions, governance policy, and critical workflow protocols. '
+            f'Re-invoke if your context is compacted and the bootstrap content is no longer present.\n\n'
+            f'After bootstrap completes, your next action is: TeamCreate(team_name="{team_name}"). '
+            f'Do not read files, explore code, or respond to the user until bootstrap and team creation are complete. '
             f'{_substitutions}'
         )
 
@@ -546,6 +556,16 @@ def main():
                     system_messages.append(session_msg)
                 else:
                     context_parts.append(session_msg)
+
+        # 5c. Ensure the PACT_ROUTING block in the project CLAUDE.md is canonical.
+        # Runs after update_session_info() so the SESSION_START block is written
+        # first; the two managed blocks use different markers and don't conflict.
+        routing_msg = update_pact_routing()
+        if routing_msg:
+            if "failed" in routing_msg.lower():
+                system_messages.append(routing_msg)
+            else:
+                context_parts.append(routing_msg)
 
         # 6. Check for in_progress Tasks (resumption context via Task integration)
         tasks = get_task_list()
