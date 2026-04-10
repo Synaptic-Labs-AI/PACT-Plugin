@@ -618,13 +618,16 @@ class TestKernelIntegrity:
         assert "PACT Framework" in content
 
     def test_kernel_contains_bootstrapper_instruction(self):
-        """Kernel must contain the bootstrapper instruction pointing lead to sidecar.
+        """Kernel must contain the bootstrapper instruction pointing the lead
+        at the /PACT:bootstrap slash command.
 
         This is the recovery path: if hook context is lost, the lead can
-        read the kernel and find the path to ~/.claude/pact-orchestrator.md.
+        read the kernel and see that its first action must be to invoke
+        /PACT:bootstrap (via the Skill tool), which loads the full operating
+        instructions and eagerly fetches the critical protocols.
         """
         content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "pact-orchestrator.md" in content
+        assert "/PACT:bootstrap" in content or 'Skill("PACT:bootstrap")' in content
 
     def test_kernel_is_under_size_budget(self):
         """Kernel should be well under 5KB chars (~1.2K tokens).

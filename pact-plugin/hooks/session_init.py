@@ -8,7 +8,6 @@ Performs:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
 2. Updates ~/.claude/CLAUDE.md (merges/installs slim PACT kernel)
-2b. Writes full orchestrator instructions to sidecar file for lead to Read (teammates skip)
 3. Ensures project CLAUDE.md exists with memory sections
 4. Checks for stale pinned context (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
@@ -81,64 +80,6 @@ from shared.session_resume import (
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-# Fallback sidecar path when session_dir is unavailable (e.g., malformed stdin)
-_ORCHESTRATOR_SIDECAR_FALLBACK = Path.home() / ".claude" / "pact-orchestrator.md"
-
-
-def _read_full_orchestrator_source() -> str | None:
-    """Read the full PACT orchestrator instructions from plugin source.
-
-    Returns the content of pact-plugin/CLAUDE.md (the full orchestrator
-    instructions, unchanged from before the kernel split), or None if the
-    file is missing or unreadable.
-    """
-    plugin_root_str = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-    if not plugin_root_str:
-        return None
-    source = Path(plugin_root_str) / "CLAUDE.md"
-    if not source.exists():
-        return None
-    try:
-        return source.read_text(encoding="utf-8")
-    except (IOError, OSError):
-        return None
-
-
-def _write_orchestrator_sidecar() -> tuple[bool, str]:
-    """Write full orchestrator instructions to sidecar file for lead to Read.
-
-    Writes to the session directory ({session_dir}/pact-orchestrator.md) to
-    avoid race conditions on concurrent starts. Falls back to the shared
-    path (~/.claude/pact-orchestrator.md) if session_dir is unavailable.
-
-    The lead reads this file via the Read tool after the hook returns a
-    pointer in additionalContext.
-
-    Returns (success, actual_path) tuple — success is True if write succeeded,
-    actual_path is the path that was written (or attempted) for use in pointer
-    messages.
-    """
-    content = _read_full_orchestrator_source()
-    if not content:
-        return False, ""
-
-    # Prefer session-scoped path; fall back to shared path
-    session_dir = get_session_dir()
-    if session_dir:
-        sidecar_path = Path(session_dir) / "pact-orchestrator.md"
-    else:
-        sidecar_path = _ORCHESTRATOR_SIDECAR_FALLBACK
-
-    try:
-        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-        sidecar_path.write_text(content, encoding="utf-8")
-        os.chmod(str(sidecar_path), 0o600)
-        return True, str(sidecar_path)
-    except (IOError, OSError) as e:
-        print(f"session_init: failed to write orchestrator sidecar: {e}",
-              file=sys.stderr)
-        return False, str(sidecar_path)
 
 
 def check_pinned_staleness():
@@ -331,7 +272,6 @@ def main():
     0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
     1. Creates plugin symlinks for @reference resolution
     2. Updates ~/.claude/CLAUDE.md (merges/installs slim PACT kernel)
-    2b. Writes full orchestrator instructions to sidecar for lead to Read (teammates skip)
     3. Ensures project CLAUDE.md exists with memory sections
     4. Checks for stale pinned context entries in project CLAUDE.md
     5. Generates session-unique PACT team name and reminds orchestrator to create it
@@ -352,11 +292,6 @@ def main():
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", ".")
         context_parts = []
         system_messages = []
-
-        # Lead vs teammate detection: SessionStart fires for teammates with
-        # agent_id present in stdin. Lead sessions have no agent_id.
-        agent_id = input_data.get("agent_id")
-        is_teammate = agent_id is not None
 
         # Detect session source: startup, resume, compact, clear
         # Default to "startup" if missing (backwards compat with older Claude Code)
@@ -396,16 +331,6 @@ def main():
                     system_messages.append(claude_md_msg)
                 else:
                     context_parts.append(claude_md_msg)
-
-        # 2b. Write full orchestrator instructions for lead to Read (teammates skip)
-        if not is_teammate and not is_context_reset:
-            sidecar_ok, sidecar_path = _write_orchestrator_sidecar()
-            if sidecar_ok:
-                context_parts.insert(0,
-                    f'PACT orchestrator instructions written to {sidecar_path}. '
-                    'Read this file NOW to load your full operating instructions. '
-                    'Do not proceed until you have read it.'
-                )
 
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
@@ -544,17 +469,6 @@ def main():
             f'Do not read files, explore code, or respond to the user until the team is created. '
             f'{_substitutions}'
         )
-
-        # 2b-compact: Re-deliver orchestrator sidecar pointer on context reset (lead only).
-        # The sidecar file persists on disk from initial startup; re-write it in case the
-        # plugin was updated mid-session, then re-deliver the pointer.
-        if is_context_reset and not is_teammate:
-            compact_ok, compact_sidecar_path = _write_orchestrator_sidecar()
-            if compact_ok:
-                context_parts.insert(0,
-                    f'POST-COMPACTION: Read {compact_sidecar_path} to reload '
-                    'your full PACT orchestrator instructions.'
-                )
 
         if source == "compact" and team_exists:
             # Post-compaction: context window was compacted, guide state recovery

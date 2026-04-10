@@ -2,10 +2,10 @@
 
 This kernel is loaded by all PACT sessions (orchestrator and specialists).
 
-> **Orchestrator only**: Your full operating instructions were written to
-> `pact-orchestrator.md` by the SessionStart hook. Read it at the path
-> provided in your startup context. If not visible (e.g., after compaction),
-> check your session directory or `Read ${CLAUDE_PLUGIN_ROOT}/CLAUDE.md`.
+> **Orchestrator only**: Your FIRST action must be to invoke `/PACT:bootstrap`
+> via the Skill tool (`Skill("PACT:bootstrap")`). This loads your full
+> operating instructions and eagerly fetches the 8 critical protocols.
+> Do not proceed with any work until bootstrap is complete.
 
 ---
 

@@ -747,3 +747,136 @@ class TestTeachbackMicroSkillExtraction:
             "pact-agent-teams should reference pact-teachback skill "
             "as a pointer so agents know where the protocol lives."
         )
+
+
+class TestBootstrapCommand:
+    """Tests for the /PACT:bootstrap slash command.
+
+    The bootstrap command replaces the earlier CLAUDE.md sidecar mechanism.
+    When the orchestrator invokes it, Claude Code eagerly resolves the
+    @${CLAUDE_PLUGIN_ROOT}/protocols/... references inside the command body
+    and loads the 8 critical protocols into the lead's context.
+
+    Contract:
+      - The command file exists at pact-plugin/commands/bootstrap.md
+      - It has YAML frontmatter with a `description` field
+      - It contains @${CLAUDE_PLUGIN_ROOT}/protocols/ references for all
+        8 critical protocols (algedonic, s5-policy, variety, workflows,
+        state-recovery, s4-checkpoints, s4-tension, communication-charter)
+      - Every referenced protocol file exists on disk
+      - The command is registered in .claude-plugin/plugin.json `commands`
+    """
+
+    PLUGIN_ROOT = Path(__file__).parent.parent
+    BOOTSTRAP_PATH = PLUGIN_ROOT / "commands" / "bootstrap.md"
+    PROTOCOLS_DIR = PLUGIN_ROOT / "protocols"
+    PLUGIN_JSON_PATH = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+
+    # The 8 critical protocols that must be eagerly loaded by the bootstrap
+    # command. Adding/removing a protocol from this set requires a matching
+    # change to commands/bootstrap.md and is intentionally visible here.
+    CRITICAL_PROTOCOLS = (
+        "algedonic",
+        "pact-s5-policy",
+        "pact-variety",
+        "pact-workflows",
+        "pact-state-recovery",
+        "pact-s4-checkpoints",
+        "pact-s4-tension",
+        "pact-communication-charter",
+    )
+
+    def test_bootstrap_file_exists(self):
+        """commands/bootstrap.md must exist in the plugin directory."""
+        assert self.BOOTSTRAP_PATH.exists(), (
+            f"bootstrap.md not found at {self.BOOTSTRAP_PATH}"
+        )
+        assert self.BOOTSTRAP_PATH.is_file()
+
+    def test_bootstrap_has_frontmatter_with_description(self):
+        """bootstrap.md must have YAML frontmatter with a description field.
+
+        Claude Code uses the frontmatter description to surface the command
+        in the slash command palette. A missing description would leave the
+        command undiscoverable even if registered in plugin.json.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        assert fm is not None, (
+            "bootstrap.md is missing YAML frontmatter"
+        )
+        assert "description" in fm, (
+            "bootstrap.md frontmatter must contain a 'description' field"
+        )
+        assert fm["description"].strip(), (
+            "bootstrap.md frontmatter 'description' must be non-empty"
+        )
+
+    def test_bootstrap_references_all_critical_protocols(self):
+        """bootstrap.md must contain @${CLAUDE_PLUGIN_ROOT}/protocols/<name>.md
+        references for all 8 critical protocols.
+
+        Claude Code resolves these @-references at command invocation time,
+        loading each referenced file into the orchestrator's context. This
+        replaces the sidecar file-write mechanism the tests used to cover.
+        """
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        missing = []
+        for protocol in self.CRITICAL_PROTOCOLS:
+            # Match both leading "@" (eager load) and the canonical env-var
+            # path fragment. We require the specific form the command body
+            # uses so a stray mention in prose doesn't accidentally satisfy
+            # the contract.
+            expected = f"@${{CLAUDE_PLUGIN_ROOT}}/protocols/{protocol}.md"
+            if expected not in text:
+                missing.append(expected)
+        assert not missing, (
+            f"bootstrap.md is missing eager-load references for: {missing}. "
+            f"Each of the 8 critical protocols must be referenced via "
+            f"@${{CLAUDE_PLUGIN_ROOT}}/protocols/<name>.md so Claude Code "
+            f"loads them at command invocation."
+        )
+
+    def test_bootstrap_referenced_protocol_files_exist(self):
+        """Every protocol referenced in bootstrap.md must exist on disk.
+
+        A broken @-reference would cause a silent load failure at runtime —
+        the orchestrator would proceed without the protocol, defeating the
+        eager-load guarantee.
+        """
+        for protocol in self.CRITICAL_PROTOCOLS:
+            path = self.PROTOCOLS_DIR / f"{protocol}.md"
+            assert path.exists(), (
+                f"Protocol file missing: {path}. "
+                f"bootstrap.md references it via "
+                f"@${{CLAUDE_PLUGIN_ROOT}}/protocols/{protocol}.md but the "
+                f"file does not exist in the plugin protocols/ directory."
+            )
+
+    def test_bootstrap_registered_in_plugin_json(self):
+        """bootstrap.md must be registered in plugin.json's commands list.
+
+        Without this registration, Claude Code will not expose the slash
+        command to the user even though the file exists on disk.
+        """
+        import json
+
+        assert self.PLUGIN_JSON_PATH.exists(), (
+            f"plugin.json not found at {self.PLUGIN_JSON_PATH}"
+        )
+        data = json.loads(self.PLUGIN_JSON_PATH.read_text(encoding="utf-8"))
+        commands = data.get("commands", [])
+        assert isinstance(commands, list), (
+            "plugin.json 'commands' must be a list"
+        )
+        # Match either "./commands/bootstrap.md" or "commands/bootstrap.md"
+        # — both are accepted relative-path forms used in this repo.
+        bootstrap_registered = any(
+            entry.endswith("commands/bootstrap.md")
+            for entry in commands
+            if isinstance(entry, str)
+        )
+        assert bootstrap_registered, (
+            f"bootstrap.md is not registered in plugin.json commands list. "
+            f"Found commands: {commands}"
+        )
