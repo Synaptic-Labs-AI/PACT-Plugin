@@ -1,28 +1,62 @@
 ---
 name: pact-teachback
-description: |
-  Teachback protocol for PACT specialist agents. Auto-loaded via frontmatter
-  so the teachback format is always available as the agent's first action.
+description: Command-style teachback protocol for PACT teammates. Invoking this skill directly instructs you to construct and send a teachback SendMessage in the canonical format before any implementation work.
 ---
 
-# Teachback Protocol
+# Teachback — Send Now
 
-**Teachback is a gate, not a notification.** Send your teachback BEFORE any
-implementation work (`Edit`, `Write`, `Bash`). Reading files to understand the
-task (`Read`, `Glob`, `Grep`) is permitted before teachback.
+Invoking this skill means you are about to send a teachback SendMessage to
+the lead. Do not proceed to implementation work until you have sent it.
 
-**Format**:
+## What a teachback is
+
+A teachback is a Pask Conversation Theory verification gate. Before you
+start implementing, you restate your understanding of the task so the
+orchestrator can catch misunderstandings early, before you burn context on
+a wrong implementation.
+
+## Action: send this SendMessage now
+
+Construct the following SendMessage call with your understanding of the
+current task substituted into the placeholders. Send it now, before any
+Edit, Write, or Bash tool call:
+
 ```
-SendMessage(to="lead",
-  message="[{sender}->lead] Teachback:\n- Building: {what}\n- Key constraints: {constraints}\n- Approach: {approach, briefly}\nProceeding unless corrected.",
-  summary="Teachback: {1-line}")
+SendMessage(
+  to="team-lead",
+  message=(
+    "[<your-agent-name>→lead] Teachback:\n"
+    "- Building: <what you understand you're building>\n"
+    "- Key constraints: <constraints you're working within>\n"
+    "- Interfaces: <interfaces you'll produce or consume>\n"
+    "- Approach: <your intended approach, briefly>\n"
+    "Proceeding unless corrected."
+  ),
+  summary="Teachback: <1-line summary>"
+)
 ```
 
-**Rules**:
-- Send as your **first message** after reading your task and any upstream handoffs
-- Keep concise: 3-6 bullet points
-- After sending, record: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
-- If the lead sends a correction, adjust your approach immediately
-- Non-blocking: proceed with work after sending — do not wait for confirmation
+After sending, record the teachback as metadata on your task:
 
-**When**: Every task dispatch. Only exception: consultant questions (peer asks you something).
+```
+TaskUpdate(taskId, metadata={"teachback_sent": true})
+```
+
+## Ordering rule
+
+You must send the teachback before any Edit/Write/Bash call used for
+implementation work. Reading files to understand the task (via Read, Glob,
+Grep) is permitted before teachback; those are understanding actions, not
+implementation actions.
+
+## Post-send behavior
+
+After sending the teachback, proceed with your work immediately. Do not
+wait for the lead to confirm — the protocol is non-blocking by design.
+If the lead sends a correction via SendMessage, adjust your approach
+as soon as you see it.
+
+## Exception
+
+Consultant questions (a peer asks you something) do not require a teachback.
+You only teachback on task dispatches.
