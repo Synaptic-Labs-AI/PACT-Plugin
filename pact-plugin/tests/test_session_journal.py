@@ -2279,7 +2279,8 @@ class TestSessionInitJournalWrite:
 
         with patch("sys.stdin", io.StringIO(json.dumps(input_data))), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=[]), \

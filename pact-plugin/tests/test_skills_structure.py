@@ -19,9 +19,9 @@ SKILLS_DIR = Path(__file__).parent.parent / "skills"
 EXPECTED_SKILLS = {
     "pact-agent-teams",
     "pact-architecture-patterns",
-    "pact-autonomy-charter",
     "pact-teachback",
     "pact-coding-standards",
+    "pact-handoff-harvest",
     "pact-memory",
     "pact-prepare-research",
     "pact-security-patterns",

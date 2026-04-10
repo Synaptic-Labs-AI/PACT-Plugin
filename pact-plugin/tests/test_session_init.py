@@ -191,7 +191,8 @@ class TestTeamResumeDetection:
             stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -246,7 +247,8 @@ class TestTeamResumeDetection:
         from session_init import main
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -269,8 +271,10 @@ class TestTeamResumeDetection:
 
         # The team instruction uses insert(0, ...) so it should be first
         # additionalContext is " | ".join(context_parts), so team instruction
-        # should be at the start
-        assert additional.startswith("Your FIRST action must be")
+        # should be at the start. Post #366 Phase 1 the prelude leads with the
+        # PACT ROLE marker to anchor role detection for the lead session.
+        assert additional.startswith("PACT ROLE: orchestrator")
+        assert "Your FIRST action must be" in additional
 
 
 class TestSourceAwareness:
@@ -290,7 +294,7 @@ class TestSourceAwareness:
     ):
         """Helper: run main() with given source and team state.
 
-        Returns (additionalContext, mock_symlinks_called, mock_claude_md_called).
+        Returns (additionalContext, mock_symlinks_called, mock_kernel_called).
         """
         from session_init import main
 
@@ -308,7 +312,8 @@ class TestSourceAwareness:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None) as mock_symlinks, \
-             patch("session_init.update_claude_md", return_value=None) as mock_claude_md, \
+             patch("session_init.remove_stale_kernel_block", return_value=None) as mock_kernel, \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -323,7 +328,7 @@ class TestSourceAwareness:
         assert exc_info.value.code == 0
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
-        return additional, mock_symlinks.called, mock_claude_md.called
+        return additional, mock_symlinks.called, mock_kernel.called
 
     # --- Path 1: startup + no team (fresh session) ---
 
@@ -337,14 +342,14 @@ class TestSourceAwareness:
         assert "Do not call TeamCreate" not in additional
         assert "WARNING" not in additional
 
-    def test_startup_calls_symlinks_and_claude_md(self, monkeypatch, tmp_path):
-        """startup should run full init (symlinks + CLAUDE.md)."""
-        _, symlinks_called, claude_md_called = self._run_main_with_source(
+    def test_startup_calls_symlinks_and_kernel(self, monkeypatch, tmp_path):
+        """startup should run full init (symlinks + remove_stale_kernel_block)."""
+        _, symlinks_called, kernel_called = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
 
         assert symlinks_called
-        assert claude_md_called
+        assert kernel_called
 
     # --- Path 2: resume + team exists (normal resume) ---
 
@@ -363,14 +368,14 @@ class TestSourceAwareness:
         assert "CONTEXT CLEARED" not in additional
         assert "POST-COMPACTION" not in additional
 
-    def test_resume_calls_symlinks_and_claude_md(self, monkeypatch, tmp_path):
-        """resume should run full init (symlinks + CLAUDE.md)."""
-        _, symlinks_called, claude_md_called = self._run_main_with_source(
+    def test_resume_calls_symlinks_and_kernel(self, monkeypatch, tmp_path):
+        """resume should run full init (symlinks + remove_stale_kernel_block)."""
+        _, symlinks_called, kernel_called = self._run_main_with_source(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
 
         assert symlinks_called
-        assert claude_md_called
+        assert kernel_called
 
     # --- Path 3: compact + team exists (post-compaction recovery) ---
 
@@ -395,13 +400,18 @@ class TestSourceAwareness:
 
         assert not symlinks_called
 
-    def test_compact_skips_claude_md_update(self, monkeypatch, tmp_path):
-        """compact should skip CLAUDE.md update (already installed)."""
-        _, _, claude_md_called = self._run_main_with_source(
+    def test_compact_runs_kernel_migration(self, monkeypatch, tmp_path):
+        """compact must STILL run remove_stale_kernel_block (idempotent migration).
+
+        Post #366 Phase 1: the legacy-block migration is unconditional on every
+        SessionStart — including compact/clear — because it is a cheap no-op
+        when the markers are absent and a critical fix when they are present.
+        """
+        _, _, kernel_called = self._run_main_with_source(
             monkeypatch, tmp_path, source="compact", team_exists=True
         )
 
-        assert not claude_md_called
+        assert kernel_called
 
     # --- Path 4: clear + team exists (context intentionally cleared) ---
 
@@ -427,13 +437,18 @@ class TestSourceAwareness:
 
         assert not symlinks_called
 
-    def test_clear_skips_claude_md_update(self, monkeypatch, tmp_path):
-        """clear should skip CLAUDE.md update (already installed)."""
-        _, _, claude_md_called = self._run_main_with_source(
+    def test_clear_runs_kernel_migration(self, monkeypatch, tmp_path):
+        """clear must STILL run remove_stale_kernel_block (idempotent migration).
+
+        Post #366 Phase 1: the legacy-block migration is unconditional on every
+        SessionStart — including compact/clear — because it is a cheap no-op
+        when the markers are absent and a critical fix when they are present.
+        """
+        _, _, kernel_called = self._run_main_with_source(
             monkeypatch, tmp_path, source="clear", team_exists=True
         )
 
-        assert not claude_md_called
+        assert kernel_called
 
     # --- Path 5: anomalous combinations ---
 
@@ -491,7 +506,8 @@ class TestSourceAwareness:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None) as mock_symlinks, \
-             patch("session_init.update_claude_md", return_value=None) as mock_claude_md, \
+             patch("session_init.remove_stale_kernel_block", return_value=None) as mock_kernel, \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -506,7 +522,7 @@ class TestSourceAwareness:
         assert exc_info.value.code == 0
         # Should behave like startup: full init, TeamCreate
         assert mock_symlinks.called
-        assert mock_claude_md.called
+        assert mock_kernel.called
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
@@ -547,7 +563,8 @@ class TestMainPausedStateIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -575,7 +592,8 @@ class TestMainPausedStateIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -689,12 +707,14 @@ class TestMainPrevSessionDirOrdering:
             return real_check_paused_state(prev_session_dir=prev_session_dir)
 
         # Patch boundary side effects that are unrelated to the ordering invariant:
-        #   - setup_plugin_symlinks / update_claude_md / ensure_project_memory_md /
+        #   - setup_plugin_symlinks / remove_stale_kernel_block / update_pact_routing /
+        #     ensure_project_memory_md /
         #     check_pinned_staleness: touch user home / plugin root — not under test
         #   - _check_pr_state: shells out to `gh pr view`; patch to OPEN so the
         #     paused_msg path is exercised instead of being suppressed.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
@@ -771,7 +791,8 @@ class TestCompactSummaryCleanup:
 
         with patch("session_init.COMPACT_SUMMARY_PATH", patched_path), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -978,7 +999,8 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1015,7 +1037,8 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1060,7 +1083,8 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1181,7 +1205,8 @@ class TestWriteContextIntegration:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1225,7 +1250,8 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({})  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1290,7 +1316,8 @@ class TestWriteContextIntegration:
         captured_stdout = io.StringIO()
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1352,7 +1379,8 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({})  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1402,7 +1430,8 @@ class TestWriteContextIntegration:
         # Intentionally do NOT patch write_context or append_event — we
         # want to verify the real call sites are gated, not mocked.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1471,7 +1500,8 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({})  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info") as mock_update_info, \
@@ -1509,7 +1539,8 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({"session_id": real_session_id})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None) as mock_update_info, \
@@ -1543,7 +1574,8 @@ class TestWriteContextIntegration:
             raise OSError("Simulated write failure")
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1867,7 +1899,8 @@ class TestPluginRootEnvWiring:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1918,7 +1951,8 @@ class TestPluginRootEnvWiring:
         # for real against the tmp_path project dir. Everything else that
         # touches ~/.claude or the plugin root is mocked.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
@@ -1978,7 +2012,8 @@ class TestPluginRootEnvWiring:
         # needed here.
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -2005,3 +2040,208 @@ class TestPluginRootEnvWiring:
         assert data["plugin_root"] == plugin_root_value
         assert data["session_id"] == session_id
         assert data["team_name"] == "pact-ccdd3344"
+
+
+# ---------------------------------------------------------------------------
+# #366 Phase 1 — kernel elimination behavior contract
+# ---------------------------------------------------------------------------
+#
+# These classes pin the post-refactor session_init contract:
+#   1. _team_create / _team_reuse strings now lead with `PACT ROLE: orchestrator`
+#      and instruct the lead to invoke `Skill("PACT:bootstrap")` as its FIRST
+#      action.
+#   2. session_init.main() calls remove_stale_kernel_block() unconditionally
+#      on every SessionStart (not gated by is_context_reset).
+#   3. session_init.main() calls update_pact_routing() unconditionally on
+#      every SessionStart.
+#   4. The legacy update_claude_md() symbol is gone — neither imported into
+#      session_init nor present in claude_md_manager.
+# ---------------------------------------------------------------------------
+
+
+def _run_session_init_for_path(
+    monkeypatch,
+    tmp_path,
+    source,
+    team_exists,
+):
+    """Helper for the contract tests below: runs main() under stable mocks
+    and returns (additionalContext, kernel_call_count, routing_call_count)."""
+    from session_init import main
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    if team_exists:
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+    stdin_data = json.dumps({
+        "session_id": "aabb1122-0000-0000-0000-000000000000",
+        "source": source,
+    })
+
+    with patch("session_init.setup_plugin_symlinks", return_value=None), \
+         patch("session_init.remove_stale_kernel_block", return_value=None) as mock_kernel, \
+         patch("session_init.update_pact_routing", return_value=None) as mock_routing, \
+         patch("session_init.ensure_project_memory_md", return_value=None), \
+         patch("session_init.check_pinned_staleness", return_value=None), \
+         patch("session_init.update_session_info", return_value=None), \
+         patch("session_init.get_task_list", return_value=None), \
+         patch("session_init.restore_last_session", return_value=None), \
+         patch("session_init.check_paused_state", return_value=None), \
+         patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code == 0
+    output = json.loads(mock_stdout.getvalue())
+    additional = output["hookSpecificOutput"]["additionalContext"]
+    return additional, mock_kernel.call_count, mock_routing.call_count
+
+
+class TestTeamCreateStringFreshSession:
+    """The fresh-session team-create string must follow the new prelude format."""
+
+    def test_starts_with_pact_role_marker(self, monkeypatch, tmp_path):
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert additional.startswith("PACT ROLE: orchestrator")
+
+    def test_contains_first_action_skill_call(self, monkeypatch, tmp_path):
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+
+    def test_contains_team_create_directive(self, monkeypatch, tmp_path):
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert 'TeamCreate(team_name="pact-aabb1122")' in additional
+
+    def test_blocks_premature_action(self, monkeypatch, tmp_path):
+        """The fresh prelude must instruct the lead not to act before bootstrap."""
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert "Do not read files" in additional
+        assert "bootstrap and team creation are complete" in additional
+
+    def test_contains_recovery_hint(self, monkeypatch, tmp_path):
+        """Re-invoke after compaction guidance is part of the prelude."""
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert "Re-invoke if your context is compacted" in additional
+
+
+class TestTeamReuseStringResumedSession:
+    """The resumed-session team-reuse string must follow the new prelude format."""
+
+    def test_starts_with_pact_role_marker(self, monkeypatch, tmp_path):
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert additional.startswith("PACT ROLE: orchestrator")
+
+    def test_contains_first_action_skill_call(self, monkeypatch, tmp_path):
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+
+    def test_contains_existing_team_marker(self, monkeypatch, tmp_path):
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert "existing — resumed session" in additional
+        assert "Do not call TeamCreate" in additional
+
+    def test_does_not_contain_team_create_directive(self, monkeypatch, tmp_path):
+        """Resume must NOT instruct TeamCreate (team already exists)."""
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert 'TeamCreate(team_name="pact-aabb1122")' not in additional
+
+
+class TestRemoveStaleKernelBlockIsCalled:
+    """remove_stale_kernel_block() is called on EVERY SessionStart source."""
+
+    def test_called_on_startup(self, monkeypatch, tmp_path):
+        _, kernel_calls, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert kernel_calls == 1
+
+    def test_called_on_resume(self, monkeypatch, tmp_path):
+        _, kernel_calls, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert kernel_calls == 1
+
+    def test_called_on_compact(self, monkeypatch, tmp_path):
+        _, kernel_calls, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="compact", team_exists=True
+        )
+        assert kernel_calls == 1
+
+    def test_called_on_clear(self, monkeypatch, tmp_path):
+        _, kernel_calls, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="clear", team_exists=True
+        )
+        assert kernel_calls == 1
+
+
+class TestUpdatePactRoutingIsCalled:
+    """update_pact_routing() is called on EVERY SessionStart source."""
+
+    def test_called_on_startup(self, monkeypatch, tmp_path):
+        _, _, routing_calls = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="startup", team_exists=False
+        )
+        assert routing_calls == 1
+
+    def test_called_on_resume(self, monkeypatch, tmp_path):
+        _, _, routing_calls = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert routing_calls == 1
+
+    def test_called_on_compact(self, monkeypatch, tmp_path):
+        _, _, routing_calls = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="compact", team_exists=True
+        )
+        assert routing_calls == 1
+
+    def test_called_on_clear(self, monkeypatch, tmp_path):
+        _, _, routing_calls = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="clear", team_exists=True
+        )
+        assert routing_calls == 1
+
+
+class TestUpdateClaudeMdNotCalled:
+    """The legacy update_claude_md symbol is gone from session_init."""
+
+    def test_session_init_does_not_import_update_claude_md(self):
+        """session_init module must not bind the legacy update_claude_md name."""
+        import session_init
+
+        assert not hasattr(session_init, "update_claude_md"), (
+            "session_init still imports update_claude_md — should be removed "
+            "as part of #366 Phase 1 kernel elimination."
+        )
+
+    def test_claude_md_manager_does_not_export_update_claude_md(self):
+        """shared/claude_md_manager.py must no longer expose update_claude_md."""
+        from shared import claude_md_manager
+
+        assert not hasattr(claude_md_manager, "update_claude_md"), (
+            "claude_md_manager still defines update_claude_md — should be "
+            "removed as part of #366 Phase 1 kernel elimination."
+        )

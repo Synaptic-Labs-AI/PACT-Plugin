@@ -1,27 +1,39 @@
 """
-Tests for shared/claude_md_manager.py -- CLAUDE.md file manipulation.
+Tests for shared/claude_md_manager.py -- CLAUDE.md file manipulation
+post #366 Phase 1 kernel elimination refactor.
 
 Tests cover:
-update_claude_md():
-1. Returns None when CLAUDE_PLUGIN_ROOT doesn't exist
-2. Returns None when source CLAUDE-kernel.md doesn't exist
-3. Creates target CLAUDE.md when it doesn't exist
-4. Updates existing PACT block between markers
-5. Returns None when PACT block is already up to date
-6. Warns about unmanaged PACT content
-7. Appends PACT block when no markers and no conflict
 
-ensure_project_memory_md():
-8. Returns None when CLAUDE_PROJECT_DIR not set
-9. Returns None when project CLAUDE.md already exists (legacy ./CLAUDE.md)
-10. Creates project CLAUDE.md (.claude/CLAUDE.md, new default) with memory sections
-11. Created file contains session markers
-12. Returns None when .claude/CLAUDE.md already exists (no overwrite)
-13. Returns None when only legacy ./CLAUDE.md exists (no migration)
-14. .claude/CLAUDE.md takes precedence when both locations exist
-15. Created .claude/CLAUDE.md has 0o600 permissions; .claude/ dir 0o700
+remove_stale_kernel_block() — one-time migration that strips the obsolete
+PACT_START/PACT_END block from ~/.claude/CLAUDE.md left over from PR #390:
+1. Block present + valid → removed, user content preserved
+2. Block absent → no-op, returns None
+3. Block malformed (PACT_START with no PACT_END) → defensive no-op
+4. Home file missing → returns None
+
+update_pact_routing() — idempotent project CLAUDE.md routing block management:
+5. Markers present + already canonical → no write, returns None
+6. Markers present + stale content → content replaced, surrounding content preserved
+7. Markers absent → block inserted near top of file, pre-existing content preserved
+8. File doesn't exist (new_default source) → returns None (deferred to ensure_project_memory_md)
+
+ensure_project_memory_md() — project CLAUDE.md creation:
+9. Returns None when CLAUDE_PROJECT_DIR not set
+10. Returns None when project CLAUDE.md already exists (legacy ./CLAUDE.md)
+11. Creates project CLAUDE.md (.claude/CLAUDE.md, new default) with memory sections
+12. Created file contains session markers
+13. Created file contains the canonical _PACT_ROUTING_BLOCK verbatim
+14. Returns None when .claude/CLAUDE.md already exists (no overwrite)
+15. Returns None when only legacy ./CLAUDE.md exists (no migration)
+16. .claude/CLAUDE.md takes precedence when both locations exist
+17. Created .claude/CLAUDE.md has 0o600 permissions; .claude/ dir 0o700
+
+_PACT_ROUTING_BLOCK constant — load-bearing fixture:
+18. Constant matches the canonical 18-line text byte-for-byte
+19. Constant has no leading or trailing newlines (Python string precision)
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,230 +43,394 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
-class TestUpdateClaudeMd:
-    """Tests for update_claude_md() -- global CLAUDE.md management."""
+# ---------------------------------------------------------------------------
+# Canonical fixture: the exact 18-line PACT routing block
+# ---------------------------------------------------------------------------
+# This is the byte-exact content the implementation must match. Pinned here
+# in the test file so any accidental drift in claude_md_manager.py is caught.
+# Includes em dash (U+2014) on line 5 and rightwards arrows (U+2192) on the
+# bullet items, per Section 6.13 Format Invariants.
 
-    def test_returns_none_when_plugin_root_missing(self, monkeypatch):
-        """Should return None when CLAUDE_PLUGIN_ROOT doesn't exist."""
-        from shared.claude_md_manager import update_claude_md
+CANONICAL_PACT_ROUTING_BLOCK = (
+    "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+    "## PACT Routing\n"
+    "\n"
+    "Before any other work, determine your PACT role and invoke the appropriate\n"
+    "bootstrap skill. Do not skip \u2014 this loads your operating instructions,\n"
+    "governance policy, and protocol references.\n"
+    "\n"
+    "Check your context for a `PACT ROLE:` marker:\n"
+    "- `PACT ROLE: orchestrator` \u2192 invoke `Skill(\"PACT:bootstrap\")` unless already loaded.\n"
+    "- `PACT ROLE: teammate (...)` \u2192 invoke `Skill(\"PACT:teammate-bootstrap\")` unless already loaded.\n"
+    "\n"
+    "No marker present? Inspect your system prompt: a `# Custom Agent Instructions`\n"
+    "block naming a specific PACT agent means you are a teammate (invoke the\n"
+    "teammate bootstrap); otherwise you are the main session (invoke the\n"
+    "orchestrator bootstrap).\n"
+    "\n"
+    "Re-invoke after compaction if the bootstrap content is no longer present.\n"
+    "<!-- PACT_ROUTING_END -->"
+)
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/nonexistent/path")
 
-        result = update_claude_md()
+# ---------------------------------------------------------------------------
+# Shared fixture: mock Path.home() so tests never touch real ~/.claude
+# ---------------------------------------------------------------------------
 
-        assert result is None
+@pytest.fixture
+def mock_home(tmp_path, monkeypatch):
+    """Patch Path.home() to return a tempdir-backed ~/.claude.
 
-    def test_returns_none_when_source_missing(self, tmp_path, monkeypatch):
-        """Should return None when plugin CLAUDE-kernel.md doesn't exist."""
-        from shared.claude_md_manager import update_claude_md
+    Required for any test that exercises remove_stale_kernel_block() or
+    other functions that read/write under Path.home() / ".claude".
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".claude").mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    return fake_home
 
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        # No CLAUDE-kernel.md in plugin root
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+# ---------------------------------------------------------------------------
+# _PACT_ROUTING_BLOCK constant — load-bearing fixture
+# ---------------------------------------------------------------------------
 
-        result = update_claude_md()
+class TestPactRoutingBlock:
+    """Byte-exact assertions on the _PACT_ROUTING_BLOCK constant.
 
-        assert result is None
+    The constant is load-bearing: agents read it from project CLAUDE.md to
+    decide which bootstrap skill to invoke. Any drift breaks role detection.
+    """
 
-    def test_creates_target_when_missing(self, tmp_path, monkeypatch):
-        """Should create ~/.claude/CLAUDE.md when it doesn't exist."""
-        from shared.claude_md_manager import update_claude_md
+    def test_constant_matches_canonical_text(self):
+        """The shared constant must match the canonical text byte-for-byte."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
 
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT Orchestrator\nContent here")
+        assert _PACT_ROUTING_BLOCK == CANONICAL_PACT_ROUTING_BLOCK
 
-        claude_dir = tmp_path / "home" / ".claude"
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    def test_constant_has_no_leading_newline(self):
+        """The constant must not start with a newline (insertion logic depends on it)."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
 
-        result = update_claude_md()
+        assert not _PACT_ROUTING_BLOCK.startswith("\n")
+        assert _PACT_ROUTING_BLOCK.startswith("<!-- PACT_ROUTING_START:")
 
-        assert result == "Created CLAUDE.md with PACT Orchestrator"
-        target = claude_dir / "CLAUDE.md"
-        assert target.exists()
-        content = target.read_text()
-        assert "PACT_START" in content
-        assert "PACT_END" in content
-        assert "# PACT Orchestrator" in content
+    def test_constant_has_no_trailing_newline(self):
+        """The constant must not end with a newline (insertion logic depends on it)."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
 
-    def test_updates_existing_pact_block(self, tmp_path, monkeypatch):
-        """Should replace content between markers when markers exist."""
-        from shared.claude_md_manager import update_claude_md
+        assert not _PACT_ROUTING_BLOCK.endswith("\n")
+        assert _PACT_ROUTING_BLOCK.endswith("<!-- PACT_ROUTING_END -->")
 
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT v2\nNew content")
+    def test_constant_contains_em_dash(self):
+        """Line 5 must contain U+2014 em dash, not ASCII --."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
 
-        claude_dir = tmp_path / "home" / ".claude"
-        claude_dir.mkdir(parents=True)
-        target = claude_dir / "CLAUDE.md"
+        assert "\u2014" in _PACT_ROUTING_BLOCK
+        assert "Do not skip \u2014" in _PACT_ROUTING_BLOCK
+
+    def test_constant_contains_rightwards_arrows(self):
+        """Bullet items must use U+2192, not ASCII ->."""
+        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+
+        # Two bullet rows; both use U+2192
+        assert _PACT_ROUTING_BLOCK.count("\u2192") == 2
+        assert "orchestrator` \u2192" in _PACT_ROUTING_BLOCK
+        assert "teammate (...)` \u2192" in _PACT_ROUTING_BLOCK
+
+
+# ---------------------------------------------------------------------------
+# remove_stale_kernel_block() — one-time migration
+# ---------------------------------------------------------------------------
+
+class TestRemoveStaleKernelBlockPresent:
+    """The legacy PACT_START/PACT_END block exists and must be removed."""
+
+    def test_strips_block_and_preserves_user_content(self, mock_home):
+        """Block is removed; user content before/after survives verbatim."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
         target.write_text(
-            "User stuff\n"
+            "User preamble line\n"
+            "More user content\n"
             "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->\n"
-            "# PACT v1\nOld content\n"
+            "# PACT Orchestrator\n"
+            "Old kernel body that must be removed\n"
             "<!-- PACT_END -->\n"
-            "More user stuff"
+            "User trailing content\n"
+            "Even more user content\n",
+            encoding="utf-8",
         )
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        result = remove_stale_kernel_block()
 
-        result = update_claude_md()
+        assert result == "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
+        new_content = target.read_text(encoding="utf-8")
+        # Markers and body are gone
+        assert "PACT_START" not in new_content
+        assert "PACT_END" not in new_content
+        assert "Old kernel body that must be removed" not in new_content
+        assert "# PACT Orchestrator" not in new_content
+        # User content survives verbatim
+        assert "User preamble line" in new_content
+        assert "More user content" in new_content
+        assert "User trailing content" in new_content
+        assert "Even more user content" in new_content
 
-        assert result == "PACT Orchestrator updated"
-        content = target.read_text()
-        assert "# PACT v2" in content
-        assert "New content" in content
-        assert "# PACT v1" not in content
-        assert "User stuff" in content
-        assert "More user stuff" in content
+    def test_secure_permissions_after_write(self, mock_home):
+        """Rewritten file must end up at 0o600."""
+        import stat
+        from shared.claude_md_manager import remove_stale_kernel_block
 
-    def test_returns_none_when_already_up_to_date(self, tmp_path, monkeypatch):
-        """Should return None when PACT block matches source."""
-        from shared.claude_md_manager import update_claude_md
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "before\n"
+            "<!-- PACT_START: pact -->\n"
+            "kernel body\n"
+            "<!-- PACT_END -->\n"
+            "after\n",
+            encoding="utf-8",
+        )
 
-        source_content = "# PACT\nSame content"
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "CLAUDE-kernel.md").write_text(source_content)
+        remove_stale_kernel_block()
 
-        start = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
-        end = "<!-- PACT_END -->"
+        mode = stat.S_IMODE(target.stat().st_mode)
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
 
-        claude_dir = tmp_path / "home" / ".claude"
-        claude_dir.mkdir(parents=True)
-        target = claude_dir / "CLAUDE.md"
-        target.write_text(f"{start}\n{source_content}\n{end}")
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+class TestRemoveStaleKernelBlockAbsent:
+    """No legacy block present — function must be a clean no-op."""
 
-        result = update_claude_md()
+    def test_returns_none_when_home_file_missing(self, mock_home):
+        """No CLAUDE.md at ~/.claude/CLAUDE.md → None, no side effects."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        # mock_home creates ~/.claude but not CLAUDE.md
+        target = mock_home / ".claude" / "CLAUDE.md"
+        assert not target.exists()
+
+        result = remove_stale_kernel_block()
 
         assert result is None
+        assert not target.exists()
 
-    def test_warns_about_unmanaged_pact(self, tmp_path, monkeypatch):
-        """Should warn when PACT Orchestrator found without markers."""
-        from shared.claude_md_manager import update_claude_md
+    def test_returns_none_when_no_markers(self, mock_home):
+        """File exists but contains no PACT_START → None, content unchanged."""
+        from shared.claude_md_manager import remove_stale_kernel_block
 
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT content")
+        target = mock_home / ".claude" / "CLAUDE.md"
+        original = "User-managed CLAUDE.md\nNo PACT markers present\n"
+        target.write_text(original, encoding="utf-8")
 
-        claude_dir = tmp_path / "home" / ".claude"
-        claude_dir.mkdir(parents=True)
-        target = claude_dir / "CLAUDE.md"
-        target.write_text("Manually installed PACT Orchestrator config")
+        result = remove_stale_kernel_block()
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        assert result is None
+        assert target.read_text(encoding="utf-8") == original
 
-        result = update_claude_md()
+    def test_returns_none_when_only_end_marker(self, mock_home):
+        """PACT_END alone (no START) → None, no change."""
+        from shared.claude_md_manager import remove_stale_kernel_block
 
-        assert result is not None
-        assert "unmanaged" in result
+        target = mock_home / ".claude" / "CLAUDE.md"
+        original = "user content\n<!-- PACT_END -->\nmore content\n"
+        target.write_text(original, encoding="utf-8")
 
-    def test_handles_multiple_pact_start_markers_gracefully(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """Corrupted CLAUDE.md with multiple PACT_START markers must not silently
-        drop intermediate content. The manager should warn to stderr, replace
-        only the LAST PACT block, and preserve everything before it verbatim.
+        result = remove_stale_kernel_block()
 
-        Regression: prior implementation used `split(START_MARKER)` and only
-        kept parts[0] and parts[1], silently dropping parts[2:] (any user
-        content between the second start marker and the trailing end marker).
-        """
-        from shared.claude_md_manager import update_claude_md
+        assert result is None
+        assert target.read_text(encoding="utf-8") == original
 
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT v2\nNew content")
 
-        start = "<!-- PACT_START: Managed by pact-plugin - Do not edit this block -->"
-        end = "<!-- PACT_END -->"
+class TestRemoveStaleKernelBlockMalformed:
+    """PACT_START present but no PACT_END — defensive no-op to avoid data loss."""
 
-        # Construct a corrupted CLAUDE.md with THREE PACT_START markers.
-        # The intermediate "stale orphan block" + "user notes" between blocks
-        # must survive the update; only the final block should be rewritten.
-        corrupted = (
-            "User preamble\n"
-            f"{start}\n"
-            "# Stale PACT v0\nFirst orphan body\n"
-            f"{end}\n"
-            "Important user notes between blocks\n"
-            f"{start}\n"
-            "# Stale PACT v0.5\nSecond orphan body\n"
-            f"{end}\n"
-            "More user notes\n"
-            f"{start}\n"
-            "# PACT v1\nMost recent body\n"
-            f"{end}\n"
-            "User trailing content"
+    def test_returns_none_when_start_without_end(self, mock_home):
+        """Unterminated PACT block → defensive no-op (do not corrupt)."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        original = (
+            "before\n"
+            "<!-- PACT_START: Managed by pact-plugin -->\n"
+            "kernel body that never closes\n"
+            "more content\n"
+        )
+        target.write_text(original, encoding="utf-8")
+
+        result = remove_stale_kernel_block()
+
+        # The current implementation early-returns when END is absent in the
+        # full content; the file remains untouched.
+        assert result is None
+        assert target.read_text(encoding="utf-8") == original
+
+
+# ---------------------------------------------------------------------------
+# update_pact_routing() — idempotent project CLAUDE.md routing block management
+# ---------------------------------------------------------------------------
+
+class TestUpdatePactRoutingIdempotent:
+    """File already has the canonical block — no rewrite, returns None."""
+
+    def test_no_write_when_block_canonical(self, tmp_path, monkeypatch):
+        """Canonical content between markers → return None, no write."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            f"{CANONICAL_PACT_ROUTING_BLOCK}\n"
+            "\n"
+            "## Working Memory\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        assert result is None
+        # File untouched
+        assert legacy.read_text(encoding="utf-8") == original
+
+    def test_returns_none_when_no_project_dir(self, monkeypatch):
+        """Empty CLAUDE_PROJECT_DIR → None."""
+        from shared.claude_md_manager import update_pact_routing
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        assert update_pact_routing() is None
+
+    def test_returns_none_when_file_does_not_exist(self, tmp_path, monkeypatch):
+        """Project dir exists but no CLAUDE.md → defer to ensure_project_memory_md."""
+        from shared.claude_md_manager import update_pact_routing
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        assert result is None
+        # update_pact_routing must not create the file
+        assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+
+class TestUpdatePactRoutingUpdate:
+    """Markers present, but content between them is stale → replace it."""
+
+    def test_replaces_stale_content_between_markers(self, tmp_path, monkeypatch):
+        """Stale routing block content gets replaced with canonical version."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text(
+            "# Project Memory\n"
+            "\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## OLD ROUTING CONTENT\n"
+            "Outdated instructions here\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "\n"
+            "## Working Memory\n"
+            "user notes\n",
+            encoding="utf-8",
         )
 
-        claude_dir = tmp_path / "home" / ".claude"
-        claude_dir.mkdir(parents=True)
-        target = claude_dir / "CLAUDE.md"
-        target.write_text(corrupted)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        result = update_pact_routing()
 
-        result = update_claude_md()
+        assert result == "PACT routing block updated in project CLAUDE.md"
+        new_content = legacy.read_text(encoding="utf-8")
+        # Canonical block is now present
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        # Stale content gone
+        assert "OLD ROUTING CONTENT" not in new_content
+        assert "Outdated instructions here" not in new_content
+        # Surrounding content preserved
+        assert "# Project Memory" in new_content
+        assert "## Working Memory" in new_content
+        assert "user notes" in new_content
 
-        assert result == "PACT Orchestrator updated"
+    def test_secure_permissions_after_update(self, tmp_path, monkeypatch):
+        """Updated file must end up at 0o600."""
+        import stat
+        from shared.claude_md_manager import update_pact_routing
 
-        content = target.read_text()
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text(
+            "# Project Memory\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "stale\n"
+            "<!-- PACT_ROUTING_END -->\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        # New content replaced the LAST block
-        assert "# PACT v2" in content
-        assert "New content" in content
-        # The most recent stale body must be gone (it was the one replaced)
-        assert "Most recent body" not in content
-        # All surrounding user content must survive verbatim
-        assert "User preamble" in content
-        assert "Important user notes between blocks" in content
-        assert "More user notes" in content
-        assert "User trailing content" in content
-        # Intermediate orphan blocks are preserved (not silently dropped)
-        assert "# Stale PACT v0" in content
-        assert "First orphan body" in content
-        assert "# Stale PACT v0.5" in content
-        assert "Second orphan body" in content
+        update_pact_routing()
 
-        # A warning was emitted to stderr identifying the corruption
-        captured = capsys.readouterr()
-        assert "PACT warning" in captured.err
-        assert "3 PACT_START markers" in captured.err
+        mode = stat.S_IMODE(legacy.stat().st_mode)
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
 
-    def test_appends_when_no_markers_no_conflict(self, tmp_path, monkeypatch):
-        """Should append PACT block when no markers and no PACT content."""
-        from shared.claude_md_manager import update_claude_md
 
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        (plugin_root / "CLAUDE-kernel.md").write_text("# PACT Setup")
+class TestUpdatePactRoutingInsert:
+    """Markers absent — insert the block near the top of the file."""
 
-        claude_dir = tmp_path / "home" / ".claude"
-        claude_dir.mkdir(parents=True)
-        target = claude_dir / "CLAUDE.md"
-        target.write_text("# My Config\nSome settings\n")
+    def test_inserts_block_after_title(self, tmp_path, monkeypatch):
+        """Routing block is inserted after the # title line."""
+        from shared.claude_md_manager import update_pact_routing
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "user notes that must survive\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
 
-        result = update_claude_md()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-        assert result == "PACT Orchestrator added to CLAUDE.md"
-        content = target.read_text()
-        assert "# My Config" in content
-        assert "PACT_START" in content
-        assert "# PACT Setup" in content
+        result = update_pact_routing()
 
+        assert result == "PACT routing block inserted into project CLAUDE.md"
+        new_content = legacy.read_text(encoding="utf-8")
+        # Canonical block now present
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        # Original content preserved
+        assert "# Project Memory" in new_content
+        assert "## Working Memory" in new_content
+        assert "user notes that must survive" in new_content
+        # Block sits between the title and the next section
+        title_idx = new_content.index("# Project Memory")
+        block_idx = new_content.index("<!-- PACT_ROUTING_START")
+        wm_idx = new_content.index("## Working Memory")
+        assert title_idx < block_idx < wm_idx
+
+    def test_idempotent_after_insert(self, tmp_path, monkeypatch):
+        """A second invocation after insert must be a no-op."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text(
+            "# Project Memory\n\n## Working Memory\nuser notes\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        first = update_pact_routing()
+        assert first == "PACT routing block inserted into project CLAUDE.md"
+
+        # Second call must not write again
+        second = update_pact_routing()
+        assert second is None
+
+
+# ---------------------------------------------------------------------------
+# ensure_project_memory_md() — preserved tests + canonical-block check
+# ---------------------------------------------------------------------------
 
 class TestEnsureProjectMemoryMd:
     """Tests for ensure_project_memory_md() -- project CLAUDE.md creation."""
@@ -311,6 +487,17 @@ class TestEnsureProjectMemoryMd:
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content
+
+    def test_created_file_contains_canonical_routing_block(self, tmp_path, monkeypatch):
+        """The created file must embed the canonical _PACT_ROUTING_BLOCK verbatim."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert CANONICAL_PACT_ROUTING_BLOCK in content
 
     def test_returns_none_when_dot_claude_exists(self, tmp_path, monkeypatch):
         """Should return None and not overwrite when .claude/CLAUDE.md already exists."""
@@ -376,45 +563,6 @@ class TestEnsureProjectMemoryMd:
         assert file_mode == 0o600, f"Expected 0o600, got {oct(file_mode)}"
         dir_mode = stat.S_IMODE(new_default.parent.stat().st_mode)
         assert dir_mode == 0o700, f"Expected 0o700, got {oct(dir_mode)}"
-
-
-class TestUpdateClaudeMdErrorPaths:
-    """Tests for update_claude_md() exception handling."""
-
-    def test_returns_error_message_on_read_failure(self, tmp_path, monkeypatch):
-        """Should return truncated error message when source file read fails."""
-        from shared.claude_md_manager import update_claude_md
-
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
-        source = plugin_root / "CLAUDE-kernel.md"
-        source.write_text("content")
-
-        claude_dir = tmp_path / "home" / ".claude"
-        claude_dir.mkdir(parents=True)
-        target = claude_dir / "CLAUDE.md"
-        target.write_text("existing")
-
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-
-        # Make target unreadable to trigger exception in read_text
-        from unittest.mock import patch
-        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
-            result = update_claude_md()
-
-        assert result is not None
-        assert "PACT update failed:" in result
-
-    def test_returns_none_when_plugin_root_env_empty(self, monkeypatch):
-        """Should return None when CLAUDE_PLUGIN_ROOT is empty string."""
-        from shared.claude_md_manager import update_claude_md
-
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "")
-
-        result = update_claude_md()
-
-        assert result is None
 
 
 class TestEnsureProjectMemoryMdErrorPaths:
@@ -548,116 +696,3 @@ class TestEnsureDotClaudeParent:
         ensure_dot_claude_parent(target)
 
         assert target.parent.exists()
-
-
-class TestKernelIntegrity:
-    """Tests for CLAUDE-kernel.md content integrity.
-
-    The slim kernel (pact-plugin/CLAUDE-kernel.md) is the on-disk file that
-    both lead and teammates see. It must contain only the essential policy
-    content and have zero @~/ references (those are delivered via hook to
-    the lead only).
-
-    This lives in test_claude_md_manager.py because CLAUDE-kernel.md is the
-    source file for update_claude_md() — it's part of the CLAUDE.md
-    installation pipeline, not an agent definition.
-    """
-
-    KERNEL_PATH = Path(__file__).parent.parent / "CLAUDE-kernel.md"
-
-    def test_kernel_file_exists(self):
-        """CLAUDE-kernel.md must exist in the plugin directory."""
-        assert self.KERNEL_PATH.exists(), (
-            f"CLAUDE-kernel.md not found at {self.KERNEL_PATH}"
-        )
-
-    def test_kernel_has_zero_at_references(self):
-        """Kernel must have zero @~/.claude/protocols/ references.
-
-        These references would cause protocol files to be loaded for every
-        agent spawn, defeating the purpose of the spawn overhead reduction.
-        """
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "@~/" not in content, (
-            "CLAUDE-kernel.md contains @~/ reference(s). These must be "
-            "removed — protocols are delivered via hook to the lead only."
-        )
-
-    def test_kernel_contains_s5_non_negotiables_table(self):
-        """Kernel must retain the S5 Non-Negotiables table.
-
-        The SACROSANCT rules apply to ALL agents (lead and teammates alike).
-        Removing them from the kernel would create a policy gap.
-        """
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "Non-Negotiables" in content
-        assert "SACROSANCT" in content or "non-negotiable" in content.lower()
-        # Verify the table has key rules
-        assert "Security" in content
-        assert "Quality" in content
-        assert "Ethics" in content
-        assert "Delegation" in content
-        assert "Integrity" in content
-
-    def test_kernel_contains_algedonic_signal_basics(self):
-        """Kernel must retain algedonic signal category table.
-
-        Every agent has Algedonic Authority per the autonomy charter. They
-        need to know the signal categories (HALT/ALERT) and levels.
-        """
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "Algedonic" in content
-        assert "HALT" in content
-        assert "ALERT" in content
-        assert "SECURITY" in content
-        assert "QUALITY" in content
-
-    def test_kernel_contains_identity_anchor(self):
-        """Kernel must retain the identity anchor heading."""
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "PACT Framework" in content
-
-    def test_kernel_contains_bootstrapper_instruction(self):
-        """Kernel must contain the bootstrapper instruction pointing the lead
-        at the /PACT:bootstrap slash command.
-
-        This is the recovery path: if hook context is lost, the lead can
-        read the kernel and see that its first action must be to invoke
-        /PACT:bootstrap (via the Skill tool), which loads the full operating
-        instructions and eagerly fetches the critical protocols.
-        """
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert "/PACT:bootstrap" in content or 'Skill("PACT:bootstrap")' in content
-
-    def test_kernel_is_under_size_budget(self):
-        """Kernel should be well under 5KB chars (~1.2K tokens).
-
-        The whole point is that this is slim. If it grows beyond ~5KB,
-        the spawn overhead reduction is being eroded.
-        """
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        assert len(content) < 5_000, (
-            f"CLAUDE-kernel.md is {len(content)} chars, exceeds 5KB budget. "
-            f"The kernel should be ~2-3KB to achieve spawn overhead targets."
-        )
-
-    def test_kernel_excludes_orchestrator_only_content(self):
-        """Kernel must NOT contain orchestrator-only sections.
-
-        These sections are delivered via hook to the lead only and must not
-        appear in the kernel that teammates also read.
-
-        MAINTENANCE: when new orchestrator-only sections are added to
-        pact-plugin/CLAUDE.md, add them to the exclusion list below.
-        The 5KB size budget (test_kernel_is_under_size_budget) serves as a
-        backstop — if the kernel grows beyond 5KB, either content leaked in
-        or the budget needs a reviewed increase.
-        """
-        content = self.KERNEL_PATH.read_text(encoding="utf-8")
-        # Orchestrator-only keywords that should NOT be in kernel.
-        # Update this list when new orchestrator-only sections are added.
-        assert "Context Economy" not in content
-        assert "Wait in Silence" not in content
-        assert "Guided Dialogue" not in content
-        assert "Always Be Delegating" not in content
-        assert "Agent Teams Dispatch" not in content

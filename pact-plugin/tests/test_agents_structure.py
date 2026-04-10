@@ -109,25 +109,25 @@ class TestAgentBody:
 
 class TestLazyLoadedAgentTeams:
     """
-    Regression guards for the #361 spawn-overhead reduction.
+    Regression guards for #366 Phase 1 (kernel elimination).
 
-    The `pact-agent-teams` skill was removed from agent frontmatter to
-    eliminate per-spawn eager-load cost. In its place, each agent now carries
-    an AGENT TEAMS PROTOCOL block in the body instructing the agent to invoke
-    `Skill("PACT:pact-agent-teams")` before its first team-tool call.
+    Post-#366, `pact-agent-teams` is back in agent frontmatter (eager-loaded
+    at spawn) because the AGENT TEAMS PROTOCOL pointer block was removed —
+    every agent's FIRST ACTION is `Skill("PACT:teammate-bootstrap")` which
+    delivers the team protocol via @-references in the command body.
 
-    These tests pin the refactor against silent regression:
-      - M3: no agent frontmatter may list `pact-agent-teams` under `skills:`
-      - M4: every agent body must reference the lazy-load pointer
-      - F3: no agent frontmatter may declare more than MAX_FRONTMATTER_SKILLS
+    The frontmatter cap now accommodates four eager skills (architect/coder
+    triad of pact-agent-teams + pact-teachback + request-more-context, plus
+    one domain-specific skill for the secretary's memory tooling and the
+    auditor's architecture-patterns).
     """
 
-    # Upper bound on eager-loaded skills per agent. Currently the secretary
-    # carries 2 (pact-memory, pact-handoff-harvest) and all other agents
-    # carry 1 (pact-teachback). Secretary carries 3 (teachback + memory +
-    # handoff-harvest), auditor carries 2 (teachback + architecture-patterns).
-    # Bumping this threshold should be a deliberate, reviewed choice.
-    MAX_FRONTMATTER_SKILLS = 3
+    # Upper bound on eager-loaded skills per agent. Secretary carries 4
+    # (pact-agent-teams + pact-teachback + pact-memory + pact-handoff-harvest),
+    # auditor carries 4 (pact-agent-teams + pact-teachback +
+    # pact-architecture-patterns + request-more-context). Bumping this
+    # threshold should be a deliberate, reviewed choice.
+    MAX_FRONTMATTER_SKILLS = 4
 
     @staticmethod
     def _extract_skill_names(text):
@@ -180,37 +180,6 @@ class TestLazyLoadedAgentTeams:
                 skill_names = self._extract_skill_names(text)
                 agents[f.stem] = (fm, text, skill_names)
         return agents
-
-    def test_agent_teams_not_in_frontmatter(self, all_agents):
-        """M3: `pact-agent-teams` must not appear in any agent's frontmatter."""
-        for name, (_fm, _text, skill_names) in all_agents.items():
-            assert "pact-agent-teams" not in skill_names, (
-                f"{name}: pact-agent-teams must be lazy-loaded, not declared "
-                f"in frontmatter (see #361). Found skills: {skill_names!r}"
-            )
-
-    def test_request_more_context_not_in_frontmatter(self, all_agents):
-        """request-more-context must be lazy-loaded, not in frontmatter."""
-        for name, (_fm, _text, skill_names) in all_agents.items():
-            assert "request-more-context" not in skill_names, (
-                f"{name}: request-more-context must be lazy-loaded, not "
-                f"declared in frontmatter (see #361). Found skills: "
-                f"{skill_names!r}"
-            )
-
-    def test_agent_teams_protocol_block_present(self, all_agents):
-        """M4: the lazy-load pointer block must exist in every agent body."""
-        for name, (_fm, text, _skills) in all_agents.items():
-            assert "AGENT TEAMS PROTOCOL" in text, (
-                f"{name}: missing '# AGENT TEAMS PROTOCOL' section. "
-                f"Without it, the agent has no instruction to load "
-                f"pact-agent-teams before first team-tool use."
-            )
-            assert 'Skill("PACT:pact-agent-teams")' in text, (
-                f"{name}: AGENT TEAMS PROTOCOL block must reference "
-                f'Skill("PACT:pact-agent-teams") so the agent knows '
-                f"which skill to invoke."
-            )
 
     def test_frontmatter_skill_count_capped(self, all_agents):
         """F3: no agent may declare more than MAX_FRONTMATTER_SKILLS."""
@@ -333,280 +302,18 @@ class TestExtractSkillNamesParser:
         assert result == []
 
 
-class TestAgentTeamsProtocolConsistency:
-    """Verify AGENT TEAMS PROTOCOL section wording is consistent across
-    all 12 agent files.
-
-    The lazy-load instruction block was cherry-picked from #361 and must
-    contain identical core wording in all agents. Domain-specific differences
-    (like the auditor having a different line count) are acceptable only
-    outside the standardized block.
-    """
-
-    # The canonical first 7 lines of the AGENT TEAMS PROTOCOL body
-    # (after the heading). These must be identical in all agents.
-    CANONICAL_LINES = [
-        "This agent communicates with the team via `SendMessage`, `TaskList`, `TaskGet`,",
-        "`TaskUpdate`, and other team tools. **On first use of any of these tools after",
-        "spawn (or after reuse for a new task), invoke the Skill tool:",
-        '`Skill("PACT:pact-agent-teams")`** to load the full',
-        "communication protocol (teachback, progress signals, message format, lifecycle,",
-        "HANDOFF format). This skill was previously eager-loaded via frontmatter; it is",
-        "now lazy-loaded to reduce per-spawn context overhead (see issue #361).",
-    ]
-
-    def _extract_protocol_block(self, text):
-        """Extract the AGENT TEAMS PROTOCOL section body lines."""
-        marker = "# AGENT TEAMS PROTOCOL"
-        idx = text.find(marker)
-        if idx == -1:
-            return []
-        # Skip the heading line and blank line after it
-        after = text[idx + len(marker):]
-        lines = after.split("\n")
-        # Skip leading blank lines
-        body_lines = []
-        started = False
-        for line in lines:
-            stripped = line.strip()
-            if not started and not stripped:
-                continue
-            if not started and stripped:
-                started = True
-            if started:
-                # Stop at next heading or end of section
-                if stripped.startswith("#") and not stripped.startswith("##"):
-                    break
-                body_lines.append(stripped)
-        return body_lines
-
-    def test_all_agents_have_canonical_protocol_wording(self, agent_files):
-        """Every agent must have the exact canonical AGENT TEAMS PROTOCOL text."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            body = self._extract_protocol_block(text)
-            for i, canonical_line in enumerate(self.CANONICAL_LINES):
-                assert i < len(body), (
-                    f"{f.name}: AGENT TEAMS PROTOCOL block has only {len(body)} "
-                    f"lines, expected at least {len(self.CANONICAL_LINES)}"
-                )
-                assert body[i] == canonical_line, (
-                    f"{f.name}: AGENT TEAMS PROTOCOL line {i} diverges.\n"
-                    f"  Expected: {canonical_line!r}\n"
-                    f"  Got:      {body[i]!r}"
-                )
-
-    def test_all_agents_have_request_more_context_mention(self, agent_files):
-        """Every agent should mention request-more-context as an on-demand skill."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            assert "request-more-context" in text, (
-                f"{f.name}: missing request-more-context mention in "
-                f"AGENT TEAMS PROTOCOL section"
-            )
-
-
-class TestAutonomyCharterExtraction:
-    """Tests for the autonomy charter boilerplate extraction (#366 S4).
-
-    All 12 agents should have had their full Autonomy Charter boilerplate
-    (>15 lines) replaced with a condensed pointer to the shared
-    pact-autonomy-charter skill (~5 lines).
-    """
-
-    def test_all_agents_reference_autonomy_charter_skill(self, agent_files):
-        """Every agent must reference pact-autonomy-charter skill."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            assert "pact-autonomy-charter" in text, (
-                f"{f.name}: missing reference to pact-autonomy-charter skill. "
-                f"The autonomy charter was extracted to a shared skill in #366."
-            )
-
-    def test_no_agent_has_full_autonomy_boilerplate(self, agent_files):
-        """No agent should have the full Autonomy Charter boilerplate (>15 lines).
-
-        The full boilerplate includes sections like 'You have authority to:',
-        'You must escalate when:', 'Nested PACT:', 'Self-Coordination:',
-        'Algedonic Authority:'. If the agent has >15 lines between
-        'AUTONOMY CHARTER' and the next heading, the extraction is incomplete.
-        """
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            lines = text.split("\n")
-            in_charter = False
-            charter_lines = 0
-            for line in lines:
-                stripped = line.strip()
-                if "AUTONOMY CHARTER" in stripped:
-                    in_charter = True
-                    charter_lines = 0
-                    continue
-                if in_charter:
-                    # Stop at next major heading (# or **heading**)
-                    if (stripped.startswith("# ") or
-                            (stripped.startswith("**") and
-                             stripped.endswith("**") and
-                             len(stripped) > 4 and
-                             stripped != "**AUTONOMY CHARTER**" and
-                             "autonomy" not in stripped.lower())):
-                        break
-                    charter_lines += 1
-
-            if in_charter:
-                # Secretary has domain-specific authority extensions beyond
-                # the shared charter (context recovery, memory consolidation,
-                # direct query response, etc.) — allow a higher cap.
-                cap = 25 if f.stem == "pact-secretary" else 15
-                assert charter_lines <= cap, (
-                    f"{f.name}: AUTONOMY CHARTER section has {charter_lines} lines, "
-                    f"exceeding the {cap}-line limit. The full boilerplate should "
-                    f"have been extracted to the pact-autonomy-charter skill."
-                )
-
-    def test_autonomy_charter_section_mentions_skill_invocation(self, agent_files):
-        """The condensed AUTONOMY CHARTER should tell the agent how to load the skill."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            if "AUTONOMY CHARTER" not in text:
-                continue
-            # Find the charter section
-            idx = text.find("AUTONOMY CHARTER")
-            after = text[idx:]
-            # Should contain the Skill invocation instruction
-            assert 'Skill("PACT:pact-autonomy-charter")' in after or \
-                   "pact-autonomy-charter" in after, (
-                f"{f.name}: AUTONOMY CHARTER section doesn't reference "
-                f"the pact-autonomy-charter skill for loading."
-            )
-
-
-class TestAutonomyCharterSkillContent:
-    """Content integrity tests for the pact-autonomy-charter skill.
-
-    The shared skill must contain all key sections that were extracted from
-    the per-agent autonomy charter boilerplate. If a section is missing,
-    agents that invoke the skill won't receive the full charter.
-    """
-
-    SKILL_PATH = Path(__file__).parent.parent / "skills" / "pact-autonomy-charter" / "SKILL.md"
-
-    REQUIRED_SECTIONS = [
-        ("authority", "You have authority to:"),
-        ("escalation", "You must escalate when:"),
-        ("nested PACT", "Nested PACT"),
-        ("self-coordination", "Self-Coordination"),
-        ("algedonic", "Algedonic Authority"),
-    ]
-
-    def test_skill_file_exists(self):
-        assert self.SKILL_PATH.is_file(), (
-            "pact-autonomy-charter/SKILL.md missing"
-        )
-
-    @pytest.mark.parametrize("label,marker", REQUIRED_SECTIONS)
-    def test_contains_required_section(self, label, marker):
-        """Each key charter section must be present in the shared skill."""
-        content = self.SKILL_PATH.read_text(encoding="utf-8")
-        assert marker in content, (
-            f"pact-autonomy-charter missing '{label}' section "
-            f"(expected marker: {marker!r})"
-        )
-
-    def test_contains_algedonic_signal_reference(self):
-        """Must reference algedonic.md for the full trigger list."""
-        content = self.SKILL_PATH.read_text(encoding="utf-8")
-        assert "algedonic.md" in content, (
-            "pact-autonomy-charter must reference algedonic.md "
-            "for signal format and full trigger list"
-        )
-
-
 class TestRequiredSkillsCondensed:
-    """Tests for REQUIRED SKILLS section condensing (#366 S5).
+    """Structural tests for the REQUIRED SKILLS section.
 
-    Each agent's REQUIRED SKILLS section should be condensed to <= 10 lines
-    (down from ~15 lines). The condensed version removes the 'How to invoke',
-    'Why this matters', and 'Cross-Agent Coordination' sub-sections.
-
-    Note: pact-secretary uses frontmatter skills: (pact-memory, pact-handoff-harvest)
-    instead of a REQUIRED SKILLS section, so it's excluded from section-based checks.
+    The aspirational #366 S5 line-count and subsection-condensing tests were
+    removed because Phase 1 did not include that condensing pass. What
+    remains here are the structural invariants that hold regardless of
+    condensing: every agent must still have a skill lookup table, and the
+    secretary uses frontmatter skills.
     """
 
     # Secretary uses frontmatter skills, not REQUIRED SKILLS section
     _SECRETARY = "pact-secretary.md"
-
-    # Maximum lines between "# REQUIRED SKILLS" heading and next heading.
-    # The architecture targets ~5 lines for most agents, but n8n has 7 skill
-    # rows in its table (legitimately larger). 15 lines is the hard ceiling.
-    # Before #366 S5 condensing, agents had ~20+ lines including the removed
-    # "How to invoke", "Why this matters", and "Cross-Agent Coordination" blocks.
-    MAX_SECTION_LINES = 15
-
-    def test_required_skills_condensed(self, agent_files):
-        """Every agent's REQUIRED SKILLS section should be <= MAX_SECTION_LINES."""
-        for f in agent_files:
-            if f.name == self._SECRETARY:
-                continue
-            text = f.read_text(encoding="utf-8")
-            lines = text.split("\n")
-            in_section = False
-            seen_table = False
-            past_table = False
-            section_lines = 0
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("# REQUIRED SKILLS"):
-                    in_section = True
-                    section_lines = 0
-                    continue
-                if in_section:
-                    # Stop at next heading (any level: #, ##, ###, etc.)
-                    if (stripped.startswith("#") and
-                            not stripped.startswith("# REQUIRED") and
-                            len(stripped) > 1 and stripped[1] in (" ", "#")):
-                        break
-                    # Stop at standalone bold section markers (**TITLE**)
-                    if (stripped.startswith("**") and stripped.endswith("**")
-                            and len(stripped) > 4):
-                        break
-                    # Track table state: once we've seen table rows and
-                    # then a blank line, the next non-blank non-table line
-                    # means we've left the REQUIRED SKILLS section (covers
-                    # agents that use prose paragraphs instead of headings)
-                    if stripped.startswith("|"):
-                        seen_table = True
-                        past_table = False
-                    elif seen_table and not stripped:
-                        past_table = True
-                    elif past_table and stripped:
-                        break
-                    section_lines += 1
-
-            if in_section:
-                assert section_lines <= self.MAX_SECTION_LINES, (
-                    f"{f.name}: REQUIRED SKILLS section has {section_lines} "
-                    f"lines, should be <= {self.MAX_SECTION_LINES} after "
-                    f"condensing (was ~15+ before #366 S5)."
-                )
-
-    def test_no_how_to_invoke_subsection(self, agent_files):
-        """No agent should have the removed 'How to invoke' block."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            assert "**How to invoke**" not in text, (
-                f"{f.name}: still contains '**How to invoke**' — "
-                f"this was removed in #366 REQUIRED SKILLS condensing."
-            )
-
-    def test_no_why_this_matters_subsection(self, agent_files):
-        """No agent should have the removed 'Why this matters' block."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            assert "**Why this matters**" not in text, (
-                f"{f.name}: still contains '**Why this matters**' — "
-                f"this was removed in #366 REQUIRED SKILLS condensing."
-            )
 
     def test_required_skills_table_preserved(self, agent_files):
         """Non-secretary agents should still have the skill table."""
@@ -654,8 +361,12 @@ class TestTeachbackMicroSkillExtraction:
     AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
     # Micro-skill size budget: teachback protocol should be compact.
-    # Measured in characters (not bytes) per lead spec.
-    MAX_SKILL_CHARS = 1500
+    # Measured in characters (not bytes). Bumped from 1500 to 2500 post-#366
+    # because the skill was rewritten in command-style form (it now contains
+    # the full SendMessage template, ordering rule, post-send behavior, and
+    # consultant-question exception). The previous stub form was too terse to
+    # function as the standalone teachback gate it now serves.
+    MAX_SKILL_CHARS = 2500
 
     # Key protocol elements that must be in the extracted skill
     REQUIRED_PROTOCOL_ELEMENTS = [
@@ -905,4 +616,312 @@ class TestBootstrapCommand:
         assert bootstrap_registered, (
             f"bootstrap.md is not registered in plugin.json commands list. "
             f"Found commands: {commands}"
+        )
+
+
+class TestAgentFirstActionPrelude:
+    """Every agent must lead its body with a `# FIRST ACTION` section that
+    invokes `Skill("PACT:teammate-bootstrap")` before any other work.
+
+    This is the load-bearing instruction that delivers the team protocol,
+    teachback standards, and algedonic reference to spawned teammates. Drift
+    here is silent — an agent without it would skip the bootstrap entirely
+    and operate without team coordination context.
+    """
+
+    def test_first_action_section_present(self, agent_files):
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert "# FIRST ACTION" in text, (
+                f"{f.name}: missing '# FIRST ACTION' section. Every agent "
+                f"must lead with a FIRST ACTION block that invokes the "
+                f"teammate bootstrap skill."
+            )
+
+    def test_first_action_invokes_teammate_bootstrap(self, agent_files):
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert 'Skill("PACT:teammate-bootstrap")' in text, (
+                f"{f.name}: FIRST ACTION must invoke "
+                f'`Skill("PACT:teammate-bootstrap")`. Without it the agent '
+                f"would not load the team protocol."
+            )
+
+    def test_first_action_precedes_other_headings(self, agent_files):
+        """The FIRST ACTION section must come before any other H1 in the body."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            # Strip frontmatter
+            if text.startswith("---"):
+                end = text.index("---", 3) + 3
+                body = text[end:]
+            else:
+                body = text
+            first_action_idx = body.find("# FIRST ACTION")
+            assert first_action_idx >= 0
+            # Find first H1 in body
+            lines = body.split("\n")
+            first_h1_line = None
+            for i, line in enumerate(lines):
+                if line.startswith("# ") and not line.startswith("## "):
+                    first_h1_line = line
+                    break
+            assert first_h1_line == "# FIRST ACTION", (
+                f"{f.name}: first H1 in body is {first_h1_line!r}, expected "
+                f"'# FIRST ACTION'. The bootstrap invocation must precede "
+                f"all other top-level sections."
+            )
+
+    def test_first_action_mentions_recovery_after_compaction(self, agent_files):
+        """The FIRST ACTION should remind the agent to re-invoke bootstrap
+        after compaction. This catches drift where the recovery hint gets
+        deleted during agent edits."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            # Find FIRST ACTION block
+            idx = text.find("# FIRST ACTION")
+            assert idx >= 0
+            # Look at the next ~400 chars
+            section = text[idx:idx + 500]
+            assert "compact" in section.lower(), (
+                f"{f.name}: FIRST ACTION section should mention "
+                f"compaction/re-invocation so agents recover after compact."
+            )
+
+
+class TestAgentFrontmatterSkills:
+    """Every agent's frontmatter must eager-load the team protocol skills.
+
+    Post-#366 the team protocol is delivered via frontmatter (eager) PLUS
+    the teammate-bootstrap command (loaded via FIRST ACTION). This test
+    pins the frontmatter contract: pact-agent-teams AND pact-teachback must
+    both be present in skills:.
+
+    Presence-only — no cardinality or exclusivity checks. Other skills may
+    be added (e.g., the secretary's pact-memory + pact-handoff-harvest, the
+    auditor's pact-architecture-patterns).
+    """
+
+    @pytest.fixture
+    def agent_skills(self, agent_files):
+        out = {}
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            out[f.stem] = TestLazyLoadedAgentTeams._extract_skill_names(text)
+        return out
+
+    def test_pact_agent_teams_in_frontmatter(self, agent_skills):
+        for name, skills in agent_skills.items():
+            assert "pact-agent-teams" in skills, (
+                f"{name}: pact-agent-teams must be eager-loaded via "
+                f"frontmatter post-#366. Found skills: {skills!r}"
+            )
+
+    def test_pact_teachback_in_frontmatter(self, agent_skills):
+        for name, skills in agent_skills.items():
+            assert "pact-teachback" in skills, (
+                f"{name}: pact-teachback must be eager-loaded via frontmatter "
+                f"so the teachback format is always available at spawn. "
+                f"Found skills: {skills!r}"
+            )
+
+
+class TestAgentAutonomyCharterInline:
+    """Post-#366, the autonomy charter content lives inline in each agent's
+    body (not extracted to a shared skill). The pact-autonomy-charter skill
+    was removed; the boilerplate is per-agent now so domain-specific authority
+    extensions can be expressed naturally.
+
+    These tests verify the inline content is present and substantive.
+    """
+
+    def test_autonomy_charter_section_present(self, agent_files):
+        """Every agent must carry an AUTONOMY CHARTER section in its body."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert "AUTONOMY CHARTER" in text, (
+                f"{f.name}: missing 'AUTONOMY CHARTER' section. Post-#366 "
+                f"the autonomy charter is inline (not extracted)."
+            )
+
+    def test_autonomy_charter_contains_authority_clause(self, agent_files):
+        """The inline charter should grant authority and define escalation."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            idx = text.find("AUTONOMY CHARTER")
+            assert idx >= 0
+            section = text[idx:idx + 2000]
+            assert "authority" in section.lower(), (
+                f"{f.name}: AUTONOMY CHARTER missing 'authority' clause. "
+                f"Inline charter should grant the agent authority to act."
+            )
+            assert "escalate" in section.lower(), (
+                f"{f.name}: AUTONOMY CHARTER missing 'escalate' clause. "
+                f"Inline charter should define when to escalate."
+            )
+
+    def test_no_pact_autonomy_charter_skill_invocation(self, agent_files):
+        """The pact-autonomy-charter skill no longer exists. Verify no agent
+        references it via Skill() invocation."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert 'Skill("PACT:pact-autonomy-charter")' not in text, (
+                f"{f.name}: still invokes pact-autonomy-charter skill which "
+                f"was removed post-#366. The charter content is now inline."
+            )
+
+    def test_pact_autonomy_charter_skill_dir_absent(self):
+        """The pact-autonomy-charter skill directory should be absent."""
+        skill_dir = (
+            Path(__file__).parent.parent / "skills" / "pact-autonomy-charter"
+        )
+        assert not skill_dir.exists(), (
+            "pact-autonomy-charter/ skill directory still exists. It should "
+            "have been removed post-#366 — the charter is now inline."
+        )
+
+
+class TestAgentAlgedonicTriggersInline:
+    """Each agent's body should reference algedonic.md and document its
+    domain-specific algedonic triggers inline. This complements the autonomy
+    charter — algedonic authority is part of the charter conceptually but is
+    typically formatted as its own subsection.
+    """
+
+    def test_algedonic_protocol_referenced(self, agent_files):
+        """Every agent must point at the algedonic.md protocol."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert "algedonic.md" in text, (
+                f"{f.name}: missing reference to algedonic.md. Every agent "
+                f"must know where to find the full algedonic signal format."
+            )
+
+    def test_algedonic_signal_keyword_present(self, agent_files):
+        """Every agent must mention HALT or ALERT — the two signal levels."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            has_halt_or_alert = "HALT" in text or "ALERT" in text
+            assert has_halt_or_alert, (
+                f"{f.name}: missing HALT/ALERT mention. Agents should know "
+                f"the two algedonic signal levels they can emit."
+            )
+
+
+class TestNoVestigialAgentTeamsProtocolSection:
+    """Post-#366 the `# AGENT TEAMS PROTOCOL` lazy-load pointer block is
+    gone. The protocol is delivered via frontmatter eager-load instead.
+
+    This is the inverse of the old TestAgentTeamsProtocolConsistency — we
+    now ensure the section is ABSENT. A reintroduction would mean someone
+    re-added the lazy-load indirection that #366 removed.
+    """
+
+    def test_no_agent_teams_protocol_heading(self, agent_files):
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert "AGENT TEAMS PROTOCOL" not in text, (
+                f"{f.name}: contains a vestigial 'AGENT TEAMS PROTOCOL' "
+                f"section. Post-#366 the lazy-load pointer block was "
+                f"removed in favor of frontmatter eager-load."
+            )
+
+    def test_no_lazy_load_skill_invocation_for_agent_teams(self, agent_files):
+        """No agent should invoke pact-agent-teams via Skill() — it's
+        eager-loaded now."""
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            assert 'Skill("PACT:pact-agent-teams")' not in text, (
+                f"{f.name}: still invokes pact-agent-teams via Skill(). "
+                f"Post-#366 it is eager-loaded via frontmatter and should "
+                f"not be lazy-invoked."
+            )
+
+
+class TestTeammateBootstrapCommand:
+    """The /PACT:teammate-bootstrap slash command is the teammate analog of
+    /PACT:bootstrap. It is invoked by every spawned teammate as its FIRST
+    ACTION (see TestAgentFirstActionPrelude) and must exist on disk with
+    valid @-references to the team protocol skills and algedonic protocol.
+    """
+
+    PLUGIN_ROOT = Path(__file__).parent.parent
+    COMMAND_PATH = PLUGIN_ROOT / "commands" / "teammate-bootstrap.md"
+
+    # Required @-references — at least these four must be present so the
+    # spawned teammate gets team-tools, teachback, on-demand context, and
+    # algedonic content loaded into context at command-invocation time.
+    REQUIRED_REFS = (
+        "skills/pact-agent-teams/SKILL.md",
+        "skills/pact-teachback/SKILL.md",
+        "skills/request-more-context/SKILL.md",
+        "protocols/algedonic.md",
+    )
+
+    def test_command_file_exists(self):
+        assert self.COMMAND_PATH.exists(), (
+            f"teammate-bootstrap.md not found at {self.COMMAND_PATH}"
+        )
+        assert self.COMMAND_PATH.is_file()
+
+    def test_command_has_frontmatter_with_description(self):
+        text = self.COMMAND_PATH.read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        assert fm is not None, (
+            "teammate-bootstrap.md is missing YAML frontmatter"
+        )
+        assert "description" in fm and fm["description"].strip(), (
+            "teammate-bootstrap.md frontmatter must contain a non-empty "
+            "'description' field"
+        )
+
+    def test_command_contains_required_at_references(self):
+        """Each required reference must appear via @${CLAUDE_PLUGIN_ROOT}/..."""
+        text = self.COMMAND_PATH.read_text(encoding="utf-8")
+        missing = []
+        for ref in self.REQUIRED_REFS:
+            expected = f"@${{CLAUDE_PLUGIN_ROOT}}/{ref}"
+            if expected not in text:
+                missing.append(expected)
+        assert not missing, (
+            f"teammate-bootstrap.md missing eager-load references: "
+            f"{missing}. Required for the teammate to receive the team "
+            f"protocol, teachback, request-more-context, and algedonic "
+            f"content at command invocation."
+        )
+
+    def test_command_referenced_files_exist(self):
+        """Each @-referenced file must exist on disk."""
+        for ref in self.REQUIRED_REFS:
+            path = self.PLUGIN_ROOT / ref
+            assert path.exists(), (
+                f"teammate-bootstrap.md references {ref} but the file "
+                f"does not exist at {path}."
+            )
+
+
+class TestTeammateBootstrapRegisteredInPluginJson:
+    """The teammate-bootstrap command must be registered in plugin.json so
+    Claude Code exposes it as a slash command. Without registration the
+    FIRST ACTION invocation in every agent would silently fail."""
+
+    PLUGIN_JSON_PATH = (
+        Path(__file__).parent.parent / ".claude-plugin" / "plugin.json"
+    )
+
+    def test_teammate_bootstrap_in_commands_list(self):
+        import json
+
+        assert self.PLUGIN_JSON_PATH.exists()
+        data = json.loads(self.PLUGIN_JSON_PATH.read_text(encoding="utf-8"))
+        commands = data.get("commands", [])
+        assert isinstance(commands, list)
+        registered = any(
+            isinstance(entry, str)
+            and entry.endswith("commands/teammate-bootstrap.md")
+            for entry in commands
+        )
+        assert registered, (
+            f"teammate-bootstrap.md not registered in plugin.json commands. "
+            f"Found: {commands}"
         )
