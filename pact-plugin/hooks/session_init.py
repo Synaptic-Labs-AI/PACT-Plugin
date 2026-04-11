@@ -60,7 +60,6 @@ from staleness import (  # noqa: F401
 )
 
 from shared.constants import COMPACT_SUMMARY_PATH
-from shared.error_output import hook_error_json
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 
@@ -265,6 +264,51 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     return stripped.startswith("unknown")
 
 
+def _build_safety_net_context(team_name: str | None) -> str:
+    """
+    Build a minimal governance-delivery additionalContext string for the
+    exception safety net in main().
+
+    The returned string MUST start with "PACT ROLE: orchestrator." at byte 0
+    (line-anchored) so the routing-block consumer check recognizes it, and
+    must include the `Skill("PACT:bootstrap")` FIRST ACTION instruction so
+    the lead still loads its operating instructions, governance policy, and
+    workflow protocols even when main() failed before building the normal
+    team-reuse/team-create string.
+
+    This helper is deliberately zero-risk: only string literals and a single
+    f-string interpolation of team_name (which is either None or a validated
+    team name from generate_team_name). No file I/O, no subprocess, no
+    imports that might fail.
+
+    Args:
+        team_name: Team name captured before the exception, or None if the
+                   exception fired before generate_team_name() ran.
+
+    Returns:
+        Minimal additionalContext string suitable for the except-block
+        safety net. Leads with "PACT ROLE: orchestrator." at byte 0.
+    """
+    prelude = (
+        'PACT ROLE: orchestrator.\n\n'
+        'Your FIRST action must be: Skill("PACT:bootstrap"). '
+        'This loads your full operating instructions, governance policy, '
+        'and critical workflow protocols.'
+    )
+    if team_name:
+        return (
+            f'{prelude}\n\n'
+            f'Session team: `{team_name}` (session_init partially failed — '
+            f'check systemMessage for details). '
+            f'Run TaskList to check current state.'
+        )
+    return (
+        f'{prelude}\n\n'
+        'Session team: NOT GENERATED (session_init failed early — check '
+        'systemMessage for details). Call TeamCreate after bootstrap loads.'
+    )
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -284,6 +328,12 @@ def main():
     now lazy-loaded on first memory operation to reduce startup cost for
     non-memory users.
     """
+    # Pre-declare team_name so the outer except block can reference whatever
+    # was captured before the exception fired. The assignment inside the try
+    # at step 5 (team_name = generate_team_name(...)) rebinds this local; if
+    # the exception fires before step 5, team_name stays None and the safety
+    # net falls through to the "NOT GENERATED" branch.
+    team_name = None
     try:
         try:
             input_data = json.load(sys.stdin)
@@ -618,8 +668,21 @@ def main():
         sys.exit(0)
 
     except Exception as e:
+        # Safety net: even when main() throws before building the normal
+        # output, the lead still needs the governance delivery chain.
+        # Emit a minimal PACT ROLE marker + bootstrap skill directive in
+        # additionalContext, alongside the error in systemMessage. Claude
+        # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {e}", file=sys.stderr)
-        print(hook_error_json("session_init", e))
+        safety_net_context = _build_safety_net_context(team_name)
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": safety_net_context,
+            },
+            "systemMessage": f"PACT hook warning (session_init): {e}",
+        }
+        print(json.dumps(output))
         sys.exit(0)
 
 

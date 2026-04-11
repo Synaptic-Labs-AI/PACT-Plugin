@@ -2245,3 +2245,211 @@ class TestUpdateClaudeMdNotCalled:
             "claude_md_manager still defines update_claude_md — should be "
             "removed as part of #366 Phase 1 kernel elimination."
         )
+
+
+# ---------------------------------------------------------------------------
+# F2 exception safety net
+# ---------------------------------------------------------------------------
+#
+# PR #390 replaces the persistent ~/.claude/CLAUDE.md kernel with a lazy-loaded
+# bootstrap skill. The session_init hook is now the PRIMARY delivery channel
+# for the PACT ROLE marker + Skill("PACT:bootstrap") FIRST ACTION directive.
+#
+# If session_init.main() throws BEFORE it has built the team_create/team_reuse
+# block, the lead would previously get only {"systemMessage": "..."} back and
+# the governance delivery chain would be broken for that one session. The F2
+# safety net in the outer except block rebuilds a minimal PACT ROLE block so
+# the lead still knows how to bootstrap even on the failure path.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSafetyNetContext:
+    """Unit tests for _build_safety_net_context() helper."""
+
+    def test_none_team_starts_with_pact_role_marker(self):
+        """With team_name=None the string must start with 'PACT ROLE: orchestrator.' at byte 0."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context(None)
+
+        assert result.startswith("PACT ROLE: orchestrator."), (
+            "Safety net must lead with 'PACT ROLE: orchestrator.' (line-anchored "
+            "for routing block consumer check)."
+        )
+
+    def test_none_team_contains_skill_first_action(self):
+        """With team_name=None the string must contain the Skill bootstrap directive."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context(None)
+
+        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in result
+
+    def test_none_team_mentions_not_generated(self):
+        """With team_name=None the message should tell the lead the team is not yet created."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context(None)
+
+        assert "NOT GENERATED" in result
+        assert "TeamCreate" in result
+
+    def test_with_team_starts_with_pact_role_marker(self):
+        """With a team_name the string must still start with the PACT ROLE marker at byte 0."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context("pact-abc123")
+
+        assert result.startswith("PACT ROLE: orchestrator.")
+
+    def test_with_team_contains_team_name(self):
+        """With a team_name the string must embed the team name so the lead can reuse it."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context("pact-abc123")
+
+        assert "pact-abc123" in result
+
+    def test_with_team_contains_skill_first_action(self):
+        """The team-present branch must still contain the Skill bootstrap directive."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context("pact-abc123")
+
+        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in result
+
+    def test_with_team_mentions_partial_failure(self):
+        """The team-present branch should note that session_init partially failed."""
+        from session_init import _build_safety_net_context
+
+        result = _build_safety_net_context("pact-abc123")
+
+        assert "partially failed" in result
+        assert "check systemMessage" in result
+
+    def test_empty_string_team_treated_as_missing(self):
+        """An empty-string team_name must fall through to the NOT GENERATED branch."""
+        from session_init import _build_safety_net_context
+
+        # An empty string is falsy in Python — truthy check on team_name selects
+        # the None branch, which is what we want: empty string means we never
+        # successfully generated a team name.
+        result = _build_safety_net_context("")
+
+        assert "NOT GENERATED" in result
+
+
+class TestMainExceptionSafetyNet:
+    """Integration tests: main()'s outer except block must emit the safety net.
+
+    These tests monkey-patch one of the early stages of main() to raise, then
+    assert that stdout contains both:
+      - hookSpecificOutput.additionalContext starting with "PACT ROLE: orchestrator."
+      - systemMessage reporting the original exception
+
+    The key invariant: even on the failure path, the lead still receives the
+    governance delivery chain (PACT ROLE marker + Skill bootstrap directive).
+    """
+
+    def test_exception_before_team_name_emits_not_generated_safety_net(
+        self, monkeypatch, tmp_path
+    ):
+        """When an exception fires BEFORE generate_team_name(), team_name is None
+        in the except block, so the safety net must fall back to the NOT GENERATED
+        branch and the original error must still surface via systemMessage."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        def raise_early(*args, **kwargs):
+            raise RuntimeError("simulated early failure before team name")
+
+        # Patch a step that runs BEFORE generate_team_name() at line ~362.
+        # setup_plugin_symlinks runs at step 1, well before step 5 where
+        # team_name gets assigned.
+        with patch("session_init.setup_plugin_symlinks", side_effect=raise_early), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+
+        # Governance delivery chain: PACT ROLE marker must be present, at byte 0
+        # of additionalContext (line-anchored for the routing block consumer).
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert additional.startswith("PACT ROLE: orchestrator.")
+        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+        assert "NOT GENERATED" in additional, (
+            "Exception fired before team_name was captured — safety net must "
+            "fall through to the NOT GENERATED branch."
+        )
+
+        # The original error must still surface via systemMessage.
+        sys_msg = output["systemMessage"]
+        assert "simulated early failure before team name" in sys_msg
+        assert "PACT hook warning (session_init)" in sys_msg
+
+    def test_exception_after_team_name_includes_captured_team_name(
+        self, monkeypatch, tmp_path
+    ):
+        """When an exception fires AFTER generate_team_name(), the except block
+        must see the captured team_name and emit it in the safety net so the
+        lead can reuse it instead of creating a new one."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+        })
+
+        def raise_late(*args, **kwargs):
+            raise RuntimeError("simulated late failure after team name captured")
+
+        # Patch a step that runs AFTER generate_team_name() at line ~362.
+        # update_session_info is step 5b, which runs after team_name is bound.
+        # Let the earlier steps no-op so main() progresses to the point where
+        # team_name is captured, then trip the exception at update_session_info.
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", side_effect=raise_late), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+
+        # Governance delivery chain: PACT ROLE marker must be present at byte 0.
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert additional.startswith("PACT ROLE: orchestrator.")
+        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+
+        # The team name captured before the exception must be in the safety net
+        # so the lead can reuse it rather than creating a second team.
+        assert "pact-aabb1122" in additional
+        assert "partially failed" in additional
+        assert "NOT GENERATED" not in additional, (
+            "team_name was captured before the exception — safety net must "
+            "take the team-present branch, not fall back to NOT GENERATED."
+        )
+
+        # The original error must still surface via systemMessage.
+        sys_msg = output["systemMessage"]
+        assert "simulated late failure after team name captured" in sys_msg
+        assert "PACT hook warning (session_init)" in sys_msg
