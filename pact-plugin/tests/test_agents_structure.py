@@ -374,12 +374,19 @@ class TestTeachbackMicroSkillExtraction:
     # function as the standalone teachback gate it now serves.
     MAX_SKILL_CHARS = 2500
 
-    # Key protocol elements that must be in the extracted skill
+    # Key protocol elements that must be in the extracted skill.
+    # Cycle 2 minor item 4: added literal ordering rule and TaskUpdate
+    # follow-up to close spec Section 6.14 coverage gap. The previous
+    # presence-only checks would have passed even if the skill dropped
+    # the ordering rule entirely.
     REQUIRED_PROTOCOL_ELEMENTS = [
         "SendMessage",           # Communication tool reference
         "teachback_sent",        # Metadata flag
         "gate",                  # Gate semantics (teachback is a gate)
         "Teachback:",            # Format template marker
+        # Cycle 2 item 4 additions:
+        "before any Edit/Write/Bash",  # Ordering rule literal
+        'TaskUpdate(taskId, metadata={"teachback_sent": true})',  # Follow-up literal
     ]
 
     # Lines that indicate full protocol content (not a stub).
@@ -626,31 +633,63 @@ class TestBootstrapCommand:
 
 
 class TestAgentFirstActionPrelude:
-    """Every agent must lead its body with a `# FIRST ACTION` section that
-    invokes `Skill("PACT:teammate-bootstrap")` before any other work.
+    """Every agent must lead its body with the canonical FIRST ACTION
+    prelude that invokes `Skill("PACT:teammate-bootstrap")` before any
+    other work.
 
     This is the load-bearing instruction that delivers the team protocol,
     teachback standards, and algedonic reference to spawned teammates. Drift
     here is silent — an agent without it would skip the bootstrap entirely
     and operate without team coordination context.
+
+    Post-#366 phase 1 cycle 2: pinned byte-exact against the canonical
+    Section 6.7 fixture from docs/architecture/366-phase1-kernel-elimination.md.
+    Adding or removing any wording from the prelude requires updating
+    CANONICAL_PRELUDE in this class, which forces the change to be reviewed.
+    The previous substring-only assertions (section present, bootstrap call
+    present, recovery mention present) silently accepted prelude wording
+    drift; the byte-exact match closes that gap and implicitly covers all
+    three previous concerns plus the recovery-after-compaction language
+    that was previously checked permissively.
     """
 
-    def test_first_action_section_present(self, agent_files):
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            assert "# FIRST ACTION" in text, (
-                f"{f.name}: missing '# FIRST ACTION' section. Every agent "
-                f"must lead with a FIRST ACTION block that invokes the "
-                f"teammate bootstrap skill."
-            )
+    # Canonical FIRST ACTION prelude per spec Section 6.7. Must appear
+    # verbatim at the top of every agent body, immediately after the
+    # frontmatter closing `---`. The blank line after the prelude block is
+    # part of the canonical content (separates prelude from agent identity).
+    CANONICAL_PRELUDE = (
+        "# FIRST ACTION\n"
+        "\n"
+        "Before any other work — including reading files, claiming tasks, "
+        "or responding\n"
+        "to your dispatch prompt — invoke `Skill(\"PACT:teammate-bootstrap\")`. "
+        "This loads\n"
+        "the team communication protocol, teachback standards, memory "
+        "retrieval, and\n"
+        "algedonic reference. If your context is compacted mid-task and "
+        "you find yourself\n"
+        "without the bootstrap content loaded, re-invoke this skill before "
+        "continuing any\n"
+        "implementation work."
+    )
 
-    def test_first_action_invokes_teammate_bootstrap(self, agent_files):
+    def test_first_action_prelude_byte_exact(self, agent_files):
+        """Every agent body must contain the canonical FIRST ACTION prelude
+        verbatim. Closes items 2 and 7 from cycle 1 minor item review.
+
+        This single byte-exact assertion supersedes the previous 3 tests
+        (test_first_action_section_present, test_first_action_invokes_teammate_bootstrap,
+        test_first_action_mentions_recovery_after_compaction) which
+        individually pinned only substrings of the prelude. Drift in any
+        word or punctuation is now caught.
+        """
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
-            assert 'Skill("PACT:teammate-bootstrap")' in text, (
-                f"{f.name}: FIRST ACTION must invoke "
-                f'`Skill("PACT:teammate-bootstrap")`. Without it the agent '
-                f"would not load the team protocol."
+            assert self.CANONICAL_PRELUDE in text, (
+                f"{f.name}: FIRST ACTION prelude does not match canonical "
+                f"Section 6.7 fixture verbatim. Either restore the canonical "
+                f"text in the agent body, or update CANONICAL_PRELUDE in "
+                f"TestAgentFirstActionPrelude to match the new fixture."
             )
 
     def test_first_action_precedes_other_headings(self, agent_files):
@@ -668,7 +707,7 @@ class TestAgentFirstActionPrelude:
             # Find first H1 in body
             lines = body.split("\n")
             first_h1_line = None
-            for i, line in enumerate(lines):
+            for line in lines:
                 if line.startswith("# ") and not line.startswith("## "):
                     first_h1_line = line
                     break
@@ -676,22 +715,6 @@ class TestAgentFirstActionPrelude:
                 f"{f.name}: first H1 in body is {first_h1_line!r}, expected "
                 f"'# FIRST ACTION'. The bootstrap invocation must precede "
                 f"all other top-level sections."
-            )
-
-    def test_first_action_mentions_recovery_after_compaction(self, agent_files):
-        """The FIRST ACTION should remind the agent to re-invoke bootstrap
-        after compaction. This catches drift where the recovery hint gets
-        deleted during agent edits."""
-        for f in agent_files:
-            text = f.read_text(encoding="utf-8")
-            # Find FIRST ACTION block
-            idx = text.find("# FIRST ACTION")
-            assert idx >= 0
-            # Look at the next ~400 chars
-            section = text[idx:idx + 500]
-            assert "compact" in section.lower(), (
-                f"{f.name}: FIRST ACTION section should mention "
-                f"compaction/re-invocation so agents recover after compact."
             )
 
 

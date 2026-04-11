@@ -265,6 +265,96 @@ class TestRemoveStaleKernelBlockMalformed:
         assert result is None
         assert target.read_text(encoding="utf-8") == original
 
+    def test_returns_none_when_end_appears_before_start(self, mock_home):
+        """END marker appears textually before START marker → defensive."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        original = (
+            "before\n"
+            "<!-- PACT_END -->\n"
+            "stray END marker out of order\n"
+            "<!-- PACT_START: Managed by pact-plugin -->\n"
+            "kernel body that never closes after this START\n"
+        )
+        target.write_text(original, encoding="utf-8")
+
+        result = remove_stale_kernel_block()
+
+        # The function splits on START first then checks for END in the
+        # remainder. Here END is before START so the remainder has no END
+        # → defensive no-op.
+        assert result is None
+        assert target.read_text(encoding="utf-8") == original
+
+
+class TestRemoveStaleKernelBlockOSError:
+    """OSError on read or write paths → graceful failure, status string returned.
+
+    Cycle 2 minor item 5/6: exercises the try/except OSError fallback
+    branches in remove_stale_kernel_block. Previously these branches were
+    unexercised, so a bug in the error handling (wrong format string,
+    wrong truncation length, accidentally raising instead of returning)
+    would not be caught by CI.
+    """
+
+    def test_returns_none_when_read_fails(self, mock_home):
+        """OSError on read_text → returns None (file appears unreadable)."""
+        from unittest.mock import patch
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text("placeholder content", encoding="utf-8")
+
+        # Patch Path.read_text to raise OSError when called on the home file
+        original_read_text = Path.read_text
+
+        def selective_read_text(self, *args, **kwargs):
+            if str(self) == str(target):
+                raise OSError("simulated read failure")
+            return original_read_text(self, *args, **kwargs)
+
+        with patch.object(Path, "read_text", selective_read_text):
+            result = remove_stale_kernel_block()
+
+        assert result is None
+
+    def test_returns_failure_status_when_write_fails(self, mock_home):
+        """OSError on write_text → returns 'Failed to remove stale kernel block: ...'.
+
+        The block is well-formed (so the function reaches the write path),
+        but the write itself fails. The function must return a status
+        string indicating the failure mode rather than raising.
+        """
+        from unittest.mock import patch
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        original = (
+            "user content before\n"
+            "<!-- PACT_START: Managed by pact-plugin - do not edit -->\n"
+            "kernel body to be stripped\n"
+            "<!-- PACT_END -->\n"
+            "user content after\n"
+        )
+        target.write_text(original, encoding="utf-8")
+
+        # Patch Path.write_text to raise OSError when called on the home file
+        original_write_text = Path.write_text
+
+        def selective_write_text(self, *args, **kwargs):
+            if str(self) == str(target):
+                raise OSError("simulated write failure")
+            return original_write_text(self, *args, **kwargs)
+
+        with patch.object(Path, "write_text", selective_write_text):
+            result = remove_stale_kernel_block()
+
+        assert result is not None
+        assert "Failed to remove stale kernel block" in result
+        # Original file unchanged because write was blocked
+        assert target.read_text(encoding="utf-8") == original
+
 
 # ---------------------------------------------------------------------------
 # update_pact_routing() — idempotent project CLAUDE.md routing block management
@@ -426,6 +516,102 @@ class TestUpdatePactRoutingInsert:
         # Second call must not write again
         second = update_pact_routing()
         assert second is None
+
+
+class TestUpdatePactRoutingOSError:
+    """OSError on read or write paths → graceful failure, status string returned.
+
+    Cycle 2 minor item 5/6: exercises the try/except OSError fallback
+    branches in update_pact_routing. Previously these branches were
+    unexercised, so a bug in the error handling (wrong format string,
+    wrong truncation length, accidentally raising instead of returning)
+    would not be caught by CI.
+    """
+
+    def test_returns_none_when_read_fails(self, tmp_path, monkeypatch):
+        """OSError on read_text → returns None (file appears unreadable)."""
+        from unittest.mock import patch
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text("placeholder content", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        original_read_text = Path.read_text
+
+        def selective_read_text(self, *args, **kwargs):
+            if str(self) == str(legacy):
+                raise OSError("simulated read failure")
+            return original_read_text(self, *args, **kwargs)
+
+        with patch.object(Path, "read_text", selective_read_text):
+            result = update_pact_routing()
+
+        assert result is None
+
+    def test_returns_failure_status_when_write_fails_during_update(
+        self, tmp_path, monkeypatch
+    ):
+        """OSError on write_text during the update path → returns failure status."""
+        from unittest.mock import patch
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        # Stale content between markers — triggers the update path
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## PACT Routing\n\nstale content that should be replaced\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "\n"
+            "## Working Memory\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        original_write_text = Path.write_text
+
+        def selective_write_text(self, *args, **kwargs):
+            if str(self) == str(legacy):
+                raise OSError("simulated write failure during update")
+            return original_write_text(self, *args, **kwargs)
+
+        with patch.object(Path, "write_text", selective_write_text):
+            result = update_pact_routing()
+
+        assert result is not None
+        assert "Failed to update PACT routing" in result
+        # Original file unchanged because write was blocked
+        assert legacy.read_text(encoding="utf-8") == original
+
+    def test_returns_failure_status_when_write_fails_during_insert(
+        self, tmp_path, monkeypatch
+    ):
+        """OSError on write_text during the insert path → returns failure status."""
+        from unittest.mock import patch
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        # No markers — triggers the insert path
+        original = "# Project Memory\n\n## Working Memory\nuser notes\n"
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        original_write_text = Path.write_text
+
+        def selective_write_text(self, *args, **kwargs):
+            if str(self) == str(legacy):
+                raise OSError("simulated write failure during insert")
+            return original_write_text(self, *args, **kwargs)
+
+        with patch.object(Path, "write_text", selective_write_text):
+            result = update_pact_routing()
+
+        assert result is not None
+        assert "Failed to insert PACT routing" in result
+        # Original file unchanged because write was blocked
+        assert legacy.read_text(encoding="utf-8") == original
 
 
 # ---------------------------------------------------------------------------
