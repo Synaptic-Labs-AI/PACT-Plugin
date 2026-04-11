@@ -38,13 +38,24 @@ b. Analyze work needed (QDCL for CODE)
 c. `TaskCreate`: agent task(s) as children of phase
 d. `TaskUpdate`: agent tasks owner = "{agent-name}"
 e. `TaskUpdate`: next phase addBlockedBy = [agent IDs]
-f. Spawn teammates: Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="...")
+f. Spawn teammates with the canonical dispatch form (shown at each specific phase below)
 g. Store agent IDs: `TaskUpdate(taskId, metadata={"agent_id": "{id_from_Task_return}"})`
 h. Monitor via `SendMessage` (completion summaries) and `TaskList` until agents complete
 i. `TaskUpdate`: phase status = "completed" (agents self-manage their task status)
 ```
 
-> ⚠️ **Canonical dispatch pattern lives in `bootstrap.md`**: the `Task(...)` examples throughout this file use an abbreviated short-form `prompt="You are joining team..."` for readability. The **full canonical dispatch prompt** — including the `PACT ROLE: teammate ({name})` marker and the `Skill("PACT:teammate-bootstrap")` FIRST ACTION instruction — lives in the Agent Teams Dispatch section of [bootstrap.md](./bootstrap.md). When actually constructing `Task()` calls, use the full canonical form from `bootstrap.md` as your template, not the abbreviated examples below. Defense-in-depth (hook injection + agent body FIRST ACTION prelude) makes the abbreviated form functionally acceptable, but the canonical form is preferred so spawned teammates see the PACT ROLE marker in their first user message as well as in hook-injected context.
+The canonical `Task()` dispatch form, referenced by every phase below:
+
+```
+Task(
+  name="{teammate-name}",
+  team_name="{team_name}",
+  subagent_type="pact-{teammate-type}",
+  prompt="PACT ROLE: teammate ({teammate-name}).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
+
+> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing via injected newlines or close-parens. The `peer_inject.py` hook also sanitizes defensively as a second layer of defense, but the orchestrator should produce conforming names directly. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
 
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
@@ -398,7 +409,16 @@ When a phase is skipped but a coder encounters a decision that would have been h
    {"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}
 JSON
    ```
-4. `Task(name="preparer", team_name="{team_name}", subagent_type="pact-preparer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+4. Spawn the preparer with the canonical dispatch form:
+
+```
+Task(
+  name="preparer",
+  team_name="{team_name}",
+  subagent_type="pact-preparer",
+  prompt="PACT ROLE: teammate (preparer).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -480,7 +500,16 @@ When detection fires (score >= threshold), follow the evaluation response protoc
    {"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}
 JSON
    ```
-4. `Task(name="architect", team_name="{team_name}", subagent_type="pact-architect", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+4. Spawn the architect with the canonical dispatch form:
+
+```
+Task(
+  name="architect",
+  team_name="{team_name}",
+  subagent_type="pact-architect",
+  prompt="PACT ROLE: teammate (architect).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
 
 Completed-phase teammates remain as consultants. Do not shutdown during this workflow.
 
@@ -594,7 +623,16 @@ For each coder needed:
    {"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
    ```
-4. `Task(name="{coder-name}", team_name="{team_name}", subagent_type="pact-{coder-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+4. Spawn each coder with the canonical dispatch form:
+
+```
+Task(
+  name="{coder-name}",
+  team_name="{team_name}",
+  subagent_type="pact-{coder-type}",
+  prompt="PACT ROLE: teammate ({coder-name}).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
 
 Spawn multiple coders in parallel (multiple `Task` calls in one response). Include worktree path and S2 scope boundaries in each task description.
 
@@ -612,7 +650,16 @@ Valid skip reasons: single coder on familiar pattern, variety reassessed below 7
    - Include: architecture doc path, plan path, coder task IDs and scope boundaries
    - Include: "Your observation targets: {coder-names}. Reference chain: architecture doc > plan > dispatch context."
 2. `TaskUpdate(taskId, owner="auditor")`
-3. `Task(name="auditor", team_name="{team_name}", subagent_type="pact-auditor", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. Spawn the auditor with the canonical dispatch form:
+
+```
+Task(
+  name="auditor",
+  team_name="{team_name}",
+  subagent_type="pact-auditor",
+  prompt="PACT ROLE: teammate (auditor).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
 
 The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate` before marking the task completed. On RED signal: SendMessage to the affected coder and pause their work. On YELLOW: pass finding to test engineer as focus area. See [pact-audit.md](../protocols/pact-audit.md) for the full Concurrent Audit Protocol.
 
@@ -701,7 +748,16 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
    {"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}
 JSON
    ```
-4. `Task(name="test-engineer", team_name="{team_name}", subagent_type="pact-test-engineer", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+4. Spawn the test engineer with the canonical dispatch form:
+
+```
+Task(
+  name="test-engineer",
+  team_name="{team_name}",
+  subagent_type="pact-test-engineer",
+  prompt="PACT ROLE: teammate (test-engineer).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
 
 **Before completing**:
 - [ ] All tests passing

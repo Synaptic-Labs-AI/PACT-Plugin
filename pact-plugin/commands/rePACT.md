@@ -216,9 +216,18 @@ Implement the sub-component:
 For each specialist needed:
 1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
 2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
-3. `Task(name="{scope-prefixed-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line and include the `Skill("PACT:teammate-bootstrap")` FIRST ACTION directive:
 
-> ⚠️ **Canonical dispatch pattern lives in `bootstrap.md`**: the `Task(...)` example above uses an abbreviated short-form `prompt=` for readability. The **full canonical dispatch prompt** — including the `PACT ROLE: teammate ({name})` marker and the `Skill("PACT:teammate-bootstrap")` FIRST ACTION instruction — lives in the Agent Teams Dispatch section of [bootstrap.md](./bootstrap.md). Use the full canonical form from `bootstrap.md` when actually constructing the `Task()` call.
+```
+Task(
+  name="{scope-prefixed-name}",
+  team_name="{team_name}",
+  subagent_type="pact-{specialist-type}",
+  prompt="PACT ROLE: teammate ({scope-prefixed-name}).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
+
+> ⚠️ **`{scope-prefixed-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `PACT ROLE: teammate ({scope-prefixed-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing. The `peer_inject.py` hook also sanitizes defensively by stripping `\n`, `\r`, and `)` as a second layer of defense.
 
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
