@@ -136,8 +136,19 @@ class TestAppendRecordFormat:
         assert entries[0]["error"] == "x" * 200
 
     def test_empty_error_is_safe(self, failure_log_home):
-        """An empty or None error is written as empty string, not crashed."""
+        """An empty string error is recorded as empty string, not crashed."""
         append_failure("malformed_json", "")
+        entries = read_failures()
+        assert len(entries) == 1
+        assert entries[0]["error"] == ""
+
+    def test_none_error_is_normalized_to_empty_string(self, failure_log_home):
+        """Passing error=None is tolerated (the annotation permits str|None)
+        and gets normalized to an empty string in the record. The body's
+        defensive `(error or "")` guards against call sites that pass
+        None unintentionally — the annotation now reflects that contract.
+        """
+        append_failure("malformed_json", None)
         entries = read_failures()
         assert len(entries) == 1
         assert entries[0]["error"] == ""

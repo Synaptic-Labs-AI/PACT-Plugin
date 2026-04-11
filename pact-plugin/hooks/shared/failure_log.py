@@ -68,7 +68,7 @@ _ERROR_MAX_CHARS = 200
 
 def append_failure(
     classification: str,
-    error: str,
+    error: str | None,
     cwd: str | None = None,
     source: str | None = None,
 ) -> None:
@@ -79,8 +79,10 @@ def append_failure(
         ts             — ISO 8601 UTC timestamp (matches session_journal)
         classification — enum string identifying the failure kind
                          (e.g. "malformed_json", "missing_session_id",
-                         "non_string_session_id", "sentinel_session_id")
-        error          — free-form error detail, truncated to 200 chars
+                         "non_string_session_id", "empty_session_id",
+                         "sentinel_session_id", "other")
+        error          — free-form error detail, truncated to 200 chars;
+                         None is tolerated and normalized to an empty string
         cwd            — current working directory (optional)
         source         — session source hint (optional, e.g. "startup",
                          "resume", "compact")
@@ -97,6 +99,9 @@ def append_failure(
     Args:
         classification: Short enum string identifying the failure kind.
         error: Human-readable error detail. Truncated to 200 chars.
+               None is tolerated and recorded as an empty string — call
+               sites may occasionally pass None unintentionally, and the
+               ring buffer handles it gracefully rather than raising.
         cwd: Current working directory at the time of failure (optional).
         source: Session source string from stdin input (optional).
     """
