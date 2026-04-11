@@ -78,9 +78,6 @@ from shared.session_resume import (
     check_paused_state,
 )
 
-# Suppress false "hook error" display in Claude Code UI on bare exit paths
-_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
 
 def check_pinned_staleness():
     """
@@ -660,10 +657,12 @@ def main():
         if system_messages:
             output["systemMessage"] = " | ".join(system_messages)
 
-        if output:
-            print(json.dumps(output))
-        else:
-            print(_SUPPRESS_OUTPUT)
+        # context_parts is guaranteed non-empty on the happy path: the
+        # team-reuse/team-create instruction is always insert(0, ...)'d
+        # earlier in main(), so `output["hookSpecificOutput"]` is always
+        # populated by this point. The exception safety net at the bottom
+        # of main() builds its own output and never falls through here.
+        print(json.dumps(output))
 
         sys.exit(0)
 

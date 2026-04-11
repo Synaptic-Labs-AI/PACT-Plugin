@@ -1839,6 +1839,40 @@ class TestExtractPrevSessionDirDualLocation:
         # The warning must NOT fire on the happy path.
         assert "_extract_prev_session_dir regex failed" not in captured.err
 
+    def test_oserror_on_read_returns_none(self, tmp_path, monkeypatch):
+        """S1: explicit coverage for the paired `except (IOError, OSError)`
+        in _extract_prev_session_dir.
+
+        Sibling tests exercise the regex-miss and fallback paths, which
+        touch the except branch indirectly. This test fails open to None
+        when the CLAUDE.md read itself raises OSError (permission denied,
+        I/O error, etc.) — verifying the hook does NOT crash in that case.
+        """
+        from session_init import _extract_prev_session_dir
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+        claude_md = dot_claude / "CLAUDE.md"
+        claude_md.write_text("placeholder", encoding="utf-8")
+
+        # Monkey-patch Path.read_text so ONLY this file raises OSError.
+        # Other Path.read_text calls (e.g., from other modules invoked
+        # incidentally) continue to work normally.
+        original_read_text = Path.read_text
+
+        def raising_read_text(self, *args, **kwargs):
+            if self == claude_md:
+                raise OSError("simulated permission denied")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", raising_read_text)
+
+        result = _extract_prev_session_dir(str(project_dir))
+
+        assert result is None
+
 
 # =============================================================================
 # CLAUDE_PLUGIN_ROOT env-set wiring tests (M6)
@@ -2247,6 +2281,72 @@ class TestUpdateClaudeMdNotCalled:
         )
 
 
+class TestHappyPathOutputInvariant:
+    """N1: after PR #390, the happy-path output dict is guaranteed non-empty.
+
+    The _team_create / _team_reuse string is always insert(0, ...)'d into
+    context_parts regardless of source/team_exists branch, so the `if output:`
+    else-branch that previously emitted `_SUPPRESS_OUTPUT` was unreachable
+    and has been deleted. This test pins the invariant end-to-end: a minimal
+    happy-path run emits hookSpecificOutput (not the suppression sentinel).
+
+    Guards against a future regression where a new branch accidentally
+    leaves context_parts empty, which would make the hook silently emit
+    nothing and break governance delivery.
+    """
+
+    def test_session_init_happy_path_emits_hook_specific_output(
+        self, monkeypatch, tmp_path
+    ):
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
+        (tmp_path / "project").mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+        })
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        raw = mock_stdout.getvalue()
+        # The output MUST parse as JSON with hookSpecificOutput — never the
+        # suppression sentinel {"suppressOutput": true}. That sentinel branch
+        # is dead after PR #390 because context_parts always contains the
+        # team instruction.
+        output = json.loads(raw)
+        assert "hookSpecificOutput" in output, (
+            "Happy-path output regressed: hook emitted suppression sentinel or "
+            "empty JSON. The team instruction (_team_create / _team_reuse) "
+            "must always populate context_parts so output is non-empty."
+        )
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert additional.startswith("PACT ROLE: orchestrator."), (
+            "Happy path must include the PACT ROLE marker at byte 0 of "
+            "additionalContext — the invariant the output-build relies on."
+        )
+        # Negative assertion: the suppression sentinel must not appear.
+        assert "suppressOutput" not in raw, (
+            "session_init emitted suppressOutput on the happy path — the "
+            "_SUPPRESS_OUTPUT branch should no longer be reachable."
+        )
+
+
 # ---------------------------------------------------------------------------
 # F2 exception safety net
 # ---------------------------------------------------------------------------
@@ -2337,6 +2437,105 @@ class TestBuildSafetyNetContext:
         result = _build_safety_net_context("")
 
         assert "NOT GENERATED" in result
+
+
+class TestReadOnlyHomeScenario:
+    """S6: scenario test simulating a read-only ~/.claude directory.
+
+    The home CLAUDE.md migration (remove_stale_kernel_block) opens a file_lock
+    and writes to ~/.claude/CLAUDE.md. If the .claude parent directory is
+    read-only, the write fails — but the hook must still deliver the
+    governance chain: exit 0, valid JSON on stdout, and additionalContext
+    starting with "PACT ROLE: orchestrator." so the lead can load bootstrap.
+
+    Unlike the unit-level OSError mocks, this test uses a real chmod on a
+    real temp directory and exercises the full migration code path end to
+    end. Permissions are restored in a finally block so tmp_path cleanup
+    does not fail.
+    """
+
+    def test_session_init_on_readonly_home_directory(self, tmp_path, monkeypatch):
+        import stat
+
+        from session_init import main
+
+        fake_home = tmp_path / "fakehome"
+        home_claude = fake_home / ".claude"
+        home_claude.mkdir(parents=True)
+
+        # Pre-populate ~/.claude/CLAUDE.md with PACT markers so the migration
+        # actually attempts to mutate the file (otherwise remove_stale_kernel_block
+        # takes the clean no-op branch and the readonly state is never exercised).
+        home_claude_md = home_claude / "CLAUDE.md"
+        home_claude_md.write_text(
+            "# Personal Preferences\n"
+            "\n"
+            "User content I care about.\n"
+            "\n"
+            "<!-- PACT_START: legacy -->\n"
+            "Obsolete orchestrator block.\n"
+            "<!-- PACT_END -->\n"
+            "\n"
+            "# More notes\n",
+            encoding="utf-8",
+        )
+
+        # Writable project dir so update_session_info succeeds — the test
+        # isolates the readonly condition to the home directory only.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / ".claude").mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        # Point Path.home() at the fake home so claude_md_manager writes
+        # target the read-only directory under test.
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        # Strip write permission on the .claude directory. The file itself
+        # is still 0o600 (writable) but the directory being readonly blocks
+        # the rename/tempfile semantics used by the locked write path.
+        original_mode = home_claude.stat().st_mode
+        home_claude.chmod(stat.S_IRUSR | stat.S_IXUSR)  # 0o500
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+        })
+
+        try:
+            with patch("session_init.setup_plugin_symlinks", return_value=None), \
+                 patch("session_init.ensure_project_memory_md", return_value=None), \
+                 patch("session_init.check_pinned_staleness", return_value=None), \
+                 patch("session_init.get_task_list", return_value=None), \
+                 patch("session_init.restore_last_session", return_value=None), \
+                 patch("session_init.check_paused_state", return_value=None), \
+                 patch("sys.stdin", io.StringIO(stdin_data)), \
+                 patch("sys.stdout", new_callable=io.StringIO) as mock_stdout, \
+                 patch("sys.stderr", new_callable=io.StringIO):
+                with pytest.raises(SystemExit) as exc_info:
+                    main()
+
+            assert exc_info.value.code == 0, (
+                "session_init must exit 0 even when the home .claude "
+                "directory is read-only — the hook fails open so the lead "
+                "still receives the governance delivery chain."
+            )
+
+            raw_output = mock_stdout.getvalue()
+            output = json.loads(raw_output)  # MUST be valid JSON
+
+            additional = output["hookSpecificOutput"]["additionalContext"]
+            assert additional.startswith("PACT ROLE: orchestrator."), (
+                "Read-only home scenario regressed: additionalContext must "
+                "still start with the PACT ROLE marker so the routing block "
+                "consumer identifies the lead's role."
+            )
+            assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional, (
+                "FIRST ACTION directive must survive the readonly scenario."
+            )
+        finally:
+            # Restore write permission so tmp_path cleanup can unlink files.
+            home_claude.chmod(original_mode)
 
 
 class TestMainExceptionSafetyNet:

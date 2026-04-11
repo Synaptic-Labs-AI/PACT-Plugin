@@ -135,6 +135,42 @@ class TestPeerInject:
 
         assert result is None
 
+    def test_returns_none_on_ioerror_config_read(self, tmp_path, monkeypatch):
+        """S4: explicit coverage for the IOError/OSError side of the paired
+        except in get_peer_context's config.json read.
+
+        Sibling test test_returns_none_on_corrupted_config_json covers the
+        JSONDecodeError side. This test verifies the OS-level read failure
+        path (permission denied, I/O error, etc.) also fails open to None,
+        letting the SubagentStart hook emit a no-op additionalContext
+        rather than crashing the spawn path.
+        """
+        from peer_inject import get_peer_context
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        config_path = team_dir / "config.json"
+        # File must exist so the `config_path.exists()` guard passes and
+        # control reaches the read_text() call.
+        config_path.write_text('{"members": []}', encoding="utf-8")
+
+        original_read_text = Path.read_text
+
+        def raising_read_text(self, *args, **kwargs):
+            if self == config_path:
+                raise OSError("simulated permission denied")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", raising_read_text)
+
+        result = get_peer_context(
+            agent_type="pact-backend-coder",
+            team_name="pact-test",
+            teams_dir=str(tmp_path / "teams"),
+        )
+
+        assert result is None
+
 
 class TestTeachbackReminder:
     """Tests for _TEACHBACK_REMINDER injection into peer context."""
