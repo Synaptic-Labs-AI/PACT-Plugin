@@ -31,6 +31,12 @@ from .claude_md_manager import (
     update_pact_routing,
     ensure_project_memory_md,
 )
+from .failure_log import (
+    append_failure,
+    read_failures,
+    LOG_PATH as FAILURE_LOG_PATH,
+    MAX_ENTRIES as FAILURE_LOG_MAX_ENTRIES,
+)
 from .session_resume import (
     update_session_info,
     restore_last_session,
@@ -66,6 +72,10 @@ __all__ = [
     "remove_stale_kernel_block",
     "update_pact_routing",
     "ensure_project_memory_md",
+    "append_failure",
+    "read_failures",
+    "FAILURE_LOG_PATH",
+    "FAILURE_LOG_MAX_ENTRIES",
     "update_session_info",
     "restore_last_session",
     "check_resumption_context",

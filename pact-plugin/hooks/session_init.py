@@ -62,6 +62,7 @@ from staleness import (  # noqa: F401
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
+from shared.failure_log import append_failure
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -331,11 +332,19 @@ def main():
     # the exception fires before step 5, team_name stays None and the safety
     # net falls through to the "NOT GENERATED" branch.
     team_name = None
+    # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
+    # gate below can distinguish "stdin was malformed JSON" from "stdin
+    # parsed but session_id was missing/blank". Both paths fall through
+    # to the same `unknown-{hex}` sentinel, but the failure_log ring
+    # buffer captures them under different classifications so post-hoc
+    # debugging can tell them apart.
+    stdin_json_error: str | None = None
     try:
         try:
             input_data = json.load(sys.stdin)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             input_data = {}
+            stdin_json_error = str(exc)
 
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", ".")
         context_parts = []
@@ -458,6 +467,60 @@ def main():
             session_id = str(raw_id)
         else:
             session_id = f"unknown-{secrets.token_hex(4)}"
+            # Issue #399: record this failure in the global ring buffer log
+            # BEFORE emitting the stderr warning. The ring buffer is the
+            # only observability surface that survives across sessions and
+            # aggregates across both lead and teammate sessions — stderr
+            # output from hooks is not visible to users, and the single-
+            # instance safety net only reaches the lead's first-message
+            # context. Defense in depth: append_failure fails-open
+            # internally, but we also wrap the call in its own try/except
+            # so a future refactor weakening that contract cannot crash
+            # session_init. The classification distinguishes the three
+            # main failure kinds so post-hoc analysis can see the shape
+            # of the problem.
+            # Classification ladder — order matters. Each branch isolates a
+            # distinct upstream failure kind so post-hoc diagnosis can tell
+            # them apart. The ladder mirrors the branches of
+            # _is_unknown_or_missing_session() (lines 255-262) plus the
+            # malformed_json case that funnels through the JSONDecodeError
+            # fallback at the top of main().
+            if stdin_json_error is not None:
+                _classification = "malformed_json"
+                _error_detail = stdin_json_error
+            elif raw_id is None:
+                _classification = "missing_session_id"
+                _error_detail = "session_id key absent from stdin payload"
+            elif not isinstance(raw_id, str):
+                _classification = "non_string_session_id"
+                _error_detail = f"session_id was {type(raw_id).__name__}: {raw_id!r}"
+            elif not raw_id.strip():
+                _classification = "empty_session_id"
+                _error_detail = f"session_id was empty/whitespace: {raw_id!r}"
+            elif raw_id.strip().startswith("unknown"):
+                # Matches _is_unknown_or_missing_session line 262 which uses
+                # bare "unknown" (not "unknown-"). Stay consistent with the
+                # canonical predicate so the two cannot drift.
+                _classification = "sentinel_session_id"
+                _error_detail = f"session_id already an unknown-* sentinel: {raw_id!r}"
+            else:
+                # Terminal catchall — reached only if a future change to
+                # _is_unknown_or_missing_session adds a rejection branch
+                # that this ladder does not cover yet.
+                _classification = "other"
+                _error_detail = f"session_id rejected by predicate: {raw_id!r}"
+            try:
+                append_failure(
+                    classification=_classification,
+                    error=_error_detail,
+                    cwd=os.getcwd(),
+                    source=source,
+                )
+            except Exception:
+                # Belt-and-suspenders: append_failure already fails-open
+                # internally, but the R3 gate MUST NEVER raise. Swallow
+                # any exception that escapes the ring buffer logic.
+                pass
             print(
                 f"session_init: missing session_id in stdin payload; "
                 f"using fallback {session_id} (no disk persistence)",

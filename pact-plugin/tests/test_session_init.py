@@ -1596,6 +1596,298 @@ class TestWriteContextIntegration:
 
 
 # =============================================================================
+# Issue #399: Failure Log Integration Tests
+# =============================================================================
+
+
+class TestFailureLogIntegration:
+    """Tests that session_init's R3 malformed-stdin gate calls
+    shared.failure_log.append_failure with the correct classification.
+
+    Issue #399: the R3 gate intentionally drops the session_start journal
+    anchor when stdin lacks a usable session_id — the alternative would
+    create an unreapable `unknown-{hex}/` directory. That design choice
+    costs visibility into hook failures (stderr is not user-visible, and
+    teammate sessions never surface their first-message context to the
+    lead). The global ring buffer at ~/.claude/pact-sessions/_session_init_failures.log
+    is the post-hoc record that closes that gap.
+
+    The integration contract verified here:
+    1. The R3 gate calls append_failure BEFORE the stderr warning
+    2. Classification distinguishes malformed_json / missing_session_id /
+       non_string_session_id / empty_session_id / sentinel_session_id /
+       other — each branch isolates a distinct upstream failure kind
+    3. Fail-open is SACROSANCT: if append_failure raises, session_init
+       still exits cleanly with the fallback sentinel (belt-and-suspenders
+       wrapper at the call site catches any escape from the internal
+       fail-open contract).
+    """
+
+    def test_malformed_stdin_calls_append_failure_with_malformed_json(
+        self, monkeypatch, tmp_path
+    ):
+        """Non-JSON stdin → classification='malformed_json' with the
+        JSONDecodeError text captured in the error field.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = "{ not valid json at all"
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure") as mock_append_failure, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Session_init must exit cleanly — malformed stdin is a
+        # fail-open path, not a crash path.
+        assert exc_info.value.code == 0
+
+        # R3 gate must have called append_failure exactly once.
+        assert mock_append_failure.call_count == 1
+        call_kwargs = mock_append_failure.call_args.kwargs
+        assert call_kwargs["classification"] == "malformed_json"
+        # The captured error should be non-empty (the real JSONDecodeError text).
+        assert call_kwargs["error"]
+        # cwd and source are populated (defensive context for post-hoc debugging).
+        assert "cwd" in call_kwargs
+        assert "source" in call_kwargs
+
+    def test_missing_session_id_calls_append_failure_with_missing_classification(
+        self, monkeypatch, tmp_path
+    ):
+        """Well-formed stdin with no session_id key at all → classification='missing_session_id'.
+
+        `session_id` is absent from the payload dict, so `.get("session_id")`
+        returns None. The ladder's `raw_id is None` branch fires first. This
+        is distinct from `empty_session_id` (present but blank) and
+        `malformed_json` (stdin could not even parse).
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # valid JSON, no session_id
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure") as mock_append_failure, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert mock_append_failure.call_count == 1
+        call_kwargs = mock_append_failure.call_args.kwargs
+        assert call_kwargs["classification"] == "missing_session_id"
+
+    def test_non_string_session_id_calls_append_failure_with_non_string_classification(
+        self, monkeypatch, tmp_path
+    ):
+        """Stdin with a non-string session_id (int) → classification='non_string_session_id'.
+
+        The _is_unknown_or_missing_session predicate rejects non-strings,
+        and the R3 gate's classification cascade must surface that as a
+        distinct failure kind for post-hoc debugging.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # Integer, not a string — triggers the non_string_session_id branch.
+        stdin_data = json.dumps({"session_id": 12345})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure") as mock_append_failure, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert mock_append_failure.call_count == 1
+        call_kwargs = mock_append_failure.call_args.kwargs
+        assert call_kwargs["classification"] == "non_string_session_id"
+
+    def test_empty_session_id_calls_append_failure_with_empty_classification(
+        self, monkeypatch, tmp_path
+    ):
+        """Whitespace-only session_id → classification='empty_session_id'.
+
+        A present-but-blank session_id (e.g. `"   "`) is a different
+        upstream failure shape than `missing_session_id` (key absent).
+        It suggests a producer wrote an empty string where a UUID was
+        expected — a distinct bug class that the diagnostic log must
+        surface separately.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({"session_id": "   "})  # whitespace only
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure") as mock_append_failure, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert mock_append_failure.call_count == 1
+        call_kwargs = mock_append_failure.call_args.kwargs
+        assert call_kwargs["classification"] == "empty_session_id"
+
+    def test_sentinel_session_id_calls_append_failure_with_sentinel_classification(
+        self, monkeypatch, tmp_path
+    ):
+        """Already-unknown-* sentinel → classification='sentinel_session_id'.
+
+        A caller re-submitting an already-rejected sentinel (e.g. replaying
+        a previous session's fallback id) is distinct from missing or
+        malformed input. The canonical predicate
+        _is_unknown_or_missing_session uses bare "unknown" (not "unknown-"),
+        so this ladder branch stays consistent with that.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({"session_id": "unknown-deadbeef"})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure") as mock_append_failure, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert mock_append_failure.call_count == 1
+        call_kwargs = mock_append_failure.call_args.kwargs
+        assert call_kwargs["classification"] == "sentinel_session_id"
+
+    def test_append_failure_raising_does_not_crash_session_init(
+        self, monkeypatch, tmp_path
+    ):
+        """If append_failure raises (violating its fail-open contract),
+        the R3 gate's belt-and-suspenders try/except MUST swallow it.
+        session_init still exits cleanly with the unknown-* sentinel.
+
+        This is the SACROSANCT invariant: the ring buffer exists to
+        observe session_init failures, not create new ones. A future
+        refactor weakening the internal fail-open must be caught by
+        the outer wrapper at the call site.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({})  # missing session_id → R3 gate fires
+
+        def raising_append_failure(*args, **kwargs):
+            raise RuntimeError("simulated failure_log crash")
+
+        captured_stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure", side_effect=raising_append_failure), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", captured_stdout), \
+             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # SACROSANCT fail-open: session_init still exits 0.
+        assert exc_info.value.code == 0
+        # The R3 fallback sentinel still appears in the stderr warning —
+        # the crash inside append_failure must NOT short-circuit the
+        # warning that follows it.
+        stderr_output = mock_stderr.getvalue()
+        assert "missing session_id" in stderr_output
+        assert "fallback" in stderr_output
+        # And the hook still emits a well-formed JSON envelope on stdout
+        # (main() does not abort mid-run because of the ring buffer crash).
+        hook_output = captured_stdout.getvalue()
+        assert hook_output  # non-empty — main() reached the normal exit path
+        envelope = json.loads(hook_output)
+        assert "hookSpecificOutput" in envelope
+
+
+# =============================================================================
 # _extract_prev_session_dir() Dual-Location Tests
 # =============================================================================
 
