@@ -238,8 +238,10 @@ class TestRemoveStaleKernelBlockAbsent:
         assert result is None
         assert target.read_text(encoding="utf-8") == original
 
-    def test_returns_none_when_only_end_marker(self, mock_home):
-        """PACT_END alone (no START) → None, no change."""
+    def test_returns_skip_status_when_only_end_marker(self, mock_home):
+        """PACT_END alone (no START) → returns a 'Migration skipped' status
+        string so session_init.py surfaces the warning to the user via
+        context_parts. Content is unchanged (defensive no-op)."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         target = mock_home / ".claude" / "CLAUDE.md"
@@ -248,15 +250,23 @@ class TestRemoveStaleKernelBlockAbsent:
 
         result = remove_stale_kernel_block()
 
-        assert result is None
+        assert result is not None
+        assert "Migration skipped" in result
+        assert "PACT_END" in result
+        assert "PACT_START" in result
+        # File is unchanged (defensive no-op)
         assert target.read_text(encoding="utf-8") == original
 
 
 class TestRemoveStaleKernelBlockMalformed:
-    """PACT_START present but no PACT_END — defensive no-op to avoid data loss."""
+    """Malformed marker states — defensive no-op PLUS a status string
+    returned so session_init.py surfaces the warning via context_parts.
+    Previously the defensive paths emitted stderr warnings (never shown
+    to the user) and returned None; now they return the warning string
+    so it actually reaches the user's orchestrator context."""
 
-    def test_returns_none_when_start_without_end(self, mock_home):
-        """Unterminated PACT block → defensive no-op (do not corrupt)."""
+    def test_returns_skip_status_when_start_without_end(self, mock_home):
+        """Unterminated PACT block → defensive no-op, returns 'Migration skipped'."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         target = mock_home / ".claude" / "CLAUDE.md"
@@ -270,13 +280,16 @@ class TestRemoveStaleKernelBlockMalformed:
 
         result = remove_stale_kernel_block()
 
-        # The current implementation early-returns when END is absent in the
-        # full content; the file remains untouched.
-        assert result is None
+        assert result is not None
+        assert "Migration skipped" in result
+        assert "PACT_START" in result
+        assert "PACT_END" in result
+        # File is unchanged (defensive no-op)
         assert target.read_text(encoding="utf-8") == original
 
-    def test_returns_none_when_end_appears_before_start(self, mock_home):
-        """END marker appears textually before START marker → defensive."""
+    def test_returns_skip_status_when_end_appears_before_start(self, mock_home):
+        """END marker appears textually before START → defensive no-op +
+        'Migration skipped' string."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         target = mock_home / ".claude" / "CLAUDE.md"
@@ -291,10 +304,11 @@ class TestRemoveStaleKernelBlockMalformed:
 
         result = remove_stale_kernel_block()
 
+        assert result is not None
+        assert "Migration skipped" in result
         # The function splits on START first then checks for END in the
-        # remainder. Here END is before START so the remainder has no END
-        # → defensive no-op.
-        assert result is None
+        # remainder. Here END is before START so the remainder has no END.
+        # Content remains untouched.
         assert target.read_text(encoding="utf-8") == original
 
 
@@ -562,8 +576,11 @@ class TestUpdatePactRoutingOrphanMarkers:
 
         result = update_pact_routing()
 
-        # First call: insert path (after orphan strip) → file gets canonical block
-        assert result == "PACT routing block inserted into project CLAUDE.md"
+        # First call: insert path (after orphan strip) → file gets canonical block.
+        # The return string now includes the orphan-stripped notice.
+        assert result is not None
+        assert "PACT routing block inserted into project CLAUDE.md" in result
+        assert "orphan" in result.lower()
         new_content = legacy.read_text(encoding="utf-8")
 
         # The orphan START marker line is gone (stripped before insertion)
@@ -611,7 +628,11 @@ class TestUpdatePactRoutingOrphanMarkers:
 
         result = update_pact_routing()
 
-        assert result == "PACT routing block inserted into project CLAUDE.md"
+        # Insert path fires after orphan strip — return string includes
+        # the orphan-stripped notice.
+        assert result is not None
+        assert "PACT routing block inserted into project CLAUDE.md" in result
+        assert "orphan" in result.lower()
         new_content = legacy.read_text(encoding="utf-8")
         assert new_content.count("<!-- PACT_ROUTING_END -->") == 1
         assert CANONICAL_PACT_ROUTING_BLOCK in new_content
@@ -649,21 +670,25 @@ class TestUpdatePactRoutingOrphanMarkers:
 
 
 class TestSymlinkRefusal:
-    """Cycle 2 minor item 14: SECURITY hardening — refuse to operate on
-    symlinks. Both remove_stale_kernel_block and update_pact_routing must
-    return None and emit a stderr warning if their target is a symlink,
-    rather than following the link and writing to its target.
+    """SECURITY hardening — refuse to operate on symlinks. Both
+    remove_stale_kernel_block and update_pact_routing return a status
+    string ('Migration skipped: ...' or 'Routing skipped: ...') if their
+    target is a symlink, rather than following the link and writing to
+    its target. session_init.py routes these to context_parts so the
+    user sees the warning via orchestrator context (hook stderr is NOT
+    shown to users).
 
     Tests use os.symlink to create real symlinks pointing at unrelated
-    files in tmp_path. We then verify the function returns None, the
-    symlink target file is unchanged, and stderr contains a warning
-    referencing the refusal."""
+    files in tmp_path. We verify (1) the function returns a status
+    string containing 'symlink', (2) the symlink target file is
+    byte-identical (untouched), and (3) the symlink itself still exists."""
 
     def test_remove_stale_kernel_block_refuses_symlink(
-        self, mock_home, tmp_path, capsys
+        self, mock_home, tmp_path
     ):
         """If ~/.claude/CLAUDE.md is a symlink, remove_stale_kernel_block
-        must return None and not touch the symlink target."""
+        returns a 'Migration skipped: ... symlink ...' string and does not
+        touch the symlink target."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         # Create a regular file as the symlink target
@@ -686,22 +711,22 @@ class TestSymlinkRefusal:
 
         result = remove_stale_kernel_block()
 
-        # Function returns None
-        assert result is None
+        # Returns a status string with 'Migration skipped' + 'symlink'
+        assert result is not None
+        assert "Migration skipped" in result
+        assert "symlink" in result.lower()
+        assert "refusing" in result.lower()
         # Symlink target file is byte-identical (untouched)
         assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
         # Symlink itself is still a symlink
         assert managed_path.is_symlink()
-        # stderr contains the refusal message
-        captured = capsys.readouterr()
-        assert "symlink" in captured.err.lower()
-        assert "refusing" in captured.err.lower()
 
     def test_update_pact_routing_refuses_symlink(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch
     ):
-        """If the project CLAUDE.md is a symlink, update_pact_routing must
-        return None and not touch the symlink target."""
+        """If the project CLAUDE.md is a symlink, update_pact_routing returns
+        a 'Routing skipped: ... symlink ...' string and does not touch the
+        symlink target."""
         from shared.claude_md_manager import update_pact_routing
 
         # Create a regular file as the symlink target
@@ -723,31 +748,36 @@ class TestSymlinkRefusal:
 
         result = update_pact_routing()
 
-        # Function returns None
-        assert result is None
+        # Returns a status string with 'Routing skipped' + 'symlink'
+        assert result is not None
+        assert "Routing skipped" in result
+        assert "symlink" in result.lower()
+        assert "refusing" in result.lower()
         # Symlink target file is byte-identical (untouched)
         assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
         # Symlink itself is still a symlink
         assert managed_path.is_symlink()
-        # stderr contains the refusal message
-        captured = capsys.readouterr()
-        assert "symlink" in captured.err.lower()
-        assert "refusing" in captured.err.lower()
 
 
 class TestRemoveStaleKernelBlockMalformedFeedback:
-    """Cycle 2 minor item 10: malformed-marker silent no-op feedback.
+    """Malformed-marker user-visible feedback.
 
     When ~/.claude/CLAUDE.md contains an orphan marker (one of
     PACT_START/PACT_END but not the other, or both with END before START),
-    remove_stale_kernel_block previously returned None silently. Now it
-    returns None AND emits a stderr warning explaining what was wrong
-    and what the user should do."""
+    remove_stale_kernel_block returns a 'Migration skipped: ...' status
+    string explaining what was wrong and what the user should do. Hook
+    stderr is NOT shown to users by Claude Code, so a returned string is
+    the only way to deliver the warning. session_init.py routes these
+    status strings to context_parts for user visibility via the
+    orchestrator's context.
 
-    def test_orphan_start_marker_emits_stderr_warning(
-        self, mock_home, capsys
+    Normal (well-formed) case returns the success message with no noise."""
+
+    def test_orphan_start_marker_returns_skip_status(
+        self, mock_home
     ):
-        """Only PACT_START present → stderr warning mentions the orphan."""
+        """Only PACT_START present → returns 'Migration skipped: ...' string
+        mentioning PACT_START and PACT_END for user diagnosis."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         target = mock_home / ".claude" / "CLAUDE.md"
@@ -758,16 +788,16 @@ class TestRemoveStaleKernelBlockMalformedFeedback:
 
         result = remove_stale_kernel_block()
 
-        assert result is None
-        captured = capsys.readouterr()
-        assert "PACT_START" in captured.err
-        assert "PACT_END" in captured.err
-        assert "skipped" in captured.err.lower() or "no matching" in captured.err.lower()
+        assert result is not None
+        assert "Migration skipped" in result
+        assert "PACT_START" in result
+        assert "PACT_END" in result
+        assert "orphan" in result.lower() or "matching" in result.lower()
 
-    def test_orphan_end_marker_emits_stderr_warning(
-        self, mock_home, capsys
+    def test_orphan_end_marker_returns_skip_status(
+        self, mock_home
     ):
-        """Only PACT_END present → stderr warning mentions the orphan."""
+        """Only PACT_END present → returns 'Migration skipped: ...' string."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         target = mock_home / ".claude" / "CLAUDE.md"
@@ -778,15 +808,16 @@ class TestRemoveStaleKernelBlockMalformedFeedback:
 
         result = remove_stale_kernel_block()
 
-        assert result is None
-        captured = capsys.readouterr()
-        assert "PACT_END" in captured.err
-        assert "PACT_START" in captured.err
+        assert result is not None
+        assert "Migration skipped" in result
+        assert "PACT_END" in result
+        assert "PACT_START" in result
 
-    def test_well_formed_block_does_not_emit_warning(
-        self, mock_home, capsys
+    def test_well_formed_block_does_not_return_skip_status(
+        self, mock_home
     ):
-        """Normal case (well-formed block) → no stderr noise."""
+        """Normal case (well-formed block) → clean success message, no
+        'Migration skipped' noise."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         target = mock_home / ".claude" / "CLAUDE.md"
@@ -802,10 +833,9 @@ class TestRemoveStaleKernelBlockMalformedFeedback:
         result = remove_stale_kernel_block()
 
         assert result == "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
-        captured = capsys.readouterr()
-        # No warning for the normal case
-        assert "skipped" not in captured.err.lower()
-        assert "refusing" not in captured.err.lower()
+        # Normal case: no 'Migration skipped' in the success message
+        assert "Migration skipped" not in result
+        assert "Refusing" not in result
 
 
 class TestUpdatePactRoutingOSError:

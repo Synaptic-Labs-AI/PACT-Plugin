@@ -314,26 +314,72 @@ class TestRequiredSkillsCondensed:
     The aspirational #366 S5 line-count and subsection-condensing tests were
     removed because Phase 1 did not include that condensing pass. What
     remains here are the structural invariants that hold regardless of
-    condensing: every agent must still have a skill lookup table, and the
-    secretary uses frontmatter skills.
+    condensing: every non-secretary agent must still have a REQUIRED SKILLS
+    section with a lookup table, and the secretary uses frontmatter skills.
     """
 
     # Secretary uses frontmatter skills, not REQUIRED SKILLS section
     _SECRETARY = "pact-secretary.md"
 
-    def test_required_skills_table_preserved(self, agent_files):
-        """Non-secretary agents should still have the skill table."""
+    def test_required_skills_section_and_table_preserved(self, agent_files):
+        """Every non-secretary agent must have BOTH (1) a REQUIRED SKILLS
+        section header AND (2) at least one skill lookup table row in the
+        body of that section.
+
+        Previous form used very permissive substring matching (`"| Task"`
+        or `"| Any"` anywhere in the body) which would pass even if the
+        REQUIRED SKILLS section had been accidentally deleted entirely,
+        as long as some markdown table elsewhere happened to contain
+        one of those substrings. The tightened form anchors on the
+        `# REQUIRED SKILLS` heading and checks for a table body inside
+        the section region.
+        """
         for f in agent_files:
             if f.name == self._SECRETARY:
                 continue
             text = f.read_text(encoding="utf-8")
-            # The table has "Task Involves" or "When Your Task Involves" header
-            has_table = ("Task Involves" in text or
-                         "| Task" in text or
-                         "| Any" in text)
-            assert has_table, (
-                f"{f.name}: REQUIRED SKILLS section is missing the "
-                f"skill lookup table."
+
+            # Requirement 1: the section header itself must exist
+            section_header_idx = text.find("# REQUIRED SKILLS")
+            assert section_header_idx != -1, (
+                f"{f.name}: missing `# REQUIRED SKILLS` section header. "
+                f"Non-secretary agents must document which skills to "
+                f"invoke at the start of their work."
+            )
+
+            # Requirement 2: the section must contain a markdown table
+            # body row (a line starting with `|` that contains a backtick-
+            # delimited skill name like `pact-coding-standards`). Slice
+            # the text starting at the header to the next top-level `#`
+            # heading, so the table check is constrained to the section.
+            #
+            # Find the next `# ` (h1) heading after the REQUIRED SKILLS
+            # header. If none, take the rest of the file.
+            region_start = section_header_idx
+            next_h1 = text.find("\n# ", region_start + 1)
+            region_end = next_h1 if next_h1 != -1 else len(text)
+            section_body = text[region_start:region_end]
+
+            # A skill lookup table row should contain a backtick-quoted
+            # skill name pattern like `` `pact-coding-standards` `` or
+            # `` `pact-security-patterns` `` somewhere inside the section.
+            has_skill_ref = (
+                "`pact-coding-standards`" in section_body
+                or "`pact-security-patterns`" in section_body
+                or "`pact-testing-strategies`" in section_body
+                or "`pact-prepare-research`" in section_body
+                or "`pact-architecture-patterns`" in section_body
+                or "`n8n-" in section_body
+            )
+            assert has_skill_ref, (
+                f"{f.name}: REQUIRED SKILLS section is present but does "
+                f"not reference any recognized skill name (e.g., "
+                f"`pact-coding-standards`, `pact-security-patterns`, "
+                f"`pact-testing-strategies`, `pact-prepare-research`, "
+                f"`pact-architecture-patterns`, or an `n8n-*` skill). "
+                f"Either the section is empty or the skill names have "
+                f"drifted — agents need a concrete skill table to know "
+                f"what to invoke."
             )
 
     def test_secretary_uses_frontmatter_skills(self, agent_files):

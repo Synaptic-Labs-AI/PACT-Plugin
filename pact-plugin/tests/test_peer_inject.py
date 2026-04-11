@@ -183,11 +183,22 @@ class TestTeachbackReminder:
         assert result.endswith(_TEACHBACK_REMINDER)
 
     def test_reminder_contains_key_instructions(self):
+        """The teachback reminder must mention the key instructions:
+        - SendMessage as the delivery mechanism
+        - Edit/Write/Bash as the ordering rule anchor
+        - 'gate' semantics (teachback is a blocking gate)
+        - pact-teachback skill reference for the full format
+
+        The old 'step 4 of your On Start sequence' cross-reference was
+        removed in cycle 2 to avoid coupling this hook's output to the
+        exact numbering of a separate skill file — the numbering could
+        drift without either side noticing."""
         from peer_inject import _TEACHBACK_REMINDER
 
         assert "SendMessage" in _TEACHBACK_REMINDER
         assert "Edit/Write/Bash" in _TEACHBACK_REMINDER
-        assert "step 4" in _TEACHBACK_REMINDER
+        assert "gate" in _TEACHBACK_REMINDER.lower()
+        assert "pact-teachback" in _TEACHBACK_REMINDER
 
     def test_reminder_not_present_when_no_team(self, tmp_path):
         """When get_peer_context returns None, no reminder is attached."""

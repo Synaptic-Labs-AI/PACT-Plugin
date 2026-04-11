@@ -22,7 +22,6 @@ default path so creators land at the preferred location.
 
 import os
 import re
-import sys
 from pathlib import Path
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
@@ -128,37 +127,38 @@ def remove_stale_kernel_block() -> str | None:
     Called from session_init.py on every SessionStart. Idempotent no-op when
     the markers are absent (i.e., for fresh installs or after first cleanup).
 
-    Cycle 2 hardening (#366):
-    - Item 14 (symlink guard): refuses to operate if ~/.claude/CLAUDE.md is
-      a symlink. An attacker with local write access to ~/.claude/ could
-      otherwise plant a symlink to redirect plugin writes to an arbitrary
-      target. Practical exploitability is low (requires pre-existing local
-      write access) but spec Section 6.10 explicitly asks for defensive
-      behavior here.
-    - Item 10 (malformed feedback): emits a stderr warning when only one of
-      the two markers is present. Previously this case was a silent None
-      return, leaving the user with no feedback about why the migration
-      didn't run.
+    Hardening (#366):
+    - Symlink guard: refuses to operate if ~/.claude/CLAUDE.md is a symlink.
+      An attacker with local write access to ~/.claude/ could otherwise
+      plant a symlink to redirect plugin writes to an arbitrary target.
+      Practical exploitability is low (requires pre-existing local write
+      access) but spec Section 6.10 explicitly asks for defensive behavior.
+    - Malformed feedback: when the migration skips due to a malformed marker
+      state (orphan marker or END-before-START), returns the warning as a
+      status string so session_init.py surfaces it via systemMessage to
+      the user. Hook stderr is NOT shown to users by Claude Code, so a
+      returned string is the only way to deliver the warning.
 
     Returns:
-        Status message on successful removal, None on no-op.
+        Status message on successful removal, None on no-op (clean, absent
+        markers) or error, or a "Migration skipped: ..." string on defensive
+        no-op (malformed marker state; session_init.py routes these to
+        systemMessages via the "failed"/"skipped" check).
     """
     target_file = Path.home() / ".claude" / "CLAUDE.md"
     if not target_file.exists():
         return None
 
-    # Item 14: refuse to operate on symlinks. The is_symlink check uses
-    # lstat under the hood which does NOT follow the link, so this is
-    # safe even if the link target is itself a malicious file.
+    # Symlink guard: is_symlink uses lstat under the hood which does NOT
+    # follow the link, so this is safe even if the link target is itself
+    # a malicious file.
     if target_file.is_symlink():
-        print(
-            "remove_stale_kernel_block: ~/.claude/CLAUDE.md is a symlink. "
+        return (
+            "Migration skipped: ~/.claude/CLAUDE.md is a symlink. "
             "Refusing to operate on symlinked managed paths to prevent "
             "redirected writes. Replace the symlink with a regular file "
-            "if you want the migration to run.",
-            file=sys.stderr,
+            "if you want the migration to run."
         )
-        return None
 
     try:
         content = target_file.read_text(encoding="utf-8")
@@ -175,34 +175,29 @@ def remove_stale_kernel_block() -> str | None:
         return None  # Normal idempotent no-op for already-migrated installs
 
     if has_start != has_end:
-        # Item 10: only one of the two markers is present. Defensive no-op
-        # to avoid data loss, BUT emit a stderr warning so the user is
-        # aware. This case can occur if a prior plugin write crashed
-        # mid-file or the user manually deleted one marker.
+        # Only one of the two markers is present. Defensive no-op to avoid
+        # data loss, and return a status string so session_init.py surfaces
+        # the warning via systemMessage. This case can occur if a prior
+        # plugin write crashed mid-file or the user manually deleted one
+        # marker.
         which = "PACT_START" if has_start else "PACT_END"
         missing = "PACT_END" if has_start else "PACT_START"
-        print(
-            f"remove_stale_kernel_block: ~/.claude/CLAUDE.md contains "
-            f"{which} but no matching {missing}. Migration skipped to "
-            f"avoid data loss. Inspect the file and either remove the "
-            f"orphan {which} marker or restore the matching {missing} "
-            f"marker so the migration can complete.",
-            file=sys.stderr,
+        return (
+            f"Migration skipped: ~/.claude/CLAUDE.md contains {which} but "
+            f"no matching {missing}. To avoid data loss, inspect the file "
+            f"and either remove the orphan {which} marker or restore the "
+            f"matching {missing} marker."
         )
-        return None
 
     pre_marker, rest = content.split(START_MARKER, 1)
     if END_MARKER not in rest:
         # END marker exists in content but appears textually before START.
-        # Defensive no-op with stderr feedback (same rationale as above).
-        print(
-            "remove_stale_kernel_block: ~/.claude/CLAUDE.md contains both "
-            "PACT_START and PACT_END markers but PACT_END appears before "
-            "PACT_START. Migration skipped to avoid data loss. Inspect "
-            "the file and reorder or remove the orphan markers.",
-            file=sys.stderr,
+        # Same defensive handling.
+        return (
+            "Migration skipped: ~/.claude/CLAUDE.md contains both PACT_START "
+            "and PACT_END markers but PACT_END appears before PACT_START. "
+            "Inspect the file and reorder or remove the orphan markers."
         )
-        return None
 
     _, post_marker = rest.split(END_MARKER, 1)
 
@@ -229,19 +224,21 @@ def update_pact_routing() -> str | None:
 
     Preserves all user content outside the markers.
 
-    Cycle 2 hardening (#366):
-    - Item 14 (symlink guard): refuses to operate if the project CLAUDE.md
-      is a symlink. Same rationale as remove_stale_kernel_block — prevents
+    Hardening (#366):
+    - Symlink guard: refuses to operate if the project CLAUDE.md is a
+      symlink. Same rationale as remove_stale_kernel_block — prevents
       redirected writes via planted symlinks.
-    - Item 13 (orphan marker handling): if exactly one of PACT_ROUTING_START
-      or PACT_ROUTING_END is present (e.g., user manually deleted the closing
-      marker, or a prior write crashed mid-file), strip the orphan marker
-      before falling through to the insert path. This prevents the previous
-      bug where the file would accumulate a new routing block on every
-      session because the guard for the update path required BOTH markers.
+    - Orphan marker handling: if exactly one of PACT_ROUTING_START or
+      PACT_ROUTING_END is present (e.g., user manually deleted the
+      closing marker, or a prior write crashed mid-file), strip the
+      orphan marker before falling through to the insert path. This
+      prevents the bug where the file accumulates a new routing block
+      on every session because the update-path guard requires BOTH
+      markers to be present.
 
     Returns:
-        Status message on change, None when no write was needed.
+        Status message on change, "Routing skipped: ..." on defensive
+        no-op (symlink), or None when no write was needed.
     """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
@@ -254,18 +251,17 @@ def update_pact_routing() -> str | None:
         # with the routing block in its template.
         return None
 
-    # Item 14: refuse to operate on symlinks. Same defensive guard as
-    # remove_stale_kernel_block. is_symlink uses lstat so it does not
-    # follow the link.
+    # Symlink guard: same defensive guard as remove_stale_kernel_block.
+    # is_symlink uses lstat so it does not follow the link. Return the
+    # warning as a status string so session_init.py surfaces it via
+    # systemMessage (hook stderr is not shown to users).
     if target_file.is_symlink():
-        print(
-            f"update_pact_routing: {target_file} is a symlink. "
-            f"Refusing to operate on symlinked managed paths to prevent "
-            f"redirected writes. Replace the symlink with a regular file "
-            f"if you want the routing block to be managed.",
-            file=sys.stderr,
+        return (
+            f"Routing skipped: {target_file} is a symlink. Refusing to "
+            f"operate on symlinked managed paths to prevent redirected "
+            f"writes. Replace the symlink with a regular file if you "
+            f"want the routing block to be managed."
         )
-        return None
 
     try:
         content = target_file.read_text(encoding="utf-8")
@@ -290,21 +286,20 @@ def update_pact_routing() -> str | None:
         except OSError as e:
             return f"Failed to update PACT routing: {str(e)[:50]}"
 
-    # Item 13: orphan marker handling. If exactly one of the two markers
-    # is present (the other was manually deleted, or a prior write crashed
-    # mid-file), strip the orphan marker before falling through to the
-    # insert path. Without this, the insert path blindly prepends a new
-    # routing block on every session because the update guard requires
-    # BOTH markers to be present — leading to file accumulation over N
-    # sessions of N orphan-blocks.
+    # Orphan marker handling: if exactly one of the two markers is present
+    # (the other was manually deleted, or a prior write crashed mid-file),
+    # strip the orphan marker before falling through to the insert path.
+    # Without this, the insert path blindly prepends a new routing block
+    # on every session because the update guard requires BOTH markers to
+    # be present — leading to file accumulation over N sessions.
     has_start = _ROUTING_START_MARKER in content
     has_end = _ROUTING_END_MARKER in content
+    orphan_stripped = False
     if has_start != has_end:
         # Strip whichever orphan marker is present. The text on the same
         # line as the marker is also stripped if the marker is on its
         # own line — otherwise just remove the marker substring.
         orphan = _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
-        # Remove the marker line if it stands alone, else remove the substring
         content_lines = content.splitlines(keepends=True)
         cleaned_lines = []
         for ln in content_lines:
@@ -317,13 +312,7 @@ def update_pact_routing() -> str | None:
             else:
                 cleaned_lines.append(ln)
         content = "".join(cleaned_lines)
-        print(
-            f"update_pact_routing: {target_file} contained an orphan "
-            f"{orphan!s} marker without its matching counterpart. Stripped "
-            f"the orphan marker before inserting a fresh routing block to "
-            f"prevent block accumulation on subsequent sessions.",
-            file=sys.stderr,
-        )
+        orphan_stripped = True
 
     # Case 2: markers absent — insert near the top of the file below the title
     lines = content.splitlines(keepends=True)
@@ -350,6 +339,11 @@ def update_pact_routing() -> str | None:
     try:
         target_file.write_text(new_content, encoding="utf-8")
         os.chmod(str(target_file), 0o600)
+        if orphan_stripped:
+            return (
+                "PACT routing block inserted into project CLAUDE.md "
+                "(stripped orphan marker from prior incomplete write)"
+            )
         return "PACT routing block inserted into project CLAUDE.md"
     except OSError as e:
         return f"Failed to insert PACT routing: {str(e)[:50]}"
@@ -407,5 +401,10 @@ This file contains project-specific memory managed by the PACT framework.
         target_file.write_text(memory_template, encoding="utf-8")
         os.chmod(str(target_file), 0o600)
         return "Created project CLAUDE.md with memory sections"
-    except Exception as e:
-        return f"Project CLAUDE.md failed: {str(e)[:30]}"
+    except OSError as e:
+        # Narrow to OSError: filesystem/permission failures are the
+        # expected failure class here. Any other exception (e.g., a
+        # programming error inside ensure_dot_claude_parent) should
+        # propagate rather than be silently swallowed with a truncated
+        # message.
+        return f"Project CLAUDE.md failed: {str(e)[:50]}"

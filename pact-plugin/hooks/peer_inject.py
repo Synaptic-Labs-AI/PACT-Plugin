@@ -25,8 +25,10 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 _TEACHBACK_REMINDER = (
     "\n\nTEACHBACK TIMING: Send your teachback via SendMessage BEFORE any "
-    "Edit/Write/Bash calls. This is step 4 of your On Start sequence. "
-    "If you haven't sent a teachback yet, do it now before any implementation work."
+    "Edit/Write/Bash calls. Teachback is a gate — nothing proceeds until "
+    "it is sent. See the pact-teachback skill loaded by "
+    "/PACT:teammate-bootstrap for the exact format. If you haven't sent "
+    "a teachback yet, do it now before any implementation work."
 )
 
 
@@ -111,9 +113,20 @@ def get_peer_context(
 
     members = config.get("members", [])
 
+    # Sanitize agent_name once up-front so the peer-list filter AND the
+    # prelude interpolation use the same cleaned value. Using the raw
+    # agent_name in the filter would cause self-exclusion to fail if the
+    # raw name contained hostile characters (e.g., embedded newlines) —
+    # a cosmetic but real degradation of the peer list.
+    safe_name = _sanitize_agent_name(agent_name)
+
     if agent_name:
-        # Filter by exact name — excludes only the spawning agent itself
-        peers = [m["name"] for m in members if m.get("name") != agent_name]
+        # Filter by exact (sanitized) name — excludes only the spawning
+        # agent itself. Team members are registered under their canonical
+        # names in the team config, so matching against the sanitized
+        # form is correct under normal conditions. Under attack, both
+        # sides flow through the same sanitization and remain consistent.
+        peers = [m["name"] for m in members if m.get("name") != safe_name]
     else:
         # Fallback: filter by agentType. This excludes ALL agents of the same
         # type, not just the spawning agent. This is a known limitation when
@@ -129,9 +142,7 @@ def get_peer_context(
             f"You can message them via SendMessage for shared artifacts or blocking questions."
         )
 
-    prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(
-        agent_name=_sanitize_agent_name(agent_name)
-    )
+    prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=safe_name)
     return prelude + peer_context + _TEACHBACK_REMINDER
 
 
