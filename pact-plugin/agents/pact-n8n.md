@@ -10,6 +10,13 @@ skills:
   - pact-agent-teams
   - pact-teachback
   - request-more-context
+  - n8n-workflow-patterns
+  - n8n-validation-expert
+  - n8n-mcp-tools-expert
+  - n8n-node-configuration
+  - n8n-code-javascript
+  - n8n-code-python
+  - n8n-expression-syntax
 ---
 
 # FIRST ACTION

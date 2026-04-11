@@ -10,6 +10,7 @@ skills:
   - pact-agent-teams
   - pact-teachback
   - request-more-context
+  - pact-testing-strategies
 ---
 
 # FIRST ACTION

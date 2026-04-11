@@ -116,18 +116,21 @@ class TestLazyLoadedAgentTeams:
     every agent's FIRST ACTION is `Skill("PACT:teammate-bootstrap")` which
     delivers the team protocol via @-references in the command body.
 
-    The frontmatter cap now accommodates four eager skills (architect/coder
-    triad of pact-agent-teams + pact-teachback + request-more-context, plus
-    one domain-specific skill for the secretary's memory tooling and the
-    auditor's architecture-patterns).
-    """
+    Per-agent skill counts vary by domain: the n8n agent carries 10 skills
+    (canonical 3 + all 7 n8n-specific skills), coders that handle multiple
+    concerns carry 5 (canonical 3 + 2 domain skills), and most other
+    specialists carry 4 (canonical 3 + 1 domain skill). Per-agent variation
+    is the intentional design — there is no uniform cap on frontmatter skill
+    count. Each agent's domain skill set is pinned individually in
+    TestAgentDomainSkillVariations below.
 
-    # Upper bound on eager-loaded skills per agent. Secretary carries 4
-    # (pact-agent-teams + pact-teachback + pact-memory + pact-handoff-harvest),
-    # auditor carries 4 (pact-agent-teams + pact-teachback +
-    # pact-architecture-patterns + request-more-context). Bumping this
-    # threshold should be a deliberate, reviewed choice.
-    MAX_FRONTMATTER_SKILLS = 4
+    Note on eager-loading: as of the #366 Phase 1 empirical findings,
+    frontmatter `skills:` entries are NOT eagerly loaded at agent spawn.
+    They populate the lazy skill catalog (which materializes after the
+    first Skill() invocation), so the per-agent variation is catalog
+    metadata and discoverability, not a runtime cost. Adding skills to
+    frontmatter is therefore safe at any cardinality.
+    """
 
     @staticmethod
     def _extract_skill_names(text):
@@ -181,15 +184,18 @@ class TestLazyLoadedAgentTeams:
                 agents[f.stem] = (fm, text, skill_names)
         return agents
 
-    def test_frontmatter_skill_count_capped(self, all_agents):
-        """F3: no agent may declare more than MAX_FRONTMATTER_SKILLS."""
+    def test_frontmatter_skill_min_baseline(self, all_agents):
+        """F3 (replacement): every agent must carry the canonical 2-skill
+        baseline (pact-agent-teams + pact-teachback). The cap was removed
+        post-#366 phase 1 because frontmatter skills don't eager-load and
+        per-agent variation is the intentional design."""
         for name, (_fm, _text, skill_names) in all_agents.items():
-            count = len(skill_names)
-            assert count <= self.MAX_FRONTMATTER_SKILLS, (
-                f"{name}: {count} frontmatter skills exceeds cap of "
-                f"{self.MAX_FRONTMATTER_SKILLS}. Per-spawn eager-load cost "
-                f"must stay bounded (see #361). Move additional skills to "
-                f"lazy-load via Skill() invocation in the agent body. "
+            assert "pact-agent-teams" in skill_names, (
+                f"{name}: missing canonical pact-agent-teams baseline skill. "
+                f"Skills found: {skill_names!r}"
+            )
+            assert "pact-teachback" in skill_names, (
+                f"{name}: missing canonical pact-teachback baseline skill. "
                 f"Skills found: {skill_names!r}"
             )
 
@@ -723,6 +729,158 @@ class TestAgentFrontmatterSkills:
                 f"{name}: pact-teachback must be eager-loaded via frontmatter "
                 f"so the teachback format is always available at spawn. "
                 f"Found skills: {skills!r}"
+            )
+
+
+class TestAgentDomainSkillVariations:
+    """Post-#366 phase 1, each specialist agent's frontmatter declares a
+    domain-specific skill set in addition to the canonical baseline. This
+    class pins the per-agent expected skills so removal of a load-bearing
+    domain skill (e.g., pact-architecture-patterns from the auditor, or any
+    of the n8n skills from the n8n agent) is caught by CI.
+
+    The mapping is the explicit per-agent design — there is no uniform cap
+    or pattern. Each agent's skill set was chosen based on its specialist
+    function. See docs/architecture/366-phase1-kernel-elimination.md
+    Section 6 for the full mapping rationale.
+
+    Note on eager-loading: frontmatter skills do NOT eager-load at agent
+    spawn (empirically verified during the #366 Phase 1 planning session).
+    The per-agent variation is catalog metadata and discoverability, not a
+    runtime cost. Agents still invoke Skill() explicitly when they need a
+    skill loaded into context.
+    """
+
+    EXPECTED_SKILLS = {
+        "pact-preparer": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-prepare-research",
+        },
+        "pact-architect": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-architecture-patterns",
+        },
+        "pact-backend-coder": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-coding-standards",
+            "pact-security-patterns",
+        },
+        "pact-frontend-coder": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-coding-standards",
+            "pact-security-patterns",
+        },
+        "pact-database-engineer": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-coding-standards",
+        },
+        "pact-devops-engineer": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-coding-standards",
+        },
+        "pact-test-engineer": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-testing-strategies",
+        },
+        "pact-qa-engineer": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-testing-strategies",
+        },
+        "pact-security-engineer": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-security-patterns",
+        },
+        "pact-n8n": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "n8n-workflow-patterns",
+            "n8n-validation-expert",
+            "n8n-mcp-tools-expert",
+            "n8n-node-configuration",
+            "n8n-code-javascript",
+            "n8n-code-python",
+            "n8n-expression-syntax",
+        },
+        "pact-auditor": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "request-more-context",
+            "pact-architecture-patterns",
+        },
+        "pact-secretary": {
+            "pact-agent-teams",
+            "pact-teachback",
+            "pact-memory",
+            "pact-handoff-harvest",
+        },
+    }
+
+    @pytest.fixture
+    def agent_skills(self, agent_files):
+        out = {}
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            out[f.stem] = set(
+                TestLazyLoadedAgentTeams._extract_skill_names(text)
+            )
+        return out
+
+    def test_all_12_agents_have_pinned_expected_skills(self, agent_skills):
+        """Every PACT agent must have a pinned expected skill set in
+        EXPECTED_SKILLS. Catches new agents added without an entry."""
+        actual_agents = set(agent_skills.keys())
+        expected_agents = set(self.EXPECTED_SKILLS.keys())
+        missing_from_expected = actual_agents - expected_agents
+        missing_from_actual = expected_agents - actual_agents
+        assert not missing_from_expected, (
+            f"Agent(s) found on disk but not pinned in EXPECTED_SKILLS: "
+            f"{missing_from_expected}. Add an entry to "
+            f"TestAgentDomainSkillVariations.EXPECTED_SKILLS."
+        )
+        assert not missing_from_actual, (
+            f"Agent(s) pinned in EXPECTED_SKILLS but not found on disk: "
+            f"{missing_from_actual}. Either remove the entry or restore "
+            f"the agent file."
+        )
+
+    def test_each_agent_has_exactly_expected_skills(self, agent_skills):
+        """Each agent's frontmatter skills set must match EXPECTED_SKILLS
+        exactly. Both directions: missing expected skills fail, and
+        unexpected extra skills also fail. This tightness is intentional
+        for documentation and catalog hygiene — adding or removing a skill
+        from any agent requires a deliberate update to this test, which
+        forces the change to be reviewed."""
+        for name, expected in self.EXPECTED_SKILLS.items():
+            actual = agent_skills.get(name, set())
+            missing = expected - actual
+            extra = actual - expected
+            assert not missing, (
+                f"{name}: missing expected frontmatter skills: {missing}. "
+                f"Expected {expected}, got {actual}."
+            )
+            assert not extra, (
+                f"{name}: unexpected extra frontmatter skills: {extra}. "
+                f"Expected {expected}, got {actual}. If the new skill is "
+                f"intentional, update EXPECTED_SKILLS to match."
             )
 
 
