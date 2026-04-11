@@ -525,7 +525,7 @@ Monitor for blocker/algedonic signals via:
 - **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
-On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
+On signal detected: Follow Signal Task Handling in [bootstrap.md](./bootstrap.md).
 
 ---
 

@@ -2,14 +2,16 @@
 Location: pact-plugin/hooks/shared/__init__.py
 Summary: Package for shared hook utilities.
 Used by: Various PACT hooks that need common Task system integration,
-         symlink management, CLAUDE.md manipulation, session resume,
-         and session context resolution.
+         symlink management, project CLAUDE.md routing block management,
+         session resume, and session context resolution.
 
 This package provides shared utilities for hooks:
 - pact_context: Session context file reader/writer (team_name, session_id, agent identity)
 - task_utils: Task system integration (used by multiple hooks)
 - symlinks: Plugin symlink management for @reference resolution
-- claude_md_manager: CLAUDE.md file creation and update
+- claude_md_manager: project CLAUDE.md scaffolding (ensure_project_memory_md),
+  PACT routing block upsert (update_pact_routing), and one-time migration
+  from the legacy ~/.claude/CLAUDE.md kernel block (remove_stale_kernel_block)
 - session_resume: Session info, snapshot restore, resumption context
 - merge_guard_common: Shared constants and cleanup for merge guard hooks
 - error_output: Standardized JSON error output for hook exception handlers

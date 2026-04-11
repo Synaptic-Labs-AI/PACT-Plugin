@@ -158,7 +158,7 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`CLAUDE.md`](../CLAUDE.md) > Temporal Horizons for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`bootstrap.md`](../commands/bootstrap.md) > Temporal Horizons for the full horizon model.
 
 ### Trigger Points
 
@@ -339,7 +339,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does [CLAUDE.md](../CLAUDE.md) favor speed or quality for this project?
+   - Does [bootstrap.md](../commands/bootstrap.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 

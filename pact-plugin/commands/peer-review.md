@@ -330,4 +330,4 @@ Monitor for blocker/algedonic signals via:
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 
-On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
+On signal detected: Follow Signal Task Handling in [bootstrap.md](./bootstrap.md).

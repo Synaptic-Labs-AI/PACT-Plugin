@@ -325,8 +325,16 @@ def main():
 
         # 2. One-time migration: strip the obsolete PACT kernel block from
         # ~/.claude/CLAUDE.md if a previous plugin version installed one.
-        # Runs unconditionally on every SessionStart (idempotent no-op when
-        # the markers are absent).
+        #
+        # Invocation policy: runs unconditionally on every SessionStart,
+        # regardless of session source (startup/resume/clear/compact). The
+        # unconditional invocation is intentional — we cannot assume the
+        # migration has already run on a given install.
+        #
+        # Behavior on absent markers: idempotent no-op. The function
+        # returns None when neither PACT_START nor PACT_END is found in
+        # the home CLAUDE.md, so re-running on an already-migrated install
+        # has zero cost.
         kernel_msg = remove_stale_kernel_block()
         if kernel_msg:
             if "failed" in kernel_msg.lower():
