@@ -1173,19 +1173,37 @@ class TestTeammateBootstrapRegisteredInPluginJson:
         )
 
 
-class TestBootstrapGuardSection:
-    """Spec Section 8 requirement: bootstrap.md must open with a Bootstrap
-    Guard section near the top of the file.
+class TestBootstrapGuardRemoved:
+    """Regression tripwire: bootstrap.md and teammate-bootstrap.md must NOT
+    contain a self-attestation "Bootstrap Guard" section.
 
-    The guard is an idempotency check — the lead re-invokes the bootstrap
-    skill after compaction to reload protocols, and the guard tells the
-    lead to short-circuit if the full orchestrator instructions are still
-    in context. Without the guard the lead re-loads ~600 lines on every
-    invocation, defeating the purpose of compaction-aware re-invocation.
+    The guard was removed in the v3.17.0 polish cycle (PR #390 remediation)
+    because it was a self-attestation check that false-positives after
+    context compaction: the orchestrator retains a summary-level recollection
+    of the guard's recognition markers but not the actual protocol content,
+    so it incorrectly short-circuits the re-load and ends up operating
+    without the orchestrator instructions actually in context.
+
+    A one-Read-per-compaction cost is cheap compared to the silent-failure
+    mode. Keep this test as a tripwire against accidental re-introduction
+    of the guard pattern in either bootstrap command file.
     """
 
-    BOOTSTRAP_PATH = (
-        Path(__file__).parent.parent / "commands" / "bootstrap.md"
+    PLUGIN_ROOT = Path(__file__).parent.parent
+    BOOTSTRAP_PATH = PLUGIN_ROOT / "commands" / "bootstrap.md"
+    TEAMMATE_BOOTSTRAP_PATH = (
+        PLUGIN_ROOT / "commands" / "teammate-bootstrap.md"
+    )
+
+    # Phrases that are characteristic of the old self-attestation guard.
+    # Matched case-insensitively to catch minor phrasing drift. Any of these
+    # appearing in either bootstrap file means the guard pattern has been
+    # re-introduced.
+    FORBIDDEN_GUARD_PHRASES = (
+        "bootstrap guard",
+        "already present in your context",
+        "already have the bootstrap loaded",
+        "short-circuit",
     )
 
     def test_bootstrap_md_exists(self):
@@ -1193,82 +1211,76 @@ class TestBootstrapGuardSection:
             f"bootstrap.md not found at {self.BOOTSTRAP_PATH}"
         )
 
-    # Spec Section 6.9: the guard must list these recognition markers
-    # verbatim so the lead can check its own context for their presence
-    # before deciding whether to re-load the bootstrap.
-    REQUIRED_RECOGNITION_MARKERS = (
-        "S5 Non-Negotiables",
-        "algedonic protocol",
-        "HALT/ALERT",
-        "communication charter",
-        "variety assessment",
-        "S4 checkpoint",
-        "workflow command",
-    )
-
-    def test_bootstrap_guard_heading_present(self):
-        """The literal `## Bootstrap Guard` heading must be in the file."""
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        assert "## Bootstrap Guard" in text, (
-            "bootstrap.md is missing the `## Bootstrap Guard` heading. "
-            "Spec Section 6.9 requires the guard for compaction-aware "
-            "re-invocation."
+    def test_teammate_bootstrap_md_exists(self):
+        assert self.TEAMMATE_BOOTSTRAP_PATH.exists(), (
+            f"teammate-bootstrap.md not found at "
+            f"{self.TEAMMATE_BOOTSTRAP_PATH}"
         )
 
-    def test_bootstrap_guard_within_first_30_lines(self):
-        """Spec Section 6.9: the guard must appear within the first 30
-        lines of the file so the lead encounters it before reading the
-        main MISSION content on re-invocation."""
+    def test_bootstrap_md_has_no_guard_heading(self):
+        """`## Bootstrap Guard` heading must not appear in bootstrap.md."""
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        assert "## Bootstrap Guard" not in text, (
+            "bootstrap.md has re-introduced the `## Bootstrap Guard` "
+            "section. This was removed in PR #390 remediation because "
+            "it false-positives after context compaction — the "
+            "orchestrator retains recollection of the guard's markers "
+            "but not the protocol content, so it incorrectly skips "
+            "the re-load. One Read-per-compaction is cheap; remove the "
+            "guard section."
+        )
+
+    def test_bootstrap_md_has_no_guard_phrases(self):
+        """None of the characteristic guard phrases may appear in bootstrap.md."""
+        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8").lower()
+        found = [p for p in self.FORBIDDEN_GUARD_PHRASES if p in text]
+        assert not found, (
+            f"bootstrap.md contains forbidden guard phrase(s): {found}. "
+            f"The self-attestation bootstrap guard was removed in PR #390 "
+            f"remediation because it false-positives after context "
+            f"compaction. Remove the guard pattern."
+        )
+
+    def test_teammate_bootstrap_md_has_no_guard_phrases(self):
+        """None of the characteristic guard phrases may appear in
+        teammate-bootstrap.md either — the guard was removed from both
+        bootstrap command files for the same reason."""
+        text = self.TEAMMATE_BOOTSTRAP_PATH.read_text(encoding="utf-8").lower()
+        found = [p for p in self.FORBIDDEN_GUARD_PHRASES if p in text]
+        assert not found, (
+            f"teammate-bootstrap.md contains forbidden guard phrase(s): "
+            f"{found}. The self-attestation bootstrap guard was removed "
+            f"in PR #390 remediation because it false-positives after "
+            f"context compaction. Remove the guard pattern."
+        )
+
+    def test_bootstrap_md_starts_at_mission(self):
+        """After the frontmatter, bootstrap.md should jump straight to the
+        `# MISSION` heading — no intervening guard section. This pins the
+        file layout against re-introduction of the guard between frontmatter
+        and MISSION.
+        """
         text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
         lines = text.splitlines()
-        head = lines[:30]
-        guard_found = any("## Bootstrap Guard" in line for line in head)
-        assert guard_found, (
-            f"bootstrap.md `## Bootstrap Guard` heading must appear within "
-            f"the first 30 lines (spec Section 6.9). First 30 lines:\n"
-            f"{chr(10).join(head)}"
-        )
-
-    def _guard_section(self, text: str) -> str:
-        """Extract the Bootstrap Guard section body: everything from the
-        `## Bootstrap Guard` heading to the next `---` horizontal rule
-        (which in this file separates the guard from the main MISSION
-        content).
-        """
-        start_marker = "## Bootstrap Guard"
-        start_idx = text.find(start_marker)
-        if start_idx == -1:
-            return ""
-        tail = text[start_idx:]
-        end_idx = tail.find("\n---\n")
-        if end_idx == -1:
-            return "\n".join(tail.splitlines()[:40])
-        return tail[:end_idx]
-
-    def test_bootstrap_guard_contains_all_recognition_markers(self):
-        """Spec Section 6.9: the guard must enumerate the specific
-        recognition markers the lead looks for to decide whether the
-        full orchestrator instructions are already loaded. Each marker
-        must appear literally inside the guard section body, not merely
-        somewhere else in the file.
-        """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        guard_body = self._guard_section(text)
-        assert guard_body, (
-            "Failed to extract the Bootstrap Guard section body from "
-            "bootstrap.md — the `## Bootstrap Guard` heading may be "
-            "missing or the section structure may have changed."
-        )
-        missing = [
-            marker
-            for marker in self.REQUIRED_RECOGNITION_MARKERS
-            if marker not in guard_body
-        ]
-        assert not missing, (
-            f"Bootstrap Guard section is missing required recognition "
-            f"markers: {missing}. Spec Section 6.9 requires the guard "
-            f"to enumerate these so the lead can check its own context "
-            f"before re-loading. Guard section body was:\n{guard_body}"
+        # Find the first heading (line starting with '#') after the
+        # frontmatter close. The frontmatter is the pair of `---` lines
+        # at the top. If frontmatter is absent, start from the top.
+        start_idx = 0
+        if lines and lines[0].strip() == "---":
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    start_idx = i + 1
+                    break
+        first_heading = None
+        for line in lines[start_idx:]:
+            if line.startswith("#"):
+                first_heading = line.strip()
+                break
+        assert first_heading == "# MISSION", (
+            f"bootstrap.md: first heading after frontmatter should be "
+            f"`# MISSION`, but got: {first_heading!r}. The bootstrap guard "
+            f"is gone — nothing should sit between the frontmatter and "
+            f"the MISSION section."
         )
 
 
