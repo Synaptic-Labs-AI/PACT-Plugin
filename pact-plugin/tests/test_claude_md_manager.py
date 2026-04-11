@@ -518,6 +518,286 @@ class TestUpdatePactRoutingInsert:
         assert second is None
 
 
+class TestUpdatePactRoutingOrphanMarkers:
+    """Cycle 2 minor item 13: orphan marker handling.
+
+    If exactly one of PACT_ROUTING_START or PACT_ROUTING_END is present
+    (e.g., user manually deleted the closing marker, or a prior write
+    crashed mid-file), the function strips the orphan marker before
+    falling through to the insert path. Without this fix, the file
+    would accumulate a new routing block on every session because the
+    update guard requires BOTH markers.
+    """
+
+    def test_orphan_start_marker_stripped_before_insert(
+        self, tmp_path, monkeypatch
+    ):
+        """Orphan PACT_ROUTING_START with no matching END → orphan stripped,
+        fresh canonical block inserted, no accumulation on subsequent runs."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        # PACT_ROUTING_START present alone (orphan), no END marker
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## PACT Routing\n\nstale orphan content with no closing marker\n"
+            "\n"
+            "## Working Memory\n"
+            "user notes\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        # First call: insert path (after orphan strip) → file gets canonical block
+        assert result == "PACT routing block inserted into project CLAUDE.md"
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # The orphan START marker line is gone (stripped before insertion)
+        # and the canonical routing block is now present (with both markers)
+        assert new_content.count(
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+        ) == 1, (
+            "Should have exactly 1 PACT_ROUTING_START marker after fix "
+            "(the new canonical one). Orphan was not stripped."
+        )
+        assert new_content.count("<!-- PACT_ROUTING_END -->") == 1
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        # User content preserved
+        assert "## Working Memory" in new_content
+        assert "user notes" in new_content
+        # Orphan content body was inside the orphan marker block — it remains
+        # because orphan stripping only removes the marker line itself, not
+        # the surrounding text. This is intentional — preserves user data.
+
+        # Second call: idempotent no-op (markers now well-formed)
+        second = update_pact_routing()
+        assert second is None, (
+            "Second call should be a no-op. If this fails, the orphan-strip "
+            "+ insert path is not converging on canonical state."
+        )
+
+    def test_orphan_end_marker_stripped_before_insert(
+        self, tmp_path, monkeypatch
+    ):
+        """Orphan PACT_ROUTING_END with no matching START → same handling."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        # Only END marker present, no START
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "stale content with stray closing marker\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "\n"
+            "## Working Memory\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        assert result == "PACT routing block inserted into project CLAUDE.md"
+        new_content = legacy.read_text(encoding="utf-8")
+        assert new_content.count("<!-- PACT_ROUTING_END -->") == 1
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+
+        # Subsequent call is a no-op
+        assert update_pact_routing() is None
+
+    def test_no_accumulation_on_repeated_calls_with_orphan(
+        self, tmp_path, monkeypatch
+    ):
+        """The fix's purpose: subsequent sessions with the orphan-stripped
+        file must NOT accumulate additional routing blocks."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        legacy.write_text(
+            "# Project Memory\n\n<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\norphan body\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        # First call: orphan strip + insert
+        update_pact_routing()
+        # Second call: idempotent no-op
+        update_pact_routing()
+        # Third call: idempotent no-op
+        update_pact_routing()
+
+        final = legacy.read_text(encoding="utf-8")
+        # Exactly one of each marker — no accumulation
+        assert final.count(
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+        ) == 1
+        assert final.count("<!-- PACT_ROUTING_END -->") == 1
+
+
+class TestSymlinkRefusal:
+    """Cycle 2 minor item 14: SECURITY hardening — refuse to operate on
+    symlinks. Both remove_stale_kernel_block and update_pact_routing must
+    return None and emit a stderr warning if their target is a symlink,
+    rather than following the link and writing to its target.
+
+    Tests use os.symlink to create real symlinks pointing at unrelated
+    files in tmp_path. We then verify the function returns None, the
+    symlink target file is unchanged, and stderr contains a warning
+    referencing the refusal."""
+
+    def test_remove_stale_kernel_block_refuses_symlink(
+        self, mock_home, tmp_path, capsys
+    ):
+        """If ~/.claude/CLAUDE.md is a symlink, remove_stale_kernel_block
+        must return None and not touch the symlink target."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        # Create a regular file as the symlink target
+        symlink_target = tmp_path / "external_target.md"
+        symlink_target_content = (
+            "# External target\n"
+            "<!-- PACT_START: Managed by pact-plugin - do not edit -->\n"
+            "fake kernel content that should NOT be touched\n"
+            "<!-- PACT_END -->\n"
+            "more external content\n"
+        )
+        symlink_target.write_text(symlink_target_content, encoding="utf-8")
+
+        # Replace ~/.claude/CLAUDE.md with a symlink to the external target
+        managed_path = mock_home / ".claude" / "CLAUDE.md"
+        if managed_path.exists() or managed_path.is_symlink():
+            managed_path.unlink()
+        os.symlink(str(symlink_target), str(managed_path))
+        assert managed_path.is_symlink()
+
+        result = remove_stale_kernel_block()
+
+        # Function returns None
+        assert result is None
+        # Symlink target file is byte-identical (untouched)
+        assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
+        # Symlink itself is still a symlink
+        assert managed_path.is_symlink()
+        # stderr contains the refusal message
+        captured = capsys.readouterr()
+        assert "symlink" in captured.err.lower()
+        assert "refusing" in captured.err.lower()
+
+    def test_update_pact_routing_refuses_symlink(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """If the project CLAUDE.md is a symlink, update_pact_routing must
+        return None and not touch the symlink target."""
+        from shared.claude_md_manager import update_pact_routing
+
+        # Create a regular file as the symlink target
+        symlink_target = tmp_path / "external_claude.md"
+        symlink_target_content = (
+            "# External target\n"
+            "user content that should NOT be touched\n"
+        )
+        symlink_target.write_text(symlink_target_content, encoding="utf-8")
+
+        # Project CLAUDE.md is a symlink to the external target
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        managed_path = project_dir / "CLAUDE.md"
+        os.symlink(str(symlink_target), str(managed_path))
+        assert managed_path.is_symlink()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = update_pact_routing()
+
+        # Function returns None
+        assert result is None
+        # Symlink target file is byte-identical (untouched)
+        assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
+        # Symlink itself is still a symlink
+        assert managed_path.is_symlink()
+        # stderr contains the refusal message
+        captured = capsys.readouterr()
+        assert "symlink" in captured.err.lower()
+        assert "refusing" in captured.err.lower()
+
+
+class TestRemoveStaleKernelBlockMalformedFeedback:
+    """Cycle 2 minor item 10: malformed-marker silent no-op feedback.
+
+    When ~/.claude/CLAUDE.md contains an orphan marker (one of
+    PACT_START/PACT_END but not the other, or both with END before START),
+    remove_stale_kernel_block previously returned None silently. Now it
+    returns None AND emits a stderr warning explaining what was wrong
+    and what the user should do."""
+
+    def test_orphan_start_marker_emits_stderr_warning(
+        self, mock_home, capsys
+    ):
+        """Only PACT_START present → stderr warning mentions the orphan."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "before\n<!-- PACT_START: Managed by pact-plugin -->\nbody\n",
+            encoding="utf-8",
+        )
+
+        result = remove_stale_kernel_block()
+
+        assert result is None
+        captured = capsys.readouterr()
+        assert "PACT_START" in captured.err
+        assert "PACT_END" in captured.err
+        assert "skipped" in captured.err.lower() or "no matching" in captured.err.lower()
+
+    def test_orphan_end_marker_emits_stderr_warning(
+        self, mock_home, capsys
+    ):
+        """Only PACT_END present → stderr warning mentions the orphan."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "before\n<!-- PACT_END -->\nstray\n",
+            encoding="utf-8",
+        )
+
+        result = remove_stale_kernel_block()
+
+        assert result is None
+        captured = capsys.readouterr()
+        assert "PACT_END" in captured.err
+        assert "PACT_START" in captured.err
+
+    def test_well_formed_block_does_not_emit_warning(
+        self, mock_home, capsys
+    ):
+        """Normal case (well-formed block) → no stderr noise."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "before\n"
+            "<!-- PACT_START: Managed by pact-plugin - do not edit -->\n"
+            "kernel body\n"
+            "<!-- PACT_END -->\n"
+            "after\n",
+            encoding="utf-8",
+        )
+
+        result = remove_stale_kernel_block()
+
+        assert result == "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
+        captured = capsys.readouterr()
+        # No warning for the normal case
+        assert "skipped" not in captured.err.lower()
+        assert "refusing" not in captured.err.lower()
+
+
 class TestUpdatePactRoutingOSError:
     """OSError on read or write paths → graceful failure, status string returned.
 
