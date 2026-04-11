@@ -784,7 +784,16 @@ Monitor for blocker/algedonic signals via:
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
-On signal detected: Follow Signal Task Handling in [bootstrap.md](./bootstrap.md).
+On signal detected, handle via the Signal Task Handling procedure:
+
+When an agent reports a blocker or algedonic signal via `SendMessage`:
+1. Create a signal Task (blocker or algedonic type)
+2. Block the agent's task via `addBlockedBy`
+3. For algedonic signals, amplify scope:
+   - ALERT → block current phase task
+   - HALT → block feature task (stops all work)
+4. Present to user and await resolution
+5. On resolution: mark signal task `completed` (unblocks downstream)
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 

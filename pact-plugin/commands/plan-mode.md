@@ -534,7 +534,16 @@ Monitor for blocker/algedonic signals via:
 - **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
-On signal detected: Follow Signal Task Handling in [bootstrap.md](./bootstrap.md).
+On signal detected, handle via the Signal Task Handling procedure:
+
+When an agent reports a blocker or algedonic signal via `SendMessage`:
+1. Create a signal Task (blocker or algedonic type)
+2. Block the agent's task via `addBlockedBy`
+3. For algedonic signals, amplify scope:
+   - ALERT → block current phase task
+   - HALT → block feature task (stops all work)
+4. Present to user and await resolution
+5. On resolution: mark signal task `completed` (unblocks downstream)
 
 ---
 
