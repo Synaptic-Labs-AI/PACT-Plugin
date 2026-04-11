@@ -20,14 +20,87 @@ The resolve_project_claude_md_path() helper picks whichever exists, with
 default path so creators land at the preferred location.
 """
 
+import fcntl  # Unix-only; PACT supports macOS/Linux. No Windows compat shim.
 import os
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
 _DOT_CLAUDE_RELATIVE = Path(".claude") / "CLAUDE.md"
 _LEGACY_RELATIVE = Path("CLAUDE.md")
+
+# Concurrency guard (#366 F1): remove_stale_kernel_block and update_pact_routing
+# both perform read-mutate-write on managed CLAUDE.md files. Without a lock,
+# two concurrent session_init hooks (e.g., resuming session A while starting
+# session B on the same project) can interleave: both processes read the same
+# starting content, both compute mutations, both write — last writer wins.
+# A sidecar lock (`.{filename}.lock` adjacent to the target) serializes the
+# critical sections. Sidecar is chosen over direct target-file locking because:
+#   1. The target file may be recreated (rename/delete) during the write; a
+#      sidecar lock file is independent of the target's inode lifetime.
+#   2. Locking the target itself would interleave with its own read/write.
+#   3. Sidecar is standard UNIX practice for cross-process coordination.
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL = 0.1
+
+
+@contextmanager
+def file_lock(target_file: Path):
+    """Acquire an exclusive sidecar file lock for a target CLAUDE.md path.
+
+    Creates (or opens) `{target_file.parent}/.{target_file.name}.lock` and
+    takes an ``fcntl`` exclusive advisory lock on its file descriptor.
+    Polls with non-blocking acquire + sleep so a stuck holder cannot hang
+    session_init forever: raises ``TimeoutError`` after
+    ``_LOCK_TIMEOUT_SECONDS``.
+
+    The lock file is intentionally NOT cleaned up on exit. Stale lock files
+    are cheap (an empty byte-0 file per managed target), and removing the
+    sidecar inside the lock window is a classic race: another waiter may
+    have already opened the same path and would be locking a now-orphaned
+    inode. Leaving the file in place is correct and safe.
+
+    Args:
+        target_file: The managed CLAUDE.md path whose read-mutate-write
+            section must be serialized. Must have an existing parent
+            directory (caller ensures this); this function does not
+            create parents for the target, only for the sidecar lock.
+
+    Raises:
+        TimeoutError: Lock not acquired within the timeout window. Caller
+            should treat this as a transient failure and return a
+            fail-open status string so session_init can surface it.
+    """
+    lock_path = target_file.parent / f".{target_file.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # 0o600: the lock file is adjacent to user-private CLAUDE.md content;
+    # match the same permissions to avoid leaving a world-readable sidecar.
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+    try:
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Failed to acquire lock on {lock_path} within "
+                        f"{_LOCK_TIMEOUT_SECONDS}s"
+                    )
+                time.sleep(_LOCK_POLL_INTERVAL)
+        yield
+    finally:
+        # Release before close. flock is released automatically on fd close
+        # by the kernel, but an explicit LOCK_UN ensures immediate release
+        # even if close is delayed (e.g., by subsequent finalizer work).
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 _ROUTING_START_MARKER = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
 _ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
@@ -169,66 +242,77 @@ def remove_stale_kernel_block() -> str | None:
             "if you want the migration to run."
         )
 
+    # Concurrency guard (#366 F1): serialize read-mutate-write so two
+    # concurrent session_init hooks on the same home file cannot clobber
+    # each other. Fail-open on timeout — next session start will retry.
     try:
-        content = target_file.read_text(encoding="utf-8")
-    except OSError:
-        return None
+        with file_lock(target_file):
+            try:
+                content = target_file.read_text(encoding="utf-8")
+            except OSError:
+                return None
 
-    START_MARKER = "<!-- PACT_START:"
-    END_MARKER = "<!-- PACT_END -->"
+            START_MARKER = "<!-- PACT_START:"
+            END_MARKER = "<!-- PACT_END -->"
 
-    has_start = START_MARKER in content
-    has_end = END_MARKER in content
+            has_start = START_MARKER in content
+            has_end = END_MARKER in content
 
-    if not has_start and not has_end:
-        return None  # Normal idempotent no-op for already-migrated installs
+            if not has_start and not has_end:
+                return None  # Normal idempotent no-op for already-migrated installs
 
-    if has_start != has_end:
-        # Only one of the two markers is present. Defensive no-op to avoid
-        # data loss, and return a status string so session_init.py surfaces
-        # the warning via systemMessage. This case can occur if a prior
-        # plugin write crashed mid-file or the user manually deleted one
-        # marker.
-        which = "PACT_START" if has_start else "PACT_END"
-        missing = "PACT_END" if has_start else "PACT_START"
+            if has_start != has_end:
+                # Only one of the two markers is present. Defensive no-op to avoid
+                # data loss, and return a status string so session_init.py surfaces
+                # the warning via systemMessage. This case can occur if a prior
+                # plugin write crashed mid-file or the user manually deleted one
+                # marker.
+                which = "PACT_START" if has_start else "PACT_END"
+                missing = "PACT_END" if has_start else "PACT_START"
+                return (
+                    f"Migration skipped: ~/.claude/CLAUDE.md contains {which} but "
+                    f"no matching {missing}. To avoid data loss, inspect the file "
+                    f"and either remove the orphan {which} marker or restore the "
+                    f"matching {missing} marker."
+                )
+
+            pre_marker, rest = content.split(START_MARKER, 1)
+            if END_MARKER not in rest:
+                # END marker exists in content but appears textually before START.
+                # Same defensive handling.
+                return (
+                    "Migration skipped: ~/.claude/CLAUDE.md contains both PACT_START "
+                    "and PACT_END markers but PACT_END appears before PACT_START. "
+                    "Inspect the file and reorder or remove the orphan markers."
+                )
+
+            _, post_marker = rest.split(END_MARKER, 1)
+
+            # Preserve one blank line at the removal boundary so the user's
+            # spacing around the obsolete block survives the strip.
+            pre_clean = pre_marker.rstrip("\r\n")
+            post_clean = post_marker.lstrip("\r\n")
+            if pre_clean and post_clean:
+                new_content = pre_clean + "\n\n" + post_clean
+            elif pre_clean:
+                new_content = pre_clean + "\n"
+            elif post_clean:
+                new_content = post_clean
+            else:
+                new_content = ""
+
+            try:
+                target_file.write_text(new_content, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
+                return "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
+            except OSError as e:
+                return f"Failed to remove stale kernel block: {str(e)[:50]}"
+    except TimeoutError:
         return (
-            f"Migration skipped: ~/.claude/CLAUDE.md contains {which} but "
-            f"no matching {missing}. To avoid data loss, inspect the file "
-            f"and either remove the orphan {which} marker or restore the "
-            f"matching {missing} marker."
+            "Failed to acquire lock on ~/.claude/CLAUDE.md within 5s "
+            "(another session_init hook may be running concurrently). "
+            "Kernel-block migration skipped; will retry on next session start."
         )
-
-    pre_marker, rest = content.split(START_MARKER, 1)
-    if END_MARKER not in rest:
-        # END marker exists in content but appears textually before START.
-        # Same defensive handling.
-        return (
-            "Migration skipped: ~/.claude/CLAUDE.md contains both PACT_START "
-            "and PACT_END markers but PACT_END appears before PACT_START. "
-            "Inspect the file and reorder or remove the orphan markers."
-        )
-
-    _, post_marker = rest.split(END_MARKER, 1)
-
-    # Preserve one blank line at the removal boundary so the user's
-    # spacing around the obsolete block survives the strip.
-    pre_clean = pre_marker.rstrip("\r\n")
-    post_clean = post_marker.lstrip("\r\n")
-    if pre_clean and post_clean:
-        new_content = pre_clean + "\n\n" + post_clean
-    elif pre_clean:
-        new_content = pre_clean + "\n"
-    elif post_clean:
-        new_content = post_clean
-    else:
-        new_content = ""
-
-    try:
-        target_file.write_text(new_content, encoding="utf-8")
-        os.chmod(str(target_file), 0o600)
-        return "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
-    except OSError as e:
-        return f"Failed to remove stale kernel block: {str(e)[:50]}"
 
 
 def update_pact_routing() -> str | None:
@@ -282,110 +366,123 @@ def update_pact_routing() -> str | None:
             f"want the routing block to be managed."
         )
 
+    # Concurrency guard (#366 F1): serialize read-mutate-write so two
+    # concurrent session_init hooks on the same project CLAUDE.md cannot
+    # interleave with each other (or with update_session_info's write) and
+    # clobber the SESSION_START block. Fail-open on timeout — next session
+    # start will retry.
     try:
-        content = target_file.read_text(encoding="utf-8")
-    except OSError:
-        return None
+        with file_lock(target_file):
+            try:
+                content = target_file.read_text(encoding="utf-8")
+            except OSError:
+                return None
 
-    stripped = _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
-    stale_line_removed = stripped != content
-    content = stripped
+            stripped = _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
+            stale_line_removed = stripped != content
+            content = stripped
 
-    # Case 1: markers present — replace content between them
-    if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
-        pattern = re.compile(
-            re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
-            re.DOTALL,
-        )
-        new_content = pattern.sub(_PACT_ROUTING_BLOCK, content)
-
-        if new_content == content and not stale_line_removed:
-            return None  # Already canonical and no stale line to strip
-
-        try:
-            target_file.write_text(new_content, encoding="utf-8")
-            os.chmod(str(target_file), 0o600)
-            if new_content == content:
-                return (
-                    "Removed stale orchestrator-loader line from project "
-                    "CLAUDE.md (routing block already canonical)"
+            # Case 1: markers present — replace content between them
+            if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
+                pattern = re.compile(
+                    re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
+                    re.DOTALL,
                 )
-            if stale_line_removed:
-                return (
-                    "PACT routing block updated in project CLAUDE.md "
-                    "(stripped stale orchestrator-loader line)"
-                )
-            return "PACT routing block updated in project CLAUDE.md"
-        except OSError as e:
-            return f"Failed to update PACT routing: {str(e)[:50]}"
+                new_content = pattern.sub(_PACT_ROUTING_BLOCK, content)
 
-    # Orphan marker handling: if exactly one of the two markers is present
-    # (the other was manually deleted, or a prior write crashed mid-file),
-    # strip the orphan marker before falling through to the insert path.
-    # Without this, the insert path blindly prepends a new routing block
-    # on every session because the update guard requires BOTH markers to
-    # be present — leading to file accumulation over N sessions.
-    has_start = _ROUTING_START_MARKER in content
-    has_end = _ROUTING_END_MARKER in content
-    orphan_stripped = False
-    if has_start != has_end:
-        # Strip whichever orphan marker is present. The text on the same
-        # line as the marker is also stripped if the marker is on its
-        # own line — otherwise just remove the marker substring.
-        orphan = _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
-        content_lines = content.splitlines(keepends=True)
-        cleaned_lines = []
-        for ln in content_lines:
-            if orphan in ln and ln.strip() == orphan:
-                # Whole-line marker — drop the line entirely
-                continue
-            elif orphan in ln:
-                # Inline marker — strip just the substring
-                cleaned_lines.append(ln.replace(orphan, ""))
-            else:
-                cleaned_lines.append(ln)
-        content = "".join(cleaned_lines)
-        orphan_stripped = True
+                if new_content == content and not stale_line_removed:
+                    return None  # Already canonical and no stale line to strip
 
-    # Case 2: markers absent — insert near the top of the file below the title
-    lines = content.splitlines(keepends=True)
-    insert_idx = 0
-    for i, line in enumerate(lines):
-        if line.startswith("# "):
-            insert_idx = i + 1
-            # Skip any blank lines or short description lines immediately
-            # after the title before inserting.
-            for j in range(i + 1, min(i + 6, len(lines))):
-                if lines[j].startswith("##") or lines[j].startswith("<!--"):
-                    insert_idx = j
+                try:
+                    target_file.write_text(new_content, encoding="utf-8")
+                    os.chmod(str(target_file), 0o600)
+                    if new_content == content:
+                        return (
+                            "Removed stale orchestrator-loader line from project "
+                            "CLAUDE.md (routing block already canonical)"
+                        )
+                    if stale_line_removed:
+                        return (
+                            "PACT routing block updated in project CLAUDE.md "
+                            "(stripped stale orchestrator-loader line)"
+                        )
+                    return "PACT routing block updated in project CLAUDE.md"
+                except OSError as e:
+                    return f"Failed to update PACT routing: {str(e)[:50]}"
+
+            # Orphan marker handling: if exactly one of the two markers is present
+            # (the other was manually deleted, or a prior write crashed mid-file),
+            # strip the orphan marker before falling through to the insert path.
+            # Without this, the insert path blindly prepends a new routing block
+            # on every session because the update guard requires BOTH markers to
+            # be present — leading to file accumulation over N sessions.
+            has_start = _ROUTING_START_MARKER in content
+            has_end = _ROUTING_END_MARKER in content
+            orphan_stripped = False
+            if has_start != has_end:
+                # Strip whichever orphan marker is present. The text on the same
+                # line as the marker is also stripped if the marker is on its
+                # own line — otherwise just remove the marker substring.
+                orphan = _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
+                content_lines = content.splitlines(keepends=True)
+                cleaned_lines = []
+                for ln in content_lines:
+                    if orphan in ln and ln.strip() == orphan:
+                        # Whole-line marker — drop the line entirely
+                        continue
+                    elif orphan in ln:
+                        # Inline marker — strip just the substring
+                        cleaned_lines.append(ln.replace(orphan, ""))
+                    else:
+                        cleaned_lines.append(ln)
+                content = "".join(cleaned_lines)
+                orphan_stripped = True
+
+            # Case 2: markers absent — insert near the top of the file below the title
+            lines = content.splitlines(keepends=True)
+            insert_idx = 0
+            for i, line in enumerate(lines):
+                if line.startswith("# "):
+                    insert_idx = i + 1
+                    # Skip any blank lines or short description lines immediately
+                    # after the title before inserting.
+                    for j in range(i + 1, min(i + 6, len(lines))):
+                        if lines[j].startswith("##") or lines[j].startswith("<!--"):
+                            insert_idx = j
+                            break
+                        insert_idx = j + 1
                     break
-                insert_idx = j + 1
-            break
 
-    new_lines = (
-        lines[:insert_idx]
-        + ["\n", _PACT_ROUTING_BLOCK + "\n", "\n"]
-        + lines[insert_idx:]
-    )
-    new_content = "".join(new_lines)
-
-    try:
-        target_file.write_text(new_content, encoding="utf-8")
-        os.chmod(str(target_file), 0o600)
-        notes = []
-        if orphan_stripped:
-            notes.append("stripped orphan marker from prior incomplete write")
-        if stale_line_removed:
-            notes.append("stripped stale orchestrator-loader line")
-        if notes:
-            return (
-                "PACT routing block inserted into project CLAUDE.md ("
-                + "; ".join(notes)
-                + ")"
+            new_lines = (
+                lines[:insert_idx]
+                + ["\n", _PACT_ROUTING_BLOCK + "\n", "\n"]
+                + lines[insert_idx:]
             )
-        return "PACT routing block inserted into project CLAUDE.md"
-    except OSError as e:
-        return f"Failed to insert PACT routing: {str(e)[:50]}"
+            new_content = "".join(new_lines)
+
+            try:
+                target_file.write_text(new_content, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
+                notes = []
+                if orphan_stripped:
+                    notes.append("stripped orphan marker from prior incomplete write")
+                if stale_line_removed:
+                    notes.append("stripped stale orchestrator-loader line")
+                if notes:
+                    return (
+                        "PACT routing block inserted into project CLAUDE.md ("
+                        + "; ".join(notes)
+                        + ")"
+                    )
+                return "PACT routing block inserted into project CLAUDE.md"
+            except OSError as e:
+                return f"Failed to insert PACT routing: {str(e)[:50]}"
+    except TimeoutError:
+        return (
+            "Failed to acquire lock on project CLAUDE.md within 5s "
+            "(another session_init hook may be running concurrently). "
+            "Routing update skipped; will retry on next session start."
+        )
 
 
 def ensure_project_memory_md() -> str | None:

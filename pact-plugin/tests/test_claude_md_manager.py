@@ -1618,3 +1618,506 @@ class TestMarkerConsistency:
                 f"for this code path — a teammate or lead reaching the "
                 f"broken emitter will not self-bootstrap."
             )
+
+
+# ---------------------------------------------------------------------------
+# #366 F1: File locking retrofit for concurrent SessionStart safety
+# ---------------------------------------------------------------------------
+# These tests cover the file_lock context manager and the concurrent-write
+# behavior of remove_stale_kernel_block() and update_pact_routing().
+#
+# Why this matters: both functions perform read-mutate-write on managed
+# CLAUDE.md files. Without a lock, two concurrent session_init hooks
+# (e.g., user resumes session A in one window + starts session B in another
+# on the same project) can interleave, and the last writer wins. Before
+# this retrofit, update_session_info's SESSION_START block could be clobbered
+# by a concurrent update_pact_routing write. Sidecar fcntl lock serializes
+# the critical section.
+
+
+class TestFileLockContextManager:
+    """file_lock(target_file) acquires/releases an fcntl sidecar lock."""
+
+    def test_sequential_acquisitions_work(self, tmp_path):
+        """Acquire, release, re-acquire must succeed without blocking."""
+        from shared.claude_md_manager import file_lock
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("content", encoding="utf-8")
+
+        with file_lock(target):
+            pass  # Exited cleanly; lock released
+
+        with file_lock(target):
+            pass  # Second acquisition must not block or raise
+
+        # Sidecar exists and is not cleaned up (by design)
+        sidecar = tmp_path / ".CLAUDE.md.lock"
+        assert sidecar.exists()
+
+    def test_sidecar_path_shape(self, tmp_path):
+        """Sidecar lock must be `{parent}/.{name}.lock` adjacent to target."""
+        from shared.claude_md_manager import file_lock
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("x", encoding="utf-8")
+
+        with file_lock(target):
+            sidecar = tmp_path / ".CLAUDE.md.lock"
+            assert sidecar.exists()
+            # Sidecar is NOT the target itself
+            assert sidecar != target
+
+    def test_sidecar_has_secure_permissions(self, tmp_path):
+        """Sidecar lock file should be 0o600 to match CLAUDE.md permissions."""
+        import stat
+        from shared.claude_md_manager import file_lock
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("x", encoding="utf-8")
+
+        sidecar = tmp_path / ".CLAUDE.md.lock"
+        if sidecar.exists():
+            sidecar.unlink()
+
+        with file_lock(target):
+            pass
+
+        mode = stat.S_IMODE(sidecar.stat().st_mode)
+        # Allow umask to tighten but not widen the permissions
+        assert mode & 0o077 == 0, (
+            f"Sidecar lock leaks permissions to group/other: {oct(mode)}"
+        )
+
+    def test_concurrent_acquisition_blocks_then_succeeds(self, tmp_path):
+        """Thread A holds the lock; Thread B's acquire blocks until A releases."""
+        import threading
+        import time as _time
+        from shared.claude_md_manager import file_lock
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("x", encoding="utf-8")
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+        b_acquired_at: list[float] = []
+        holder_released_at: list[float] = []
+
+        def holder():
+            with file_lock(target):
+                holder_has_lock.set()
+                # Hold the lock until main signals release
+                holder_release.wait(timeout=5)
+                holder_released_at.append(_time.monotonic())
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2), "holder thread never acquired"
+
+        # Kick off the waiter in a second thread so we can release the
+        # holder while the waiter is blocked in acquire.
+        def waiter():
+            with file_lock(target):
+                b_acquired_at.append(_time.monotonic())
+
+        w = threading.Thread(target=waiter)
+        w.start()
+
+        # Give the waiter a brief moment to enter the acquire loop, then
+        # release the holder.
+        _time.sleep(0.3)
+        holder_release.set()
+
+        t.join(timeout=5)
+        w.join(timeout=5)
+        assert not t.is_alive()
+        assert not w.is_alive()
+        assert len(b_acquired_at) == 1, "waiter did not acquire after release"
+        assert len(holder_released_at) == 1
+        # Waiter's acquire must happen AFTER holder's release (ordering proof)
+        assert b_acquired_at[0] >= holder_released_at[0] - 0.05, (
+            "waiter acquired before holder released — lock ordering broken"
+        )
+
+    def test_timeout_raises_timeouterror(self, tmp_path, monkeypatch):
+        """If the lock cannot be acquired within the timeout, TimeoutError."""
+        import threading
+        from shared.claude_md_manager import file_lock
+        from shared import claude_md_manager as cmm
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("x", encoding="utf-8")
+
+        # Shrink the timeout so the test completes quickly
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 0.3)
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+
+        def holder():
+            with file_lock(target):
+                holder_has_lock.set()
+                holder_release.wait(timeout=5)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2)
+
+        # Second acquire must time out
+        with pytest.raises(TimeoutError) as exc_info:
+            with file_lock(target):
+                pass
+
+        assert "Failed to acquire lock" in str(exc_info.value)
+        assert ".CLAUDE.md.lock" in str(exc_info.value)
+
+        # Clean up the holder
+        holder_release.set()
+        t.join(timeout=5)
+
+    def test_exception_in_body_releases_lock(self, tmp_path):
+        """A raise inside `with file_lock(...)` must still release the lock."""
+        from shared.claude_md_manager import file_lock
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("x", encoding="utf-8")
+
+        class _MarkerError(Exception):
+            pass
+
+        with pytest.raises(_MarkerError):
+            with file_lock(target):
+                raise _MarkerError("boom")
+
+        # Re-acquire must succeed — if the finally clause didn't release,
+        # this would deadlock until the default 5s timeout.
+        with file_lock(target):
+            pass
+
+
+class TestRemoveStaleKernelBlockLocking:
+    """Concurrent remove_stale_kernel_block calls do not corrupt the file."""
+
+    def test_concurrent_writes_preserve_managed_block(self, mock_home):
+        """Two concurrent threads running remove_stale_kernel_block on the
+        same home CLAUDE.md must converge to a clean, valid final state.
+
+        Both threads start with the same input (markers present). With the
+        sidecar lock, the read-mutate-write is serialized: the second
+        thread sees the already-migrated content and is an idempotent
+        no-op. Final state must contain user content verbatim, with no
+        markers remaining.
+        """
+        import threading
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "User preamble\n"
+            "<!-- PACT_START: Managed by pact-plugin -->\n"
+            "stale kernel body\n"
+            "<!-- PACT_END -->\n"
+            "User trailing\n",
+            encoding="utf-8",
+        )
+
+        results: list[str | None] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                results.append(remove_stale_kernel_block())
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        assert not errors, f"Thread errors: {errors}"
+        assert len(results) == 2
+
+        # Final file must be well-formed: user content preserved, no markers
+        final = target.read_text(encoding="utf-8")
+        assert "User preamble" in final
+        assert "User trailing" in final
+        assert "PACT_START" not in final
+        assert "PACT_END" not in final
+        assert "stale kernel body" not in final
+
+        # Exactly one of the two workers did the removal work; the other
+        # saw the already-migrated content and returned None (idempotent).
+        # Order is non-deterministic, so just assert the multiset.
+        assert results.count(
+            "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
+        ) == 1
+        assert results.count(None) == 1
+
+
+class TestUpdatePactRoutingLocking:
+    """Concurrent update_pact_routing calls do not corrupt the project file."""
+
+    def test_concurrent_writes_preserve_managed_block(
+        self, tmp_path, monkeypatch
+    ):
+        """Two concurrent threads running update_pact_routing on the same
+        project CLAUDE.md must converge to a clean, valid final state.
+
+        Both threads start with a file containing the stale orchestrator
+        line and NO routing block. With the sidecar lock, the read-mutate-
+        write is serialized: exactly one thread does the insert, the
+        other sees the canonical state and is a no-op (modulo idempotent
+        re-write). Final state must contain the canonical routing block
+        exactly once and preserve all user content.
+        """
+        import threading
+        from shared.claude_md_manager import update_pact_routing
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "User-owned content line 1\n"
+            "User-owned content line 2\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        results: list[str | None] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                results.append(update_pact_routing())
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        assert not errors, f"Thread errors: {errors}"
+        assert len(results) == 2
+
+        # Final file must contain exactly ONE canonical routing block
+        final = claude_md.read_text(encoding="utf-8")
+        assert final.count(
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+        ) == 1, (
+            "Concurrent writes accumulated multiple routing blocks — lock "
+            "failed to serialize"
+        )
+        assert final.count("<!-- PACT_ROUTING_END -->") == 1
+        assert "User-owned content line 1" in final
+        assert "User-owned content line 2" in final
+        assert "# Project Memory" in final
+
+    def test_concurrent_writes_preserve_session_start_block(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: pre-fix failure mode — update_pact_routing racing
+        with a SESSION_START block write could clobber the session info.
+
+        We simulate the real session_init sequence: one thread writes a
+        SESSION_START block, another thread runs update_pact_routing.
+        With the lock in place, update_pact_routing's read sees the
+        SESSION_START block and its write preserves it. Without the
+        lock, the routing thread's stale read would drop the block
+        on write.
+        """
+        import threading
+        from shared.claude_md_manager import update_pact_routing
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "User content\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        # Kick off update_pact_routing concurrently with another thread
+        # that repeatedly writes a SESSION_START block. The lock must
+        # serialize them so the final file contains both blocks.
+        stop = threading.Event()
+        errors: list[BaseException] = []
+
+        def session_writer():
+            """Simulates update_session_info by overwriting the file with
+            a SESSION_START block plus whatever we read. This is the real
+            failure mode: it must also go through the lock, but the pre-
+            fix code did not. Here we exercise the lock on the routing
+            side — the session writer is best-effort.
+            """
+            try:
+                from shared.claude_md_manager import file_lock
+                while not stop.is_set():
+                    with file_lock(claude_md):
+                        content = claude_md.read_text(encoding="utf-8")
+                        if "<!-- SESSION_START -->" not in content:
+                            new = content.replace(
+                                "# Project Memory\n",
+                                "# Project Memory\n\n<!-- SESSION_START -->\n"
+                                "## Current Session\n"
+                                "- Team: pact-abc123\n"
+                                "<!-- SESSION_END -->\n",
+                            )
+                            claude_md.write_text(new, encoding="utf-8")
+                    # Tiny yield so the routing thread gets a chance
+                    import time as _time
+                    _time.sleep(0.01)
+            except BaseException as e:
+                errors.append(e)
+
+        def routing_worker():
+            try:
+                update_pact_routing()
+            except BaseException as e:
+                errors.append(e)
+
+        sw = threading.Thread(target=session_writer)
+        sw.start()
+        # Give session_writer a moment to establish the SESSION_START block
+        import time as _time
+        _time.sleep(0.05)
+
+        rw = threading.Thread(target=routing_worker)
+        rw.start()
+        rw.join(timeout=10)
+
+        stop.set()
+        sw.join(timeout=5)
+        assert not errors, f"Thread errors: {errors}"
+
+        final = claude_md.read_text(encoding="utf-8")
+        # Both managed blocks must be present: routing preserved the
+        # session block through its read-mutate-write cycle.
+        assert "<!-- SESSION_START -->" in final, (
+            "SESSION_START block was clobbered by concurrent "
+            "update_pact_routing — lock did not serialize the critical "
+            "section properly"
+        )
+        assert "<!-- SESSION_END -->" in final
+        assert (
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+            in final
+        )
+        assert "<!-- PACT_ROUTING_END -->" in final
+        assert "# Project Memory" in final
+        assert "User content" in final
+
+    def test_timeout_returns_fail_open_status(
+        self, tmp_path, monkeypatch
+    ):
+        """When the lock cannot be acquired, update_pact_routing returns a
+        'Failed to acquire lock ... Routing update skipped ...' status string.
+
+        The 'failed' substring is load-bearing: session_init.py's routing
+        check (`'failed' in msg.lower()`) uses it to send the message to
+        system_messages (user-visible error surface) rather than silently
+        into context_parts. A 5s lock acquisition failure is a genuine
+        concurrency problem the user should see, not a silent fallback.
+        """
+        import threading
+        from shared.claude_md_manager import update_pact_routing, file_lock
+        from shared import claude_md_manager as cmm
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n\nUser content\n", encoding="utf-8"
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 0.3)
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+
+        def holder():
+            with file_lock(claude_md):
+                holder_has_lock.set()
+                holder_release.wait(timeout=5)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2)
+
+        result = update_pact_routing()
+
+        assert result is not None
+        # MUST contain "failed" — session_init routes on
+        # `'failed' in msg.lower()` to system_messages for user visibility.
+        assert "failed" in result.lower()
+        assert "lock" in result.lower()
+        assert "routing update skipped" in result.lower()
+
+        holder_release.set()
+        t.join(timeout=5)
+
+    def test_remove_stale_kernel_block_timeout_returns_fail_open_status(
+        self, mock_home
+    ):
+        """Companion test for remove_stale_kernel_block's timeout path.
+
+        Same routing rationale as `test_timeout_returns_fail_open_status`:
+        the 'failed' substring routes the message to system_messages for
+        user visibility.
+        """
+        import threading
+        from shared.claude_md_manager import remove_stale_kernel_block, file_lock
+        from shared import claude_md_manager as cmm
+        from unittest.mock import patch
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "before\n"
+            "<!-- PACT_START: pact -->\n"
+            "kernel\n"
+            "<!-- PACT_END -->\n"
+            "after\n",
+            encoding="utf-8",
+        )
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+
+        def holder():
+            with file_lock(target):
+                holder_has_lock.set()
+                holder_release.wait(timeout=5)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2)
+
+        with patch.object(cmm, "_LOCK_TIMEOUT_SECONDS", 0.3):
+            result = remove_stale_kernel_block()
+
+        assert result is not None
+        # MUST contain "failed" — session_init routes on
+        # `'failed' in msg.lower()` to system_messages for user visibility.
+        assert "failed" in result.lower()
+        assert "lock" in result.lower()
+        assert "kernel-block migration skipped" in result.lower()
+        # File was NOT mutated (timeout is fail-open, write never happened)
+        assert "PACT_START" in target.read_text(encoding="utf-8")
+
+        holder_release.set()
+        t.join(timeout=5)

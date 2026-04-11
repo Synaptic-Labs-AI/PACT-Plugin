@@ -26,6 +26,7 @@ from .task_utils import (
 )
 from .symlinks import setup_plugin_symlinks
 from .claude_md_manager import (
+    file_lock,
     remove_stale_kernel_block,
     update_pact_routing,
     ensure_project_memory_md,
@@ -61,6 +62,7 @@ __all__ = [
     "find_active_agents",
     "find_blockers",
     "setup_plugin_symlinks",
+    "file_lock",
     "remove_stale_kernel_block",
     "update_pact_routing",
     "ensure_project_memory_md",

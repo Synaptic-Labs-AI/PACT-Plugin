@@ -544,6 +544,177 @@ class TestUpdateSessionInfoErrorPaths:
         assert "Session info failed:" in result
 
 
+class TestUpdateSessionInfoLocking:
+    """Concurrency tests for update_session_info() (#366 F1 gap closure).
+
+    update_session_info writes to the project CLAUDE.md at session_init step 5b
+    and must share a lock with update_pact_routing (step 5c) so two concurrent
+    session_init hooks on the same project cannot interleave read-mutate-write
+    and clobber each other's managed blocks.
+    """
+
+    def test_concurrent_writes_preserve_session_start_block(
+        self, tmp_path, monkeypatch
+    ):
+        """Two concurrent update_session_info calls on the same CLAUDE.md
+        must produce exactly one SESSION_START/SESSION_END block, matching
+        exactly one of the two callers' inputs. Last-writer-wins is
+        acceptable; interleaved writes that corrupt the block or duplicate
+        markers are not.
+        """
+        import threading
+        from shared.session_resume import update_session_info
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        target = project_dir / ".claude" / "CLAUDE.md"
+        target.parent.mkdir()
+        # Start with an existing file containing user content and a prior
+        # session block so both writers exercise the "markers present"
+        # replace path (Case 1 of update_session_info).
+        target.write_text(
+            "# Project Memory\n"
+            "\n"
+            "User content above the session block.\n"
+            "\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume prior-session`\n"
+            "- Team: `pact-prior`\n"
+            "- Started: 2026-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n"
+            "\n"
+            "User content below the session block.\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        barrier = threading.Barrier(2)
+        results: list[str | None] = [None, None]
+        errors: list[BaseException] = []
+
+        def run(index: int, session_id: str, team_name: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                results[index] = update_session_info(session_id, team_name)
+            except BaseException as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=run, args=(0, "sess-AAAA", "pact-AAAA"))
+        t2 = threading.Thread(target=run, args=(1, "sess-BBBB", "pact-BBBB"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not errors, f"Worker threads raised: {errors}"
+        assert not t1.is_alive()
+        assert not t2.is_alive()
+
+        # Both calls must have returned a status string (neither crashed
+        # from an exception, neither hit the 5s timeout — two threads
+        # each doing one read+write cycle finish in < 100ms).
+        assert results[0] is not None
+        assert results[1] is not None
+
+        final_content = target.read_text(encoding="utf-8")
+
+        # Exactly one SESSION_START block survives (no duplicates, no
+        # half-written interleavings).
+        assert final_content.count("<!-- SESSION_START -->") == 1, (
+            "Concurrent writes accumulated multiple SESSION_START markers "
+            "— lock failed to serialize the read-mutate-write."
+        )
+        assert final_content.count("<!-- SESSION_END -->") == 1
+
+        # The winning session ID must be one of the two callers' IDs — not
+        # the prior "prior-session" (which must have been replaced).
+        assert "prior-session" not in final_content, (
+            "Prior session block should have been replaced by the winner"
+        )
+
+        # User content outside the managed block must survive verbatim.
+        assert "User content above the session block." in final_content
+        assert "User content below the session block." in final_content
+        assert "# Project Memory" in final_content
+
+        # The winning block must be well-formed: the session ID and team
+        # must match each other (no cross-thread contamination where one
+        # thread wrote the ID and another wrote the team).
+        aaaa_won = (
+            "sess-AAAA" in final_content and "pact-AAAA" in final_content
+        )
+        bbbb_won = (
+            "sess-BBBB" in final_content and "pact-BBBB" in final_content
+        )
+        assert aaaa_won != bbbb_won, (
+            "Exactly one writer must win; got "
+            f"aaaa_won={aaaa_won}, bbbb_won={bbbb_won}"
+        )
+        if aaaa_won:
+            assert "sess-BBBB" not in final_content
+            assert "pact-BBBB" not in final_content
+        else:
+            assert "sess-AAAA" not in final_content
+            assert "pact-AAAA" not in final_content
+
+    def test_timeout_returns_fail_open_status(self, tmp_path, monkeypatch):
+        """When the lock cannot be acquired within the timeout,
+        update_session_info returns a 'Failed to acquire lock ...' status
+        string so session_init.py's `'failed' in msg.lower()` routing sends
+        it to system_messages (user-visible error surface) rather than
+        silently into context_parts. A 5s lock acquisition failure is a
+        genuine concurrency problem the user should see.
+        """
+        import threading
+        from shared.claude_md_manager import file_lock
+        from shared import claude_md_manager as cmm
+        from shared.session_resume import update_session_info
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        target = project_dir / "CLAUDE.md"
+        target.write_text(
+            "# Project Memory\n\nUser content\n", encoding="utf-8"
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 0.3)
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+
+        def holder() -> None:
+            with file_lock(target):
+                holder_has_lock.set()
+                holder_release.wait(timeout=5)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2), (
+            "Holder thread never acquired the lock"
+        )
+
+        result = update_session_info("sess-timeout", "pact-timeout")
+
+        assert result is not None
+        # MUST contain "failed" — session_init routes on
+        # `'failed' in msg.lower()` to system_messages for user visibility.
+        assert "failed" in result.lower()
+        assert "lock" in result.lower()
+        assert "session info update skipped" in result.lower()
+
+        # File was NOT mutated — the lock acquisition failed before any
+        # write happened, so the starting content is intact.
+        assert target.read_text(encoding="utf-8") == (
+            "# Project Memory\n\nUser content\n"
+        )
+
+        holder_release.set()
+        t.join(timeout=5)
+
+
 class TestCheckPausedState:
     """Tests for check_paused_state() -- journal-only path."""
 
