@@ -669,6 +669,180 @@ class TestUpdatePactRoutingOrphanMarkers:
         assert final.count("<!-- PACT_ROUTING_END -->") == 1
 
 
+class TestUpdatePactRoutingStaleOrchestratorLine:
+    """F1: strip the v3.16.2-era 'The global PACT Orchestrator is loaded
+    from ~/.claude/CLAUDE.md' line from upgraded project CLAUDE.mds.
+
+    After the #366 Phase 1 migration, the routing block supersedes the
+    stale line. Leaving it in place creates a factual contradiction for
+    users who upgrade. update_pact_routing must strip the line even when
+    the routing block is already canonical (the original short-circuit
+    return would otherwise leave the stale line in place forever)."""
+
+    STALE_LINE = "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`."
+
+    def test_strips_stale_line_when_block_already_canonical(
+        self, tmp_path, monkeypatch
+    ):
+        """Stale line + canonical routing block → file is rewritten to
+        drop the stale line; the canonical routing block is untouched."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            f"{self.STALE_LINE}\n"
+            "\n"
+            f"{CANONICAL_PACT_ROUTING_BLOCK}\n"
+            "\n"
+            "## Working Memory\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        assert result is not None
+        assert "stale" in result.lower() or "orchestrator-loader" in result.lower()
+        new_content = legacy.read_text(encoding="utf-8")
+        assert self.STALE_LINE not in new_content
+        # Canonical routing block survives intact
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        assert "# Project Memory" in new_content
+        assert "## Working Memory" in new_content
+
+    def test_strips_stale_line_when_inserting_routing_block(
+        self, tmp_path, monkeypatch
+    ):
+        """Stale line + no routing block → stale line is removed AND the
+        canonical routing block is inserted in the same pass. The return
+        string mentions the stale-line strip as a suffix."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "This file contains project-specific memory managed by the PACT framework.\n"
+            f"{self.STALE_LINE}\n"
+            "\n"
+            "## Working Memory\n"
+            "user notes\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        assert result is not None
+        assert "inserted" in result
+        assert "stale" in result.lower() or "orchestrator-loader" in result.lower()
+        new_content = legacy.read_text(encoding="utf-8")
+        assert self.STALE_LINE not in new_content
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        # Unrelated user content preserved
+        assert "This file contains project-specific memory" in new_content
+        assert "## Working Memory" in new_content
+        assert "user notes" in new_content
+
+    def test_no_write_when_no_stale_line_and_block_canonical(
+        self, tmp_path, monkeypatch
+    ):
+        """Fresh project CLAUDE.md (no stale line, canonical block) →
+        idempotent no-op: returns None, file is byte-identical after."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            f"{CANONICAL_PACT_ROUTING_BLOCK}\n"
+            "\n"
+            "## Working Memory\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        mtime_before = legacy.stat().st_mtime_ns
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        assert result is None
+        assert legacy.read_text(encoding="utf-8") == original
+        assert legacy.stat().st_mtime_ns == mtime_before
+
+
+class TestRemoveStaleKernelBlockBlankLinePreservation:
+    """F3: preserve one blank line at the removal boundary when the
+    obsolete kernel block is stripped. The pre-fix implementation
+    collapsed intentional blank lines around the removed block, trampling
+    user spacing."""
+
+    def test_preserves_single_blank_line_between_pre_and_post(self, mock_home):
+        """"Line1\\n\\n<block>\\n\\nLine2\\n" → "Line1\\n\\nLine2\\n" —
+        one blank line survives the strip."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "Line1\n"
+            "\n"
+            "<!-- PACT_START: Managed by pact-plugin -->\n"
+            "kernel body\n"
+            "<!-- PACT_END -->\n"
+            "\n"
+            "Line2\n",
+            encoding="utf-8",
+        )
+
+        remove_stale_kernel_block()
+
+        new_content = target.read_text(encoding="utf-8")
+        assert new_content == "Line1\n\nLine2\n"
+
+    def test_block_at_top_of_file_leaves_clean_post_content(self, mock_home):
+        """PACT block at the top of the file → post content starts fresh
+        with no leading blank lines."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "<!-- PACT_START: Managed by pact-plugin -->\n"
+            "kernel body\n"
+            "<!-- PACT_END -->\n"
+            "\n"
+            "User content starts here\n"
+            "more content\n",
+            encoding="utf-8",
+        )
+
+        remove_stale_kernel_block()
+
+        new_content = target.read_text(encoding="utf-8")
+        assert new_content == "User content starts here\nmore content\n"
+
+    def test_block_at_end_of_file_leaves_trailing_newline_on_pre(self, mock_home):
+        """PACT block at the end of the file → file ends with pre_clean + '\\n',
+        no leftover whitespace or markers."""
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "User content line 1\n"
+            "User content line 2\n"
+            "\n"
+            "<!-- PACT_START: Managed by pact-plugin -->\n"
+            "kernel body\n"
+            "<!-- PACT_END -->\n",
+            encoding="utf-8",
+        )
+
+        remove_stale_kernel_block()
+
+        new_content = target.read_text(encoding="utf-8")
+        assert new_content == "User content line 1\nUser content line 2\n"
+
+
 class TestSymlinkRefusal:
     """SECURITY hardening — refuse to operate on symlinks. Both
     remove_stale_kernel_block and update_pact_routing return a status

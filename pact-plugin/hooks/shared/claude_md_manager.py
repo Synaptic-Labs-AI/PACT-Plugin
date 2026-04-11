@@ -32,6 +32,15 @@ _LEGACY_RELATIVE = Path("CLAUDE.md")
 _ROUTING_START_MARKER = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
 _ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
 
+# Stale line from the v3.16.2 project CLAUDE.md template. After the PR #390
+# migration the routing block supersedes it, but the stale line lingers in
+# upgraded files and contradicts the routing block. Strip it on every
+# update_pact_routing() pass. Allows optional trailing period / whitespace.
+_STALE_ORCHESTRATOR_LINE_RE = re.compile(
+    r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$\n?",
+    re.MULTILINE,
+)
+
 _PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
 ## PACT Routing
 
@@ -201,8 +210,18 @@ def remove_stale_kernel_block() -> str | None:
 
     _, post_marker = rest.split(END_MARKER, 1)
 
-    # Normalize whitespace around the removal point
-    new_content = pre_marker.rstrip() + "\n" + post_marker.lstrip()
+    # Preserve one blank line at the removal boundary so the user's
+    # spacing around the obsolete block survives the strip.
+    pre_clean = pre_marker.rstrip("\r\n")
+    post_clean = post_marker.lstrip("\r\n")
+    if pre_clean and post_clean:
+        new_content = pre_clean + "\n\n" + post_clean
+    elif pre_clean:
+        new_content = pre_clean + "\n"
+    elif post_clean:
+        new_content = post_clean
+    else:
+        new_content = ""
 
     try:
         target_file.write_text(new_content, encoding="utf-8")
@@ -268,6 +287,10 @@ def update_pact_routing() -> str | None:
     except OSError:
         return None
 
+    stripped = _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
+    stale_line_removed = stripped != content
+    content = stripped
+
     # Case 1: markers present — replace content between them
     if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
         pattern = re.compile(
@@ -276,12 +299,22 @@ def update_pact_routing() -> str | None:
         )
         new_content = pattern.sub(_PACT_ROUTING_BLOCK, content)
 
-        if new_content == content:
-            return None  # Already canonical
+        if new_content == content and not stale_line_removed:
+            return None  # Already canonical and no stale line to strip
 
         try:
             target_file.write_text(new_content, encoding="utf-8")
             os.chmod(str(target_file), 0o600)
+            if new_content == content:
+                return (
+                    "Removed stale orchestrator-loader line from project "
+                    "CLAUDE.md (routing block already canonical)"
+                )
+            if stale_line_removed:
+                return (
+                    "PACT routing block updated in project CLAUDE.md "
+                    "(stripped stale orchestrator-loader line)"
+                )
             return "PACT routing block updated in project CLAUDE.md"
         except OSError as e:
             return f"Failed to update PACT routing: {str(e)[:50]}"
@@ -339,10 +372,16 @@ def update_pact_routing() -> str | None:
     try:
         target_file.write_text(new_content, encoding="utf-8")
         os.chmod(str(target_file), 0o600)
+        notes = []
         if orphan_stripped:
+            notes.append("stripped orphan marker from prior incomplete write")
+        if stale_line_removed:
+            notes.append("stripped stale orchestrator-loader line")
+        if notes:
             return (
-                "PACT routing block inserted into project CLAUDE.md "
-                "(stripped orphan marker from prior incomplete write)"
+                "PACT routing block inserted into project CLAUDE.md ("
+                + "; ".join(notes)
+                + ")"
             )
         return "PACT routing block inserted into project CLAUDE.md"
     except OSError as e:
