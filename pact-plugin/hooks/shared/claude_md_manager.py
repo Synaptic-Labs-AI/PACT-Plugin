@@ -182,15 +182,29 @@ def ensure_dot_claude_parent(path: Path) -> None:
     """
     Ensure the parent directory of a `.claude/CLAUDE.md` path exists.
 
-    No-op when the parent already exists. Creates the directory with mode
-    0o700 to match the rest of the PACT plugin's secure-by-default file
-    permissions. Safe to call for any CLAUDE.md path -- if the parent is
-    not a `.claude` dir, this is just an existence check.
+    No-op when the parent already exists as a directory. Creates the
+    directory with mode 0o700 to match the rest of the PACT plugin's
+    secure-by-default file permissions. Safe to call for any CLAUDE.md
+    path -- if the parent is not a `.claude` dir, this is just an
+    existence check.
+
+    Raises early with a clear message when the parent path exists but is
+    a regular file (e.g., a local attacker deliberately blocking mkdir
+    by creating a file where `.claude/` should be). Without this guard
+    the code path would fall through to the subsequent write_text call
+    and surface a less-clear late-stage OSError.
 
     Args:
         path: The target CLAUDE.md path (e.g. /proj/.claude/CLAUDE.md).
+
+    Raises:
+        OSError: When `path.parent` exists but is not a directory. The
+            caller (ensure_project_memory_md) catches OSError and
+            returns a user-facing failure status string.
     """
     parent = path.parent
+    if parent.exists() and not parent.is_dir():
+        raise OSError(f"{parent} exists but is not a directory")
     if not parent.exists():
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -233,13 +247,12 @@ def remove_stale_kernel_block() -> str | None:
 
     # Symlink guard: is_symlink uses lstat under the hood which does NOT
     # follow the link, so this is safe even if the link target is itself
-    # a malicious file.
+    # a malicious file. The status string is deliberately opaque — it
+    # identifies WHAT was skipped without revealing the internal check
+    # that triggered the skip to a local attacker inspecting the output.
     if target_file.is_symlink():
         return (
-            "Migration skipped: ~/.claude/CLAUDE.md is a symlink. "
-            "Refusing to operate on symlinked managed paths to prevent "
-            "redirected writes. Replace the symlink with a regular file "
-            "if you want the migration to run."
+            "Migration skipped: ~/.claude/CLAUDE.md path precondition not met."
         )
 
     # Concurrency guard (#366 F1): serialize read-mutate-write so two
@@ -357,13 +370,11 @@ def update_pact_routing() -> str | None:
     # Symlink guard: same defensive guard as remove_stale_kernel_block.
     # is_symlink uses lstat so it does not follow the link. Return the
     # warning as a status string so session_init.py surfaces it via
-    # systemMessage (hook stderr is not shown to users).
+    # systemMessage (hook stderr is not shown to users). The status
+    # string is deliberately opaque — see remove_stale_kernel_block.
     if target_file.is_symlink():
         return (
-            f"Routing skipped: {target_file} is a symlink. Refusing to "
-            f"operate on symlinked managed paths to prevent redirected "
-            f"writes. Replace the symlink with a regular file if you "
-            f"want the routing block to be managed."
+            f"Routing skipped: {target_file} path precondition not met."
         )
 
     # Concurrency guard (#366 F1): serialize read-mutate-write so two
@@ -416,17 +427,42 @@ def update_pact_routing() -> str | None:
             # Without this, the insert path blindly prepends a new routing block
             # on every session because the update guard requires BOTH markers to
             # be present — leading to file accumulation over N sessions.
+            #
+            # SESSION_START isolation (#366 item 5): the strip is scoped to lines
+            # OUTSIDE any <!-- SESSION_START --> ... <!-- SESSION_END --> region.
+            # Without this scope, a SESSION_START block whose content happened to
+            # contain a line matching the routing marker (pathological but
+            # possible — e.g., user pasted routing-block docs into session
+            # metadata) would be silently corrupted: the orphan strip would drop
+            # the line, then the insert path would add a fresh routing block at
+            # the top while the SESSION_START body was left missing a line.
             has_start = _ROUTING_START_MARKER in content
             has_end = _ROUTING_END_MARKER in content
             orphan_stripped = False
             if has_start != has_end:
                 # Strip whichever orphan marker is present. The text on the same
                 # line as the marker is also stripped if the marker is on its
-                # own line — otherwise just remove the marker substring.
+                # own line — otherwise just remove the marker substring. Lines
+                # inside a SESSION_START/SESSION_END region are preserved
+                # verbatim even if they contain the marker substring.
                 orphan = _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
                 content_lines = content.splitlines(keepends=True)
                 cleaned_lines = []
+                inside_session_block = False
                 for ln in content_lines:
+                    if "<!-- SESSION_START -->" in ln:
+                        inside_session_block = True
+                        cleaned_lines.append(ln)
+                        continue
+                    if "<!-- SESSION_END -->" in ln:
+                        inside_session_block = False
+                        cleaned_lines.append(ln)
+                        continue
+                    if inside_session_block:
+                        # Preserve SESSION_START body verbatim — the strip
+                        # must never reach into this region.
+                        cleaned_lines.append(ln)
+                        continue
                     if orphan in ln and ln.strip() == orphan:
                         # Whole-line marker — drop the line entirely
                         continue

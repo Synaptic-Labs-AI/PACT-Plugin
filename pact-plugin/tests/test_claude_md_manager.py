@@ -669,6 +669,238 @@ class TestUpdatePactRoutingOrphanMarkers:
         assert final.count("<!-- PACT_ROUTING_END -->") == 1
 
 
+class TestUpdatePactRoutingSessionStartIsolation:
+    """SESSION_START preservation tripwire (#366 item 5, architect S3 finding).
+
+    update_pact_routing and update_session_info both mutate the project
+    CLAUDE.md but use disjoint markers (PACT_ROUTING_START/END vs
+    SESSION_START/END). The current code relies on marker disjointness
+    to avoid clobbering the session block, but there is no tripwire test
+    asserting that:
+
+    1. The insert path (markers absent) leaves the SESSION_START block
+       byte-identical.
+    2. The update path (markers canonicalized) leaves the SESSION_START
+       block byte-identical.
+    3. The orphan-strip path does NOT reach into a SESSION_START block
+       even if the session body happens to contain a line that matches
+       the routing marker substring.
+
+    Test (3) is the worst-case scenario architect flagged. Without the
+    SESSION_START isolation in the orphan-strip loop, a file whose
+    SESSION_START body accidentally contained a line matching the
+    PACT_ROUTING_START marker would be silently corrupted: the orphan
+    strip would drop the line from inside the session body, and the
+    subsequent insert path would add a fresh routing block at the top,
+    leaving SESSION_START missing a line. The fix in claude_md_manager
+    tracks inside_session_block and preserves those lines verbatim."""
+
+    SESSION_BLOCK_BODY = (
+        "<!-- SESSION_START -->\n"
+        "## Current Session\n"
+        "- Resume: `claude --resume deadbeef-dead-beef-dead-beefdeadbeef`\n"
+        "- Team: `pact-deadbeef`\n"
+        "- Session dir: `/Users/test/.claude/pact-sessions/proj/deadbeef`\n"
+        "- Started: 2026-04-11 00:00:00 UTC\n"
+        "<!-- SESSION_END -->\n"
+    )
+
+    def test_insert_path_preserves_session_start_block_verbatim(
+        self, tmp_path, monkeypatch
+    ):
+        """Insert path: file has SESSION_START but NO PACT_ROUTING markers.
+        After update_pact_routing, a PACT_ROUTING block is inserted AND the
+        SESSION_START block is byte-identical to what was there before."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original_content = (
+            "# Project Memory\n"
+            "\n"
+            "Some preamble that is not session metadata.\n"
+            "\n"
+            + self.SESSION_BLOCK_BODY
+            + "\n"
+            "## Retrieved Context\n"
+            "(empty)\n"
+        )
+        legacy.write_text(original_content, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # 1. PACT_ROUTING block was inserted
+        assert result is not None
+        assert "inserted" in result.lower()
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+
+        # 2. SESSION_START block body is byte-identical
+        assert self.SESSION_BLOCK_BODY in new_content, (
+            "SESSION_START block body must be byte-identical after "
+            "update_pact_routing inserts a routing block."
+        )
+
+        # 3. Sensible position — SESSION_START block is not fragmented
+        start_idx = new_content.index("<!-- SESSION_START -->")
+        end_idx = new_content.index("<!-- SESSION_END -->")
+        assert start_idx < end_idx
+        # The routing block should be placed before SESSION_START (near top)
+        routing_idx = new_content.index(
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+        )
+        assert routing_idx < start_idx, (
+            "PACT_ROUTING block should be inserted before the "
+            "SESSION_START block, not inside or after it."
+        )
+
+    def test_update_path_preserves_session_start_block_verbatim(
+        self, tmp_path, monkeypatch
+    ):
+        """Update path: file has BOTH a non-canonical PACT_ROUTING block
+        AND a SESSION_START block. After update_pact_routing, the routing
+        block is canonicalized AND SESSION_START is byte-identical."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original_content = (
+            "# Project Memory\n"
+            "\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## PACT Routing\n"
+            "\n"
+            "STALE non-canonical content that should be rewritten.\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "\n"
+            + self.SESSION_BLOCK_BODY
+            + "\n"
+            "## Retrieved Context\n"
+            "(empty)\n"
+        )
+        legacy.write_text(original_content, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # 1. Routing block canonicalized
+        assert result is not None
+        assert "updated" in result.lower()
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        assert "STALE non-canonical content" not in new_content
+
+        # 2. SESSION_START block body byte-identical
+        assert self.SESSION_BLOCK_BODY in new_content, (
+            "SESSION_START block body must be byte-identical after "
+            "update_pact_routing canonicalizes the routing block."
+        )
+
+    def test_orphan_strip_does_not_corrupt_session_start(
+        self, tmp_path, monkeypatch
+    ):
+        """Worst-case tripwire: SESSION_START body contains a line matching
+        the PACT_ROUTING_START marker, and there is NO matching END marker
+        elsewhere in the file. This triggers the orphan-strip branch.
+
+        Without the SESSION_START isolation fix in the orphan-strip loop,
+        the loop would silently drop the matching line from inside the
+        session body, then the insert path would prepend a new routing
+        block at the top — leaving SESSION_START visibly corrupted.
+
+        With the fix, lines inside SESSION_START/SESSION_END are preserved
+        verbatim, and the insert path still adds a routing block at the
+        top. Both blocks coexist cleanly."""
+        from shared.claude_md_manager import update_pact_routing
+
+        # SESSION_START body contains a line that is literally the routing
+        # start marker — e.g., user pasted routing-block docs into the
+        # session metadata. No PACT_ROUTING_END is present anywhere.
+        session_block_with_marker = (
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume deadbeef`\n"
+            "- Team: `pact-deadbeef`\n"
+            "- Note: docs pasted below\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "- Started: 2026-04-11 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n"
+        )
+        legacy = tmp_path / "CLAUDE.md"
+        original_content = (
+            "# Project Memory\n"
+            "\n"
+            + session_block_with_marker
+            + "\n"
+            "## Retrieved Context\n"
+            "(empty)\n"
+        )
+        legacy.write_text(original_content, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+        assert result is not None
+
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # 1. SESSION_START block body byte-identical — the orphan strip
+        # MUST NOT have dropped the line matching the routing marker.
+        assert session_block_with_marker in new_content, (
+            "SESSION_START block body was corrupted — the orphan strip "
+            "reached into the session block and dropped a line. "
+            "Expected byte-identical preservation of SESSION_START body."
+        )
+
+        # 2. A canonical routing block was added at the top (insert path)
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+
+        # 3. All the session content is still readable and intact
+        assert "- Resume: `claude --resume deadbeef`" in new_content
+        assert "- Team: `pact-deadbeef`" in new_content
+        assert "- Started: 2026-04-11 00:00:00 UTC" in new_content
+        assert "- Note: docs pasted below" in new_content
+
+    def test_orphan_strip_outside_session_block_still_works(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression guard for the SESSION_START isolation fix:
+        orphan markers OUTSIDE a SESSION_START block must still be
+        stripped. This ensures the fix did not over-scope and break the
+        main orphan-strip behavior for content outside session metadata."""
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        # Orphan START marker outside any SESSION_START block
+        original_content = (
+            "# Project Memory\n"
+            "\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "\n"
+            + self.SESSION_BLOCK_BODY
+            + "\n"
+            "## Retrieved Context\n"
+            "(empty)\n"
+        )
+        legacy.write_text(original_content, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = update_pact_routing()
+        assert result is not None
+
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # Exactly one of each marker — the orphan outside SESSION_START
+        # was stripped, and a fresh canonical block was inserted at top.
+        assert new_content.count(
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+        ) == 1
+        assert new_content.count("<!-- PACT_ROUTING_END -->") == 1
+
+        # SESSION_START body still byte-identical
+        assert self.SESSION_BLOCK_BODY in new_content
+
+
 class TestUpdatePactRoutingStaleOrchestratorLine:
     """F1: strip the v3.16.2-era 'The global PACT Orchestrator is loaded
     from ~/.claude/CLAUDE.md' line from upgraded project CLAUDE.mds.
@@ -852,17 +1084,23 @@ class TestSymlinkRefusal:
     user sees the warning via orchestrator context (hook stderr is NOT
     shown to users).
 
+    The status strings are deliberately opaque: they name WHAT was skipped
+    and use a generic "path precondition not met" phrase that does not
+    reveal the internal guard (symlink check) to a local attacker reading
+    the output. Tests assert on the opaque phrasing, not on the word
+    "symlink" or "refusing".
+
     Tests use os.symlink to create real symlinks pointing at unrelated
-    files in tmp_path. We verify (1) the function returns a status
-    string containing 'symlink', (2) the symlink target file is
-    byte-identical (untouched), and (3) the symlink itself still exists."""
+    files in tmp_path. We verify (1) the function returns the opaque
+    skip status string, (2) the symlink target file is byte-identical
+    (untouched), and (3) the symlink itself still exists."""
 
     def test_remove_stale_kernel_block_refuses_symlink(
         self, mock_home, tmp_path
     ):
         """If ~/.claude/CLAUDE.md is a symlink, remove_stale_kernel_block
-        returns a 'Migration skipped: ... symlink ...' string and does not
-        touch the symlink target."""
+        returns an opaque 'Migration skipped: ... path precondition not met'
+        string and does not touch the symlink target."""
         from shared.claude_md_manager import remove_stale_kernel_block
 
         # Create a regular file as the symlink target
@@ -885,11 +1123,15 @@ class TestSymlinkRefusal:
 
         result = remove_stale_kernel_block()
 
-        # Returns a status string with 'Migration skipped' + 'symlink'
+        # Returns an opaque status string ("path precondition not met")
+        # rather than one that discloses the symlink check to attackers.
         assert result is not None
         assert "Migration skipped" in result
-        assert "symlink" in result.lower()
-        assert "refusing" in result.lower()
+        assert "path precondition not met" in result
+        # Deliberately NOT revealing: the word "symlink" or "refusing"
+        # should not appear in the status string.
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
         # Symlink target file is byte-identical (untouched)
         assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
         # Symlink itself is still a symlink
@@ -899,8 +1141,8 @@ class TestSymlinkRefusal:
         self, tmp_path, monkeypatch
     ):
         """If the project CLAUDE.md is a symlink, update_pact_routing returns
-        a 'Routing skipped: ... symlink ...' string and does not touch the
-        symlink target."""
+        an opaque 'Routing skipped: ... path precondition not met' string
+        and does not touch the symlink target."""
         from shared.claude_md_manager import update_pact_routing
 
         # Create a regular file as the symlink target
@@ -922,11 +1164,15 @@ class TestSymlinkRefusal:
 
         result = update_pact_routing()
 
-        # Returns a status string with 'Routing skipped' + 'symlink'
+        # Returns an opaque status string ("path precondition not met")
+        # rather than one that discloses the symlink check to attackers.
         assert result is not None
         assert "Routing skipped" in result
-        assert "symlink" in result.lower()
-        assert "refusing" in result.lower()
+        assert "path precondition not met" in result
+        # Deliberately NOT revealing: the word "symlink" or "refusing"
+        # should not appear in the status string.
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
         # Symlink target file is byte-identical (untouched)
         assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
         # Symlink itself is still a symlink
@@ -1376,6 +1622,37 @@ class TestEnsureDotClaudeParent:
         ensure_dot_claude_parent(target)
 
         assert target.parent.exists()
+
+    def test_raises_when_parent_is_regular_file(self, tmp_path):
+        """Raises a clear OSError when `path.parent` exists but is a
+        regular file instead of a directory.
+
+        Without the is_dir guard, the failure would surface as a
+        confusing late-stage OSError from `write_text` in
+        ensure_project_memory_md. With the guard, callers catch the
+        early OSError and return a clear failure status string.
+
+        This is a pathological case (e.g., a local attacker blocks
+        mkdir by planting a file at the `.claude/` path), but the
+        early guard makes the failure mode readable.
+        """
+        import pytest
+        from shared.claude_md_manager import ensure_dot_claude_parent
+
+        # Create a regular file where `.claude/` would go
+        blocker = tmp_path / ".claude"
+        blocker.write_text("I am a file, not a directory", encoding="utf-8")
+        assert blocker.exists()
+        assert blocker.is_file()
+        assert not blocker.is_dir()
+
+        target = blocker / "CLAUDE.md"  # ensure_dot_claude_parent inspects target.parent
+
+        with pytest.raises(OSError, match="exists but is not a directory"):
+            ensure_dot_claude_parent(target)
+
+        # The blocker file is untouched — guard is read-only
+        assert blocker.read_text(encoding="utf-8") == "I am a file, not a directory"
 
 
 class TestMarkerConsistency:
