@@ -44,6 +44,8 @@ h. Monitor via `SendMessage` (completion summaries) and `TaskList` until agents 
 i. `TaskUpdate`: phase status = "completed" (agents self-manage their task status)
 ```
 
+> ⚠️ **Canonical dispatch pattern lives in `bootstrap.md`**: the `Task(...)` examples throughout this file use an abbreviated short-form `prompt="You are joining team..."` for readability. The **full canonical dispatch prompt** — including the `PACT ROLE: teammate ({name})` marker and the `Skill("PACT:teammate-bootstrap")` FIRST ACTION instruction — lives in the Agent Teams Dispatch section of [bootstrap.md](./bootstrap.md). When actually constructing `Task()` calls, use the full canonical form from `bootstrap.md` as your template, not the abbreviated examples below. Defense-in-depth (hook injection + agent body FIRST ACTION prelude) makes the abbreviated form functionally acceptable, but the canonical form is preferred so spawned teammates see the PACT ROLE marker in their first user message as well as in hook-injected context.
+
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):

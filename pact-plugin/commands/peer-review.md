@@ -147,6 +147,8 @@ For each reviewer:
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
 3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
+> ⚠️ **Canonical dispatch pattern lives in `bootstrap.md`**: the `Task(...)` example above uses an abbreviated short-form `prompt=` for readability. The **full canonical dispatch prompt** — including the `PACT ROLE: teammate ({name})` marker and the `Skill("PACT:teammate-bootstrap")` FIRST ACTION instruction — lives in the Agent Teams Dispatch section of [bootstrap.md](./bootstrap.md). Use the full canonical form from `bootstrap.md` when actually constructing reviewer `Task()` calls.
+
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
 **Journal event**: After dispatching all reviewers, write a `review_dispatch` event:

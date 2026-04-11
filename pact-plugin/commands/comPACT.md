@@ -183,6 +183,8 @@ JSON
 > ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
 4. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
 
+> ⚠️ **Canonical dispatch pattern lives in `bootstrap.md`**: the `Task(...)` examples in this file use an abbreviated short-form `prompt=` for readability. The **full canonical dispatch prompt** — including the `PACT ROLE: teammate ({name})` marker and the `Skill("PACT:teammate-bootstrap")` FIRST ACTION instruction — lives in the Agent Teams Dispatch section of [bootstrap.md](./bootstrap.md). When actually constructing `Task()` calls, use the full canonical form from `bootstrap.md` as your template.
+
 Spawn all specialists in parallel (multiple `Task` calls in one response).
 
 **Progress monitoring**: For parallel dispatch or novel domains, include "Send progress signals per the agent-teams skill Progress Signals section" in each specialist's dispatch prompt.
