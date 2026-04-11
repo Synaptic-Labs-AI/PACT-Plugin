@@ -39,6 +39,37 @@ _BOOTSTRAP_PRELUDE_TEMPLATE = (
 )
 
 
+def _sanitize_agent_name(agent_name: str) -> str:
+    """Strip characters from agent_name that could break out of the
+    PACT ROLE marker format.
+
+    SECURITY (cycle 2 minor item 12): the prelude template interpolates
+    agent_name into `PACT ROLE: teammate ({agent_name}).` Without
+    sanitization, an agent_name containing a newline could inject a
+    second `PACT ROLE: orchestrator` line into additionalContext,
+    causing a teammate to self-identify as the orchestrator under the
+    routing block's substring check.
+
+    Stripped characters:
+      - newline (\\n) and carriage return (\\r): prevent line-break
+        injection that could spawn a fake marker line
+      - close-paren ()): prevent closing the parenthetical early so
+        downstream content can claim to be a different role
+
+    The fallback for empty/None agent_name is "unknown" — same as
+    before this hardening.
+
+    Note: this is producer-side sanitization. The line-anchor consumer
+    check in _PACT_ROUTING_BLOCK is the second layer of defense
+    (cycle 2 minor item 15) — together they provide defense in depth
+    against marker spoofing via either malicious agent names or
+    embedded prose containing the marker phrase.
+    """
+    if not agent_name:
+        return "unknown"
+    return agent_name.replace("\n", "_").replace("\r", "_").replace(")", "_")
+
+
 def get_peer_context(
     agent_type: str,
     team_name: str,
@@ -98,7 +129,9 @@ def get_peer_context(
             f"You can message them via SendMessage for shared artifacts or blocking questions."
         )
 
-    prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=agent_name or "unknown")
+    prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(
+        agent_name=_sanitize_agent_name(agent_name)
+    )
     return prelude + peer_context + _TEACHBACK_REMINDER
 
 
