@@ -1199,6 +1199,27 @@ class TestWriteContextDirCreation:
         assert data["started_at"] != ""
 
 
+    def test_creates_parent_dir_with_0o700_mode(self, monkeypatch, tmp_path):
+        """write_context must create parent directories with 0o700 permissions."""
+        import shared.pact_context as ctx_module
+
+        ctx_file = tmp_path / "new-dir" / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
+
+        ctx_module.write_context(
+            team_name="pact-mode",
+            session_id="mode-test",
+            project_dir="/mode/project",
+        )
+
+        parent = ctx_file.parent
+        assert parent.is_dir()
+        actual_mode = parent.stat().st_mode & 0o777
+        assert actual_mode == 0o700, (
+            f"Expected 0o700, got {oct(actual_mode)} for {parent}"
+        )
+
+
 class TestDetectSessionIdPriority:
     """Verify _detect_session_id uses context file only (no env var fallback)."""
 
@@ -1932,6 +1953,36 @@ class TestGetSessionDirAdversarial:
             f"Path traversal not neutralized: _build_session_path returned "
             f"{result} which resolves to {resolved}, outside "
             f"{sessions_root_resolved}"
+        )
+
+
+    def test_sibling_directory_prefix_collision(self, monkeypatch, tmp_path):
+        """A session_id that traverses into a sibling directory whose name
+        shares the 'pact-sessions' prefix must be caught by the guard.
+
+        Without the trailing os.sep in the prefix check, a resolved path like
+        /home/user/.claude/pact-sessions-evil/foo would pass the
+        startswith('/home/user/.claude/pact-sessions') guard because the
+        string prefix matches without requiring a path separator boundary.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+        evil_sibling = tmp_path / ".claude" / "pact-sessions-evil"
+        evil_sibling.mkdir(parents=True, exist_ok=True)
+
+        # session_id traverses up out of {slug}/ into the sibling dir
+        result = _build_session_path("my-project", "../../pact-sessions-evil/payload")
+        resolved = str(result.resolve())
+
+        sessions_prefix = str(sessions_root.resolve()) + "/"
+        assert resolved.startswith(sessions_prefix), (
+            f"Sibling directory prefix collision not caught: "
+            f"_build_session_path resolved to {resolved}, which is outside "
+            f"{sessions_prefix}"
         )
 
 

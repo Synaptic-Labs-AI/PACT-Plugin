@@ -13,6 +13,7 @@ Output: JSON with hookSpecificOutput.additionalContext
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -69,7 +70,10 @@ def _sanitize_agent_name(agent_name: str) -> str:
     """
     if not agent_name:
         return "unknown"
-    return agent_name.replace("\n", "_").replace("\r", "_").replace(")", "_")
+    # Strip all C0 control chars (0x00-0x1F) and DEL (0x7F) first — covers
+    # NUL, BEL, ESC, etc. in addition to the \n and \r caught below.
+    sanitized = re.sub(r"[\x00-\x1f\x7f]", "_", agent_name)
+    return sanitized.replace(")", "_")
 
 
 def get_peer_context(

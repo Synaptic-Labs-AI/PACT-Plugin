@@ -57,7 +57,8 @@ def _build_session_path(slug: str, session_id: str) -> Path:
     candidate = sessions_root / slug / session_id
     try:
         resolved = candidate.resolve()
-        if not str(resolved).startswith(str(sessions_root.resolve())):
+        prefix = str(sessions_root.resolve()) + os.sep
+        if not str(resolved).startswith(prefix):
             candidate = sessions_root / slug / Path(session_id).name
     except (OSError, ValueError):
         pass
@@ -373,7 +374,7 @@ def write_context(
 
     context_dir = target.parent
     try:
-        context_dir.mkdir(parents=True, exist_ok=True)
+        context_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Write to temp file in the same directory (required for atomic rename)
         fd, tmp_path = tempfile.mkstemp(

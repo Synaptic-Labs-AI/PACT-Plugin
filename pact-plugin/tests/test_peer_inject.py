@@ -628,6 +628,18 @@ class TestSanitizeAgentName:
                 f"{line!r}. The sanitizer should have stripped the newline."
             )
 
+    def test_strips_nul_and_other_control_chars(self):
+        """NUL (0x00), BEL (0x07), ESC (0x1b), DEL (0x7f) and other C0
+        control characters must be replaced with underscore."""
+        from peer_inject import _sanitize_agent_name
+
+        result = _sanitize_agent_name("foo\x00bar\x07baz\x1bqux\x7fend")
+        assert "\x00" not in result
+        assert "\x07" not in result
+        assert "\x1b" not in result
+        assert "\x7f" not in result
+        assert result == "foo_bar_baz_qux_end"
+
     def test_prelude_does_not_inject_orchestrator_marker_via_close_paren(
         self, tmp_path
     ):

@@ -547,6 +547,15 @@ class TestSourceAwareness:
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
         assert "WARNING" in additional
 
+    def test_invalid_source_clamped_to_unknown(self, monkeypatch, tmp_path):
+        """An unrecognized source value must be clamped to 'unknown' so it
+        cannot inject arbitrary text into additionalContext."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="<script>alert(1)</script>", team_exists=True
+        )
+        assert "<script>" not in additional
+        assert '"unknown"' in additional
+
 
 class TestMainPausedStateIntegration:
     """Integration test: check_paused_state wiring in session_init.main()."""
@@ -1126,13 +1135,12 @@ class TestIsUnknownOrMissingSession:
         assert _is_unknown_or_missing_session(value) is True
 
     @pytest.mark.parametrize("value", [
-        "unknown",
         "unknown-abc123",
         "unknown-a3f9b2c4",
-        "unknownFoo",
+        "unknown-",
     ])
     def test_rejects_unknown_sentinels(self, value):
-        """Any string starting with 'unknown' is treated as a sentinel."""
+        """Strings starting with 'unknown-' (with hyphen) are treated as sentinels."""
         from session_init import _is_unknown_or_missing_session
 
         assert _is_unknown_or_missing_session(value) is True
@@ -1156,9 +1164,15 @@ class TestIsUnknownOrMissingSession:
         "some-session-id",
         "a1b2c3d4",
         "valid",
+        "unknown",
+        "unknownFoo",
     ])
     def test_accepts_valid_session_ids(self, value):
-        """Real session IDs (non-empty, non-unknown strings) are accepted."""
+        """Real session IDs (non-empty, non-'unknown-' strings) are accepted.
+
+        Note: 'unknown' (no hyphen) and 'unknownFoo' are NOT sentinel-shaped
+        and are accepted. Only 'unknown-*' matches the sentinel format.
+        """
         from session_init import _is_unknown_or_missing_session
 
         assert _is_unknown_or_missing_session(value) is False
@@ -1797,8 +1811,8 @@ class TestFailureLogIntegration:
         A caller re-submitting an already-rejected sentinel (e.g. replaying
         a previous session's fallback id) is distinct from missing or
         malformed input. The canonical predicate
-        _is_unknown_or_missing_session uses bare "unknown" (not "unknown-"),
-        so this ladder branch stays consistent with that.
+        _is_unknown_or_missing_session uses "unknown-" (with hyphen) to
+        match only the sentinel format "unknown-{hex}".
         """
         from session_init import main
 

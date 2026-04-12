@@ -259,7 +259,7 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     stripped = raw_id.strip()
     if not stripped:
         return True
-    return stripped.startswith("unknown")
+    return stripped.startswith("unknown-")
 
 
 def _build_safety_net_context(team_name: str | None) -> str:
@@ -351,8 +351,12 @@ def main():
         system_messages = []
 
         # Detect session source: startup, resume, compact, clear
-        # Default to "startup" if missing (backwards compat with older Claude Code)
-        source = input_data.get("source", "startup")
+        # Default to "startup" if missing (backwards compat with older Claude Code).
+        # Validate against the known set — an unrecognized source is surfaced
+        # as "unknown" so it cannot inject arbitrary text into additionalContext.
+        _VALID_SOURCES = {"startup", "resume", "compact", "clear"}
+        raw_source = input_data.get("source", "startup")
+        source = raw_source if raw_source in _VALID_SOURCES else "unknown"
         is_context_reset = source in ("compact", "clear")
 
         # Clean up stale compact-summary from previous sessions.
@@ -497,10 +501,10 @@ def main():
             elif not raw_id.strip():
                 _classification = "empty_session_id"
                 _error_detail = f"session_id was empty/whitespace: {raw_id!r}"
-            elif raw_id.strip().startswith("unknown"):
-                # Matches _is_unknown_or_missing_session line 262 which uses
-                # bare "unknown" (not "unknown-"). Stay consistent with the
-                # canonical predicate so the two cannot drift.
+            elif raw_id.strip().startswith("unknown-"):
+                # Matches _is_unknown_or_missing_session which uses
+                # "unknown-" (with hyphen) to match only the sentinel format
+                # "unknown-{hex}" without false-positiving on unrelated ids.
                 _classification = "sentinel_session_id"
                 _error_detail = f"session_id already an unknown-* sentinel: {raw_id!r}"
             else:
@@ -735,14 +739,14 @@ def main():
         # Emit a minimal PACT ROLE marker + bootstrap skill directive in
         # additionalContext, alongside the error in systemMessage. Claude
         # Code's hook-output schema supports both fields in the same JSON.
-        print(f"Hook warning (session_init): {e}", file=sys.stderr)
+        print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
         safety_net_context = _build_safety_net_context(team_name)
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": safety_net_context,
             },
-            "systemMessage": f"PACT hook warning (session_init): {e}",
+            "systemMessage": f"PACT hook warning (session_init): {str(e)[:100]}",
         }
         print(json.dumps(output))
         sys.exit(0)

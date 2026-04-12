@@ -552,12 +552,6 @@ def ensure_project_memory_md() -> str | None:
     if source != "new_default":
         return None
 
-    # Symlink guard: the resolver returned "new_default" (neither location
-    # exists), but the preferred path could still be a dangling symlink.
-    # is_symlink uses lstat and returns True even for dangling links.
-    if target_file.is_symlink():
-        return "Project CLAUDE.md skipped: path precondition not met."
-
     # Create minimal CLAUDE.md with memory sections at the new default location
     memory_template = f"""# Project Memory
 
@@ -577,15 +571,33 @@ This file contains project-specific memory managed by the PACT framework.
 <!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->
 """
 
+    # Concurrency guard: serialize symlink check + write so two concurrent
+    # session_init hooks on the same project cannot both see "new_default"
+    # and race on the write. Same pattern as remove_stale_kernel_block and
+    # update_pact_routing. Fail-open on timeout — next session start retries.
     try:
         ensure_dot_claude_parent(target_file)
-        target_file.write_text(memory_template, encoding="utf-8")
-        os.chmod(str(target_file), 0o600)
-        return "Created project CLAUDE.md with memory sections"
+        with file_lock(target_file):
+            # Symlink guard: the resolver returned "new_default" (neither
+            # location exists), but the preferred path could still be a
+            # dangling symlink. is_symlink uses lstat and returns True even
+            # for dangling links. Re-check inside the lock so a concurrent
+            # writer that just created the file is detected.
+            if target_file.is_symlink():
+                return "Project CLAUDE.md skipped: path precondition not met."
+            if target_file.exists():
+                return None
+            try:
+                target_file.write_text(memory_template, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
+                return "Created project CLAUDE.md with memory sections"
+            except OSError as e:
+                return f"Project CLAUDE.md failed: {str(e)[:50]}"
+    except TimeoutError:
+        return (
+            "Failed to acquire lock on project CLAUDE.md within 5s "
+            "(another session_init hook may be running concurrently). "
+            "Project CLAUDE.md creation skipped; will retry on next session start."
+        )
     except OSError as e:
-        # Narrow to OSError: filesystem/permission failures are the
-        # expected failure class here. Any other exception (e.g., a
-        # programming error inside ensure_dot_claude_parent) should
-        # propagate rather than be silently swallowed with a truncated
-        # message.
         return f"Project CLAUDE.md failed: {str(e)[:50]}"
