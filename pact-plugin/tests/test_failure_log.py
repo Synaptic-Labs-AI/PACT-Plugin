@@ -135,6 +135,69 @@ class TestAppendRecordFormat:
         assert len(entries[0]["error"]) == 200
         assert entries[0]["error"] == "x" * 200
 
+    def test_truncates_cwd_to_200_chars(self, failure_log_home):
+        """A cwd longer than 200 chars is truncated to exactly 200 (#366 R5 L1).
+
+        Pre-fix the cwd field was unbounded — a pathological cwd (e.g., a
+        deeply nested test fixture path) could blow the per-entry size and
+        push the ring buffer well above its ~10 KB steady-state target.
+        """
+        long_cwd = "/path/" + ("y" * 500)
+        append_failure("missing_session_id", "boom", cwd=long_cwd)
+
+        entries = read_failures()
+        assert len(entries) == 1
+        assert len(entries[0]["cwd"]) == 200
+        assert entries[0]["cwd"] == long_cwd[:200]
+
+    def test_truncates_source_to_200_chars(self, failure_log_home):
+        """A source longer than 200 chars is truncated to exactly 200 (#366 R5 L1).
+
+        Source is normally a short literal ("startup", "resume", "compact")
+        but the field is Optional[str] and Claude Code may pass through
+        arbitrary user/agent-supplied content in the future. Bound it.
+        """
+        long_source = "z" * 500
+        append_failure("missing_session_id", "boom", source=long_source)
+
+        entries = read_failures()
+        assert len(entries) == 1
+        assert len(entries[0]["source"]) == 200
+        assert entries[0]["source"] == "z" * 200
+
+    def test_cwd_none_preserved_after_truncation_fix(self, failure_log_home):
+        """The truncation fix preserves None for cwd (does not coerce to '').
+
+        The Optional[str] contract distinguishes 'not provided' from
+        'empty string'. Pre-existing test_optional_fields_default_to_none
+        already covers the basic None passthrough; this test pins the
+        behavior specifically against the L1 fix to prevent a future
+        refactor from coercing cwd=None into cwd="".
+        """
+        append_failure("missing_session_id", "boom", cwd=None, source=None)
+        entries = read_failures()
+        assert len(entries) == 1
+        assert entries[0]["cwd"] is None
+        assert entries[0]["source"] is None
+
+    def test_error_max_chars_constant_parity(self):
+        """failure_log._ERROR_MAX_CHARS == error_output._ERROR_MAX_CHARS (#366 R5 L2).
+
+        Both modules cap free-form error text to the same length. If one
+        drifts (e.g., a future PR bumps failure_log to 500 without touching
+        error_output), the truncation contract diverges and observability
+        becomes inconsistent. Pin them to a single constant via test parity.
+        """
+        from shared import error_output
+        from shared import failure_log as fl
+
+        assert fl._ERROR_MAX_CHARS == error_output._ERROR_MAX_CHARS, (
+            f"Truncation cap drift: failure_log._ERROR_MAX_CHARS="
+            f"{fl._ERROR_MAX_CHARS} but error_output._ERROR_MAX_CHARS="
+            f"{error_output._ERROR_MAX_CHARS}. The two modules must agree "
+            "on the cap so observability stays consistent."
+        )
+
     def test_empty_error_is_safe(self, failure_log_home):
         """An empty string error is recorded as empty string, not crashed."""
         append_failure("malformed_json", "")

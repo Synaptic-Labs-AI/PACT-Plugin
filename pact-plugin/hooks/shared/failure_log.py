@@ -109,12 +109,18 @@ def append_failure(
         # Construct the record up front so any formatting failure (unlikely
         # with these field types, but defensive) is caught by the outer
         # except and drops the append cleanly rather than propagating.
+        # All free-form string fields are bounded by _ERROR_MAX_CHARS so a
+        # pathological cwd, source, or error cannot blow up the log size
+        # (#366 R5 L1). None values pass through unchanged so the JSON
+        # representation stays null instead of empty string — the original
+        # cwd/source contract is Optional[str] and call sites distinguish
+        # "not provided" from "empty string".
         record: dict[str, Any] = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "classification": classification,
             "error": (error or "")[:_ERROR_MAX_CHARS],
-            "cwd": cwd,
-            "source": source,
+            "cwd": cwd[:_ERROR_MAX_CHARS] if cwd is not None else None,
+            "source": source[:_ERROR_MAX_CHARS] if source is not None else None,
         }
 
         # Ensure parent dir exists. 0o700 matches the rest of PACT's
