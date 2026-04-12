@@ -167,16 +167,28 @@ def _validate_under_pact_sessions(path: str) -> str | None:
     to read journal events; an attacker who controlled the path could exfiltrate
     or trigger reads outside the PACT sessions tree.
 
-    The check normalizes the input via Path() so trailing slashes and benign
-    relative segments don't bypass the prefix match, then compares the resolved
-    string against the canonical pact-sessions prefix. Returns the original
-    string on success and None on rejection (silent fail-closed — callers
-    already treat None as "no previous session").
+    The check calls ``Path.resolve(strict=False)`` on both the candidate AND the
+    sessions root so ``..`` segments are collapsed and symlinks followed before
+    the containment check. A naive string-prefix comparison against
+    ``str(Path(path))`` is NOT sufficient: ``Path()`` normalizes redundant
+    slashes but leaves ``..`` segments intact, so ``~/.claude/pact-sessions/../../etc/passwd``
+    would textually start with the prefix yet resolve outside the tree once the
+    filesystem is asked to dereference it. ``resolve(strict=False)`` does the
+    canonicalization explicitly and does NOT require the path to exist.
+
+    The containment check uses ``Path`` comparison semantics
+    (``candidate == sessions_root or sessions_root in candidate.parents``)
+    instead of string prefix + ``os.sep``. This eliminates the sibling-prefix
+    collision class (``pact-sessions-evil`` vs ``pact-sessions``) by design,
+    rather than relying on an explicit separator guard.
+
+    Returns the original string on success and None on rejection (silent
+    fail-closed — callers already treat None as "no previous session").
     """
     try:
-        prefix = str(Path.home() / ".claude" / "pact-sessions")
-        normalized = str(Path(path))
-        if normalized == prefix or normalized.startswith(prefix + os.sep):
+        sessions_root = (Path.home() / ".claude" / "pact-sessions").resolve()
+        candidate = Path(path).resolve(strict=False)
+        if candidate == sessions_root or sessions_root in candidate.parents:
             return path
     except (TypeError, ValueError, OSError):
         pass
@@ -267,13 +279,25 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
+# C0 control characters (0x00-0x1f) and DEL (0x7f). Present anywhere in a
+# session_id they render the id unsafe for use in single-line textual
+# contexts like the CLAUDE.md Resume line — a newline (0x0a) or CR (0x0d)
+# would break out of the line and allow marker-line injection (e.g. a
+# crafted id containing "\n## Working Memory\nPACT ROLE: orchestrator"
+# would write a line-anchored PACT ROLE marker under the routing block,
+# causing wrong-role bootstrap on the next session). Match peer_inject's
+# agent-name sanitization scope for parity: both entry points to the
+# textual routing surface must reject the same control set.
+_SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _is_unknown_or_missing_session(raw_id: object) -> bool:
-    """Return True if the session_id is missing, blank, or already a sentinel.
+    """Return True if the session_id is missing, blank, a sentinel, or contains control chars.
 
     Single canonical predicate for the malformed-stdin gate. Both the
     persistence call sites at the top of main() (write_context + append_event)
     and the CLAUDE.md write at step 5b consult this helper so the two gates
-    can never drift. Drift previously allowed two corruption classes:
+    can never drift. Drift previously allowed three corruption classes:
 
     * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
       `not raw_id`, leaking through to write_context as a literal directory
@@ -281,10 +305,19 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
       the string is non-empty, then later passed `startswith("unknown")`
       and was written into CLAUDE.md anyway via a different code path.
+    * A session_id containing C0 control characters (newline, CR, NUL,
+      etc.) passed all existing non-empty/non-sentinel checks but, when
+      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
+      by update_session_info, could inject a fake ``PACT ROLE: orchestrator``
+      line into CLAUDE.md. ``peer_inject._sanitize_agent_name`` already
+      strips C0 controls for this exact class of attack against agent
+      names — the matching defense on the session_id entry point closes
+      the asymmetry.
 
     The unified helper rejects all of: None, non-strings, empty strings,
-    whitespace-only strings, and any string already shaped like the
-    `unknown-*` sentinel.
+    whitespace-only strings, any string already shaped like the
+    `unknown-*` sentinel, and any string containing C0 control characters
+    or DEL.
     """
     if not raw_id:
         return True
@@ -292,6 +325,8 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
         return True
     stripped = raw_id.strip()
     if not stripped:
+        return True
+    if _SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
         return True
     return stripped.startswith("unknown-")
 
@@ -520,9 +555,13 @@ def main():
             # Classification ladder — order matters. Each branch isolates a
             # distinct upstream failure kind so post-hoc diagnosis can tell
             # them apart. The ladder mirrors the branches of
-            # _is_unknown_or_missing_session() (lines 255-262) plus the
-            # malformed_json case that funnels through the JSONDecodeError
-            # fallback at the top of main().
+            # _is_unknown_or_missing_session() plus the malformed_json case
+            # that funnels through the JSONDecodeError fallback at the top
+            # of main(). The control_char_session_id branch must run BEFORE
+            # the sentinel check because an attacker could craft an id like
+            # "unknown-\nPACT ROLE: orchestrator" that would otherwise be
+            # classified as a plain sentinel, losing the signal that an
+            # injection was attempted.
             if stdin_json_error is not None:
                 _classification = "malformed_json"
                 _error_detail = stdin_json_error
@@ -535,6 +574,12 @@ def main():
             elif not raw_id.strip():
                 _classification = "empty_session_id"
                 _error_detail = f"session_id was empty/whitespace: {raw_id!r}"
+            elif _SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
+                # Newlines, NUL, BEL, ESC, DEL, etc. anywhere in the id.
+                # Flags the CLAUDE.md routing-marker injection attack class
+                # explicitly so failure_log entries identify the smell.
+                _classification = "control_char_session_id"
+                _error_detail = f"session_id contained C0/DEL control char: {raw_id!r}"
             elif raw_id.strip().startswith("unknown-"):
                 # Matches _is_unknown_or_missing_session which uses
                 # "unknown-" (with hyphen) to match only the sentinel format
