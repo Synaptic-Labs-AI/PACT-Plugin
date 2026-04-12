@@ -248,6 +248,116 @@ class TestConcurrency:
         for i in range(num_threads):
             assert seen_per_worker[i] == writes_per_thread
 
+    def test_concurrent_append_and_read_never_observes_partial_state(
+        self, failure_log_home
+    ):
+        """R4-L2: ``read_failures`` must never observe a partially-written
+        file while ``append_failure`` is rotating.
+
+        Before the fix, ``read_failures`` called ``LOG_PATH.read_text()``
+        without acquiring ``file_lock``. The writer's rotation path uses
+        ``Path.write_text`` (truncate-then-write under the hood via
+        ``open(mode='w')``), which is NOT atomic against unlocked readers:
+        a concurrent reader in the narrow window between truncate and
+        write could observe a zero-length or partially-written file, then
+        return ``[]`` or a subset of entries. Under steady write load this
+        would manifest as sporadic "disappearing" entries.
+
+        The R4 fix acquires ``file_lock`` in ``read_failures`` so the
+        reader serializes against the writer's rotation. Every
+        ``read_failures`` call while ``append_failure`` is running MUST
+        return a coherent, well-formed list — never empty, never
+        partial, never raising.
+
+        This test uses ``threading.Barrier`` to synchronize a writer
+        thread and multiple reader threads so they all enter the critical
+        section together. Every read that occurs during the storm is
+        checked for (1) well-formedness (parses), (2) consistent
+        monotonic growth (entries only added, never removed during a
+        single storm before rotation kicks in).
+
+        Deterministic expected-count check: we seed the log with
+        MAX_ENTRIES entries first, then the writer performs N rotation
+        writes while readers hammer read_failures in parallel. Every
+        reader's snapshot length must equal MAX_ENTRIES (rotation always
+        keeps the buffer at the cap), and every entry must parse.
+        """
+        # Seed the log to the cap so every subsequent write triggers rotation
+        # (read-keep-(MAX_ENTRIES-1)-append-write). Rotation is the window
+        # where the bug would manifest: the writer truncates the file to
+        # rewrite the full buffer. An unlocked reader in that window sees a
+        # short/empty file.
+        for i in range(MAX_ENTRIES):
+            append_failure("missing_session_id", f"seed-{i}")
+
+        writes_during_storm = 30
+        num_readers = 4
+        barrier = threading.Barrier(num_readers + 1)
+        reader_snapshots: list[list[dict]] = []
+        reader_errors: list[BaseException] = []
+        lock_for_results = threading.Lock()
+
+        def writer():
+            barrier.wait()
+            for seq in range(writes_during_storm):
+                append_failure(
+                    classification="missing_session_id",
+                    error=f"storm-{seq}",
+                )
+
+        def reader():
+            barrier.wait()
+            try:
+                # Multiple reads per reader to maximize the odds of
+                # overlapping with the writer's rotation window.
+                for _ in range(20):
+                    snapshot = read_failures()
+                    with lock_for_results:
+                        reader_snapshots.append(snapshot)
+            except BaseException as e:
+                with lock_for_results:
+                    reader_errors.append(e)
+
+        threads = [threading.Thread(target=reader) for _ in range(num_readers)]
+        writer_thread = threading.Thread(target=writer)
+        for t in threads:
+            t.start()
+        writer_thread.start()
+        writer_thread.join()
+        for t in threads:
+            t.join()
+
+        # No reader should have raised.
+        assert not reader_errors, f"read_failures raised: {reader_errors}"
+
+        # Every snapshot must be non-empty (the writer cannot cause the
+        # reader to see a truncated-to-zero view) and every entry must
+        # parse and carry a classification field.
+        assert reader_snapshots, "readers did not capture any snapshots"
+        for snap in reader_snapshots:
+            # Under rotation semantics the buffer stays at exactly
+            # MAX_ENTRIES once seeded. A reader observing fewer entries
+            # means it caught the writer mid-rotation (the bug).
+            assert len(snap) == MAX_ENTRIES, (
+                f"reader observed partial state: len={len(snap)}, "
+                f"expected={MAX_ENTRIES} — reader raced with writer's "
+                f"truncate-then-write rotation window"
+            )
+            # Each entry must be well-formed.
+            for entry in snap:
+                assert "classification" in entry
+                assert "error" in entry
+
+        # After the storm, final state is consistent: exactly MAX_ENTRIES,
+        # and some number of storm-* entries visible (rotation drops the
+        # oldest seed-* entries first).
+        final = read_failures()
+        assert len(final) == MAX_ENTRIES
+        # At least some storm entries survived (rotation is FIFO so the
+        # latest writes are always at the tail).
+        storm_entries = [e for e in final if e["error"].startswith("storm-")]
+        assert len(storm_entries) == writes_during_storm
+
 
 # ---------------------------------------------------------------------------
 # append_failure: fail-open

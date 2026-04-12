@@ -188,6 +188,13 @@ def read_failures() -> list[dict[str, Any]]:
     """
     Read the ring buffer log and return parsed entries in chronological order.
 
+    Acquires the same ``file_lock`` as ``append_failure`` for the read. The
+    writer's rotation path uses ``Path.write_text`` (truncate-then-write),
+    which is NOT atomic against unlocked readers: a concurrent reader could
+    observe a zero-length or partially-written file during the narrow window
+    between truncate and write. Taking the lock serializes the read against
+    any in-flight rotation so the reader always sees a coherent file.
+
     Fail-open contract: returns [] on any failure — missing file, lock
     timeout, OSError, malformed JSON. Malformed individual lines are
     silently skipped (matching session_journal's _read_events_at).
@@ -199,15 +206,13 @@ def read_failures() -> list[dict[str, Any]]:
     try:
         if not LOG_PATH.exists():
             return []
-        # Read does not require the exclusive lock — JSONL lines are
-        # self-contained and _atomic_write style integrity guarantees
-        # we never see a partially-written line from a concurrent writer
-        # because the writer holds the lock across the full rewrite.
-        # errors="replace" prevents one bad byte from poisoning the scan.
+        with file_lock(LOG_PATH):
+            # errors="replace" prevents one bad byte from poisoning the scan.
+            # A single stray byte substitutes U+FFFD rather than raising,
+            # so a corrupt byte cannot block reads of the surviving entries.
+            content = LOG_PATH.read_text(encoding="utf-8", errors="replace")
         entries: list[dict[str, Any]] = []
-        for line in LOG_PATH.read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines():
+        for line in content.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
