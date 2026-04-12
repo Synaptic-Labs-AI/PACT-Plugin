@@ -137,9 +137,16 @@ class TestGenerateTeamName:
         """session_id from input_data should be used as the sole source."""
         from session_init import generate_team_name
 
-        result = generate_team_name({"session_id": "inputinp-aaaa-bbbb-cccc-ddddeeeeffff"})
+        result = generate_team_name({"session_id": "a1b2c3d4-aaaa-bbbb-cccc-ddddeeeeffff"})
 
-        assert result == "pact-inputinp"
+        assert result == "pact-a1b2c3d4"
+
+    def test_non_hex_chars_in_session_id_are_stripped(self):
+        """Non-hex characters in session_id prefix are stripped for safe team names."""
+        from session_init import generate_team_name
+
+        result = generate_team_name({"session_id": "aXbYcZd1-aaaa"})
+        assert result == "pact-abcd1"
 
     def test_exactly_8_char_session_id(self):
         """Should handle a session_id that is exactly 8 characters."""

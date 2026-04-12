@@ -124,7 +124,7 @@ def get_peer_context(
     # a cosmetic but real degradation of the peer list.
     safe_name = _sanitize_agent_name(agent_name)
 
-    if agent_name:
+    if safe_name and safe_name != "unknown":
         # Filter by exact (sanitized) name — excludes only the spawning
         # agent itself. Team members are registered under their canonical
         # names in the team config, so matching against the sanitized

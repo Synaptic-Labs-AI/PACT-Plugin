@@ -151,7 +151,7 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else ""
     if session_id:
-        suffix = session_id[:8]
+        suffix = re.sub(r"[^a-f0-9-]", "", session_id[:8]) or secrets.token_hex(4)
     else:
         suffix = secrets.token_hex(4)
     return f"pact-{suffix}"

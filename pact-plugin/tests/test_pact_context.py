@@ -1985,6 +1985,60 @@ class TestGetSessionDirAdversarial:
             f"{sessions_prefix}"
         )
 
+    def test_dotdot_only_session_id_returns_safe_path(self, monkeypatch, tmp_path):
+        """session_id='../..' produces a path whose basename() is '..',
+        which the guard must reject. The result must not contain '..'
+        path components.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+
+        result = _build_session_path("my-project", "../..")
+        resolved = result.resolve()
+
+        sessions_root_resolved = sessions_root.resolve()
+        assert (
+            resolved == sessions_root_resolved
+            or sessions_root_resolved in resolved.parents
+        ), (
+            f"'../..' session_id escaped containment: resolved to "
+            f"{resolved}, outside {sessions_root_resolved}"
+        )
+        assert ".." not in result.parts, (
+            f"Result path contains '..' component: {result}"
+        )
+
+    def test_exception_in_validation_returns_fail_closed(self, monkeypatch, tmp_path):
+        """When resolve() raises, the guard returns a slug-only path
+        (fail-closed) rather than the unvalidated candidate.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+
+        original_resolve = Path.resolve
+
+        def exploding_resolve(self, strict=False):
+            if "malicious" in str(self):
+                raise OSError("simulated resolve failure")
+            return original_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", exploding_resolve)
+
+        result = _build_session_path("my-project", "malicious-id")
+        expected_slug_only = sessions_root / "my-project"
+        assert result == expected_slug_only, (
+            f"Expected fail-closed slug-only path {expected_slug_only}, "
+            f"got {result}"
+        )
+
 
 # =============================================================================
 # Parallel Session Isolation — Core Fix Verification (Test Engineer)

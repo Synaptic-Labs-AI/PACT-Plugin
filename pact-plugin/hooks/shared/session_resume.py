@@ -263,11 +263,15 @@ def _coerce_phase_string(phase: Any) -> str:
     - pathologically long strings from a misconfigured writer that stashed
       a whole error message in `phase`
 
-    Any of the above is stringified via ``str()`` and truncated at
+    None is handled explicitly (returns ``""``), matching
+    ``_coerce_decision_summary``'s convention. Other non-string values
+    are stringified via ``str()`` and truncated at
     ``_PHASE_TRUNCATION_LIMIT`` so a bad event can produce at worst a
     readable 80-character stub in the resume output instead of flooding
     the SessionStart hook context or raising a TypeError downstream.
     """
+    if phase is None:
+        return ""
     rendered = str(phase)
     if len(rendered) > _PHASE_TRUNCATION_LIMIT:
         rendered = rendered[:_PHASE_TRUNCATION_LIMIT - 3] + "..."

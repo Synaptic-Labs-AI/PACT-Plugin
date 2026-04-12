@@ -370,6 +370,11 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     # See `fcntl_sidecar_lock_pattern` for the canonical pattern.
     if modified:
         try:
+            # Function-level import to avoid circular dependency:
+            # session_init.py imports staleness at module level, and also
+            # imports from shared.claude_md_manager — a module-level
+            # import here would create a staleness → claude_md_manager →
+            # (indirectly) staleness cycle on some Python versions.
             from shared.claude_md_manager import file_lock
             with file_lock(claude_md_path):
                 # Symlink guard INSIDE the lock (TOCTOU defense). is_symlink

@@ -4,6 +4,8 @@ description: Teammate bootstrap — loads team protocol, teachback, memory retri
 
 # PACT Teammate Bootstrap
 
+<!-- You may have been routed here via the Custom Agent Instructions fallback if no PACT ROLE marker was found. -->
+
 Load the following before any other work:
 
 @${CLAUDE_PLUGIN_ROOT}/skills/pact-agent-teams/SKILL.md

@@ -17,6 +17,7 @@ import json
 # could otherwise produce a multi-megabyte JSON line and overwhelm the UI.
 # Matches the _ERROR_MAX_CHARS = 200 cap used by failure_log.append_failure.
 _ERROR_MAX_CHARS = 200
+_HOOK_NAME_MAX_CHARS = 50
 
 
 def hook_error_json(hook_name: str, error: Exception) -> str:
@@ -26,8 +27,8 @@ def hook_error_json(hook_name: str, error: Exception) -> str:
     will display to the user as a warning. This is for fail-open hooks
     (exit 0) where we want to surface the error without blocking.
 
-    The error portion is truncated to `_ERROR_MAX_CHARS` so that a
-    pathological exception message cannot blow up the systemMessage line.
+    Both hook_name and error are truncated so that a pathological input
+    cannot blow up the systemMessage line.
 
     Args:
         hook_name: Name of the hook (e.g., 'validate_handoff')
@@ -36,7 +37,8 @@ def hook_error_json(hook_name: str, error: Exception) -> str:
     Returns:
         JSON string: {"systemMessage": "PACT hook warning (hook_name): error message"}
     """
+    safe_name = str(hook_name)[:_HOOK_NAME_MAX_CHARS]
     error_str = str(error)[:_ERROR_MAX_CHARS]
     return json.dumps(
-        {"systemMessage": f"PACT hook warning ({hook_name}): {error_str}"}
+        {"systemMessage": f"PACT hook warning ({safe_name}): {error_str}"}
     )

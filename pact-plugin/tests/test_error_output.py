@@ -182,6 +182,17 @@ class TestHookErrorJson:
         parsed = json.loads(result)
         assert 'hook"name' in parsed["systemMessage"]
 
+    def test_very_long_hook_name_is_truncated(self):
+        """Pathological hook_name is truncated to _HOOK_NAME_MAX_CHARS."""
+        from shared.error_output import _HOOK_NAME_MAX_CHARS, hook_error_json
+
+        long_name = "h" * 500
+        result = hook_error_json(long_name, RuntimeError("err"))
+        parsed = json.loads(result)
+        truncated = "h" * _HOOK_NAME_MAX_CHARS
+        assert truncated in parsed["systemMessage"]
+        assert long_name not in parsed["systemMessage"]
+
 
 # =============================================================================
 # Integration Tests: Each hook's exception handler outputs JSON on stdout
