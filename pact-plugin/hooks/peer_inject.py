@@ -159,7 +159,14 @@ def main():
 
     pact_context.init(input_data)
     agent_type = input_data.get("agent_type", "")
-    agent_name = input_data.get("agent_name", "") or input_data.get("agent_id", "")
+    # Only accept agent_name here. agent_id is a UUID and team members are
+    # registered in the team config under their canonical names, not UUIDs —
+    # falling back to agent_id would make the self-exclusion filter in
+    # get_peer_context() fail to match anything, and the intended agentType
+    # fallback (which excludes ALL peers of the same type) would become
+    # unreachable. Leave agent_name empty when absent so get_peer_context's
+    # agentType fallback fires as originally designed.
+    agent_name = input_data.get("agent_name", "")
     team_name = get_team_name()
 
     context = get_peer_context(

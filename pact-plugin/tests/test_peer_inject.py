@@ -364,6 +364,83 @@ class TestMainEntryPoint:
             with pytest.raises(RuntimeError, match="boom"):
                 main()
 
+    def test_main_agent_id_only_falls_through_to_agent_type_fallback(
+        self, tmp_path, pact_context, capsys
+    ):
+        """R4-L1: when stdin supplies only ``agent_id`` (a UUID) and no
+        ``agent_name``, the agentType-based fallback fires in
+        get_peer_context — NOT a broken self-exclusion by UUID.
+
+        The round-3 code used ``agent_name = input_data.get("agent_name", "") or
+        input_data.get("agent_id", "")`` as a fallback. That was broken by
+        construction: team members are registered under their canonical names
+        in the team config, never their UUIDs. The self-exclusion filter
+        ``m.get("name") != agent_name`` would compare a canonical name
+        against a UUID and always return True, so every team member appeared
+        in the peer list (including the spawning agent itself). Worse, the
+        intended agentType-fallback branch (which excludes ALL peers of the
+        same type) became unreachable because ``agent_name`` was non-empty.
+
+        The R4 fix removes the ``or agent_id`` fallback so agent_name stays
+        empty when absent. Empty agent_name routes through the agentType
+        else-branch at peer_inject.py L138, which excludes every member whose
+        agentType matches the spawning agent's type. This test pins both
+        the routing (agentType fallback fires) and the self-exclusion
+        outcome (the spawning agent is NOT in the peer list).
+        """
+        from peer_inject import main
+
+        # Build a real team config with two backend-coders and a frontend-coder.
+        # With the bug, passing agent_id would fail self-exclusion and list
+        # BOTH backend-coders (including the spawner). With the fix,
+        # the agentType fallback excludes all backend-coders, leaving only
+        # the frontend-coder in the peer list. Place the config at the
+        # canonical ~/.claude/teams/{team_name}/config.json location that
+        # peer_inject.get_peer_context derives from Path.home().
+        team_dir = tmp_path / ".claude" / "teams" / "pact-test-l1"
+        team_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+                {"name": "backend-coder-2", "agentType": "pact-backend-coder"},
+                {"name": "frontend-coder", "agentType": "pact-frontend-coder"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        pact_context(team_name="pact-test-l1")
+
+        # Stdin provides agent_id (UUID) but no agent_name.
+        # Pre-fix: agent_name falls back to this UUID, self-exclusion fails.
+        # Post-fix: agent_name stays empty, agentType fallback fires.
+        input_data = json.dumps({
+            "agent_type": "pact-backend-coder",
+            "agent_id": "deadbeef-1111-2222-3333-444444444444",
+        })
+
+        # Patch Path.home() as the peer_inject module imports it. The
+        # module uses a local `from pathlib import Path` at L18 and
+        # calls Path.home() at L107, so patching the class attribute via
+        # the peer_inject namespace is the correct scoping.
+        with patch("peer_inject.Path.home", return_value=tmp_path), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        additional_context = output["hookSpecificOutput"]["additionalContext"]
+
+        # The agentType-fallback branch excludes BOTH backend-coders, so
+        # neither name should appear in the peer list. If the fallback
+        # were still present, at least one backend-coder would leak
+        # through (the self-exclusion would compare a UUID, not a name).
+        assert "backend-coder-1" not in additional_context
+        assert "backend-coder-2" not in additional_context
+        # The unrelated agent type MUST still appear.
+        assert "frontend-coder" in additional_context
+
 
 class TestBootstrapPrelude:
     """The _BOOTSTRAP_PRELUDE_TEMPLATE is the load-bearing teammate prelude.
