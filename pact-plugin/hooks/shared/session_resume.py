@@ -73,11 +73,6 @@ def update_session_info(
     # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
     target_file, _source = resolve_project_claude_md_path(project_dir)
 
-    # Symlink guard: same defensive check as remove_stale_kernel_block and
-    # update_pact_routing. is_symlink uses lstat (does not follow the link).
-    if target_file.is_symlink():
-        return "Session info skipped: path precondition not met."
-
     SESSION_START = "<!-- SESSION_START -->"
     SESSION_END = "<!-- SESSION_END -->"
 
@@ -127,6 +122,14 @@ def update_session_info(
     # on timeout — next session start will retry.
     try:
         with file_lock(target_file):
+            # Symlink guard INSIDE the lock (#366 R5 M1, TOCTOU defense):
+            # same defensive check as remove_stale_kernel_block and
+            # update_pact_routing. is_symlink uses lstat (does not follow
+            # the link). Inside the lock so an attacker cannot swap the
+            # target between an outside-lock check and the write.
+            if target_file.is_symlink():
+                return "Session info skipped: path precondition not met."
+
             try:
                 # Case 0: File doesn't exist -- create it with a minimal template
                 # so the orchestrator has a stable Current Session block to read on

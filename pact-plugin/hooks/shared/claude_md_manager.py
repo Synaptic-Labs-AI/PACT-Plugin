@@ -248,21 +248,24 @@ def remove_stale_kernel_block() -> str | None:
     if not target_file.exists():
         return None
 
-    # Symlink guard: is_symlink uses lstat under the hood which does NOT
-    # follow the link, so this is safe even if the link target is itself
-    # a malicious file. The status string is deliberately opaque — it
-    # identifies WHAT was skipped without revealing the internal check
-    # that triggered the skip to a local attacker inspecting the output.
-    if target_file.is_symlink():
-        return (
-            "Migration skipped: ~/.claude/CLAUDE.md path precondition not met."
-        )
-
     # Concurrency guard (#366 F1): serialize read-mutate-write so two
     # concurrent session_init hooks on the same home file cannot clobber
     # each other. Fail-open on timeout — next session start will retry.
     try:
         with file_lock(target_file):
+            # Symlink guard INSIDE the lock (#366 R5 M1, TOCTOU defense):
+            # is_symlink uses lstat under the hood which does NOT follow the
+            # link, so this is safe even if the link target is itself a
+            # malicious file. Inside the lock so an attacker cannot swap the
+            # target between an outside-lock check and the write. The status
+            # string is deliberately opaque — it identifies WHAT was skipped
+            # without revealing the internal check that triggered the skip to
+            # a local attacker inspecting the output.
+            if target_file.is_symlink():
+                return (
+                    "Migration skipped: ~/.claude/CLAUDE.md path precondition not met."
+                )
+
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
@@ -370,16 +373,6 @@ def update_pact_routing() -> str | None:
         # with the routing block in its template.
         return None
 
-    # Symlink guard: same defensive guard as remove_stale_kernel_block.
-    # is_symlink uses lstat so it does not follow the link. Return the
-    # warning as a status string so session_init.py surfaces it via
-    # systemMessage (hook stderr is not shown to users). The status
-    # string is deliberately opaque — see remove_stale_kernel_block.
-    if target_file.is_symlink():
-        return (
-            f"Routing skipped: {target_file} path precondition not met."
-        )
-
     # Concurrency guard (#366 F1): serialize read-mutate-write so two
     # concurrent session_init hooks on the same project CLAUDE.md cannot
     # interleave with each other (or with update_session_info's write) and
@@ -387,6 +380,19 @@ def update_pact_routing() -> str | None:
     # start will retry.
     try:
         with file_lock(target_file):
+            # Symlink guard INSIDE the lock (#366 R5 M1, TOCTOU defense):
+            # same defensive guard as remove_stale_kernel_block. is_symlink
+            # uses lstat so it does not follow the link. Inside the lock so
+            # an attacker cannot swap the target between an outside-lock
+            # check and the write. Return the warning as a status string so
+            # session_init.py surfaces it via systemMessage (hook stderr is
+            # not shown to users). The status string is deliberately opaque
+            # — see remove_stale_kernel_block.
+            if target_file.is_symlink():
+                return (
+                    f"Routing skipped: {target_file} path precondition not met."
+                )
+
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
