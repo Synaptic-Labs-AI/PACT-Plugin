@@ -1199,6 +1199,27 @@ class TestWriteContextDirCreation:
         assert data["started_at"] != ""
 
 
+    def test_creates_parent_dir_with_0o700_mode(self, monkeypatch, tmp_path):
+        """write_context must create parent directories with 0o700 permissions."""
+        import shared.pact_context as ctx_module
+
+        ctx_file = tmp_path / "new-dir" / "pact-session-context.json"
+        monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
+
+        ctx_module.write_context(
+            team_name="pact-mode",
+            session_id="mode-test",
+            project_dir="/mode/project",
+        )
+
+        parent = ctx_file.parent
+        assert parent.is_dir()
+        actual_mode = parent.stat().st_mode & 0o777
+        assert actual_mode == 0o700, (
+            f"Expected 0o700, got {oct(actual_mode)} for {parent}"
+        )
+
+
 class TestDetectSessionIdPriority:
     """Verify _detect_session_id uses context file only (no env var fallback)."""
 
@@ -1907,6 +1928,116 @@ class TestGetSessionDirAdversarial:
 
         result = get_session_dir()
         assert ".claude/pact-sessions/" in result
+
+    def test_path_traversal_session_id_neutralized(self, monkeypatch, tmp_path):
+        """A session_id containing '../' path traversal components must NOT
+        resolve outside ~/.claude/pact-sessions/.
+
+        The _build_session_path guard resolves the candidate path and checks
+        it stays under the sessions root. If traversal is detected, it falls
+        back to using just the basename of the session_id, neutralizing the
+        traversal.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+
+        result = _build_session_path("my-project", "../../etc/passwd")
+        resolved = result.resolve()
+
+        sessions_root_resolved = sessions_root.resolve()
+        assert str(resolved).startswith(str(sessions_root_resolved)), (
+            f"Path traversal not neutralized: _build_session_path returned "
+            f"{result} which resolves to {resolved}, outside "
+            f"{sessions_root_resolved}"
+        )
+
+
+    def test_sibling_directory_prefix_collision(self, monkeypatch, tmp_path):
+        """A session_id that traverses into a sibling directory whose name
+        shares the 'pact-sessions' prefix must be caught by the guard.
+
+        Without the trailing os.sep in the prefix check, a resolved path like
+        /home/user/.claude/pact-sessions-evil/foo would pass the
+        startswith('/home/user/.claude/pact-sessions') guard because the
+        string prefix matches without requiring a path separator boundary.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+        evil_sibling = tmp_path / ".claude" / "pact-sessions-evil"
+        evil_sibling.mkdir(parents=True, exist_ok=True)
+
+        # session_id traverses up out of {slug}/ into the sibling dir
+        result = _build_session_path("my-project", "../../pact-sessions-evil/payload")
+        resolved = str(result.resolve())
+
+        sessions_prefix = str(sessions_root.resolve()) + "/"
+        assert resolved.startswith(sessions_prefix), (
+            f"Sibling directory prefix collision not caught: "
+            f"_build_session_path resolved to {resolved}, which is outside "
+            f"{sessions_prefix}"
+        )
+
+    def test_dotdot_only_session_id_returns_safe_path(self, monkeypatch, tmp_path):
+        """session_id='../..' produces a path whose basename() is '..',
+        which the guard must reject. The result must not contain '..'
+        path components.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+
+        result = _build_session_path("my-project", "../..")
+        resolved = result.resolve()
+
+        sessions_root_resolved = sessions_root.resolve()
+        assert (
+            resolved == sessions_root_resolved
+            or sessions_root_resolved in resolved.parents
+        ), (
+            f"'../..' session_id escaped containment: resolved to "
+            f"{resolved}, outside {sessions_root_resolved}"
+        )
+        assert ".." not in result.parts, (
+            f"Result path contains '..' component: {result}"
+        )
+
+    def test_exception_in_validation_returns_fail_closed(self, monkeypatch, tmp_path):
+        """When resolve() raises, the guard returns a slug-only path
+        (fail-closed) rather than the unvalidated candidate.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+
+        original_resolve = Path.resolve
+
+        def exploding_resolve(self, strict=False):
+            if "malicious" in str(self):
+                raise OSError("simulated resolve failure")
+            return original_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", exploding_resolve)
+
+        result = _build_session_path("my-project", "malicious-id")
+        expected_slug_only = sessions_root / "my-project"
+        assert result == expected_slug_only, (
+            f"Expected fail-closed slug-only path {expected_slug_only}, "
+            f"got {result}"
+        )
 
 
 # =============================================================================

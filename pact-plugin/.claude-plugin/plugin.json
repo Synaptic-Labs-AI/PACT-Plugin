@@ -1,14 +1,14 @@
 {
   "name": "PACT",
-  "version": "3.16.2",
+  "version": "3.17.0",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "ProfSynapse",
-    "url": "https://github.com/ProfSynapse/PACT-prompt"
+    "url": "https://github.com/Synaptic-Labs-AI/PACT-Plugin"
   },
   "license": "MIT",
-  "repository": "https://github.com/ProfSynapse/PACT-prompt",
-  "homepage": "https://github.com/ProfSynapse/PACT-prompt",
+  "repository": "https://github.com/Synaptic-Labs-AI/PACT-Plugin",
+  "homepage": "https://github.com/Synaptic-Labs-AI/PACT-Plugin",
   "keywords": [
     "pact",
     "vsm",
@@ -25,6 +25,8 @@
     "conversation-theory"
   ],
   "commands": [
+    "./commands/bootstrap.md",
+    "./commands/teammate-bootstrap.md",
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
     "./commands/rePACT.md",

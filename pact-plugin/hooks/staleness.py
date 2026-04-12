@@ -364,10 +364,36 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
         content, pinned_start, pinned_end, pinned_content
     )
 
-    # Write back if modified
+    # Write back if modified — under file_lock with TOCTOU symlink guard.
+    # staleness.py is the 6th writer to project CLAUDE.md and must use the
+    # same hardening as the other 5 (claude_md_manager + session_resume).
+    # See `fcntl_sidecar_lock_pattern` for the canonical pattern.
     if modified:
         try:
-            claude_md_path.write_text(new_content, encoding="utf-8")
+            # Function-level import to avoid circular dependency:
+            # session_init.py imports staleness at module level, and also
+            # imports from shared.claude_md_manager — a module-level
+            # import here would create a staleness → claude_md_manager →
+            # (indirectly) staleness cycle on some Python versions.
+            from shared.claude_md_manager import file_lock
+            with file_lock(claude_md_path):
+                # Symlink guard INSIDE the lock (TOCTOU defense). is_symlink
+                # uses lstat so it does not follow the link. Status string is
+                # deliberately opaque — see remove_stale_kernel_block.
+                if claude_md_path.is_symlink():
+                    return "Pinned staleness skipped: path precondition not met."
+                # Re-read inside the lock — a concurrent update_pact_routing
+                # or update_session_info may have landed between our outer
+                # read at L348 and the lock acquisition. If content changed,
+                # skip this pass: the staleness markers are idempotent and
+                # the next session will re-detect any stale entries. This
+                # avoids clobbering a concurrent writer's SESSION_START block.
+                current = claude_md_path.read_text(encoding="utf-8")
+                if current != content:
+                    return None
+                claude_md_path.write_text(new_content, encoding="utf-8")
+        except TimeoutError:
+            return "Pinned staleness update skipped: lock contention."
         except (IOError, OSError) as e:
             logger_msg = f"Failed to update pinned staleness: {e}"
             return logger_msg

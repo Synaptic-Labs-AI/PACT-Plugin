@@ -145,7 +145,18 @@ Select the domain coder based on PR focus:
 For each reviewer:
 1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. `Task(name="{reviewer-name}", team_name="{team_name}", subagent_type="pact-{reviewer-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `PACT ROLE: teammate ({reviewer-name})` marker on its own line and include the `Skill("PACT:teammate-bootstrap")` FIRST ACTION directive so routing defense-in-depth delivers the teammate bootstrap at spawn:
+
+```
+Task(
+  name="{reviewer-name}",
+  team_name="{team_name}",
+  subagent_type="pact-{reviewer-type}",
+  prompt="PACT ROLE: teammate ({reviewer-name}).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
+
+> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing. The `peer_inject.py` hook also sanitizes defensively by stripping `\n`, `\r`, and `)` as a second layer of defense.
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 
@@ -330,4 +341,13 @@ Monitor for blocker/algedonic signals via:
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 
-On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
+On signal detected, handle via the Signal Task Handling procedure:
+
+When an agent reports a blocker or algedonic signal via `SendMessage`:
+1. Create a signal Task (blocker or algedonic type)
+2. Block the agent's task via `addBlockedBy`
+3. For algedonic signals, amplify scope:
+   - ALERT → block current phase task
+   - HALT → block feature task (stops all work)
+4. Present to user and await resolution
+5. On resolution: mark signal task `completed` (unblocks downstream)

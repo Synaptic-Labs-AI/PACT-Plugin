@@ -46,8 +46,30 @@ def _build_session_path(slug: str, session_id: str) -> Path:
 
     Used by init(), get_session_dir(), and write_context() to avoid
     duplicating path construction logic.
+
+    Path traversal guard: resolves the constructed path and verifies it
+    stays under ~/.claude/pact-sessions/ using Path.parents containment
+    (immune to sibling-prefix collisions by design — matches
+    session_init._validate_under_pact_sessions). A malicious session_id
+    like "../../etc" would resolve outside the expected tree — fall back
+    to a sanitized basename. Fail-closed: if the validation itself
+    raises, return a slug-only path (no session_id component).
     """
-    return Path.home() / ".claude" / "pact-sessions" / slug / session_id
+    sessions_root = Path.home() / ".claude" / "pact-sessions"
+    candidate = sessions_root / slug / session_id
+    try:
+        sessions_root_resolved = sessions_root.resolve()
+        resolved = candidate.resolve(strict=False)
+        if resolved == sessions_root_resolved or sessions_root_resolved in resolved.parents:
+            return candidate
+        basename = Path(session_id).name
+        if basename in ("", ".", "..") or "/" in basename:
+            candidate = sessions_root / slug
+        else:
+            candidate = sessions_root / slug / basename
+    except (OSError, ValueError):
+        candidate = sessions_root / slug
+    return candidate
 
 
 def _get_context_file_path() -> Path | None:
@@ -359,7 +381,7 @@ def write_context(
 
     context_dir = target.parent
     try:
-        context_dir.mkdir(parents=True, exist_ok=True)
+        context_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Write to temp file in the same directory (required for atomic rename)
         fd, tmp_path = tempfile.mkstemp(

@@ -158,7 +158,7 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`CLAUDE.md`](../CLAUDE.md) > Temporal Horizons for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`bootstrap.md`](../commands/bootstrap.md) > Temporal Horizons for the full horizon model.
 
 ### Trigger Points
 
@@ -339,7 +339,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does [CLAUDE.md](../CLAUDE.md) favor speed or quality for this project?
+   - Does [bootstrap.md](../commands/bootstrap.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 
@@ -749,7 +749,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(type="broadcast")`, preserve work-in-progress, do NOT commit partial work
+- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(to="*")`, preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT
@@ -952,7 +952,7 @@ CalibrationRecord:
 | Redo prior phase | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
 | Augment present phase | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
 | Invoke rePACT | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
-| Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
+| Terminate agent | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(task_id=taskId)` (force-stop) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` + fresh spawn with partial handoff |
 | Not truly blocked | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | Escalate to user | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 

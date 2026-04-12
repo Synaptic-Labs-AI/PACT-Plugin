@@ -100,15 +100,48 @@ class TestHookErrorJson:
         parsed = json.loads(result)
         assert "line1\nline2\nline3" in parsed["systemMessage"]
 
-    def test_very_long_error_message(self):
-        """Very long error messages should be handled without truncation."""
-        from shared.error_output import hook_error_json
+    def test_very_long_error_message_is_truncated(self):
+        """Very long error messages are truncated to _ERROR_MAX_CHARS (200).
+
+        Pathological exception messages (huge stdin echoed back, full
+        traceback strings, base64 blobs) would otherwise produce a
+        multi-megabyte JSON line and overwhelm the UI. The truncation
+        cap matches failure_log._ERROR_MAX_CHARS for consistency.
+        """
+        from shared.error_output import _ERROR_MAX_CHARS, hook_error_json
 
         long_msg = "x" * 10_000
         error = RuntimeError(long_msg)
         result = hook_error_json("test_hook", error)
         parsed = json.loads(result)
-        assert long_msg in parsed["systemMessage"]
+
+        # Only the truncated prefix appears
+        truncated = "x" * _ERROR_MAX_CHARS
+        assert truncated in parsed["systemMessage"]
+        # Full message does NOT appear
+        assert long_msg not in parsed["systemMessage"]
+        # The systemMessage is bounded: prefix ("PACT hook warning (test_hook): ")
+        # plus exactly _ERROR_MAX_CHARS error chars
+        prefix = "PACT hook warning (test_hook): "
+        assert parsed["systemMessage"] == prefix + truncated
+
+    def test_truncation_at_exact_boundary(self):
+        """An error of exactly _ERROR_MAX_CHARS chars is preserved unchanged."""
+        from shared.error_output import _ERROR_MAX_CHARS, hook_error_json
+
+        msg = "y" * _ERROR_MAX_CHARS
+        result = hook_error_json("test_hook", RuntimeError(msg))
+        parsed = json.loads(result)
+        assert msg in parsed["systemMessage"]
+
+    def test_short_error_message_is_unchanged(self):
+        """Short error messages (< _ERROR_MAX_CHARS) pass through verbatim."""
+        from shared.error_output import hook_error_json
+
+        msg = "small error"
+        result = hook_error_json("test_hook", RuntimeError(msg))
+        parsed = json.loads(result)
+        assert parsed["systemMessage"] == f"PACT hook warning (test_hook): {msg}"
 
     def test_hook_name_appears_in_output(self):
         """The hook_name parameter should appear in the systemMessage."""
@@ -148,6 +181,17 @@ class TestHookErrorJson:
         result = hook_error_json('hook"name', RuntimeError("err"))
         parsed = json.loads(result)
         assert 'hook"name' in parsed["systemMessage"]
+
+    def test_very_long_hook_name_is_truncated(self):
+        """Pathological hook_name is truncated to _HOOK_NAME_MAX_CHARS."""
+        from shared.error_output import _HOOK_NAME_MAX_CHARS, hook_error_json
+
+        long_name = "h" * 500
+        result = hook_error_json(long_name, RuntimeError("err"))
+        parsed = json.loads(result)
+        truncated = "h" * _HOOK_NAME_MAX_CHARS
+        assert truncated in parsed["systemMessage"]
+        assert long_name not in parsed["systemMessage"]
 
 
 # =============================================================================
@@ -1381,7 +1425,8 @@ class TestSessionInitSuppressOutput:
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("session_init.check_additional_directories", return_value=None), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.update_claude_md", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.generate_team_name", return_value="pact-test123"), \

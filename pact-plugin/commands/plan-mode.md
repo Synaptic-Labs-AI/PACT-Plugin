@@ -191,7 +191,16 @@ If a specialist fails entirely (timeout, error):
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
    - Add to description: "Send a teachback to lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
-3. `Task(name="{specialist-name}", team_name="{team_name}", subagent_type="pact-{specialist-type}", prompt="You are joining team {team_name}. Check `TaskList` for tasks assigned to you.")`
+3. Spawn the consultant with the canonical dispatch form:
+
+```
+Task(
+  name="{specialist-name}",
+  team_name="{team_name}",
+  subagent_type="pact-{specialist-type}",
+  prompt="PACT ROLE: teammate ({specialist-name}).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+)
+```
 
 Spawn all consultants in parallel.
 
@@ -525,7 +534,16 @@ Monitor for blocker/algedonic signals via:
 - **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
-On signal detected: Follow Signal Task Handling in [CLAUDE.md](../CLAUDE.md).
+On signal detected, handle via the Signal Task Handling procedure:
+
+When an agent reports a blocker or algedonic signal via `SendMessage`:
+1. Create a signal Task (blocker or algedonic type)
+2. Block the agent's task via `addBlockedBy`
+3. For algedonic signals, amplify scope:
+   - ALERT → block current phase task
+   - HALT → block feature task (stops all work)
+4. Present to user and await resolution
+5. On resolution: mark signal task `completed` (unblocks downstream)
 
 ---
 

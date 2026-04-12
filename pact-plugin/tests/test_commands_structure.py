@@ -150,3 +150,45 @@ class TestAskUserQuestionOptions:
         desc = "Save session knowledge and pause"
         assert desc in wrapup_content, "wrap-up.md missing shared Pause description"
         assert desc in peer_review_content, "peer-review.md missing shared Pause description"
+
+
+class TestPactRoleTeammateInConsumerCommands:
+    """All consumer command files must inline the canonical PACT ROLE: teammate
+    marker (#366 R5 L3).
+
+    Background: bootstrap.md is the canonical source for the Task() dispatch
+    form, but five consumer commands (orchestrate, peer-review, comPACT,
+    rePACT, plan-mode) inline the same form because LLM readers under token
+    pressure don't follow cross-references reliably. The "PACT ROLE: teammate ("
+    substring is the load-bearing marker that the multi-layer routing
+    mechanism (session_init.py + peer_inject.py) uses to detect a teammate
+    spawn and inject the bootstrap directive.
+
+    If a consumer file silently drops the marker — for example a future
+    refactor that compresses the dispatch template into a "see bootstrap.md"
+    pointer — teammates spawned via that command will not load the bootstrap
+    skill and will be silently demoted from PACT specialists to plain Claude
+    Code agents. This test pins the marker as a structural invariant.
+    """
+
+    CONSUMER_COMMANDS = [
+        "orchestrate",
+        "peer-review",
+        "comPACT",
+        "rePACT",
+        "plan-mode",
+    ]
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_contains_canonical_pact_role(self, name):
+        path = COMMANDS_DIR / f"{name}.md"
+        assert path.exists(), f"Consumer command file missing: {name}.md"
+        text = path.read_text(encoding="utf-8")
+        assert "PACT ROLE: teammate (" in text, (
+            f"{name}.md must contain canonical 'PACT ROLE: teammate (' "
+            "marker — load-bearing for the routing chain that promotes a "
+            "freshly spawned teammate to a PACT specialist via "
+            "Skill('PACT:teammate-bootstrap'). See bootstrap.md and the "
+            "'Canonical Task() dispatch is mirrored inline at every consumer "
+            "site' pinned-context entry for context."
+        )

@@ -544,6 +544,224 @@ class TestUpdateSessionInfoErrorPaths:
         assert "Session info failed:" in result
 
 
+class TestUpdateSessionInfoLocking:
+    """Concurrency tests for update_session_info() (#366 F1 gap closure).
+
+    update_session_info writes to the project CLAUDE.md at session_init step 5b
+    and must share a lock with update_pact_routing (step 5c) so two concurrent
+    session_init hooks on the same project cannot interleave read-mutate-write
+    and clobber each other's managed blocks.
+    """
+
+    def test_concurrent_writes_preserve_session_start_block(
+        self, tmp_path, monkeypatch
+    ):
+        """Two concurrent update_session_info calls on the same CLAUDE.md
+        must produce exactly one SESSION_START/SESSION_END block, matching
+        exactly one of the two callers' inputs. Last-writer-wins is
+        acceptable; interleaved writes that corrupt the block or duplicate
+        markers are not.
+        """
+        import threading
+        from shared.session_resume import update_session_info
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        target = project_dir / ".claude" / "CLAUDE.md"
+        target.parent.mkdir()
+        # Start with an existing file containing user content and a prior
+        # session block so both writers exercise the "markers present"
+        # replace path (Case 1 of update_session_info).
+        target.write_text(
+            "# Project Memory\n"
+            "\n"
+            "User content above the session block.\n"
+            "\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume prior-session`\n"
+            "- Team: `pact-prior`\n"
+            "- Started: 2026-01-01 00:00:00 UTC\n"
+            "<!-- SESSION_END -->\n"
+            "\n"
+            "User content below the session block.\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        barrier = threading.Barrier(2)
+        results: list[str | None] = [None, None]
+        errors: list[BaseException] = []
+
+        def run(index: int, session_id: str, team_name: str) -> None:
+            try:
+                barrier.wait(timeout=5)
+                results[index] = update_session_info(session_id, team_name)
+            except BaseException as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=run, args=(0, "sess-AAAA", "pact-AAAA"))
+        t2 = threading.Thread(target=run, args=(1, "sess-BBBB", "pact-BBBB"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not errors, f"Worker threads raised: {errors}"
+        assert not t1.is_alive()
+        assert not t2.is_alive()
+
+        # Both calls must have returned a status string (neither crashed
+        # from an exception, neither hit the 5s timeout — two threads
+        # each doing one read+write cycle finish in < 100ms).
+        assert results[0] is not None
+        assert results[1] is not None
+
+        final_content = target.read_text(encoding="utf-8")
+
+        # Exactly one SESSION_START block survives (no duplicates, no
+        # half-written interleavings).
+        assert final_content.count("<!-- SESSION_START -->") == 1, (
+            "Concurrent writes accumulated multiple SESSION_START markers "
+            "— lock failed to serialize the read-mutate-write."
+        )
+        assert final_content.count("<!-- SESSION_END -->") == 1
+
+        # The winning session ID must be one of the two callers' IDs — not
+        # the prior "prior-session" (which must have been replaced).
+        assert "prior-session" not in final_content, (
+            "Prior session block should have been replaced by the winner"
+        )
+
+        # User content outside the managed block must survive verbatim.
+        assert "User content above the session block." in final_content
+        assert "User content below the session block." in final_content
+        assert "# Project Memory" in final_content
+
+        # The winning block must be well-formed: the session ID and team
+        # must match each other (no cross-thread contamination where one
+        # thread wrote the ID and another wrote the team).
+        aaaa_won = (
+            "sess-AAAA" in final_content and "pact-AAAA" in final_content
+        )
+        bbbb_won = (
+            "sess-BBBB" in final_content and "pact-BBBB" in final_content
+        )
+        assert aaaa_won != bbbb_won, (
+            "Exactly one writer must win; got "
+            f"aaaa_won={aaaa_won}, bbbb_won={bbbb_won}"
+        )
+        if aaaa_won:
+            assert "sess-BBBB" not in final_content
+            assert "pact-BBBB" not in final_content
+        else:
+            assert "sess-AAAA" not in final_content
+            assert "pact-AAAA" not in final_content
+
+    def test_timeout_returns_fail_open_status(self, tmp_path, monkeypatch):
+        """When the lock cannot be acquired within the timeout,
+        update_session_info returns a 'Failed to acquire lock ...' status
+        string so session_init.py's `'failed' in msg.lower()` routing sends
+        it to system_messages (user-visible error surface) rather than
+        silently into context_parts. A 5s lock acquisition failure is a
+        genuine concurrency problem the user should see.
+        """
+        import threading
+        from shared.claude_md_manager import file_lock
+        from shared import claude_md_manager as cmm
+        from shared.session_resume import update_session_info
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        target = project_dir / "CLAUDE.md"
+        target.write_text(
+            "# Project Memory\n\nUser content\n", encoding="utf-8"
+        )
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 0.3)
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+
+        def holder() -> None:
+            with file_lock(target):
+                holder_has_lock.set()
+                holder_release.wait(timeout=5)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2), (
+            "Holder thread never acquired the lock"
+        )
+
+        result = update_session_info("sess-timeout", "pact-timeout")
+
+        assert result is not None
+        # MUST contain "failed" — session_init routes on
+        # `'failed' in msg.lower()` to system_messages for user visibility.
+        assert "failed" in result.lower()
+        assert "lock" in result.lower()
+        assert "session info update skipped" in result.lower()
+
+        # File was NOT mutated — the lock acquisition failed before any
+        # write happened, so the starting content is intact.
+        assert target.read_text(encoding="utf-8") == (
+            "# Project Memory\n\nUser content\n"
+        )
+
+        holder_release.set()
+        t.join(timeout=5)
+
+
+class TestUpdateSessionInfoSymlinkRefusal:
+    """SECURITY hardening — update_session_info refuses to operate on symlinks.
+
+    Matches the pattern in remove_stale_kernel_block and update_pact_routing:
+    if the project CLAUDE.md is a symlink, return an opaque 'Session info
+    skipped: ... path precondition not met.' string and do not follow the
+    link. is_symlink uses lstat so it does not follow the link.
+
+    The status string is deliberately opaque — no mention of 'symlink' or
+    'refusing' to avoid disclosing the internal guard to a local attacker."""
+
+    def test_update_session_info_refuses_symlink(self, tmp_path, monkeypatch):
+        """If the project CLAUDE.md is a symlink, update_session_info returns
+        an opaque skip status and does not touch the symlink target."""
+        import os
+        from shared.session_resume import update_session_info
+
+        symlink_target = tmp_path / "external_target.md"
+        symlink_target_content = (
+            "# External target\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume old-session`\n"
+            "<!-- SESSION_END -->\n"
+        )
+        symlink_target.write_text(symlink_target_content, encoding="utf-8")
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        managed_path = project_dir / "CLAUDE.md"
+        os.symlink(str(symlink_target), str(managed_path))
+        assert managed_path.is_symlink()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = update_session_info("sess-new", "pact-new")
+
+        assert result is not None
+        assert "Session info skipped" in result
+        assert "path precondition not met" in result
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
+        # Symlink target is byte-identical (untouched)
+        assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
+        assert managed_path.is_symlink()
+
+
 class TestCheckPausedState:
     """Tests for check_paused_state() -- journal-only path."""
 
@@ -605,6 +823,92 @@ class TestCheckPausedState:
         # All bad shapes must collapse to None — no formatted output.
         result = _check_journal_paused_state(str(sd))
         assert result is None
+
+    @pytest.mark.parametrize(
+        "age_days,expected_branch",
+        [
+            (0, "active"),
+            (13, "active"),
+            (14, "active"),  # STRICT > 14 means 14 days exactly is still ACTIVE
+            (15, "stale"),
+            (999, "stale"),
+        ],
+        ids=["fresh", "13d", "14d-boundary", "15d", "999d"],
+    )
+    def test_ttl_boundary_is_strict_greater_than_14_days(
+        self, tmp_path, monkeypatch, age_days, expected_branch
+    ):
+        """D: TTL boundary at age=13/14/15/999 days against the strict ``> 14`` cutoff.
+
+        The implementation uses ``if age_days > 14`` (strict greater-than). The
+        boundary cases are:
+          - 13 days → active (well below cutoff)
+          - 14 days → active (equal to cutoff, NOT stale, because of strict >)
+          - 15 days → stale (just over cutoff)
+          - 999 days → stale (well over)
+
+        A regression to ``>=`` would silently flip 14d-old paused sessions to
+        the stale branch. A regression to ``<`` would skip the stale branch
+        entirely. This parametrized test pins all four corners of the
+        boundary so either drift is caught.
+
+        We monkeypatch ``_check_pr_state`` to return "OPEN" so the function
+        reaches the active formatter (otherwise PR state checks would dominate
+        the test outcome) — controlling the dependency without touching
+        datetime, which the function under test reads directly.
+        """
+        import json
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_journal_paused_state
+
+        sd = tmp_path / ".claude" / "pact-sessions" / "test" / f"ttl-{age_days}d"
+        sd.mkdir(parents=True, exist_ok=True)
+        journal = sd / "session-journal.jsonl"
+
+        # Compute a timestamp that is exactly age_days old. The function
+        # truncates ``(now - paused_at).days`` so this lands on the integer
+        # boundary deterministically.
+        ts = (datetime.now(timezone.utc) - timedelta(days=age_days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        event = {
+            "v": 1,
+            "type": "session_paused",
+            "pr_number": 4242,
+            "branch": "feat/ttl-test",
+            "worktree_path": "/tmp/wt-ttl",
+            "consolidation_completed": True,
+            "ts": ts,
+        }
+        with open(str(journal), "w") as f:
+            f.write(json.dumps(event) + "\n")
+
+        # Pin _check_pr_state to OPEN so the active branch reaches its formatter
+        # without shelling out to gh. Stale branch returns BEFORE _check_pr_state
+        # is called, so this mock has no effect on stale outcomes — exactly the
+        # isolation we want.
+        with mock_patch(
+            "shared.session_resume._check_pr_state", return_value="OPEN"
+        ):
+            result = _check_journal_paused_state(str(sd))
+
+        assert result is not None, (
+            f"age_days={age_days}: expected non-None result on {expected_branch} branch"
+        )
+
+        if expected_branch == "stale":
+            assert result.startswith("Stale paused state from"), (
+                f"age_days={age_days}: expected stale message, got: {result!r}"
+            )
+            assert "older than 14 days" in result
+            assert "PR #4242" in result
+        else:
+            assert result.startswith("Paused work detected: PR #4242"), (
+                f"age_days={age_days}: expected active message, got: {result!r}"
+            )
+            assert "feat/ttl-test" in result
 
 
 # ---------------------------------------------------------------------------

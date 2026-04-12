@@ -686,3 +686,198 @@ class TestEstimateTokensEquivalence:
                 break
 
         return body_text
+
+
+class TestCheckPinnedStalenessHardening:
+    """SECURITY + CONCURRENCY hardening for check_pinned_staleness (#366 R5 H1).
+
+    Background: staleness.py is the 6th writer to project CLAUDE.md. The
+    other 5 writers (claude_md_manager.{remove_stale_kernel_block,
+    update_pact_routing, ensure_project_memory_md} and
+    session_resume.update_session_info, plus the test fixture writers)
+    use the canonical pattern: file_lock around the read-mutate-write
+    block, symlink check INSIDE the lock as a TOCTOU defense, opaque
+    skip status when the precondition fails. Pre-fix, check_pinned_staleness
+    used a bare read_text/write_text pair with no lock and no symlink
+    guard — a concurrent update_session_info or update_pact_routing
+    could clobber the SESSION_START block, and a planted symlink would
+    redirect the write to an attacker-chosen target.
+
+    This class pins the canonical hardening:
+    1. Symlink target rejected with opaque skip status
+    2. Concurrent content change detected via inside-lock re-read; no write
+       occurs and the function returns None (idempotent skip — staleness
+       markers are re-detectable next session, so dropping this pass is
+       always safe)
+    """
+
+    STALE_DATE = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+
+    def _stale_pinned_content(self):
+        """Build CLAUDE.md content with one pinned entry stale enough to
+        trigger the modified=True branch of check_pinned_staleness."""
+        return (
+            "# Project Memory\n\n"
+            "## Pinned Context\n\n"
+            f"### Old Feature (PR #100, merged {self.STALE_DATE})\n"
+            "- Some details about the feature\n\n"
+            "## Working Memory\n"
+        )
+
+    def test_symlink_target_rejected_with_opaque_status(self, tmp_path):
+        """If the project CLAUDE.md is a symlink, check_pinned_staleness
+        returns an opaque 'precondition not met' string and does NOT touch
+        the symlink target.
+
+        Pre-fix, the function would call write_text on the symlink path,
+        which would follow the link and clobber the attacker-chosen target.
+        Post-fix, the inside-lock symlink guard refuses to operate.
+        """
+        from session_init import check_pinned_staleness
+
+        # Plant a regular file as the symlink target
+        symlink_target = tmp_path / "external_target.md"
+        original_target_content = "# External file (must not be modified)\n"
+        symlink_target.write_text(original_target_content, encoding="utf-8")
+
+        # Replace the project CLAUDE.md with a symlink to the external target
+        managed_path = tmp_path / "CLAUDE.md"
+        os.symlink(str(symlink_target), str(managed_path))
+        assert managed_path.is_symlink()
+
+        # The symlink itself reads through to stale content (so the inner
+        # read_text + parse + apply_staleness_markings path runs and
+        # produces modified=True, which is what gates the file_lock entry)
+        symlink_target.write_text(
+            self._stale_pinned_content(), encoding="utf-8"
+        )
+
+        with patch("session_init._get_project_claude_md_path", return_value=managed_path), \
+             patch("staleness._get_project_claude_md_path", return_value=managed_path):
+            result = check_pinned_staleness()
+
+        # Status string is opaque — does not reveal the internal symlink
+        # check to a local attacker reading hook stderr.
+        assert result is not None
+        assert "skipped" in result.lower()
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
+
+        # Critical: the symlink TARGET is byte-identical to what we wrote
+        # last (the stale content). The function did not append a STALE
+        # marker, did not insert a budget warning, did not write at all.
+        assert symlink_target.read_text(encoding="utf-8") == self._stale_pinned_content()
+        # The symlink itself is still a symlink (was not replaced with a
+        # regular file by a bypassing write).
+        assert managed_path.is_symlink()
+
+    def test_concurrent_content_change_skips_write(self, tmp_path, monkeypatch):
+        """If content changes between the outer read at L348 and the
+        inner re-read inside the lock, the function returns None and does
+        NOT write.
+
+        Justification: staleness markers are idempotent — the next session
+        will re-detect any stale entries. Better to sacrifice this pass
+        than to clobber a concurrent update_pact_routing or
+        update_session_info that landed between our outer read and lock
+        acquisition.
+
+        We simulate the concurrent change by monkeypatching Path.read_text
+        so the SECOND call (inside the lock) returns DIFFERENT content
+        than the first.
+        """
+        from session_init import check_pinned_staleness
+
+        # Plant the project CLAUDE.md with stale content (triggers modified=True)
+        claude_md = tmp_path / "CLAUDE.md"
+        original_content = self._stale_pinned_content()
+        claude_md.write_text(original_content, encoding="utf-8")
+
+        # The "concurrent writer" simulated content — different bytes,
+        # represents a SESSION_START block landing between our outer read
+        # and our lock acquisition.
+        concurrent_content = (
+            "# Project Memory\n\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: claude --resume abc123\n"
+            "<!-- SESSION_END -->\n\n"
+            "## Pinned Context\n\n"
+            f"### Old Feature (PR #100, merged {self.STALE_DATE})\n"
+            "- Some details about the feature\n\n"
+        )
+
+        original_read_text = Path.read_text
+        call_state = {"count": 0}
+
+        def fake_read_text(self, *args, **kwargs):
+            # Only intercept reads of the managed path; let other reads
+            # (e.g., site-packages, pyc inspection) pass through.
+            if str(self) == str(claude_md):
+                call_state["count"] += 1
+                if call_state["count"] == 1:
+                    return original_content
+                # All subsequent reads (the inside-lock re-read) return the
+                # "concurrent change" content.
+                return concurrent_content
+            return original_read_text(self, *args, **kwargs)
+
+        # Track writes so we can assert no write occurred
+        write_calls = []
+        original_write_text = Path.write_text
+
+        def tracking_write_text(self, content, *args, **kwargs):
+            if str(self) == str(claude_md):
+                write_calls.append(content)
+            return original_write_text(self, content, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fake_read_text)
+        monkeypatch.setattr(Path, "write_text", tracking_write_text)
+
+        with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
+             patch("staleness._get_project_claude_md_path", return_value=claude_md):
+            result = check_pinned_staleness()
+
+        # The inside-lock re-read detected the content change → skip write
+        # → return None (idempotent skip).
+        assert result is None
+        # Critical: NO write occurred to the managed path.
+        assert write_calls == [], (
+            f"Expected zero writes when content changed under the writer, "
+            f"but {len(write_calls)} write(s) occurred. The inside-lock "
+            f"re-read guard at staleness.py L386-388 is not protecting the "
+            f"concurrent writer's content."
+        )
+        # Both reads happened (outer + inner re-read), confirming the lock
+        # path was actually entered.
+        assert call_state["count"] >= 2, (
+            f"Expected at least 2 reads of the managed path (outer + "
+            f"inner re-read), got {call_state['count']}. The inside-lock "
+            f"re-read may have been skipped."
+        )
+
+    def test_modified_write_succeeds_when_no_concurrent_change(self, tmp_path):
+        """Sanity check: when no concurrent change happens, the function
+        DOES write the modified content (stale marker insertion).
+
+        This is the positive complement to the concurrent-change test —
+        without it, a future bug that disables ALL writes would silently
+        pass the concurrent-change test.
+        """
+        from session_init import check_pinned_staleness
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(self._stale_pinned_content(), encoding="utf-8")
+
+        with patch("session_init._get_project_claude_md_path", return_value=claude_md), \
+             patch("staleness._get_project_claude_md_path", return_value=claude_md):
+            result = check_pinned_staleness()
+
+        # Function reports the stale entry was found
+        assert result is not None
+        assert "stale pin" in result.lower()
+
+        # The file was actually modified — STALE marker is now present
+        post_content = claude_md.read_text(encoding="utf-8")
+        assert "<!-- STALE: Last relevant" in post_content
+        assert self.STALE_DATE in post_content

@@ -21,6 +21,7 @@ from typing import Any
 
 from shared.claude_md_manager import (
     ensure_dot_claude_parent,
+    file_lock,
     resolve_project_claude_md_path,
 )
 from shared.session_journal import read_events_from, read_last_event_from
@@ -104,64 +105,93 @@ def update_session_info(
         f"{SESSION_END}"
     )
 
+    # Create the `.claude/` parent directory (with 0o700) BEFORE acquiring
+    # the file lock. `file_lock` internally creates the target's parent
+    # directory as a side effect of opening the sidecar lock file, but it
+    # uses `mkdir(parents=True, exist_ok=True)` with no explicit mode —
+    # which defaults to 0o755 under umask. Running `ensure_dot_claude_parent`
+    # first guarantees the parent gets the intended 0o700 mode. The call is
+    # idempotent, so concurrent callers are safe: whichever thread creates
+    # the directory wins with 0o700, others see `parent.exists()` and no-op.
+    ensure_dot_claude_parent(target_file)
+
+    # Concurrency guard (#366 F1): serialize read-mutate-write so two
+    # concurrent session_init hooks on the same project CLAUDE.md cannot
+    # interleave 5b (update_session_info) with 5c (update_pact_routing) in
+    # another session and clobber each other's managed blocks. Fail-open
+    # on timeout — next session start will retry.
     try:
-        # Case 0: File doesn't exist -- create it with a minimal template
-        # so the orchestrator has a stable Current Session block to read on
-        # the very first session in a project. The resolver returns the
-        # preferred .claude/CLAUDE.md location in this case, so create the
-        # .claude/ parent directory if needed (no-op when target is legacy).
-        if not target_file.exists():
-            new_content = (
-                "# Project Memory\n"
-                "\n"
-                "<!-- PACT auto-creates this file on first session. "
-                "Safe to add your own content; the SESSION_START/SESSION_END "
-                "markers are auto-updated each session. -->\n"
-                "\n"
-                f"{session_block}\n"
-            )
-            ensure_dot_claude_parent(target_file)
-            target_file.write_text(new_content, encoding="utf-8")
-            os.chmod(str(target_file), 0o600)
-            return "Session info created in new project CLAUDE.md"
+        with file_lock(target_file):
+            # Symlink guard INSIDE the lock (#366 R5 M1, TOCTOU defense):
+            # same defensive check as remove_stale_kernel_block and
+            # update_pact_routing. is_symlink uses lstat (does not follow
+            # the link). Inside the lock so an attacker cannot swap the
+            # target between an outside-lock check and the write.
+            if target_file.is_symlink():
+                return "Session info skipped: path precondition not met."
 
-        content = target_file.read_text(encoding="utf-8")
+            try:
+                # Case 0: File doesn't exist -- create it with a minimal template
+                # so the orchestrator has a stable Current Session block to read on
+                # the very first session in a project. The .claude/ parent was
+                # created above (before the lock) with mode 0o700.
+                if not target_file.exists():
+                    new_content = (
+                        "# Project Memory\n"
+                        "\n"
+                        "<!-- PACT auto-creates this file on first session. "
+                        "Safe to add your own content; the SESSION_START/SESSION_END "
+                        "markers are auto-updated each session. -->\n"
+                        "\n"
+                        f"{session_block}\n"
+                    )
+                    target_file.write_text(new_content, encoding="utf-8")
+                    os.chmod(str(target_file), 0o600)
+                    return "Session info created in new project CLAUDE.md"
 
-        # Case 1: Markers already exist -- replace the block
-        if SESSION_START in content and SESSION_END in content:
-            new_content = re.sub(
-                re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END),
-                session_block,
-                content,
-                count=1,
-                flags=re.DOTALL,
-            )
-            if new_content != content:
+                content = target_file.read_text(encoding="utf-8")
+
+                # Case 1: Markers already exist -- replace the block
+                if SESSION_START in content and SESSION_END in content:
+                    new_content = re.sub(
+                        re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END),
+                        session_block,
+                        content,
+                        count=1,
+                        flags=re.DOTALL,
+                    )
+                    if new_content != content:
+                        target_file.write_text(new_content, encoding="utf-8")
+                        os.chmod(str(target_file), 0o600)
+                        return "Session info updated in project CLAUDE.md"
+                    return None
+
+                # Case 2: No markers -- insert before "## Retrieved Context" if present
+                insert_marker = "## Retrieved Context"
+                if insert_marker in content:
+                    new_content = content.replace(
+                        insert_marker,
+                        session_block + "\n\n" + insert_marker,
+                        1,
+                    )
+                else:
+                    # Fallback: append at end
+                    if not content.endswith("\n"):
+                        content += "\n"
+                    new_content = content + "\n" + session_block + "\n"
+
                 target_file.write_text(new_content, encoding="utf-8")
                 os.chmod(str(target_file), 0o600)
-                return "Session info updated in project CLAUDE.md"
-            return None
+                return "Session info added to project CLAUDE.md"
 
-        # Case 2: No markers -- insert before "## Retrieved Context" if present
-        insert_marker = "## Retrieved Context"
-        if insert_marker in content:
-            new_content = content.replace(
-                insert_marker,
-                session_block + "\n\n" + insert_marker,
-                1,
-            )
-        else:
-            # Fallback: append at end
-            if not content.endswith("\n"):
-                content += "\n"
-            new_content = content + "\n" + session_block + "\n"
-
-        target_file.write_text(new_content, encoding="utf-8")
-        os.chmod(str(target_file), 0o600)
-        return "Session info added to project CLAUDE.md"
-
-    except Exception as e:
-        return f"Session info failed: {str(e)[:30]}"
+            except Exception as e:
+                return f"Session info failed: {str(e)[:50]}"
+    except TimeoutError:
+        return (
+            "Failed to acquire lock on project CLAUDE.md within 5s "
+            "(another session_init hook may be running concurrently). "
+            "Session info update skipped; will retry on next session start."
+        )
 
 
 def restore_last_session(
@@ -233,11 +263,15 @@ def _coerce_phase_string(phase: Any) -> str:
     - pathologically long strings from a misconfigured writer that stashed
       a whole error message in `phase`
 
-    Any of the above is stringified via ``str()`` and truncated at
+    None is handled explicitly (returns ``""``), matching
+    ``_coerce_decision_summary``'s convention. Other non-string values
+    are stringified via ``str()`` and truncated at
     ``_PHASE_TRUNCATION_LIMIT`` so a bad event can produce at worst a
     readable 80-character stub in the resume output instead of flooding
     the SessionStart hook context or raising a TypeError downstream.
     """
+    if phase is None:
+        return ""
     rendered = str(phase)
     if len(rendered) > _PHASE_TRUNCATION_LIMIT:
         rendered = rendered[:_PHASE_TRUNCATION_LIMIT - 3] + "..."

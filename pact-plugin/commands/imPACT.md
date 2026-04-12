@@ -117,7 +117,7 @@ Answer three questions:
 | **Redo prior phase** | Issue is upstream in P→A→C→T | Re-delegate to relevant agent(s) to redo the prior phase |
 | **Augment present phase** | Need help in current phase | Re-invoke blocked agent with additional context + parallel agents |
 | **Invoke rePACT** | Sub-task needs own P→A→C→T cycle | Use `/PACT:rePACT` for nested cycle |
-| **Terminate agent** | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(taskId)` (force-stop: terminates immediately, non-cooperative) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` |
+| **Terminate agent** | Agent unrecoverable (infinite loop, context exhaustion, stall after resume) | `TaskStop(task_id=taskId)` (force-stop: terminates immediately, non-cooperative) + `TaskUpdate(taskId, status="completed", metadata={"terminated": true, "reason": "..."})` |
 | **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
@@ -127,7 +127,7 @@ If the blocker reveals that a sub-task is more complex than expected and needs i
 /PACT:rePACT backend "implement the OAuth2 token refresh that's blocking us"
 ```
 
-**When to terminate**: Last resort — agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle stall unresolved by resume. `TaskStop` is a force-stop (immediate, non-cooperative); use `SendMessage(type="shutdown_request")` for cooperative shutdown. After termination, spawn a fresh agent with partial handoff from the terminated agent's task metadata.
+**When to terminate**: Last resort — agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle stall unresolved by resume. `TaskStop` is a force-stop (immediate, non-cooperative); use `SendMessage(to="{agent-name}", message={"type": "shutdown_request"})` for cooperative shutdown. After termination, spawn a fresh agent with partial handoff from the terminated agent's task metadata.
 
 ### Conversation Failure Taxonomy
 

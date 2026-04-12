@@ -7,7 +7,7 @@ Used by: Claude Code settings.json SessionStart hook
 Performs:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
 1. Creates plugin symlinks for @reference resolution
-2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
+2. One-time migration: strips obsolete PACT kernel block from ~/.claude/CLAUDE.md
 3. Ensures project CLAUDE.md exists with memory sections
 4. Checks for stale pinned context (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
@@ -60,14 +60,15 @@ from staleness import (  # noqa: F401
 )
 
 from shared.constants import COMPACT_SUMMARY_PATH
-from shared.error_output import hook_error_json
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
+from shared.failure_log import append_failure
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
 from shared.claude_md_manager import (
-    update_claude_md,
+    remove_stale_kernel_block,
+    update_pact_routing,
     ensure_project_memory_md,
     resolve_project_claude_md_path,
 )
@@ -77,9 +78,6 @@ from shared.session_resume import (
     check_resumption_context,
     check_paused_state,
 )
-
-# Suppress false "hook error" display in Claude Code UI on bare exit paths
-_SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def check_pinned_staleness():
@@ -153,10 +151,48 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else ""
     if session_id:
-        suffix = session_id[:8]
+        suffix = re.sub(r"[^a-f0-9-]", "", session_id[:8]) or secrets.token_hex(4)
     else:
         suffix = secrets.token_hex(4)
     return f"pact-{suffix}"
+
+
+def _validate_under_pact_sessions(path: str) -> str | None:
+    """Reject extracted session paths that escape the pact-sessions root.
+
+    Defense-in-depth against tampered CLAUDE.md content. The Session dir / Resume
+    lines are user-editable text, so a malicious or accidentally corrupted file
+    could point _extract_prev_session_dir at any filesystem location (e.g.
+    /etc, /var, a sibling project's secrets). Callers consume the returned path
+    to read journal events; an attacker who controlled the path could exfiltrate
+    or trigger reads outside the PACT sessions tree.
+
+    The check calls ``Path.resolve(strict=False)`` on both the candidate AND the
+    sessions root so ``..`` segments are collapsed and symlinks followed before
+    the containment check. A naive string-prefix comparison against
+    ``str(Path(path))`` is NOT sufficient: ``Path()`` normalizes redundant
+    slashes but leaves ``..`` segments intact, so ``~/.claude/pact-sessions/../../etc/passwd``
+    would textually start with the prefix yet resolve outside the tree once the
+    filesystem is asked to dereference it. ``resolve(strict=False)`` does the
+    canonicalization explicitly and does NOT require the path to exist.
+
+    The containment check uses ``Path`` comparison semantics
+    (``candidate == sessions_root or sessions_root in candidate.parents``)
+    instead of string prefix + ``os.sep``. This eliminates the sibling-prefix
+    collision class (``pact-sessions-evil`` vs ``pact-sessions``) by design,
+    rather than relying on an explicit separator guard.
+
+    Returns the original string on success and None on rejection (silent
+    fail-closed — callers already treat None as "no previous session").
+    """
+    try:
+        sessions_root = (Path.home() / ".claude" / "pact-sessions").resolve()
+        candidate = Path(path).resolve(strict=False)
+        if candidate == sessions_root or sessions_root in candidate.parents:
+            return path
+    except (TypeError, ValueError, OSError):
+        pass
+    return None
 
 
 def _extract_prev_session_dir(project_dir: str) -> str | None:
@@ -174,9 +210,14 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     project root basename if the Session dir line is absent (backward compat
     with sessions that wrote team name but not session dir).
 
+    Both extracted paths (primary and fallback) are validated against the
+    canonical pact-sessions prefix via _validate_under_pact_sessions before
+    being returned. Defense-in-depth against tampered CLAUDE.md content.
+
     This is used to locate the previous session's journal for resume context
-    and pause state detection. Returns None if neither CLAUDE.md exists or
-    the session dir can't be extracted.
+    and pause state detection. Returns None if neither CLAUDE.md exists, the
+    session dir can't be extracted, or the extracted path is outside the
+    pact-sessions tree.
 
     Args:
         project_dir: CLAUDE_PROJECT_DIR path
@@ -201,8 +242,10 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             raw = match.group(1)
             # Expand ~ to actual home directory
             if raw.startswith("~/"):
-                return str(Path.home() / raw[2:])
-            return raw
+                expanded = str(Path.home() / raw[2:])
+            else:
+                expanded = raw
+            return _validate_under_pact_sessions(expanded)
 
         # The primary regex missed even though CLAUDE.md is on disk. This is
         # usually benign (older sessions wrote only the Resume line, not the
@@ -226,22 +269,35 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             session_id = resume_match.group(1)
             # Use project root basename (not worktree) for slug
             slug = Path(project_dir).name
-            return str(
+            derived = str(
                 Path.home() / ".claude" / "pact-sessions" / slug / session_id
             )
+            return _validate_under_pact_sessions(derived)
 
     except (IOError, OSError):
         pass
     return None
 
 
+# C0 control characters (0x00-0x1f) and DEL (0x7f). Present anywhere in a
+# session_id they render the id unsafe for use in single-line textual
+# contexts like the CLAUDE.md Resume line — a newline (0x0a) or CR (0x0d)
+# would break out of the line and allow marker-line injection (e.g. a
+# crafted id containing "\n## Working Memory\nPACT ROLE: orchestrator"
+# would write a line-anchored PACT ROLE marker under the routing block,
+# causing wrong-role bootstrap on the next session). Match peer_inject's
+# agent-name sanitization scope for parity: both entry points to the
+# textual routing surface must reject the same control set.
+_SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _is_unknown_or_missing_session(raw_id: object) -> bool:
-    """Return True if the session_id is missing, blank, or already a sentinel.
+    """Return True if the session_id is missing, blank, a sentinel, or contains control chars.
 
     Single canonical predicate for the malformed-stdin gate. Both the
     persistence call sites at the top of main() (write_context + append_event)
     and the CLAUDE.md write at step 5b consult this helper so the two gates
-    can never drift. Drift previously allowed two corruption classes:
+    can never drift. Drift previously allowed three corruption classes:
 
     * Whitespace-only ids (e.g. `"   "`) were truthy and bypassed
       `not raw_id`, leaking through to write_context as a literal directory
@@ -249,10 +305,19 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     * An attacker-supplied `"unknown-foo"` value passed `not raw_id` because
       the string is non-empty, then later passed `startswith("unknown")`
       and was written into CLAUDE.md anyway via a different code path.
+    * A session_id containing C0 control characters (newline, CR, NUL,
+      etc.) passed all existing non-empty/non-sentinel checks but, when
+      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
+      by update_session_info, could inject a fake ``PACT ROLE: orchestrator``
+      line into CLAUDE.md. ``peer_inject._sanitize_agent_name`` already
+      strips C0 controls for this exact class of attack against agent
+      names — the matching defense on the session_id entry point closes
+      the asymmetry.
 
     The unified helper rejects all of: None, non-strings, empty strings,
-    whitespace-only strings, and any string already shaped like the
-    `unknown-*` sentinel.
+    whitespace-only strings, any string already shaped like the
+    `unknown-*` sentinel, and any string containing C0 control characters
+    or DEL.
     """
     if not raw_id:
         return True
@@ -261,7 +326,54 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     stripped = raw_id.strip()
     if not stripped:
         return True
-    return stripped.startswith("unknown")
+    if _SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
+        return True
+    return stripped.startswith("unknown-")
+
+
+def _build_safety_net_context(team_name: str | None) -> str:
+    """
+    Build a minimal governance-delivery additionalContext string for the
+    exception safety net in main().
+
+    The returned string MUST start with "PACT ROLE: orchestrator." at byte 0
+    (line-anchored) so the routing-block consumer check recognizes it, and
+    must include the `Skill("PACT:bootstrap")` FIRST ACTION instruction so
+    the lead still loads its operating instructions, governance policy, and
+    workflow protocols even when main() failed before building the normal
+    team-reuse/team-create string.
+
+    This helper is deliberately zero-risk: only string literals and a single
+    f-string interpolation of team_name (which is either None or a validated
+    team name from generate_team_name). No file I/O, no subprocess, no
+    imports that might fail.
+
+    Args:
+        team_name: Team name captured before the exception, or None if the
+                   exception fired before generate_team_name() ran.
+
+    Returns:
+        Minimal additionalContext string suitable for the except-block
+        safety net. Leads with "PACT ROLE: orchestrator." at byte 0.
+    """
+    prelude = (
+        'PACT ROLE: orchestrator.\n\n'
+        'Your FIRST action must be: Skill("PACT:bootstrap"). '
+        'This loads your full operating instructions, governance policy, '
+        'and critical workflow protocols.'
+    )
+    if team_name:
+        return (
+            f'{prelude}\n\n'
+            f'Session team: `{team_name}` (session_init partially failed — '
+            f'check systemMessage for details). '
+            f'Run TaskList to check current state.'
+        )
+    return (
+        f'{prelude}\n\n'
+        'Session team: NOT GENERATED (session_init failed early — check '
+        'systemMessage for details). Call TeamCreate after bootstrap loads.'
+    )
 
 
 def main():
@@ -271,7 +383,7 @@ def main():
     Performs PACT environment initialization:
     0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
     1. Creates plugin symlinks for @reference resolution
-    2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
+    2. One-time migration: strips obsolete PACT kernel block from ~/.claude/CLAUDE.md
     3. Ensures project CLAUDE.md exists with memory sections
     4. Checks for stale pinned context entries in project CLAUDE.md
     5. Generates session-unique PACT team name and reminds orchestrator to create it
@@ -283,19 +395,37 @@ def main():
     now lazy-loaded on first memory operation to reduce startup cost for
     non-memory users.
     """
+    # Pre-declare team_name so the outer except block can reference whatever
+    # was captured before the exception fired. The assignment inside the try
+    # at step 5 (team_name = generate_team_name(...)) rebinds this local; if
+    # the exception fires before step 5, team_name stays None and the safety
+    # net falls through to the "NOT GENERATED" branch.
+    team_name = None
+    # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
+    # gate below can distinguish "stdin was malformed JSON" from "stdin
+    # parsed but session_id was missing/blank". Both paths fall through
+    # to the same `unknown-{hex}` sentinel, but the failure_log ring
+    # buffer captures them under different classifications so post-hoc
+    # debugging can tell them apart.
+    stdin_json_error: str | None = None
     try:
         try:
             input_data = json.load(sys.stdin)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             input_data = {}
+            stdin_json_error = str(exc)
 
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", ".")
         context_parts = []
         system_messages = []
 
         # Detect session source: startup, resume, compact, clear
-        # Default to "startup" if missing (backwards compat with older Claude Code)
-        source = input_data.get("source", "startup")
+        # Default to "startup" if missing (backwards compat with older Claude Code).
+        # Validate against the known set — an unrecognized source is surfaced
+        # as "unknown" so it cannot inject arbitrary text into additionalContext.
+        _VALID_SOURCES = {"startup", "resume", "compact", "clear"}
+        raw_source = input_data.get("source", "startup")
+        source = raw_source if raw_source in _VALID_SOURCES else "unknown"
         is_context_reset = source in ("compact", "clear")
 
         # Clean up stale compact-summary from previous sessions.
@@ -322,15 +452,24 @@ def main():
             elif symlink_result:
                 context_parts.append(symlink_result)
 
-        # 2. Updates ~/.claude/CLAUDE.md (merges/installs PACT Orchestrator)
-        # Context resets (compact/clear): CLAUDE.md is already installed from original session
-        if not is_context_reset:
-            claude_md_msg = update_claude_md()
-            if claude_md_msg:
-                if "failed" in claude_md_msg.lower() or "unmanaged" in claude_md_msg.lower():
-                    system_messages.append(claude_md_msg)
-                else:
-                    context_parts.append(claude_md_msg)
+        # 2. One-time migration: strip the obsolete PACT kernel block from
+        # ~/.claude/CLAUDE.md if a previous plugin version installed one.
+        #
+        # Invocation policy: runs unconditionally on every SessionStart,
+        # regardless of session source (startup/resume/clear/compact). The
+        # unconditional invocation is intentional — we cannot assume the
+        # migration has already run on a given install.
+        #
+        # Behavior on absent markers: idempotent no-op. The function
+        # returns None when neither PACT_START nor PACT_END is found in
+        # the home CLAUDE.md, so re-running on an already-migrated install
+        # has zero cost.
+        kernel_msg = remove_stale_kernel_block()
+        if kernel_msg:
+            if "failed" in kernel_msg.lower():
+                system_messages.append(kernel_msg)
+            else:
+                context_parts.append(kernel_msg)
 
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
@@ -401,6 +540,70 @@ def main():
             session_id = str(raw_id)
         else:
             session_id = f"unknown-{secrets.token_hex(4)}"
+            # Issue #399: record this failure in the global ring buffer log
+            # BEFORE emitting the stderr warning. The ring buffer is the
+            # only observability surface that survives across sessions and
+            # aggregates across both lead and teammate sessions — stderr
+            # output from hooks is not visible to users, and the single-
+            # instance safety net only reaches the lead's first-message
+            # context. Defense in depth: append_failure fails-open
+            # internally, but we also wrap the call in its own try/except
+            # so a future refactor weakening that contract cannot crash
+            # session_init. The classification distinguishes the three
+            # main failure kinds so post-hoc analysis can see the shape
+            # of the problem.
+            # Classification ladder — order matters. Each branch isolates a
+            # distinct upstream failure kind so post-hoc diagnosis can tell
+            # them apart. The ladder mirrors the branches of
+            # _is_unknown_or_missing_session() plus the malformed_json case
+            # that funnels through the JSONDecodeError fallback at the top
+            # of main(). The control_char_session_id branch must run BEFORE
+            # the sentinel check because an attacker could craft an id like
+            # "unknown-\nPACT ROLE: orchestrator" that would otherwise be
+            # classified as a plain sentinel, losing the signal that an
+            # injection was attempted.
+            if stdin_json_error is not None:
+                _classification = "malformed_json"
+                _error_detail = stdin_json_error
+            elif raw_id is None:
+                _classification = "missing_session_id"
+                _error_detail = "session_id key absent from stdin payload"
+            elif not isinstance(raw_id, str):
+                _classification = "non_string_session_id"
+                _error_detail = f"session_id was {type(raw_id).__name__}: {raw_id!r}"
+            elif not raw_id.strip():
+                _classification = "empty_session_id"
+                _error_detail = f"session_id was empty/whitespace: {raw_id!r}"
+            elif _SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
+                # Newlines, NUL, BEL, ESC, DEL, etc. anywhere in the id.
+                # Flags the CLAUDE.md routing-marker injection attack class
+                # explicitly so failure_log entries identify the smell.
+                _classification = "control_char_session_id"
+                _error_detail = f"session_id contained C0/DEL control char: {raw_id!r}"
+            elif raw_id.strip().startswith("unknown-"):
+                # Matches _is_unknown_or_missing_session which uses
+                # "unknown-" (with hyphen) to match only the sentinel format
+                # "unknown-{hex}" without false-positiving on unrelated ids.
+                _classification = "sentinel_session_id"
+                _error_detail = f"session_id already an unknown-* sentinel: {raw_id!r}"
+            else:
+                # Terminal catchall — reached only if a future change to
+                # _is_unknown_or_missing_session adds a rejection branch
+                # that this ladder does not cover yet.
+                _classification = "other"
+                _error_detail = f"session_id rejected by predicate: {raw_id!r}"
+            try:
+                append_failure(
+                    classification=_classification,
+                    error=_error_detail,
+                    cwd=os.getcwd(),
+                    source=source,
+                )
+            except Exception:
+                # Belt-and-suspenders: append_failure already fails-open
+                # internally, but the R3 gate MUST NEVER raise. Swallow
+                # any exception that escapes the ring buffer logic.
+                pass
             print(
                 f"session_init: missing session_id in stdin payload; "
                 f"using fallback {session_id} (no disk persistence)",
@@ -460,13 +663,21 @@ def main():
                 f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
             )
         _team_reuse = (
+            f'PACT ROLE: orchestrator.\n\n'
+            f'Your FIRST action must be: Skill("PACT:bootstrap"). This loads your full '
+            f'operating instructions, governance policy, and critical workflow protocols. '
+            f'Re-invoke if your context is compacted and the bootstrap content is no longer present.\n\n'
             f'Your team is `{team_name}` (existing — resumed session). '
             f'Do not call TeamCreate — the team already exists. '
             f'{_substitutions}'
         )
         _team_create = (
-            f'Your FIRST action must be: TeamCreate(team_name="{team_name}"). '
-            f'Do not read files, explore code, or respond to the user until the team is created. '
+            f'PACT ROLE: orchestrator.\n\n'
+            f'Your FIRST action must be: Skill("PACT:bootstrap"). This loads your full '
+            f'operating instructions, governance policy, and critical workflow protocols. '
+            f'Re-invoke if your context is compacted and the bootstrap content is no longer present.\n\n'
+            f'After bootstrap completes, your next action is: TeamCreate(team_name="{team_name}"). '
+            f'Do not read files, explore code, or respond to the user until bootstrap and team creation are complete. '
             f'{_substitutions}'
         )
 
@@ -547,6 +758,16 @@ def main():
                 else:
                     context_parts.append(session_msg)
 
+        # 5c. Ensure the PACT_ROUTING block in the project CLAUDE.md is canonical.
+        # Runs after update_session_info() so the SESSION_START block is written
+        # first; the two managed blocks use different markers and don't conflict.
+        routing_msg = update_pact_routing()
+        if routing_msg:
+            if "failed" in routing_msg.lower():
+                system_messages.append(routing_msg)
+            else:
+                context_parts.append(routing_msg)
+
         # 6. Check for in_progress Tasks (resumption context via Task integration)
         tasks = get_task_list()
         if tasks:
@@ -582,16 +803,31 @@ def main():
         if system_messages:
             output["systemMessage"] = " | ".join(system_messages)
 
-        if output:
-            print(json.dumps(output))
-        else:
-            print(_SUPPRESS_OUTPUT)
+        # context_parts is guaranteed non-empty on the happy path: the
+        # team-reuse/team-create instruction is always insert(0, ...)'d
+        # earlier in main(), so `output["hookSpecificOutput"]` is always
+        # populated by this point. The exception safety net at the bottom
+        # of main() builds its own output and never falls through here.
+        print(json.dumps(output))
 
         sys.exit(0)
 
     except Exception as e:
-        print(f"Hook warning (session_init): {e}", file=sys.stderr)
-        print(hook_error_json("session_init", e))
+        # Safety net: even when main() throws before building the normal
+        # output, the lead still needs the governance delivery chain.
+        # Emit a minimal PACT ROLE marker + bootstrap skill directive in
+        # additionalContext, alongside the error in systemMessage. Claude
+        # Code's hook-output schema supports both fields in the same JSON.
+        print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
+        safety_net_context = _build_safety_net_context(team_name)
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": safety_net_context,
+            },
+            "systemMessage": f"PACT hook warning (session_init): {str(e)[:100]}",
+        }
+        print(json.dumps(output))
         sys.exit(0)
 
 

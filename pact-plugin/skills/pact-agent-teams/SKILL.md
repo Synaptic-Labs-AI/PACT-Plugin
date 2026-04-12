@@ -45,26 +45,21 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 
 ## Teachback (Conversation Verification)
 
-**Teachback is a gate, not a notification.** Nothing proceeds until your teachback is sent. After sending, proceed with work immediately — do not wait for the lead to confirm. "Non-blocking" means you don't wait for a response; it does NOT mean the teachback itself is optional or deferrable. Sending teachback is the action that unlocks your work.
+The teachback protocol lives in the separate `pact-teachback` skill. It is
+loaded into your context via the `/PACT:teammate-bootstrap` command's
+`@`-ref (which you invoke via your agent body's `# FIRST ACTION` prelude
+on spawn), not via frontmatter auto-loading. Frontmatter `skills:`
+entries populate the lazy skill catalog for discoverability but are not
+eagerly loaded at spawn (empirically verified during #366 phase 1).
 
-**Why ordering matters**: The purpose of teachback is to catch misunderstandings *before* you invest your context window in implementation. If you batch teachback with your handoff, any misunderstanding is discovered only after the work is complete — wasting the entire agent session. A teachback costs ~100-200 tokens. Redoing work from a misunderstanding costs the entire context.
+See `pact-teachback/SKILL.md` for format, rules, and ordering requirements.
 
-> **ORDERING RULE**: Send your teachback via `SendMessage` BEFORE calling `Edit`, `Write`, or `Bash` for implementation work. Reading files to understand the task (via `Read`, `Glob`, `Grep`) is permitted before teachback. The prohibition is on *implementation actions*, not *understanding actions*.
-
-**Format**:
-```
-SendMessage(type="message", recipient="lead",
-  content="[{sender}→lead] Teachback:\n- Building: {what you understand you're building}\n- Key constraints: {constraints you're working within}\n- Interfaces: {interfaces you'll produce or consume}\n- Approach: {your intended approach, briefly}\nProceeding unless corrected.",
-  summary="Teachback: {1-line summary}")
-```
-
-**Rules**:
-- Send teachback as your **first message** after reading your task description (and any upstream handoffs)
-- Keep it concise: 3-6 bullet points
-- After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
-- If the lead sends a correction, adjust your approach as soon as you see it
-
-**When**: Always — every task dispatch. Only exception: consultant questions (peer asks you something).
+Teachback is a **gate**: send it BEFORE any implementation work. The
+structural enforcement comes from the three-layer delivery architecture:
+`peer_inject.py` injects a `FIRST ACTION` reminder via `additionalContext`,
+your agent body has a `# FIRST ACTION` section, and the
+`/PACT:teammate-bootstrap` command eagerly loads the pact-teachback skill
+content via `@`-ref.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 
@@ -89,7 +84,7 @@ When the lead requests progress monitoring in your dispatch, send brief progress
 
 ## Message Prefix Convention
 
-**Prefix all `SendMessage` `content`** with `[{sender}→{recipient}]` (use `all` as recipient when `type="broadcast"`). Do not prefix `summary`.
+**Prefix all `SendMessage` `message`** with `[{sender}→{recipient}]` (use `all` as recipient when `to="*"`). Do not prefix `summary`.
 
 ### Message Authenticity
 
@@ -128,7 +123,7 @@ When your work is done:
    ```
    If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
 2. **Complete task — BOTH actions required, in this order**:
-   a. `SendMessage(type="message", recipient="lead", content="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
+   a. `SendMessage(to="lead", message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
    b. `TaskUpdate(taskId, status="completed")`
 
    > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the TaskCompleted hook only fires after TaskUpdate, which triggers HANDOFF capture for institutional memory. Skipping (b) means your work is invisible to the memory system.
@@ -159,7 +154,7 @@ Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — incl
 
 ## Peer Communication
 
-Use `SendMessage(type="message", recipient="teammate-name")` for direct coordination.
+Use `SendMessage(to="teammate-name")` for direct coordination.
 Discover teammates via `~/.claude/teams/{team-name}/config.json` or from peer names
 in your task description.
 
@@ -192,8 +187,8 @@ If you cannot proceed:
 1. **Stop work immediately**
 2. **`SendMessage`** the blocker to the lead:
    ```
-   SendMessage(type="message", recipient="lead",
-     content="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+   SendMessage(to="lead",
+     message="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -208,8 +203,8 @@ When you detect a viability threat (security, data integrity, ethics):
 1. **Stop work immediately**
 2. **`SendMessage`** the signal to the lead:
    ```
-   SendMessage(type="message", recipient="lead",
-     content="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+   SendMessage(to="lead",
+     message="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
