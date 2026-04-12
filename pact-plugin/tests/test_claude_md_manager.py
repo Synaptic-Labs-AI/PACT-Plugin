@@ -148,6 +148,44 @@ class TestPactRoutingBlock:
         assert "Line starting with `PACT ROLE: orchestrator` \u2192" in _PACT_ROUTING_BLOCK
         assert "Line starting with `PACT ROLE: teammate (` \u2192" in _PACT_ROUTING_BLOCK
 
+    def test_line_anchor_heuristic_rejects_mid_line_pact_role(self):
+        """The routing block instructs agents to check for 'PACT ROLE:'
+        AT THE START OF A LINE. A mid-line occurrence (e.g., inside a
+        Working Memory section quoting the marker) must NOT be treated
+        as a valid role signal.
+
+        This test simulates the consumer-side heuristic described in the
+        routing block text: split context into lines, check each line
+        with startswith('PACT ROLE:'). A CLAUDE.md with the marker
+        embedded mid-line in Working Memory should produce zero matches.
+        """
+        claude_md_content = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "- 2026-04-12: The session_init hook injects PACT ROLE: orchestrator "
+            "into additionalContext for the lead session.\n"
+            "- Architecture note: PACT ROLE: teammate markers are injected by "
+            "peer_inject.py.\n"
+            "\n"
+            "## Retrieved Context\n"
+            "- Memory 0a52fd73: session_init emits `PACT ROLE: orchestrator` at "
+            "byte 0 of additionalContext\n"
+        )
+
+        # Simulate the consumer-side line-anchored check
+        line_anchored_matches = [
+            line for line in claude_md_content.splitlines()
+            if line.startswith("PACT ROLE:")
+        ]
+
+        assert line_anchored_matches == [], (
+            f"Line-anchored check found false-positive PACT ROLE markers in "
+            f"Working Memory / Retrieved Context sections: {line_anchored_matches}. "
+            f"The routing block instructs agents to use a line-anchored check — "
+            f"mid-line occurrences must not match."
+        )
+
 
 # ---------------------------------------------------------------------------
 # remove_stale_kernel_block() — one-time migration
@@ -1176,6 +1214,82 @@ class TestSymlinkRefusal:
         # Symlink target file is byte-identical (untouched)
         assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
         # Symlink itself is still a symlink
+        assert managed_path.is_symlink()
+
+    def test_ensure_project_memory_md_refuses_dangling_symlink(
+        self, tmp_path, monkeypatch
+    ):
+        """If the preferred .claude/CLAUDE.md path is a dangling symlink,
+        ensure_project_memory_md returns an opaque skip status and does not
+        follow the link.
+
+        This covers the edge case where neither CLAUDE.md location exists
+        (resolve returns "new_default") but the preferred path is a dangling
+        symlink — e.g., a local attacker pre-planted a symlink before the
+        first session. is_symlink uses lstat and returns True even for
+        dangling links."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+
+        # Create a dangling symlink at the preferred CLAUDE.md path
+        managed_path = dot_claude / "CLAUDE.md"
+        os.symlink("/nonexistent/target", str(managed_path))
+        assert managed_path.is_symlink()
+        assert not managed_path.exists()  # dangling
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = ensure_project_memory_md()
+
+        assert result is not None
+        assert "Project CLAUDE.md skipped" in result
+        assert "path precondition not met" in result
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
+        # Symlink is still a dangling symlink (not replaced with a file)
+        assert managed_path.is_symlink()
+        assert not managed_path.exists()
+
+    def test_update_session_info_refuses_symlink(
+        self, tmp_path, monkeypatch
+    ):
+        """If the project CLAUDE.md is a symlink, update_session_info returns
+        an opaque skip status and does not touch the symlink target.
+
+        Placed in TestSymlinkRefusal alongside the other two guards for
+        discoverability, with a parallel test in test_session_resume.py
+        for the session_resume test suite."""
+        from shared.session_resume import update_session_info
+
+        symlink_target = tmp_path / "external_target.md"
+        symlink_target_content = (
+            "# External\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "<!-- SESSION_END -->\n"
+        )
+        symlink_target.write_text(symlink_target_content, encoding="utf-8")
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        managed_path = project_dir / "CLAUDE.md"
+        os.symlink(str(symlink_target), str(managed_path))
+        assert managed_path.is_symlink()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = update_session_info("sess-new", "pact-new")
+
+        assert result is not None
+        assert "Session info skipped" in result
+        assert "path precondition not met" in result
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
+        assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
         assert managed_path.is_symlink()
 
 

@@ -73,6 +73,11 @@ def update_session_info(
     # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
     target_file, _source = resolve_project_claude_md_path(project_dir)
 
+    # Symlink guard: same defensive check as remove_stale_kernel_block and
+    # update_pact_routing. is_symlink uses lstat (does not follow the link).
+    if target_file.is_symlink():
+        return "Session info skipped: path precondition not met."
+
     SESSION_START = "<!-- SESSION_START -->"
     SESSION_END = "<!-- SESSION_END -->"
 
@@ -177,7 +182,7 @@ def update_session_info(
                 return "Session info added to project CLAUDE.md"
 
             except Exception as e:
-                return f"Session info failed: {str(e)[:30]}"
+                return f"Session info failed: {str(e)[:50]}"
     except TimeoutError:
         return (
             "Failed to acquire lock on project CLAUDE.md within 5s "

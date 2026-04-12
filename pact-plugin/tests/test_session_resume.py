@@ -715,6 +715,53 @@ class TestUpdateSessionInfoLocking:
         t.join(timeout=5)
 
 
+class TestUpdateSessionInfoSymlinkRefusal:
+    """SECURITY hardening — update_session_info refuses to operate on symlinks.
+
+    Matches the pattern in remove_stale_kernel_block and update_pact_routing:
+    if the project CLAUDE.md is a symlink, return an opaque 'Session info
+    skipped: ... path precondition not met.' string and do not follow the
+    link. is_symlink uses lstat so it does not follow the link.
+
+    The status string is deliberately opaque — no mention of 'symlink' or
+    'refusing' to avoid disclosing the internal guard to a local attacker."""
+
+    def test_update_session_info_refuses_symlink(self, tmp_path, monkeypatch):
+        """If the project CLAUDE.md is a symlink, update_session_info returns
+        an opaque skip status and does not touch the symlink target."""
+        import os
+        from shared.session_resume import update_session_info
+
+        symlink_target = tmp_path / "external_target.md"
+        symlink_target_content = (
+            "# External target\n"
+            "<!-- SESSION_START -->\n"
+            "## Current Session\n"
+            "- Resume: `claude --resume old-session`\n"
+            "<!-- SESSION_END -->\n"
+        )
+        symlink_target.write_text(symlink_target_content, encoding="utf-8")
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        managed_path = project_dir / "CLAUDE.md"
+        os.symlink(str(symlink_target), str(managed_path))
+        assert managed_path.is_symlink()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = update_session_info("sess-new", "pact-new")
+
+        assert result is not None
+        assert "Session info skipped" in result
+        assert "path precondition not met" in result
+        assert "symlink" not in result.lower()
+        assert "refusing" not in result.lower()
+        # Symlink target is byte-identical (untouched)
+        assert symlink_target.read_text(encoding="utf-8") == symlink_target_content
+        assert managed_path.is_symlink()
+
+
 class TestCheckPausedState:
     """Tests for check_paused_state() -- journal-only path."""
 

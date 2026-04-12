@@ -1886,6 +1886,53 @@ class TestFailureLogIntegration:
         envelope = json.loads(hook_output)
         assert "hookSpecificOutput" in envelope
 
+    def test_other_classification_catchall_via_mock(
+        self, monkeypatch, tmp_path
+    ):
+        """The 'other' catchall fires when _is_unknown_or_missing_session
+        returns True for a session_id that none of the explicit cascade
+        branches match (e.g., a valid UUID).
+
+        Currently unreachable in production — every value rejected by the
+        predicate is covered by an explicit branch. This test proves the
+        defensive safety net works by mocking the predicate to return True
+        for a value that would normally pass, forcing the cascade into the
+        terminal else branch.
+        """
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        # A valid UUID — would normally pass _is_unknown_or_missing_session.
+        valid_uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        stdin_data = json.dumps({"session_id": valid_uuid})
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event", return_value=None), \
+             patch("session_init.append_failure") as mock_append_failure, \
+             patch("session_init._is_unknown_or_missing_session", return_value=True), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert mock_append_failure.call_count == 1
+        call_kwargs = mock_append_failure.call_args.kwargs
+        assert call_kwargs["classification"] == "other"
+        assert valid_uuid in call_kwargs["error"]
+
 
 # =============================================================================
 # _extract_prev_session_dir() Dual-Location Tests

@@ -48,6 +48,28 @@ class TestSpawnOverheadRegression:
     #     the regression gate has lost its point.
     THRESHOLD_BYTES = 10000
 
+    # Hard ceiling: THRESHOLD_BYTES must never be raised above this value.
+    # Enforces the advisory comment above as a mechanical gate — any PR that
+    # bumps THRESHOLD_BYTES past 12000 triggers a test failure demanding
+    # investigation of CLAUDE.md-scale content creep.
+    ABSOLUTE_CEILING = 12000
+
+    def test_threshold_within_absolute_ceiling(self):
+        """THRESHOLD_BYTES must stay below ABSOLUTE_CEILING.
+
+        This enforces the tuning rule: "Do NOT raise THRESHOLD_BYTES above
+        ~12000 without re-examining whether CLAUDE.md-scale content has crept
+        back in." A test failure here means someone bumped the threshold past
+        the point where the regression gate loses its value.
+        """
+        assert self.THRESHOLD_BYTES <= self.ABSOLUTE_CEILING, (
+            f"THRESHOLD_BYTES ({self.THRESHOLD_BYTES}) exceeds "
+            f"ABSOLUTE_CEILING ({self.ABSOLUTE_CEILING}). The spawn overhead "
+            f"regression gate loses its value above {self.ABSOLUTE_CEILING} "
+            f"bytes — investigate whether CLAUDE.md-scale content has crept "
+            f"back into the always-on spawn path before raising this limit."
+        )
+
     def test_teammate_spawn_content_under_threshold(self, tmp_path):
         """The static content a freshly-spawned PACT teammate implicitly
         loads at spawn time must remain under THRESHOLD_BYTES.

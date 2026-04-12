@@ -51,6 +51,9 @@ _LOCK_POLL_INTERVAL = 0.1
 def file_lock(target_file: Path):
     """Acquire an exclusive sidecar file lock for a target CLAUDE.md path.
 
+    Not re-entrant: nested acquisition from the same thread will deadlock
+    (TimeoutError after ``_LOCK_TIMEOUT_SECONDS``).
+
     Creates (or opens) `{target_file.parent}/.{target_file.name}.lock` and
     takes an ``fcntl`` exclusive advisory lock on its file descriptor.
     Polls with non-blocking acquire + sleep so a stuck holder cannot hang
@@ -548,6 +551,12 @@ def ensure_project_memory_md() -> str | None:
     # Don't overwrite existing project CLAUDE.md (either location)
     if source != "new_default":
         return None
+
+    # Symlink guard: the resolver returned "new_default" (neither location
+    # exists), but the preferred path could still be a dangling symlink.
+    # is_symlink uses lstat and returns True even for dangling links.
+    if target_file.is_symlink():
+        return "Project CLAUDE.md skipped: path precondition not met."
 
     # Create minimal CLAUDE.md with memory sections at the new default location
     memory_template = f"""# Project Memory

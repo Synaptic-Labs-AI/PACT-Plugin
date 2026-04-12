@@ -46,8 +46,22 @@ def _build_session_path(slug: str, session_id: str) -> Path:
 
     Used by init(), get_session_dir(), and write_context() to avoid
     duplicating path construction logic.
+
+    Path traversal guard: resolves the constructed path and verifies it
+    stays under ~/.claude/pact-sessions/. A malicious session_id like
+    "../../etc" would resolve outside the expected prefix — fall back to
+    just the basename to neutralize the traversal. Fail-open: if the
+    validation itself raises, return the unguarded path.
     """
-    return Path.home() / ".claude" / "pact-sessions" / slug / session_id
+    sessions_root = Path.home() / ".claude" / "pact-sessions"
+    candidate = sessions_root / slug / session_id
+    try:
+        resolved = candidate.resolve()
+        if not str(resolved).startswith(str(sessions_root.resolve())):
+            candidate = sessions_root / slug / Path(session_id).name
+    except (OSError, ValueError):
+        pass
+    return candidate
 
 
 def _get_context_file_path() -> Path | None:

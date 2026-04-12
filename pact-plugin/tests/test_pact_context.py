@@ -1908,6 +1908,32 @@ class TestGetSessionDirAdversarial:
         result = get_session_dir()
         assert ".claude/pact-sessions/" in result
 
+    def test_path_traversal_session_id_neutralized(self, monkeypatch, tmp_path):
+        """A session_id containing '../' path traversal components must NOT
+        resolve outside ~/.claude/pact-sessions/.
+
+        The _build_session_path guard resolves the candidate path and checks
+        it stays under the sessions root. If traversal is detected, it falls
+        back to using just the basename of the session_id, neutralizing the
+        traversal.
+        """
+        from shared.pact_context import _build_session_path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sessions_root = tmp_path / ".claude" / "pact-sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+
+        result = _build_session_path("my-project", "../../etc/passwd")
+        resolved = result.resolve()
+
+        sessions_root_resolved = sessions_root.resolve()
+        assert str(resolved).startswith(str(sessions_root_resolved)), (
+            f"Path traversal not neutralized: _build_session_path returned "
+            f"{result} which resolves to {resolved}, outside "
+            f"{sessions_root_resolved}"
+        )
+
 
 # =============================================================================
 # Parallel Session Isolation — Core Fix Verification (Test Engineer)
