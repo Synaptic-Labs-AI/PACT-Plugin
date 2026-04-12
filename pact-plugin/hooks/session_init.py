@@ -157,6 +157,32 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     return f"pact-{suffix}"
 
 
+def _validate_under_pact_sessions(path: str) -> str | None:
+    """Reject extracted session paths that escape the pact-sessions root.
+
+    Defense-in-depth against tampered CLAUDE.md content. The Session dir / Resume
+    lines are user-editable text, so a malicious or accidentally corrupted file
+    could point _extract_prev_session_dir at any filesystem location (e.g.
+    /etc, /var, a sibling project's secrets). Callers consume the returned path
+    to read journal events; an attacker who controlled the path could exfiltrate
+    or trigger reads outside the PACT sessions tree.
+
+    The check normalizes the input via Path() so trailing slashes and benign
+    relative segments don't bypass the prefix match, then compares the resolved
+    string against the canonical pact-sessions prefix. Returns the original
+    string on success and None on rejection (silent fail-closed — callers
+    already treat None as "no previous session").
+    """
+    try:
+        prefix = str(Path.home() / ".claude" / "pact-sessions")
+        normalized = str(Path(path))
+        if normalized == prefix or normalized.startswith(prefix + os.sep):
+            return path
+    except (TypeError, ValueError, OSError):
+        pass
+    return None
+
+
 def _extract_prev_session_dir(project_dir: str) -> str | None:
     """
     Extract the previous session's directory path from the project CLAUDE.md.
@@ -172,9 +198,14 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     project root basename if the Session dir line is absent (backward compat
     with sessions that wrote team name but not session dir).
 
+    Both extracted paths (primary and fallback) are validated against the
+    canonical pact-sessions prefix via _validate_under_pact_sessions before
+    being returned. Defense-in-depth against tampered CLAUDE.md content.
+
     This is used to locate the previous session's journal for resume context
-    and pause state detection. Returns None if neither CLAUDE.md exists or
-    the session dir can't be extracted.
+    and pause state detection. Returns None if neither CLAUDE.md exists, the
+    session dir can't be extracted, or the extracted path is outside the
+    pact-sessions tree.
 
     Args:
         project_dir: CLAUDE_PROJECT_DIR path
@@ -199,8 +230,10 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             raw = match.group(1)
             # Expand ~ to actual home directory
             if raw.startswith("~/"):
-                return str(Path.home() / raw[2:])
-            return raw
+                expanded = str(Path.home() / raw[2:])
+            else:
+                expanded = raw
+            return _validate_under_pact_sessions(expanded)
 
         # The primary regex missed even though CLAUDE.md is on disk. This is
         # usually benign (older sessions wrote only the Resume line, not the
@@ -224,9 +257,10 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             session_id = resume_match.group(1)
             # Use project root basename (not worktree) for slug
             slug = Path(project_dir).name
-            return str(
+            derived = str(
                 Path.home() / ".claude" / "pact-sessions" / slug / session_id
             )
+            return _validate_under_pact_sessions(derived)
 
     except (IOError, OSError):
         pass

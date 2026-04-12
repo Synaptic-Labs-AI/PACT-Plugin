@@ -2436,8 +2436,22 @@ class TestExtractPrevSessionDir:
 
         assert result is None
 
-    def test_non_tilde_absolute_path_returned_as_is(self, tmp_path):
-        """Absolute path without tilde prefix is returned unchanged."""
+    def test_non_tilde_absolute_path_outside_prefix_is_rejected(self, tmp_path):
+        """F: an absolute Session dir path outside ~/.claude/pact-sessions is rejected.
+
+        Contract flip from earlier behavior: previously the function returned
+        any absolute path verbatim, including paths outside the canonical
+        pact-sessions tree. The F-fix added _validate_under_pact_sessions which
+        rejects (returns None for) any path that does not live under
+        ~/.claude/pact-sessions. Defense-in-depth against tampered CLAUDE.md
+        content that could redirect the function at /etc, /var, or a sibling
+        project's secrets.
+
+        See test_session_init.TestExtractPrevSessionDirDualLocation for the
+        full F-fix coverage; this test pins the contract from the
+        test_session_journal angle as well so a regression in either file
+        is caught.
+        """
         from session_init import _extract_prev_session_dir
 
         claude_md = tmp_path / "CLAUDE.md"
@@ -2450,7 +2464,8 @@ class TestExtractPrevSessionDir:
         )
 
         result = _extract_prev_session_dir(str(tmp_path))
-        assert result == "/var/data/pact-sessions/myproject/abc123"
+        # /var/data/... is NOT under ~/.claude/pact-sessions → validator returns None.
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
