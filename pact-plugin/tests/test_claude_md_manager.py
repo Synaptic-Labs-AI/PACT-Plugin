@@ -1625,6 +1625,57 @@ class TestEnsureProjectMemoryMdErrorPaths:
         assert result is not None
         assert "Project CLAUDE.md failed:" in result
 
+    def test_lock_timeout_returns_skip_message(self, tmp_path, monkeypatch):
+        """C: when file_lock raises TimeoutError, ensure_project_memory_md
+        must return the human-readable skip message and NOT create the file.
+
+        Coverage gap closed: the existing TestUpdatePactRoutingLockContention
+        suite exercises the analogous TimeoutError fail-open in
+        update_pact_routing, but no test exercises the equivalent path inside
+        ensure_project_memory_md. A regression here would mean a stuck lock
+        (concurrent session_init hooks) crashes session start instead of
+        skipping the project CLAUDE.md creation gracefully.
+
+        We monkeypatch the file_lock symbol on the claude_md_manager module
+        directly to raise TimeoutError on entry — simpler than spinning up a
+        threaded lock holder and isolates this test from the lock
+        infrastructure's own contention semantics.
+        """
+        from contextlib import contextmanager
+        from shared import claude_md_manager as cmm
+
+        # Fresh empty project dir so the resolver returns "new_default" and
+        # ensure_project_memory_md proceeds to the file_lock branch.
+        project_dir = tmp_path / "fresh_project"
+        project_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        # Stub file_lock to raise TimeoutError on entry, mirroring how the
+        # real implementation behaves when _LOCK_TIMEOUT_SECONDS elapses
+        # without acquiring the sidecar lock.
+        @contextmanager
+        def timing_out_lock(_path):
+            raise TimeoutError(
+                "Failed to acquire lock on .CLAUDE.md.lock within 5s"
+            )
+            yield  # pragma: no cover  -- unreachable, contextmanager requires it
+
+        monkeypatch.setattr(cmm, "file_lock", timing_out_lock)
+
+        result = cmm.ensure_project_memory_md()
+
+        # Result must be the human-readable skip message routed to systemMessage.
+        assert result is not None
+        assert "Failed to acquire lock" in result
+        assert "5s" in result
+        assert "skipped" in result
+        assert "next session start" in result
+
+        # The CLAUDE.md file must NOT have been created — the timeout aborts
+        # the write before any filesystem mutation.
+        assert not (project_dir / ".claude" / "CLAUDE.md").exists()
+        assert not (project_dir / "CLAUDE.md").exists()
+
 
 class TestResolveProjectClaudeMdPath:
     """Direct tests for resolve_project_claude_md_path() helper.

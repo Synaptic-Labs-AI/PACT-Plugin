@@ -487,6 +487,46 @@ class TestReadFailures:
         monkeypatch.setattr(Path, "read_text", failing_read_text)
         assert read_failures() == []
 
+    def test_read_handles_invalid_utf8_bytes(self, failure_log_home):
+        """E: invalid UTF-8 bytes do not poison the scan; valid lines survive.
+
+        Coverage gap closed: ``read_failures`` reads with ``errors="replace"``
+        so a stray byte cannot make the entire scan raise — but no test
+        previously exercised that contract end-to-end. Without this test, a
+        regression that drops the ``errors="replace"`` argument would only
+        surface in production when a corrupt log file is encountered.
+
+        We open the log file in binary mode and write a line of raw invalid
+        bytes (``\\xff\\xfe`` is not legal UTF-8) followed by a valid JSON
+        record. ``read_failures`` must return exactly the 1 valid entry without
+        raising; the invalid line is silently skipped (its decoded form
+        contains U+FFFD substitutions and fails JSON parsing).
+        """
+        failure_log_home.parent.mkdir(parents=True, exist_ok=True)
+
+        valid_record = {
+            "ts": "2026-04-12T00:00:00Z",
+            "classification": "missing_session_id",
+            "error": "valid after invalid bytes",
+            "cwd": None,
+            "source": None,
+        }
+
+        # Write raw bytes: invalid UTF-8 line, then valid JSON line.
+        # The invalid bytes are 0xff 0xfe, which form an invalid UTF-8 sequence
+        # (0xff is never legal as a leading byte). errors="replace" turns each
+        # invalid byte into U+FFFD, leaving a 2-character "garbage" first line
+        # that fails json.loads -- exactly the malformed-line skip path.
+        with open(str(failure_log_home), "wb") as f:
+            f.write(b"\xff\xfe\n")
+            f.write(json.dumps(valid_record).encode("utf-8") + b"\n")
+
+        # Must NOT raise. Must return the 1 valid entry.
+        entries = read_failures()
+        assert len(entries) == 1
+        assert entries[0]["error"] == "valid after invalid bytes"
+        assert entries[0]["classification"] == "missing_session_id"
+
     def test_rotation_preserves_good_lines_after_malformed(
         self, failure_log_home
     ):

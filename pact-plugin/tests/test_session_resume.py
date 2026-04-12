@@ -824,6 +824,92 @@ class TestCheckPausedState:
         result = _check_journal_paused_state(str(sd))
         assert result is None
 
+    @pytest.mark.parametrize(
+        "age_days,expected_branch",
+        [
+            (0, "active"),
+            (13, "active"),
+            (14, "active"),  # STRICT > 14 means 14 days exactly is still ACTIVE
+            (15, "stale"),
+            (999, "stale"),
+        ],
+        ids=["fresh", "13d", "14d-boundary", "15d", "999d"],
+    )
+    def test_ttl_boundary_is_strict_greater_than_14_days(
+        self, tmp_path, monkeypatch, age_days, expected_branch
+    ):
+        """D: TTL boundary at age=13/14/15/999 days against the strict ``> 14`` cutoff.
+
+        The implementation uses ``if age_days > 14`` (strict greater-than). The
+        boundary cases are:
+          - 13 days → active (well below cutoff)
+          - 14 days → active (equal to cutoff, NOT stale, because of strict >)
+          - 15 days → stale (just over cutoff)
+          - 999 days → stale (well over)
+
+        A regression to ``>=`` would silently flip 14d-old paused sessions to
+        the stale branch. A regression to ``<`` would skip the stale branch
+        entirely. This parametrized test pins all four corners of the
+        boundary so either drift is caught.
+
+        We monkeypatch ``_check_pr_state`` to return "OPEN" so the function
+        reaches the active formatter (otherwise PR state checks would dominate
+        the test outcome) — controlling the dependency without touching
+        datetime, which the function under test reads directly.
+        """
+        import json
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import _check_journal_paused_state
+
+        sd = tmp_path / ".claude" / "pact-sessions" / "test" / f"ttl-{age_days}d"
+        sd.mkdir(parents=True, exist_ok=True)
+        journal = sd / "session-journal.jsonl"
+
+        # Compute a timestamp that is exactly age_days old. The function
+        # truncates ``(now - paused_at).days`` so this lands on the integer
+        # boundary deterministically.
+        ts = (datetime.now(timezone.utc) - timedelta(days=age_days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        event = {
+            "v": 1,
+            "type": "session_paused",
+            "pr_number": 4242,
+            "branch": "feat/ttl-test",
+            "worktree_path": "/tmp/wt-ttl",
+            "consolidation_completed": True,
+            "ts": ts,
+        }
+        with open(str(journal), "w") as f:
+            f.write(json.dumps(event) + "\n")
+
+        # Pin _check_pr_state to OPEN so the active branch reaches its formatter
+        # without shelling out to gh. Stale branch returns BEFORE _check_pr_state
+        # is called, so this mock has no effect on stale outcomes — exactly the
+        # isolation we want.
+        with mock_patch(
+            "shared.session_resume._check_pr_state", return_value="OPEN"
+        ):
+            result = _check_journal_paused_state(str(sd))
+
+        assert result is not None, (
+            f"age_days={age_days}: expected non-None result on {expected_branch} branch"
+        )
+
+        if expected_branch == "stale":
+            assert result.startswith("Stale paused state from"), (
+                f"age_days={age_days}: expected stale message, got: {result!r}"
+            )
+            assert "older than 14 days" in result
+            assert "PR #4242" in result
+        else:
+            assert result.startswith("Paused work detected: PR #4242"), (
+                f"age_days={age_days}: expected active message, got: {result!r}"
+            )
+            assert "feat/ttl-test" in result
+
 
 # ---------------------------------------------------------------------------
 # _check_pr_state() -- direct tests
