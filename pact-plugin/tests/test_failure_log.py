@@ -328,6 +328,92 @@ class TestFailOpen:
 
 
 # ---------------------------------------------------------------------------
+# append_failure: symlink guard (TOCTOU defense)
+# ---------------------------------------------------------------------------
+
+class TestSymlinkGuard:
+    """LOG_PATH must never be followed if it points at a symlink.
+
+    The guard runs INSIDE the file_lock so a concurrent writer cannot
+    swap a regular file for a symlink between check and write. The
+    guard is silent fail-open: if LOG_PATH is a symlink, append_failure
+    returns None without writing anything (and without following the
+    link). This prevents an attacker (or accidental local action) from
+    tricking session_init's failure logger into clobbering an arbitrary
+    file via symlink redirection (e.g., /etc/passwd, ~/.ssh/authorized_keys).
+    """
+
+    def test_symlink_at_log_path_is_not_followed(
+        self, failure_log_home, tmp_path
+    ):
+        """Replacing LOG_PATH with a symlink causes append_failure to no-op
+        without modifying the symlink target.
+        """
+        log = failure_log_home
+        log.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create a target file we want to PROTECT from being clobbered.
+        # Place it outside the pact-sessions tree so a successful write
+        # would be unambiguously detectable.
+        target = tmp_path / "victim.txt"
+        original_content = "DO NOT OVERWRITE\n"
+        target.write_text(original_content, encoding="utf-8")
+
+        # Replace LOG_PATH with a symlink pointing at the victim file.
+        log.symlink_to(target)
+        assert log.is_symlink()
+
+        # Attempt to append. Must not raise. Must not write to the target.
+        append_failure("missing_session_id", "symlink redirection attempt")
+
+        # The symlink itself still exists and still points at the victim,
+        # but the victim is unchanged. The guard short-circuited before
+        # any read or write happened.
+        assert log.is_symlink()
+        assert target.read_text(encoding="utf-8") == original_content
+
+        # And read_failures returns [] because nothing valid was logged.
+        # (read_failures itself does follow the symlink to read, which is
+        # safe — the file content hasn't been touched by us.)
+        # We assert specifically that the victim still has its original
+        # content, not log entries.
+        assert "missing_session_id" not in target.read_text(encoding="utf-8")
+
+    def test_symlink_to_nonexistent_target_is_silent(
+        self, failure_log_home, tmp_path
+    ):
+        """A dangling symlink at LOG_PATH still triggers fail-open no-op."""
+        log = failure_log_home
+        log.parent.mkdir(parents=True, exist_ok=True)
+
+        nonexistent = tmp_path / "does_not_exist.log"
+        log.symlink_to(nonexistent)
+        assert log.is_symlink()
+        assert not nonexistent.exists()
+
+        # Must not raise even though the symlink target is missing.
+        append_failure("missing_session_id", "dangling symlink")
+
+        # Nothing was created at the target path.
+        assert not nonexistent.exists()
+        # The symlink itself is still there, untouched.
+        assert log.is_symlink()
+
+    def test_regular_file_still_writes_normally(self, failure_log_home):
+        """Sanity check: with no symlink, append_failure writes normally."""
+        log = failure_log_home
+        assert not log.exists()
+
+        append_failure("missing_session_id", "normal write")
+
+        assert log.exists()
+        assert not log.is_symlink()
+        entries = read_failures()
+        assert len(entries) == 1
+        assert entries[0]["error"] == "normal write"
+
+
+# ---------------------------------------------------------------------------
 # read_failures
 # ---------------------------------------------------------------------------
 

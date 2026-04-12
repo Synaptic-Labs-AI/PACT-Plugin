@@ -124,6 +124,15 @@ def append_failure(
         # file_lock serializes the read-mutate-write critical section.
         # Timeout fails open via the outer try/except below.
         with file_lock(LOG_PATH):
+            # Symlink guard (TOCTOU defense): inside the lock so no concurrent
+            # writer can swap the file between check and write. is_symlink()
+            # is lstat-based and does not follow the link, so an attacker who
+            # replaces LOG_PATH with a symlink to /etc/passwd cannot trick us
+            # into clobbering the target. Silent fail-open preserves the
+            # SACROSANCT invariant.
+            if LOG_PATH.is_symlink():
+                return
+
             existing_lines: list[str] = []
             if LOG_PATH.exists():
                 try:
