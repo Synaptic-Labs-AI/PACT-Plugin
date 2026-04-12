@@ -100,15 +100,48 @@ class TestHookErrorJson:
         parsed = json.loads(result)
         assert "line1\nline2\nline3" in parsed["systemMessage"]
 
-    def test_very_long_error_message(self):
-        """Very long error messages should be handled without truncation."""
-        from shared.error_output import hook_error_json
+    def test_very_long_error_message_is_truncated(self):
+        """Very long error messages are truncated to _ERROR_MAX_CHARS (200).
+
+        Pathological exception messages (huge stdin echoed back, full
+        traceback strings, base64 blobs) would otherwise produce a
+        multi-megabyte JSON line and overwhelm the UI. The truncation
+        cap matches failure_log._ERROR_MAX_CHARS for consistency.
+        """
+        from shared.error_output import _ERROR_MAX_CHARS, hook_error_json
 
         long_msg = "x" * 10_000
         error = RuntimeError(long_msg)
         result = hook_error_json("test_hook", error)
         parsed = json.loads(result)
-        assert long_msg in parsed["systemMessage"]
+
+        # Only the truncated prefix appears
+        truncated = "x" * _ERROR_MAX_CHARS
+        assert truncated in parsed["systemMessage"]
+        # Full message does NOT appear
+        assert long_msg not in parsed["systemMessage"]
+        # The systemMessage is bounded: prefix ("PACT hook warning (test_hook): ")
+        # plus exactly _ERROR_MAX_CHARS error chars
+        prefix = "PACT hook warning (test_hook): "
+        assert parsed["systemMessage"] == prefix + truncated
+
+    def test_truncation_at_exact_boundary(self):
+        """An error of exactly _ERROR_MAX_CHARS chars is preserved unchanged."""
+        from shared.error_output import _ERROR_MAX_CHARS, hook_error_json
+
+        msg = "y" * _ERROR_MAX_CHARS
+        result = hook_error_json("test_hook", RuntimeError(msg))
+        parsed = json.loads(result)
+        assert msg in parsed["systemMessage"]
+
+    def test_short_error_message_is_unchanged(self):
+        """Short error messages (< _ERROR_MAX_CHARS) pass through verbatim."""
+        from shared.error_output import hook_error_json
+
+        msg = "small error"
+        result = hook_error_json("test_hook", RuntimeError(msg))
+        parsed = json.loads(result)
+        assert parsed["systemMessage"] == f"PACT hook warning (test_hook): {msg}"
 
     def test_hook_name_appears_in_output(self):
         """The hook_name parameter should appear in the systemMessage."""
