@@ -358,15 +358,22 @@ def _find_terminator_offset(
     """
     Fence-aware line walker that finds the absolute offset of the first line
     in `content[start:]` that matches `terminator_pattern`, skipping lines
-    inside triple-backtick code fences.
+    inside fenced code blocks (backtick or tilde, per CommonMark §4.5).
 
     Markdown fenced code blocks open and close with a line whose stripped
-    form starts with ``` (optionally followed by a language tag). We track
-    `in_code_fence` state and suppress terminator matches while inside a
-    fence. This prevents a user-authored fenced block from prematurely
-    terminating the section — a concern for Working Memory and Retrieved
-    Context, which may contain example markdown with boundary-marker-like
-    HTML comments.
+    form starts with ``` or ~~~ (optionally followed by a language tag).
+    We track the two fence types as INDEPENDENT states and suppress
+    terminator matches while inside EITHER. This prevents a user-authored
+    fenced block from prematurely terminating the section — a concern for
+    Working Memory and Retrieved Context, which may contain example
+    markdown with boundary-marker-like HTML comments.
+
+    Round 8 item 1: tilde-fence support. Pre-round-8 the walker recognized
+    only backtick fences (```). A ~~~-wrapped example containing a PACT
+    boundary marker would terminate the section inside the fence, eating
+    the user's example. Tracking tilde fences as a second independent
+    state fixes this: a ``` line inside a ~~~ fence is fence body (not a
+    toggle), and vice versa.
 
     Args:
         content: Full CLAUDE.md file content.
@@ -379,7 +386,9 @@ def _find_terminator_offset(
             `start` should pass the fence state at that boundary; callers
             who start at a safe point (after a ## heading + optional
             comment) can pass False — section headers cannot appear inside
-            a fence anyway.
+            a fence anyway. When True, the caller is assumed to be inside
+            a backtick fence (the pre-round-8 default); tilde-specific
+            seeding can be added if a future caller needs it.
 
     Returns:
         Absolute offset in `content` of the first line in `content[start:]`
@@ -388,7 +397,8 @@ def _find_terminator_offset(
         found — the caller should treat that as "scan to EOF".
     """
     pos = start
-    fence_re = re.compile(r'^\s*```')
+    in_backtick_fence = in_code_fence
+    in_tilde_fence = False
     while pos < len(content):
         nl = content.find("\n", pos)
         if nl == -1:
@@ -398,9 +408,15 @@ def _find_terminator_offset(
             line = content[pos:nl]
             line_end = nl + 1
 
-        if fence_re.match(line):
-            in_code_fence = not in_code_fence
-        elif not in_code_fence and terminator_pattern.match(line):
+        stripped = line.lstrip()
+        is_backtick_fence_line = stripped.startswith("```")
+        is_tilde_fence_line = stripped.startswith("~~~")
+
+        if is_backtick_fence_line and not in_tilde_fence:
+            in_backtick_fence = not in_backtick_fence
+        elif is_tilde_fence_line and not in_backtick_fence:
+            in_tilde_fence = not in_tilde_fence
+        elif not (in_backtick_fence or in_tilde_fence) and terminator_pattern.match(line):
             return pos
 
         pos = line_end

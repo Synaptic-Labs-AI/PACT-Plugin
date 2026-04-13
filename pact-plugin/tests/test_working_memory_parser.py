@@ -641,3 +641,50 @@ class TestWorkingMemoryParserFenceAware:
         assert "## Retrieved Context" in after
         for entry in existing:
             assert "This must be excluded" not in entry
+
+    def test_tilde_fenced_pact_marker_does_not_terminate_working_memory(self):
+        """Round 8 item 1: `working_memory._find_terminator_offset` must
+        recognize tilde fences (CommonMark §4.5) as well as backtick
+        fences. Pre-round-8, the walker only tracked ``` fences, so a
+        user-authored ~~~ fence containing a fake PACT boundary marker
+        would cause the terminator search to stop inside the fence,
+        losing the tail of the Working Memory section.
+
+        This test is the counterpart to
+        `test_fenced_pact_marker_does_not_terminate_working_memory` —
+        same adversarial content, wrapped in ~~~ instead of ```.
+        """
+        from scripts.working_memory import _parse_working_memory_section
+
+        content = (
+            f"{_MANAGED_START}\n"
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            "## Working Memory\n"
+            "\n"
+            "### 2026-04-12 04:00\n"
+            "**Context**: Tilde-fenced example below\n"
+            "\n"
+            "~~~\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "~~~\n"
+            "\n"
+            "**Lessons**: Tilde fences are equivalent to backtick fences\n"
+            "\n"
+            f"{_MEMORY_END}\n"
+            f"{_MANAGED_END}\n"
+        )
+
+        _before, _header, after, existing = _parse_working_memory_section(content)
+
+        # The entry survives intact INCLUDING the tilde-fenced fake marker
+        # and the post-fence lessons line.
+        assert len(existing) == 1
+        assert "<!-- PACT_MEMORY_END -->" in existing[0]
+        assert (
+            "Tilde fences are equivalent to backtick fences" in existing[0]
+        )
+        # The REAL PACT_MEMORY_END marker is in `after_section`
+        assert _MEMORY_END in after
+        assert _MANAGED_END in after

@@ -146,7 +146,13 @@ def _find_terminator_offset(
     module because skills/pact-memory/scripts/ cannot cleanly import from
     hooks/shared/. See that function's docstring for full rationale. The
     two helpers have identical semantics; a behavioral twin is acceptable
-    here because fence tracking is simple and the logic is only ~25 lines.
+    here because fence tracking is simple and the logic is only ~30 lines.
+
+    Round 8 item 1: tilde-fence support per CommonMark §4.5. The walker
+    tracks backtick fences (```) and tilde fences (~~~) as INDEPENDENT
+    states. A pinned section whose body contains a ~~~-fenced example of
+    a PACT boundary marker must NOT terminate at the marker — the fenced
+    example is user documentation, not a real section boundary.
 
     Args:
         content: Full CLAUDE.md file content.
@@ -154,14 +160,24 @@ def _find_terminator_offset(
         terminator_pattern: Compiled regex matched against individual lines
             via `.match` (no `^` anchor, no MULTILINE flag needed).
         in_code_fence: Initial fence state. Default False is safe when
-            `start` is immediately after a ## section header.
+            `start` is immediately after a ## section header. When passed
+            True, it seeds BOTH fence states — the walker can only learn
+            the specific fence type from an explicit close, which is the
+            correct semantics for "we know we're inside some fence, but
+            not which kind".
 
     Returns:
         Absolute offset of the first terminator line that is not inside a
-        fenced code block, or `len(content)` if none found.
+        fenced code block (backtick or tilde), or `len(content)` if none
+        found.
     """
+    # Two independent fence states (round 8 item 1). When the caller seeds
+    # `in_code_fence=True`, we conservatively assume backtick — the most
+    # common case and the only type that existed pre-round-8. Callers that
+    # need tilde-specific seeding can be added later if needed; none exist.
     pos = start
-    fence_re = re.compile(r'^\s*```')
+    in_backtick_fence = in_code_fence
+    in_tilde_fence = False
     while pos < len(content):
         nl = content.find("\n", pos)
         if nl == -1:
@@ -171,9 +187,15 @@ def _find_terminator_offset(
             line = content[pos:nl]
             line_end = nl + 1
 
-        if fence_re.match(line):
-            in_code_fence = not in_code_fence
-        elif not in_code_fence and terminator_pattern.match(line):
+        stripped = line.lstrip()
+        is_backtick_fence_line = stripped.startswith("```")
+        is_tilde_fence_line = stripped.startswith("~~~")
+
+        if is_backtick_fence_line and not in_tilde_fence:
+            in_backtick_fence = not in_backtick_fence
+        elif is_tilde_fence_line and not in_backtick_fence:
+            in_tilde_fence = not in_tilde_fence
+        elif not (in_backtick_fence or in_tilde_fence) and terminator_pattern.match(line):
             return pos
 
         pos = line_end

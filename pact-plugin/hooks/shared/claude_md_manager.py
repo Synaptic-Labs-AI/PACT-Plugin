@@ -179,14 +179,23 @@ def _strip_legacy_lines(content: str) -> str:
     only requires editing this helper, not both call sites.
 
     Round 7 item 2 — fence-aware: walks `content` line by line, tracks
-    markdown fenced-code-block state via `^\s*\`\`\`` (matching
-    `staleness._find_terminator_offset` and `_find_preamble_cutoff`
-    conventions), and applies `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines
-    that are NOT inside a fence. Lines inside a fence are preserved
-    verbatim, even if they match the stale-line regex. This prevents
-    silent data loss when a user's CLAUDE.md contains a fenced code block
-    that quotes the legacy template verbatim (e.g., migration documentation,
-    tutorial content, upgrade change logs).
+    markdown fenced-code-block state, and applies
+    `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines that are NOT inside a
+    fence. Lines inside a fence are preserved verbatim, even if they match
+    the stale-line regex. This prevents silent data loss when a user's
+    CLAUDE.md contains a fenced code block that quotes the legacy template
+    verbatim (e.g., migration documentation, tutorial content, upgrade
+    change logs).
+
+    Round 8 item 1 — tilde-fence support (CommonMark §4.5): the walker
+    tracks backtick fences (```) and tilde fences (~~~) as INDEPENDENT
+    states. The two fence characters are equivalent per CommonMark, and a
+    line inside a backtick fence that contains ~~~ does not affect tilde
+    state (and vice versa). Prior (round 7) behavior recognized only
+    backtick fences, so the counter-test
+        "# Notes\\n\\n~~~markdown\\nThe global PACT Orchestrator is loaded
+        from `~/.claude/CLAUDE.md`.\\n~~~\\n"
+    produced output with the stale line destroyed inside the tilde fence.
 
     Prior (pre-round-7) behavior used `re.MULTILINE` on the whole content,
     which stripped matching lines regardless of fence state. The verify-
@@ -200,19 +209,17 @@ def _strip_legacy_lines(content: str) -> str:
 
     Returns:
         Content with all legacy template lines OUTSIDE fenced code blocks
-        removed. Content inside fenced code blocks is preserved byte for
-        byte. Pure function.
+        removed. Content inside fenced code blocks (backtick or tilde) is
+        preserved byte for byte. Pure function.
     """
     # Walker matches the pattern used by `_find_preamble_cutoff` in this
     # module and `_find_terminator_offset` in staleness.py/working_memory.py.
-    # A shared helper was considered but the two consumers have divergent
-    # semantics: `_find_preamble_cutoff` stops at first match, this function
-    # accumulates every non-matching line. The twin-copy cost is ~15 lines
-    # of walker boilerplate — same bar as the existing staleness/working_memory
-    # twin and worth the isolation.
+    # Two independent fence states (round 8 item 1): a backtick fence is
+    # only closed by ```, a tilde fence only by ~~~. "Inside a fence" is
+    # the logical OR — either state being true suppresses legacy stripping.
     pos = 0
-    in_code_fence = False
-    fence_re = re.compile(r"^\s*```")
+    in_backtick_fence = False
+    in_tilde_fence = False
     out_parts: list[str] = []
     while pos < len(content):
         nl = content.find("\n", pos)
@@ -225,11 +232,21 @@ def _strip_legacy_lines(content: str) -> str:
             raw_segment = content[pos:nl + 1]
             line_end = nl + 1
 
-        if fence_re.match(line):
-            # Fence boundary: toggle state and keep the line verbatim.
-            in_code_fence = not in_code_fence
+        stripped = line.lstrip()
+        is_backtick_fence_line = stripped.startswith("```")
+        is_tilde_fence_line = stripped.startswith("~~~")
+
+        if is_backtick_fence_line and not in_tilde_fence:
+            # Backtick fence boundary (only toggles when NOT inside a
+            # tilde fence — a ``` line inside ~~~ is fence body, not a
+            # boundary). Keep the line verbatim.
+            in_backtick_fence = not in_backtick_fence
             out_parts.append(raw_segment)
-        elif in_code_fence:
+        elif is_tilde_fence_line and not in_backtick_fence:
+            # Tilde fence boundary (symmetric — ~~~ inside ``` is body).
+            in_tilde_fence = not in_tilde_fence
+            out_parts.append(raw_segment)
+        elif in_backtick_fence or in_tilde_fence:
             # Inside a fence: keep all content verbatim, regardless of
             # whether the line matches a legacy pattern.
             out_parts.append(raw_segment)
@@ -243,6 +260,92 @@ def _strip_legacy_lines(content: str) -> str:
         pos = line_end
 
     return "".join(out_parts)
+
+
+def _find_markers_outside_fences(
+    content: str,
+    markers: tuple[str, ...],
+) -> dict[str, int]:
+    """
+    Return byte offsets of the first occurrence of each marker in
+    `markers` that appears OUTSIDE any markdown fenced code block.
+
+    Shared helper for fence-aware marker discovery in `update_pact_routing`
+    and `_build_migrated_content` (round 8 items 2 + 3). Walks `content`
+    line by line, tracking backtick (```) and tilde (~~~) fence state as
+    independent booleans (CommonMark §4.5 compliance — see
+    `_strip_legacy_lines` for the convention). For each line that is NOT
+    inside any fence, scans for each marker substring and records the
+    absolute byte offset of its earliest occurrence.
+
+    Design rationale: round 7's architect calculated N≥5 breakeven for
+    shared-helper extraction when consumers have the same shape. Round 8
+    adds 4 new same-shape consumers:
+      - update_pact_routing Case 1 (START + END replacement)
+      - update_pact_routing orphan path (orphan marker strip)
+      - _build_migrated_content Case 1 (START + END extraction)
+      - _build_migrated_content orphan path (orphan-region skip)
+    All four need "find this PACT marker string, but ignore occurrences
+    inside a user-authored fenced code block". That's the extraction
+    boundary. The existing 4 walkers (`_strip_legacy_lines`,
+    `_find_preamble_cutoff`, `staleness._find_terminator_offset`,
+    `working_memory._find_terminator_offset`) have DIVERGENT shapes
+    (stop-at-first vs accumulate-all vs terminator-regex), so they stay
+    as inline walkers per the round 7 architect's direction.
+
+    Args:
+        content: Full CLAUDE.md content (pre- or post-mutation, caller's
+            responsibility). The walker treats this as byte-addressed
+            UTF-8 for offset reporting.
+        markers: Tuple of exact marker substrings to locate. Each marker
+            is searched for as a substring within each non-fenced line
+            (not as a full-line match, because markers like
+            `<!-- PACT_ROUTING_START: ... -->` sit on their own line but
+            a caller may pass inline markers in the future).
+
+    Returns:
+        Dict mapping marker string → absolute byte offset of the
+        EARLIEST occurrence outside any fence. Markers that do not
+        appear outside a fence are omitted from the dict — callers check
+        `marker in result` to distinguish "absent" from "present at 0".
+        A marker that appears only inside a fence is treated as absent:
+        it is user documentation, not a real PACT-managed marker.
+    """
+    pos = 0
+    in_backtick_fence = False
+    in_tilde_fence = False
+    found: dict[str, int] = {}
+    remaining_markers = set(markers)
+    while pos < len(content) and remaining_markers:
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            line_end = nl + 1
+
+        stripped = line.lstrip()
+        is_backtick_fence_line = stripped.startswith("```")
+        is_tilde_fence_line = stripped.startswith("~~~")
+
+        if is_backtick_fence_line and not in_tilde_fence:
+            in_backtick_fence = not in_backtick_fence
+        elif is_tilde_fence_line and not in_backtick_fence:
+            in_tilde_fence = not in_tilde_fence
+        elif not (in_backtick_fence or in_tilde_fence):
+            # Scan this non-fenced line for any remaining markers.
+            # Iterate a snapshot of `remaining_markers` so we can mutate
+            # the set inside the loop when a marker is located.
+            for marker in list(remaining_markers):
+                idx = line.find(marker)
+                if idx != -1:
+                    found[marker] = pos + idx
+                    remaining_markers.discard(marker)
+
+        pos = line_end
+
+    return found
 
 
 # Canonical PACT routing block template (round 7, item 3). The exact
@@ -547,62 +650,94 @@ def update_pact_routing() -> str | None:
             stale_line_removed = stripped != content
             content = stripped
 
-            # Case 1: markers present — replace content between them
-            if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
-                pattern = re.compile(
-                    re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
-                    re.DOTALL,
-                )
-                new_content = pattern.sub(PACT_ROUTING_BLOCK, content)
+            # Round 8 item 2: fence-aware marker discovery. `_find_markers_outside_fences`
+            # returns only marker offsets that are NOT inside a markdown fence.
+            # A fenced `<!-- PACT_ROUTING_START ... -->` in user documentation
+            # is treated as user content, not a real routing block — otherwise
+            # the Case 1 re.DOTALL replacement would silently overwrite the
+            # user's fenced example with the canonical PACT routing block
+            # (verify-backend-coder-7 counter-test).
+            routing_markers = _find_markers_outside_fences(
+                content, (_ROUTING_START_MARKER, _ROUTING_END_MARKER)
+            )
+            has_start_outside_fence = _ROUTING_START_MARKER in routing_markers
+            has_end_outside_fence = _ROUTING_END_MARKER in routing_markers
 
-                if new_content == content and not stale_line_removed:
-                    return None  # Already canonical and no stale line to strip
+            # Case 1: both markers present OUTSIDE any fence — replace content
+            # between them with the canonical routing block.
+            if has_start_outside_fence and has_end_outside_fence:
+                start_idx = routing_markers[_ROUTING_START_MARKER]
+                end_idx = routing_markers[_ROUTING_END_MARKER]
+                # Guard against END appearing before START (malformed file).
+                # The re.DOTALL pattern used to work only left-to-right and
+                # would have missed this; we mimic that by falling through to
+                # the orphan/insert path when markers are out of order.
+                if start_idx < end_idx:
+                    end_of_block = end_idx + len(_ROUTING_END_MARKER)
+                    new_content = (
+                        content[:start_idx]
+                        + PACT_ROUTING_BLOCK
+                        + content[end_of_block:]
+                    )
 
-                try:
-                    target_file.write_text(new_content, encoding="utf-8")
-                    os.chmod(str(target_file), 0o600)
-                    if new_content == content:
-                        return (
-                            "Removed stale orchestrator-loader line from project "
-                            "CLAUDE.md (routing block already canonical)"
-                        )
-                    if stale_line_removed:
-                        return (
-                            "PACT routing block updated in project CLAUDE.md "
-                            "(stripped stale orchestrator-loader line)"
-                        )
-                    return "PACT routing block updated in project CLAUDE.md"
-                except OSError as e:
-                    return f"Failed to update PACT routing: {str(e)[:50]}"
+                    if new_content == content and not stale_line_removed:
+                        return None  # Already canonical and no stale line
 
-            # Orphan marker handling: if exactly one of the two markers is present
-            # (the other was manually deleted, or a prior write crashed mid-file),
-            # strip the orphan marker before falling through to the insert path.
-            # Without this, the insert path blindly prepends a new routing block
-            # on every session because the update guard requires BOTH markers to
-            # be present — leading to file accumulation over N sessions.
+                    try:
+                        target_file.write_text(new_content, encoding="utf-8")
+                        os.chmod(str(target_file), 0o600)
+                        if new_content == content:
+                            return (
+                                "Removed stale orchestrator-loader line from project "
+                                "CLAUDE.md (routing block already canonical)"
+                            )
+                        if stale_line_removed:
+                            return (
+                                "PACT routing block updated in project CLAUDE.md "
+                                "(stripped stale orchestrator-loader line)"
+                            )
+                        return "PACT routing block updated in project CLAUDE.md"
+                    except OSError as e:
+                        return f"Failed to update PACT routing: {str(e)[:50]}"
+
+            # Orphan marker handling: if exactly one of the two markers is
+            # present OUTSIDE a fence (the other was manually deleted, or a
+            # prior write crashed mid-file), strip the orphan marker before
+            # falling through to the insert path. Without this, the insert
+            # path blindly prepends a new routing block on every session
+            # because the update guard requires BOTH markers to be present —
+            # leading to file accumulation over N sessions.
             #
-            # SESSION_START isolation (#366 item 5): the strip is scoped to lines
-            # OUTSIDE any <!-- SESSION_START --> ... <!-- SESSION_END --> region.
-            # Without this scope, a SESSION_START block whose content happened to
-            # contain a line matching the routing marker (pathological but
-            # possible — e.g., user pasted routing-block docs into session
-            # metadata) would be silently corrupted: the orphan strip would drop
-            # the line, then the insert path would add a fresh routing block at
-            # the top while the SESSION_START body was left missing a line.
-            has_start = _ROUTING_START_MARKER in content
-            has_end = _ROUTING_END_MARKER in content
+            # Fence scoping (round 8 item 2): the orphan check uses the
+            # fence-aware marker dict, so a marker INSIDE a fence is not
+            # treated as orphan — it's user documentation. This prevents the
+            # failure mode where stripping an in-fence marker scrambles the
+            # user's example block.
+            #
+            # SESSION_START isolation (#366 item 5): the strip is scoped to
+            # lines OUTSIDE any <!-- SESSION_START --> ... <!-- SESSION_END -->
+            # region. Without this scope, a SESSION_START block whose content
+            # happened to contain a line matching the routing marker
+            # (pathological but possible — e.g., user pasted routing-block
+            # docs into session metadata) would be silently corrupted.
             orphan_stripped = False
-            if has_start != has_end:
-                # Strip whichever orphan marker is present. The text on the same
-                # line as the marker is also stripped if the marker is on its
-                # own line — otherwise just remove the marker substring. Lines
-                # inside a SESSION_START/SESSION_END region are preserved
-                # verbatim even if they contain the marker substring.
-                orphan = _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
+            if has_start_outside_fence != has_end_outside_fence:
+                # Strip whichever orphan marker is present. The text on the
+                # same line as the marker is also stripped if the marker is
+                # on its own line — otherwise just remove the marker
+                # substring. Lines inside a SESSION_START/SESSION_END region
+                # or inside a markdown fence are preserved verbatim even if
+                # they contain the marker substring.
+                orphan = (
+                    _ROUTING_START_MARKER
+                    if has_start_outside_fence
+                    else _ROUTING_END_MARKER
+                )
                 content_lines = content.splitlines(keepends=True)
                 cleaned_lines = []
                 inside_session_block = False
+                in_backtick_fence = False
+                in_tilde_fence = False
                 for ln in content_lines:
                     if "<!-- SESSION_START -->" in ln:
                         inside_session_block = True
@@ -615,6 +750,29 @@ def update_pact_routing() -> str | None:
                     if inside_session_block:
                         # Preserve SESSION_START body verbatim — the strip
                         # must never reach into this region.
+                        cleaned_lines.append(ln)
+                        continue
+                    # Fence tracking (round 8 item 2): mirror the fence
+                    # convention used by `_find_markers_outside_fences` so
+                    # the orphan strip is coherent with the fence-aware
+                    # marker discovery that selected this branch.
+                    stripped_line = ln.lstrip().rstrip("\n\r")
+                    is_backtick_fence_line = stripped_line.startswith("```")
+                    is_tilde_fence_line = stripped_line.startswith("~~~")
+                    if is_backtick_fence_line and not in_tilde_fence:
+                        in_backtick_fence = not in_backtick_fence
+                        cleaned_lines.append(ln)
+                        continue
+                    if is_tilde_fence_line and not in_backtick_fence:
+                        in_tilde_fence = not in_tilde_fence
+                        cleaned_lines.append(ln)
+                        continue
+                    if in_backtick_fence or in_tilde_fence:
+                        # Preserve fence body verbatim — the in-fence
+                        # occurrence is already excluded from
+                        # `routing_markers` so it is not "the" orphan we're
+                        # stripping; keeping it here is a belt-and-suspenders
+                        # guarantee.
                         cleaned_lines.append(ln)
                         continue
                     if orphan in ln and ln.strip() == orphan:
@@ -874,8 +1032,7 @@ def _find_preamble_cutoff(content: str) -> int:
     content begins in the original (pre-migration) CLAUDE.md content.
 
     Walks the content line by line, tracking markdown fenced code block
-    state (toggled on any line whose stripped form starts with ```). For
-    each non-fenced line, checks whether any trigger in
+    state. For each non-fenced line, checks whether any trigger in
     `_PREAMBLE_TRIGGERS` occurs in that line and returns the byte offset
     of the earliest such occurrence. Triggers that appear inside a fenced
     code block are skipped — they are treated as user example content, not
@@ -893,13 +1050,28 @@ def _find_preamble_cutoff(content: str) -> int:
 
     Round 7 item 1: the round-6 implementation used naive substring
     search (`content.find(trigger)`). That composed unsafely with the
-    downstream `_strip_legacy_lines` + `^# Project Memory` `re.sub` at
-    line 971: a user example inside a fenced code block containing
-    `# Project Memory` + routing markers saw its heading stripped, its
-    routing block extracted from inside the fence, and its closing fence
-    left orphaned in the trailing user region. The fence-aware walker
-    makes triggers inside fences invisible to the cutoff scan, so the
-    entire example block survives as preamble.
+    downstream `_strip_legacy_lines` + `^# Project Memory` `re.sub`:
+    a user example inside a fenced code block containing `# Project
+    Memory` + routing markers saw its heading stripped, its routing
+    block extracted from inside the fence, and its closing fence left
+    orphaned in the trailing user region. The fence-aware walker makes
+    triggers inside fences invisible to the cutoff scan, so the entire
+    example block survives as preamble.
+
+    Round 8 item 1: tilde-fence support per CommonMark §4.5. The walker
+    tracks backtick and tilde fences as independent states; triggers
+    inside EITHER fence type are invisible to the cutoff scan. Pre-round-8
+    behavior only recognized ```, so a ~~~-wrapped example with PACT
+    triggers inside it would cause the cutoff to land on a trigger inside
+    the fence.
+
+    Substring-matching caveat: triggers are matched as substrings within a
+    line; a literal trigger appearing in user prose (outside any fenced
+    code block) will split the preamble at that point, which is the
+    accepted fallback — user content still survives below the managed
+    block as `remaining` / user_text. This caveat applies only to triggers
+    in NON-fenced user prose; fenced examples are protected by the
+    fence-aware walker.
 
     Args:
         content: The pre-migration CLAUDE.md content.
@@ -909,9 +1081,12 @@ def _find_preamble_cutoff(content: str) -> int:
         code block, or `len(content)` if no trigger is found outside
         fences.
     """
+    # Two independent fence states (round 8 item 1): see _strip_legacy_lines
+    # for the same convention. A line inside one fence type does not affect
+    # the other type's state.
     pos = 0
-    in_code_fence = False
-    fence_re = re.compile(r"^\s*```")
+    in_backtick_fence = False
+    in_tilde_fence = False
     while pos < len(content):
         nl = content.find("\n", pos)
         if nl == -1:
@@ -921,9 +1096,15 @@ def _find_preamble_cutoff(content: str) -> int:
             line = content[pos:nl]
             line_end = nl + 1
 
-        if fence_re.match(line):
-            in_code_fence = not in_code_fence
-        elif not in_code_fence:
+        stripped = line.lstrip()
+        is_backtick_fence_line = stripped.startswith("```")
+        is_tilde_fence_line = stripped.startswith("~~~")
+
+        if is_backtick_fence_line and not in_tilde_fence:
+            in_backtick_fence = not in_backtick_fence
+        elif is_tilde_fence_line and not in_backtick_fence:
+            in_tilde_fence = not in_tilde_fence
+        elif not (in_backtick_fence or in_tilde_fence):
             # Scan this line for the earliest trigger. Return the absolute
             # offset (line start + trigger offset within the line).
             earliest_in_line = -1
@@ -994,18 +1175,37 @@ def _build_migrated_content(content: str) -> str:
     content = content[preamble_cutoff:]
 
     # Extract routing block if present (between markers)
+    #
+    # Round 8 item 3: fence-aware marker discovery. Case 1 (both markers
+    # present) and the orphan path both route through
+    # `_find_markers_outside_fences` so PACT routing markers that appear
+    # inside a user-authored fenced code block are ignored. The pre-round-8
+    # code used `in content` substring checks plus a `re.DOTALL` pattern for
+    # extraction, which would silently yank a fenced example's body OUT of
+    # the fence and promote it as the "routing block" — leaving an empty
+    # decapitated fence behind in `remaining`. See the companion fix in
+    # `update_pact_routing` (item 2) and `_find_markers_outside_fences`
+    # for the shared walker semantics.
     routing_block = ""
     content_sans_routing = content
-    if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
-        pattern = re.compile(
-            re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
-            re.DOTALL,
-        )
-        match = pattern.search(content)
-        if match:
-            routing_block = match.group(0)
-            content_sans_routing = content[:match.start()] + content[match.end():]
-    elif _ROUTING_START_MARKER in content or _ROUTING_END_MARKER in content:
+    routing_markers = _find_markers_outside_fences(
+        content, (_ROUTING_START_MARKER, _ROUTING_END_MARKER)
+    )
+    has_start_outside_fence = _ROUTING_START_MARKER in routing_markers
+    has_end_outside_fence = _ROUTING_END_MARKER in routing_markers
+    # Case 1: both markers OUTSIDE any fence — extract via byte-offset
+    # slicing (not `re.DOTALL`, which scans across fence boundaries).
+    # Guard against END appearing before START (malformed file): fall
+    # through to the orphan / no-markers path so the file isn't silently
+    # mangled by a negative-length slice.
+    if has_start_outside_fence and has_end_outside_fence:
+        start_idx = routing_markers[_ROUTING_START_MARKER]
+        end_idx = routing_markers[_ROUTING_END_MARKER]
+        if start_idx < end_idx:
+            end_of_block = end_idx + len(_ROUTING_END_MARKER)
+            routing_block = content[start_idx:end_of_block]
+            content_sans_routing = content[:start_idx] + content[end_of_block:]
+    elif has_start_outside_fence or has_end_outside_fence:
         # Orphan PACT_ROUTING marker (round 5, item 5): exactly one of
         # START/END is present. This happens if a user manually edits the
         # routing block and deletes half of it, or if a partial write
@@ -1021,12 +1221,21 @@ def _build_migrated_content(content: str) -> str:
         # update_pact_routing call. We lose no information — the canonical
         # routing content is a plugin template rebuilt from
         # PACT_ROUTING_BLOCK, not user-authored content.
+        #
+        # Fence scoping (round 8 item 3): the orphan marker is pulled from
+        # `routing_markers` (the fence-aware dict), so a marker INSIDE a
+        # user fence is NOT selected as the orphan — it is treated as user
+        # documentation and falls through to `content_sans_routing =
+        # content` (no strip). This prevents the failure mode where a
+        # fenced `<!-- PACT_ROUTING_END -->` example was picked up by a
+        # naive `content.find` and triggered orphan-strip machinery across
+        # the user's fence body.
         orphan_marker = (
             _ROUTING_START_MARKER
-            if _ROUTING_START_MARKER in content
+            if has_start_outside_fence
             else _ROUTING_END_MARKER
         )
-        marker_idx = content.find(orphan_marker)
+        marker_idx = routing_markers[orphan_marker]
 
         # Find the start of the strip region: prefer the preceding
         # `## PACT Routing` heading if it appears just before the orphan

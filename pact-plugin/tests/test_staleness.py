@@ -674,6 +674,13 @@ class TestParsePinnedSectionMarkerBoundary:
         """Same boundary behavior for PACT_ROUTING_END. This is an edge
         case — normally routing precedes Pinned Context in the file, but
         the regex alternative lists all three prefixes symmetrically.
+
+        Defensive coverage: the regex alternative lists all three boundary
+        prefixes (PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_) symmetrically,
+        and the parser must terminate the pinned section at ANY of them
+        even when the canonical file layout would never put PACT_ROUTING_END
+        after ## Pinned Context. This test guarantees the invariant holds
+        regardless of file layout reshuffling in the future.
         """
         from staleness import _parse_pinned_section
 
@@ -1175,3 +1182,46 @@ class TestParsePinnedSectionFenceAware:
         assert "After both fences." in pinned_content
         # The real terminator must be excluded
         assert "Working Memory" not in pinned_content
+
+    def test_tilde_fenced_pact_marker_does_not_terminate_pinned_section(self):
+        """Round 8 item 1: `staleness._find_terminator_offset` must
+        recognize tilde fences (CommonMark §4.5) as well as backtick
+        fences. Pre-round-8, the walker only tracked ``` fences, so a
+        user-authored ~~~ fence containing a fake PACT boundary marker
+        would cause the terminator search to stop inside the fence,
+        cutting off the pinned section mid-fence and losing user content.
+
+        This test is the counterpart to
+        `test_fenced_pact_marker_does_not_terminate_pinned_section` —
+        same adversarial content, but wrapped in ~~~ instead of ```.
+        """
+        from staleness import _parse_pinned_section
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "### Documentation pin (tilde fence)\n"
+            "Example of the managed-boundary marker in a tilde fence:\n"
+            "\n"
+            "~~~html\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "~~~\n"
+            "\n"
+            "Further narrative after the tilde fence.\n"
+            "\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "## After memory block\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        _pinned_start, pinned_end, pinned_content = result
+
+        # The tilde-fenced fake marker must be inside the extracted region
+        # (it must not be treated as the section terminator).
+        assert "~~~html" in pinned_content
+        assert "Further narrative after the tilde fence." in pinned_content
+        # The real marker at the bottom must be the terminator
+        assert content[pinned_end:].lstrip().startswith("<!-- PACT_MEMORY_END -->")

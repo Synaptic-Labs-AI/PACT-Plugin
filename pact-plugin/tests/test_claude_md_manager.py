@@ -777,6 +777,137 @@ class TestUpdatePactRoutingOrphanMarkers:
         assert final.count("<!-- PACT_ROUTING_END -->") == 1
 
 
+class TestUpdatePactRoutingFenceAware:
+    """Round 8 item 2: `update_pact_routing` must be fence-aware.
+
+    Pre-round-8 behavior: the Case 1 routing replacement used naive
+    substring checks (`_ROUTING_START_MARKER in content`) plus a `re.DOTALL`
+    extraction pattern. That composed unsafely with user-authored fenced
+    code blocks: a fenced `<!-- PACT_ROUTING_START ... END -->` example
+    (e.g., in migration documentation or tutorial content) was detected
+    as a real routing block and silently replaced with the canonical
+    plugin template INSIDE the fence — destroying the user's example.
+
+    Post-round-8: Case 1 and the orphan path both route through the
+    `_find_markers_outside_fences` shared helper. Fenced markers are
+    invisible to the marker discovery; in the Case 1 fenced scenario
+    below, the function falls through to Case 2 (insert path), inserting
+    a fresh canonical routing block above the fenced example without
+    touching the fence body.
+    """
+
+    def test_fenced_routing_example_not_replaced(
+        self, tmp_path, monkeypatch
+    ):
+        """A user's fenced `<!-- PACT_ROUTING_START ... END -->` example
+        must NOT be treated as a real routing block. The Case 1 regex
+        pre-round-8 would replace the fence's body with PACT_ROUTING_BLOCK.
+        """
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "Documentation for the PACT routing block format:\n"
+            "\n"
+            "```markdown\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## PACT Routing\n"
+            "\n"
+            "This is an example inside a fence — not a real routing block.\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "```\n"
+            "\n"
+            "## Working Memory\n"
+            "user notes\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        update_pact_routing()
+
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # The fenced example must survive byte-for-byte. Pre-round-8, the
+        # Case 1 replacement silently overwrote the fence body with
+        # PACT_ROUTING_BLOCK (the canonical template).
+        assert (
+            "This is an example inside a fence — not a real routing block."
+            in new_content
+        ), "Fenced routing example must survive verbatim (round 8 item 2)"
+        # Fence boundaries intact
+        assert "```markdown" in new_content
+        assert new_content.count("```") == 2, (
+            "Both fence boundaries must still be present"
+        )
+        # A fresh canonical routing block was inserted elsewhere (Case 2
+        # insert path fires after the fence-aware marker discovery rules
+        # out the fenced markers).
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        # Count PACT_ROUTING_START: the fenced example has one AND the
+        # new inserted canonical block has one = 2 total. This is the
+        # expected post-fix state — the fence is user content, the
+        # inserted block is plugin content.
+        assert new_content.count(
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+        ) == 2, (
+            "Post-fix: 1 fenced example + 1 new canonical block = 2"
+        )
+        # User content preserved
+        assert "## Working Memory" in new_content
+        assert "user notes" in new_content
+
+    def test_fenced_orphan_routing_end_not_stripped(
+        self, tmp_path, monkeypatch
+    ):
+        """A user's fenced `<!-- PACT_ROUTING_END -->` (with no matching
+        START) must NOT trigger orphan-strip handling. Pre-round-8, the
+        orphan-detection substring check `_ROUTING_END_MARKER in content`
+        would fire on the in-fence marker and the orphan-strip walker
+        would reach across the fence body.
+        """
+        from shared.claude_md_manager import update_pact_routing
+
+        legacy = tmp_path / "CLAUDE.md"
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "Example of a broken routing block (for user's own reference):\n"
+            "\n"
+            "```markdown\n"
+            "Some narrative about routing blocks.\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "Extra instructional text below the orphan.\n"
+            "```\n"
+            "\n"
+            "## Working Memory\n"
+            "user notes\n"
+        )
+        legacy.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        update_pact_routing()
+
+        new_content = legacy.read_text(encoding="utf-8")
+
+        # The fenced example body must survive byte-for-byte — the
+        # orphan-strip machinery must NOT have reached into the fence.
+        assert "Some narrative about routing blocks." in new_content
+        assert (
+            "Extra instructional text below the orphan." in new_content
+        ), "Fenced body must survive — orphan-strip must not cross fences"
+        # The fenced `<!-- PACT_ROUTING_END -->` is still user content.
+        assert new_content.count("<!-- PACT_ROUTING_END -->") == 2, (
+            "Post-fix: 1 fenced example + 1 new canonical block = 2"
+        )
+        # New canonical block inserted (Case 2 path fires because there
+        # was no real routing block).
+        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
+        # Fence boundaries intact
+        assert new_content.count("```") == 2
+
+
 class TestUpdatePactRoutingSessionStartIsolation:
     """SESSION_START preservation tripwire (#366 item 5, architect S3 finding).
 
@@ -3652,46 +3783,130 @@ class TestBuildMigratedContentAdversarial:
         assert "```markdown" not in after_managed
         assert "End of my notes." not in after_managed
 
+    def test_tilde_fenced_trigger_inside_preamble(self):
+        """Round 8 item 1: `_find_preamble_cutoff` must recognize tilde
+        fences (CommonMark §4.5) as well as backtick fences.
+
+        This test is the tilde-fence counterpart to
+        `test_fenced_trigger_inside_preamble`. Pre-round-8, the walker
+        only tracked ``` fences, so a user's ~~~ fence containing PACT
+        triggers (``# Project Memory``, routing markers) would cause
+        `_find_preamble_cutoff` to land at a trigger inside the fence,
+        and the downstream extraction pipeline would destroy the fence
+        body. Post-round-8, triggers inside ~~~ fences are invisible to
+        the cutoff scan so the tilde-fenced example survives intact as
+        preamble.
+
+        Counter-test-by-revert: reverting the tilde-fence tracking in
+        `_find_preamble_cutoff` (reverting `in_tilde_fence` to a no-op)
+        makes this test fail because the first trigger inside the fence
+        (``# Project Memory``) becomes the cutoff.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# My Tilde Notes\n"
+            "Here's an example of a PACT project CLAUDE.md using tilde fences:\n"
+            "\n"
+            "~~~markdown\n"
+            "# Project Memory\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## PACT Routing\n"
+            "Example routing text.\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "~~~\n"
+            "\n"
+            "End of my tilde notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+        managed_end_idx = result.index(_MANAGED_END)
+        managed_region = result[managed_start_idx:managed_end_idx]
+        after_managed = result[managed_end_idx:]
+
+        # (a) Non-fenced prose above the fence is preserved in position.
+        assert "# My Tilde Notes" in before_managed
+        # (b) The tilde fence boundaries survive intact.
+        assert "~~~markdown" in before_managed
+        # The file has TWO ~~~ lines (open + close). Both must be
+        # preserved — if the preamble cutoff landed inside the fence,
+        # the closing ~~~ would have been orphaned below the managed
+        # block instead.
+        assert before_managed.count("~~~") == 2, (
+            "Both tilde fence boundaries must be in preamble"
+        )
+        # (c) The fence body content must be in the preamble region
+        # (intact and in order).
+        assert "# Project Memory" in before_managed
+        assert (
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+            in before_managed
+        )
+        assert "Example routing text." in before_managed
+        # (d) Post-fence narrative also in preamble
+        assert "End of my tilde notes." in before_managed
+        # (e) No fence content leaked into managed region
+        assert "Example routing text." not in managed_region
+        assert "~~~markdown" not in managed_region
+        # (f) Trailing user region is empty of fenced content
+        assert "# My Tilde Notes" not in after_managed
+        assert "~~~" not in after_managed
+
     def test_fenced_stale_orchestrator_line_preserved(self):
-        """Round 7 item 2: `_strip_legacy_lines` must be fence-aware.
+        """Round 7 item 2 / round 8 item 4: `_strip_legacy_lines` must be
+        fence-aware, and the regression test must exercise the POST-CUTOFF
+        stripper path (not only the preamble-only path).
 
         Adversarial scenario: a user's CLAUDE.md has a fenced code block
-        that quotes the legacy v3.16.2 orchestrator-loader line verbatim
-        (e.g., in migration documentation, upgrade change logs, or
-        tutorial content explaining what the old PACT template looked
-        like). The line is NOT part of the live PACT config — it's an
-        example inside a fenced code block.
+        inside the managed region (e.g., inside `## Working Memory`) that
+        quotes the legacy v3.16.2 orchestrator-loader line verbatim as
+        migration documentation. The line is NOT part of the live PACT
+        config — it's an example inside a fenced code block.
 
-        Pre-fix behavior (verify-backend-coder-7 counter-test):
+        Pre-round-7 behavior (verify-backend-coder-7 counter-test):
           `_STALE_ORCHESTRATOR_LINE_RE` was compiled with `re.MULTILINE`
           and applied via `_STALE_ORCHESTRATOR_LINE_RE.sub("", content)`
           against the full content. `^...$\\n?` matched every occurrence
           at any line boundary, INCLUDING lines inside user-authored
-          fenced code blocks. The counter-test input
-              "```\\nThe global PACT Orchestrator is loaded from ...\\n```\\n"
-          produced the output
-              "```\\n```\\n"
-          with the fenced line silently destroyed.
+          fenced code blocks.
 
-        Post-fix: `_strip_legacy_lines` walks lines, tracks in-fence
-        state via `^\\s*```` (matching
-        `staleness._find_terminator_offset` and `_find_preamble_cutoff`
-        conventions), and applies the per-line pattern ONLY to non-fenced
-        lines. Lines inside a fence are preserved byte-for-byte.
+        Post-round-7: `_strip_legacy_lines` walks lines, tracks in-fence
+        state via `^\\s*```` (round 7), and round 8 item 1 adds tilde
+        fence state independently. Lines inside EITHER fence type are
+        preserved byte-for-byte.
 
-        This regression test is NOT a unit test of `_strip_legacy_lines`
-        in isolation — it drives `_build_migrated_content` end-to-end to
-        prove the full migration pipeline preserves fenced content. The
-        stripping function is called in multiple places in the pipeline
-        (preamble scrub, post-cutoff remaining scrub, and in
-        update_pact_routing), so an end-to-end driver is the highest-
-        fidelity regression guard.
+        Round 8 item 4 fixture fix: the pre-round-8 fixture had NO
+        non-fenced PACT trigger — the fenced `# Project Memory` heading
+        was the ONLY trigger in the file, and it was inside a fence, so
+        `_find_preamble_cutoff` (also fence-aware) returned
+        `len(content)`. That meant `remaining` was empty and the
+        post-cutoff `_strip_legacy_lines` call NEVER saw the fenced
+        content — only the preamble_text call did. Since the fenced line
+        was in the preamble, the preamble-only stripping was enough.
+        Round-8 audit caught that the counter-test-by-revert claim in
+        the original docstring only exercised ONE of the two
+        `_strip_legacy_lines` call sites.
 
-        Counter-test-by-revert has been validated for this regression:
-        temporarily reverting `_strip_legacy_lines` to the fence-unaware
-        `_STALE_ORCHESTRATOR_LINE_RE.sub` form and reverting the regex
-        to its `re.MULTILINE` + `$\\n?` variant makes this test fail
-        (the fenced line disappears from the preamble region).
+        The new fixture places the fenced stale line INSIDE `## Working
+        Memory`, with a non-fenced `# Project Memory` heading in
+        position 0. `_find_preamble_cutoff` returns 0 → preamble is
+        empty → full file is `remaining` → the post-cutoff
+        `_strip_legacy_lines` call at line ~1330 is exercised by the
+        fenced content. Reverting `_strip_legacy_lines` to the
+        fence-unaware form now fails this test via the post-cutoff
+        path, not the preamble path.
+
+        Counter-test-by-revert validated for this regression: temporarily
+        reverting `_strip_legacy_lines` to the fence-unaware
+        `_STALE_ORCHESTRATOR_LINE_RE.sub` form makes this test fail
+        (the fenced line disappears from the `## Working Memory`
+        section's body inside the PACT_MANAGED region).
         """
         from shared.claude_md_manager import _build_migrated_content
 
@@ -3700,15 +3915,20 @@ class TestBuildMigratedContentAdversarial:
             "`~/.claude/CLAUDE.md`."
         )
 
+        # Non-fenced `# Project Memory` at position 0 → preamble cutoff is 0
+        # → post-cutoff `remaining` is the full file body → fenced stale
+        # line is scrubbed by the POST-cutoff `_strip_legacy_lines` call,
+        # not the preamble-only call. This is the critical difference from
+        # the pre-round-8 fixture.
         content = (
-            "# My Notes\n"
-            "\n"
-            "Here is what the legacy CLAUDE.md template looked like:\n"
-            "\n"
-            "```markdown\n"
             "# Project Memory\n"
             "\n"
-            "This file contains project-specific memory managed by the PACT framework.\n"
+            "## Working Memory\n"
+            "\n"
+            "Migration notes for future reference:\n"
+            "\n"
+            "```markdown\n"
+            "This is what the old v3.16.2 template looked like:\n"
             f"{stale_line}\n"
             "```\n"
             "\n"
@@ -3721,66 +3941,65 @@ class TestBuildMigratedContentAdversarial:
         assert _MANAGED_START in result
         assert _MANAGED_END in result
 
-        # The entire user file contains NO non-fenced PACT trigger, so
-        # the whole file is preamble and lands ABOVE PACT_MANAGED_START.
         managed_start_idx = result.index(_MANAGED_START)
-        before_managed = result[:managed_start_idx]
         managed_end_idx = result.index(_MANAGED_END)
+        before_managed = result[:managed_start_idx]
+        managed_region = result[managed_start_idx:managed_end_idx]
         after_managed = result[managed_end_idx:]
 
-        # (a) The fenced stale line MUST survive verbatim in the
-        # preamble. This is the primary regression assertion — pre-fix
-        # the line was destroyed by the MULTILINE substitution.
-        assert stale_line in before_managed, (
-            "Fenced stale-orchestrator line must survive byte-for-byte. "
-            "If this fails, _strip_legacy_lines is still fence-unaware."
+        # (a) PRIMARY ASSERTION — the fenced stale line MUST survive
+        # verbatim INSIDE the managed region's `## Working Memory`
+        # section. Pre-round-7 it was destroyed by the post-cutoff
+        # `_STALE_ORCHESTRATOR_LINE_RE.sub`. Pre-round-8-fixture the
+        # test couldn't detect this specific failure because the fenced
+        # content was in the preamble path, not the remaining path.
+        assert stale_line in managed_region, (
+            "Fenced stale-orchestrator line must survive byte-for-byte "
+            "inside the managed region. If this fails, the post-cutoff "
+            "`_strip_legacy_lines` call at line ~1330 is still "
+            "fence-unaware."
         )
 
-        # (b) The fence boundaries survive intact in the preamble.
-        fence_open_idx = before_managed.find("```markdown")
+        # (b) The fence boundaries survive intact in the managed region.
+        fence_open_idx = managed_region.find("```markdown")
         assert fence_open_idx != -1, (
-            "Opening ```markdown fence must survive in preamble"
+            "Opening ```markdown fence must survive in managed region"
         )
-        fence_close_idx = before_managed.find("```\n", fence_open_idx + 1)
+        fence_close_idx = managed_region.find("```\n", fence_open_idx + 1)
         assert fence_close_idx != -1, (
-            "Closing ``` fence must survive in preamble"
+            "Closing ``` fence must survive in managed region"
         )
         assert fence_open_idx < fence_close_idx, (
             "Closing fence must appear after opening fence"
         )
 
         # (c) The stale line must appear BETWEEN the opening and closing
-        # fences — not orphaned elsewhere in the output, and not
-        # stripped from its position inside the fence.
-        stale_idx = before_managed.find(stale_line)
+        # fences inside the managed region — not orphaned elsewhere, and
+        # not stripped from its position inside the fence.
+        stale_idx = managed_region.find(stale_line)
         assert fence_open_idx < stale_idx < fence_close_idx, (
-            "Stale line must remain INSIDE the fence region, not be "
-            "relocated or stripped"
+            "Stale line must remain INSIDE the fence region inside the "
+            "managed block, not be relocated or stripped"
         )
 
-        # (d) The non-fenced narrative prose survives too.
-        assert "# My Notes" in before_managed
-        assert (
-            "Here is what the legacy CLAUDE.md template looked like:"
-            in before_managed
-        )
+        # (d) The non-fenced narrative prose around the fence survives
+        # too (inside the managed region's Working Memory section).
+        assert "Migration notes for future reference:" in managed_region
         assert (
             "The line inside the fence is an EXAMPLE, not live config."
-            in before_managed
+            in managed_region
         )
 
-        # (e) The stale line must NOT leak into the managed region. The
-        # fence-aware stripper ran on `remaining` (post-cutoff content)
-        # as well, and if that stripper were still fence-unaware AND the
-        # cutoff logic had changed, the line could end up duplicated in
-        # the managed region. Belt-and-suspenders check.
-        managed_region = result[managed_start_idx:managed_end_idx]
-        assert stale_line not in managed_region
+        # (e) The file had NO preamble (first line was `# Project
+        # Memory`), so there should be no user content above
+        # PACT_MANAGED_START.
+        assert stale_line not in before_managed
+        assert "```markdown" not in before_managed
 
-        # (f) The trailing user region (below PACT_MANAGED_END) does not
-        # contain the fenced content — the whole file was preamble.
+        # (f) The trailing user region (below PACT_MANAGED_END) is also
+        # empty of the fenced content.
         assert stale_line not in after_managed
-        assert "# My Notes" not in after_managed
+        assert "```markdown" not in after_managed
 
 
 class TestBuildMigratedContentOrphanRoutingMarker:
@@ -3909,6 +4128,154 @@ class TestBuildMigratedContentOrphanRoutingMarker:
         assert "Real memory entry" in result
         # The paragraph before the orphan is user content and must survive
         assert "Some user paragraph before the orphan." in result
+
+
+class TestBuildMigratedContentFenceAwareRouting:
+    """Round 8 item 3: `_build_migrated_content` must be fence-aware.
+
+    Pre-round-8 behavior: the Case 1 routing extraction used naive
+    substring checks (`_ROUTING_START_MARKER in content`) plus a
+    `re.DOTALL` pattern. A user's fenced `<!-- PACT_ROUTING_START ... END -->`
+    example was silently extracted — the fence body was yanked OUT of the
+    fence and promoted as the "routing block" inside PACT_MANAGED,
+    leaving an empty decapitated fence behind in the user region.
+
+    The orphan path had the same bug: `content.find(orphan_marker)`
+    would fire on a fenced marker and the orphan-strip regex walker
+    would reach into the fence body.
+
+    Post-round-8: both Case 1 and the orphan path go through
+    `_find_markers_outside_fences`, so fenced markers are invisible to
+    marker discovery. A fenced example survives as user content
+    (landing inside the memory region as part of `## Working Memory`
+    body or preamble, depending on the file layout).
+    """
+
+    _ROUTING_START = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+    _ROUTING_END = "<!-- PACT_ROUTING_END -->"
+
+    def test_fenced_routing_block_not_extracted(self):
+        """A fenced `<!-- PACT_ROUTING_START ... END -->` example must NOT
+        be detected as a real routing block. Pre-round-8, the fence body
+        was extracted and promoted as the routing block.
+
+        Fixture layout: file starts with `# Project Memory` (non-fenced
+        trigger at position 0), so `_find_preamble_cutoff` returns 0 and
+        the fenced example lives inside `remaining` — exactly the path
+        where Case 1 extraction runs.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "Documentation for the PACT routing block format:\n"
+            "\n"
+            "```markdown\n"
+            f"{self._ROUTING_START}\n"
+            "## PACT Routing\n"
+            "\n"
+            "Example routing prose (fenced — not a real block).\n"
+            f"{self._ROUTING_END}\n"
+            "```\n"
+            "\n"
+            "More user notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Fenced example body survives verbatim — NOT extracted as routing
+        assert (
+            "Example routing prose (fenced — not a real block)." in result
+        ), "Fenced routing example must survive byte-for-byte (round 8 item 3)"
+        # Fence boundaries intact — pre-fix the opening fence had an empty
+        # body left behind after Case 1 yanked the interior.
+        assert "```markdown" in result
+        assert result.count("```") == 2, (
+            "Both fence boundaries must still be present"
+        )
+        # The fenced markers still appear in the output (inside the fence)
+        assert self._ROUTING_START in result
+        assert self._ROUTING_END in result
+        # Each marker appears EXACTLY ONCE — only inside the fence, not
+        # duplicated by a Case 1 extraction that would have promoted them
+        # as a new routing block.
+        assert result.count(self._ROUTING_START) == 1
+        assert result.count(self._ROUTING_END) == 1
+        # Neither marker appears OUTSIDE the fence in the managed region.
+        # The routing block in the managed region must be absent (no real
+        # markers were discovered outside fences).
+        managed_start = result.index(
+            "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
+        )
+        managed_end = result.index("<!-- PACT_MANAGED_END -->")
+        managed_region = result[managed_start:managed_end]
+        # The fenced example lives inside the managed region (inside Working
+        # Memory), so the markers ARE inside the managed region — but they
+        # must be inside the fence specifically, not extracted to a bare
+        # routing block above the fence.
+        mr_fence_open = managed_region.find("```markdown")
+        assert mr_fence_open != -1, (
+            "Fenced example must live inside managed region's Working Memory"
+        )
+        mr_fence_close = managed_region.find("```\n", mr_fence_open + 1)
+        assert mr_fence_close != -1
+        # The PACT_ROUTING_START must be between the fence open and close.
+        routing_idx = managed_region.find(self._ROUTING_START)
+        assert mr_fence_open < routing_idx < mr_fence_close, (
+            "PACT_ROUTING_START must be INSIDE the fence (not extracted)"
+        )
+        # User notes after the fence survive
+        assert "More user notes." in result
+
+    def test_fenced_orphan_routing_marker_not_stripped(self):
+        """A fenced orphan marker (only one of START/END inside a user
+        fence) must NOT trigger orphan-strip handling. Pre-round-8, the
+        substring `_ROUTING_END_MARKER in content` would fire, and the
+        orphan-strip walker would reach across the fence body using the
+        regex-based terminator search.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "Migration notes:\n"
+            "\n"
+            "```markdown\n"
+            "Some narrative about the routing block shape.\n"
+            f"{self._ROUTING_END}\n"
+            "Extra body text below the orphan marker.\n"
+            "```\n"
+            "\n"
+            "Post-fence notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # The fenced example body survives byte-for-byte — orphan-strip
+        # must NOT have reached into the fence.
+        assert "Some narrative about the routing block shape." in result
+        assert (
+            "Extra body text below the orphan marker." in result
+        ), "Fenced orphan body must survive — orphan-strip must not cross fences"
+        # The fenced orphan marker is still user content
+        assert self._ROUTING_END in result
+        assert result.count(self._ROUTING_END) == 1
+        # No PACT_ROUTING_START is injected (this is just orphan handling,
+        # not Case 1 + migration of a real routing block).
+        assert self._ROUTING_START not in result
+        # Fence boundaries intact — pre-fix, the orphan-strip walker's
+        # `next_terminator` regex could reach across the closing fence
+        # and delete content past it.
+        assert result.count("```") == 2
+        # User content after the fence survives
+        assert "Post-fence notes." in result
+        assert "Migration notes:" in result
 
 
 class TestBuildMigratedContentIdempotent:
@@ -4650,4 +5017,209 @@ class TestStripLegacyLines:
         # Both lines mention "orchestrator" but don't match the stale pattern
         assert "The orchestrator loads from somewhere else entirely." in result
         assert "See also: orchestrator governance." in result
+
+    # Round 8 item 5: direct fence unit tests for `_strip_legacy_lines`.
+    # Prior coverage exercised the walker's fence branches through
+    # `_build_migrated_content` and `test_fenced_stale_orchestrator_line_preserved`
+    # (an end-to-end driver). Direct unit tests produce targeted failures when
+    # the walker's fence-state tracking regresses, without the downstream
+    # migration-pipeline assertions masking the signal.
+
+    def test_strip_legacy_lines_backtick_fenced_stale_line_preserved(self):
+        """A stale line INSIDE a backtick fence must be preserved byte-for-byte.
+
+        Round 7 item 2 added fence-awareness via `in_code_fence`; this unit
+        test pins that behavior so a regression in the backtick-fence branch
+        (distinct from the tilde branch below) fails here instead of only
+        failing via the end-to-end driver.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "```\n"
+            f"{self.STALE_LINE}\n"
+            "```\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE in result, (
+            "Stale line inside backtick fence must be preserved verbatim"
+        )
+        # The fence boundaries also survive intact.
+        assert result.count("```") == 2
+
+    def test_strip_legacy_lines_tilde_fenced_stale_line_preserved(self):
+        """Round 8 item 1: tilde fences (CommonMark §4.5) must be recognized.
+
+        Pre-round-8 `_strip_legacy_lines` only recognized backtick (```)
+        fences. A user-authored `~~~` fence containing the stale line was
+        treated as non-fenced content and silently destroyed. Round 8 adds
+        an independent `in_tilde_fence` state so the stripper skips
+        tilde-fenced content the same way it skips backtick-fenced content.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "~~~\n"
+            f"{self.STALE_LINE}\n"
+            "~~~\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE in result, (
+            "Stale line inside tilde fence must be preserved verbatim "
+            "(round 8 item 1)"
+        )
+        assert result.count("~~~") == 2
+
+    def test_strip_legacy_lines_unclosed_fence_at_eof_preserves_content(self):
+        """An unclosed fence at EOF must still protect the content below.
+
+        When a user's content has an opening fence with no matching close
+        (file ends before the fence is closed), the walker should remain
+        in-fence through to the end of the content. Any stale-line match
+        inside the unclosed fence must be preserved.
+
+        This is CommonMark-compatible: §4.5 explicitly allows unclosed
+        fenced code blocks to extend to the end of the document.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "```\n"
+            f"{self.STALE_LINE}\n"
+            "more content that never gets un-fenced\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE in result, (
+            "Stale line inside unclosed fence must be preserved — the "
+            "walker's in-fence state must not reset at EOF"
+        )
+        assert "more content that never gets un-fenced" in result
+
+    def test_strip_legacy_lines_indented_fence_preserves_content(self):
+        """A fence with leading whitespace (`    \\`\\`\\``) is still detected.
+
+        The walker uses `stripped = line.lstrip()` before checking for
+        ```/~~~ prefixes, so an indented fence opener is recognized. The
+        pattern matches Markdown conventions where a fence inside a list
+        item or blockquote may be indented.
+
+        Note: CommonMark §4.5 technically requires closing fences to have
+        the same or less indentation than the opener, and treats leading
+        whitespace >3 spaces as indicating an indented code block instead
+        of a fenced block. Our walker uses a simpler "any leading
+        whitespace" convention for symmetry with the other walker sites
+        (_find_preamble_cutoff, staleness._find_terminator_offset,
+        working_memory._find_terminator_offset) — this is documented
+        divergence from strict CommonMark, sufficient for CLAUDE.md use.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "- List item with fenced example:\n"
+            "  ```\n"
+            f"  {self.STALE_LINE}\n"
+            "  ```\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        # The stale line must survive — it's inside an indented fence body.
+        assert self.STALE_LINE in result, (
+            "Stale line inside indented fence must be preserved — the "
+            "walker's `stripped = line.lstrip()` normalization must "
+            "recognize leading-whitespace fence openers"
+        )
+
+    def test_strip_legacy_lines_consecutive_fences_state_resets(self):
+        """Two consecutive fences: content inside BOTH must survive.
+
+        The walker toggles fence state on each fence line, so after a
+        fence closes, the next fence opener should correctly re-enter
+        the in-fence state. This test pins the toggle behavior — a
+        regression that fails to reset state (e.g., a sticky in-fence
+        flag) would strip the stale line in the second fence.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "```\n"
+            f"{self.STALE_LINE}\n"
+            "```\n"
+            "\n"
+            "Some non-fenced narrative.\n"
+            "\n"
+            "```\n"
+            f"{self.STALE_LINE}\n"
+            "```\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        # Both occurrences of the stale line (inside each fence) must
+        # survive. The non-fenced narrative line in between is not a
+        # stale-line match, so it also survives.
+        assert result.count(self.STALE_LINE) == 2, (
+            "Both fenced stale lines must survive — state must reset "
+            "correctly between consecutive fences"
+        )
+        assert "Some non-fenced narrative." in result
+
+    def test_strip_legacy_lines_backtick_inside_tilde_fence_is_inert(self):
+        """Independent-state invariant: a ``` line INSIDE a ~~~ fence
+        must NOT toggle backtick state.
+
+        This test pins the CommonMark §4.5 guarantee that fence
+        delimiters of different characters are independent. Without the
+        independent-state tracking, a user's tilde-fenced example that
+        shows a backtick-fence snippet inside it would see the backtick
+        "line" treated as a fence boundary, flip the backtick state, and
+        fool the walker into exiting in-fence state early. The stale
+        line that follows would then be stripped.
+
+        Pairs with `test_strip_legacy_lines_tilde_fenced_stale_line_preserved`
+        which exercises the simple tilde-only case; this test exercises
+        the nested / interaction case.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "~~~\n"
+            "Example: how to open a code fence in Markdown:\n"
+            "```\n"  # This ``` line is INSIDE a ~~~ fence, must be inert
+            f"{self.STALE_LINE}\n"
+            "```\n"  # Still inside ~~~, still inert
+            "More content inside the tilde fence.\n"
+            "~~~\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        # The stale line must survive — it's inside a ~~~ fence, and
+        # the nested ``` lines do not toggle backtick state.
+        assert self.STALE_LINE in result, (
+            "Stale line inside backtick-inside-tilde nested fence must "
+            "be preserved — backtick and tilde fence states must be "
+            "independent (CommonMark §4.5)"
+        )
+        # All content lines also survive
+        assert "Example: how to open a code fence in Markdown:" in result
+        assert "More content inside the tilde fence." in result
 
