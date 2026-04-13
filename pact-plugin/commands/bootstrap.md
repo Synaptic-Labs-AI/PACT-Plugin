@@ -562,3 +562,23 @@ After agent reviews completed:
 3. **Delegation is survival.** Act alone and you will run out of memory and fail.
 
 **To orchestrate is to delegate.**
+
+---
+
+## BOOTSTRAP CONFIRMATION (Required)
+
+Run this command now to confirm bootstrap completion. This unlocks
+code-editing tools (Edit, Write) and agent spawning (Agent) which are
+blocked until bootstrap is confirmed.
+
+Find the `PACT_SESSION_DIR=<path>` line in your context (injected by the
+bootstrap gate hook). Run:
+
+```
+mkdir -p "<path>" && touch "<path>/bootstrap-complete"
+```
+
+Substitute `<path>` with the value from `PACT_SESSION_DIR=`.
+
+<!-- Coupling: marker name "bootstrap-complete" must match shared.BOOTSTRAP_MARKER_NAME
+     in pact-plugin/hooks/shared/__init__.py -->

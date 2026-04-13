@@ -61,8 +61,9 @@ def main():
     if error:
         output = {
             "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": error
+                "permissionDecisionReason": error,
             }
         }
         print(json.dumps(output))

@@ -17,3 +17,6 @@ __pycache__/
 .coverage
 CLAUDE.md
 .worktrees/
+
+# Sidecar lock files created by file_lock() helper
+.*.lock
