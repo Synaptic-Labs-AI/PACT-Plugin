@@ -50,6 +50,18 @@ Add team directory access and PACT permission allow rules to your `~/.claude/set
 
 > See [full installation](#installation) for all options including auto-updates.
 
+### Optional: Shell aliases for auto-bootstrap
+
+PACT enforces a "bootstrap first" policy — the orchestrator must invoke `Skill("PACT:bootstrap")` before using code-editing tools (Edit, Write, Agent). You can shortcut this with a shell alias that sends a synthetic first user message:
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+alias claude-pact='claude "Invoke Skill(\"PACT:bootstrap\") now."'
+alias cldpct='claude "Invoke Skill(\"PACT:bootstrap\") now."'
+```
+
+Two aliases: `claude-pact` (readable) and `cldpct` (quick-type). If you launch with plain `claude` instead, PACT's enforcement hooks will remind the orchestrator to bootstrap before any implementation work — no setup required.
+
 ---
 
 ## See It In Action
