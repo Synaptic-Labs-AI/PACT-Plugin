@@ -31,9 +31,10 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 _BOOTSTRAP_INSTRUCTION = (
     "REQUIRED: Before responding to this message, invoke "
-    'Skill("PACT:bootstrap"). Implementation tools (Edit, Write, Bash, Agent) '
-    "are mechanically blocked until bootstrap completes. This loads your "
-    "operating instructions, governance policy, and workflow protocols."
+    'Skill("PACT:bootstrap"). Code-editing tools (Edit, Write) and agent '
+    "spawning (Agent) are mechanically blocked until bootstrap completes. "
+    "This loads your operating instructions, governance policy, and "
+    "workflow protocols."
 )
 
 _MARKER_NAME = "bootstrap-complete"

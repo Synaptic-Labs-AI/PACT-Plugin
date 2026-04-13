@@ -568,8 +568,8 @@ After agent reviews completed:
 ## BOOTSTRAP CONFIRMATION (Required)
 
 Run this command now to confirm bootstrap completion. This unlocks
-implementation tools (Edit, Write, Bash, Agent) which are blocked until
-bootstrap is confirmed.
+code-editing tools (Edit, Write) and agent spawning (Agent) which are
+blocked until bootstrap is confirmed.
 
 ```bash
 python3 -c "
