@@ -452,11 +452,11 @@ def main():
         # path traversal guard (Path.parents containment check).
         if is_context_reset:
             try:
-                _reset_session_id = input_data.get("session_id", "")
-                if _reset_session_id and project_dir:
-                    _slug = Path(project_dir).name
-                    _session_path = build_session_path(_slug, str(_reset_session_id))
-                    (_session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
+                reset_session_id = input_data.get("session_id", "")
+                if reset_session_id and project_dir:
+                    slug = Path(project_dir).name
+                    session_path = build_session_path(slug, str(reset_session_id))
+                    (session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for marker cleanup
 
