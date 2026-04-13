@@ -2563,3 +2563,1004 @@ class TestUpdatePactRoutingLocking:
 
         holder_release.set()
         t.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# #404: CLAUDE.md restructuring — PACT_MANAGED and PACT_MEMORY boundaries
+# ---------------------------------------------------------------------------
+# These tests cover the three new pieces introduced by issue #404:
+#
+#   _build_migrated_content(content)  — pure function that transforms old-format
+#       CLAUDE.md content into the new managed structure with PACT_MANAGED_START/
+#       END and PACT_MEMORY_START/END boundaries.
+#
+#   migrate_to_managed_structure()  — integration wrapper that does file I/O,
+#       file_lock, symlink guard, and idempotent check around _build_migrated_content.
+#
+#   ensure_project_memory_md() template update  — the template for new files now
+#       includes the PACT_MANAGED and PACT_MEMORY markers.
+#
+# Risk tier: HIGH — migration runs on every existing project CLAUDE.md.
+
+# Marker constants pinned locally so drift in the implementation is caught.
+_MANAGED_START = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
+_MANAGED_END = "<!-- PACT_MANAGED_END -->"
+_MEMORY_START = "<!-- PACT_MEMORY_START -->"
+_MEMORY_END = "<!-- PACT_MEMORY_END -->"
+_ROUTING_START = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+_ROUTING_END = "<!-- PACT_ROUTING_END -->"
+_SESSION_START = "<!-- SESSION_START -->"
+_SESSION_END = "<!-- SESSION_END -->"
+
+
+class TestBuildMigratedContentCurrentFormat:
+    """_build_migrated_content() with the standard pre-#404 CLAUDE.md layout.
+
+    This is the most common input shape: has the # Project Memory heading,
+    routing block, session block, and all three memory sections with real
+    content under them.
+    """
+
+    CURRENT_FORMAT = (
+        "# Project Memory\n"
+        "\n"
+        "This file contains project-specific memory managed by the PACT framework.\n"
+        "\n"
+        f"{_ROUTING_START}\n"
+        "## PACT Routing\n"
+        "\n"
+        "Some routing instructions here.\n"
+        f"{_ROUTING_END}\n"
+        "\n"
+        f"{_SESSION_START}\n"
+        "## Current Session\n"
+        "- Team: pact-abc123\n"
+        f"{_SESSION_END}\n"
+        "\n"
+        "## Retrieved Context\n"
+        "Some retrieved context.\n"
+        "\n"
+        "## Pinned Context\n"
+        "\n"
+        "### Important pin\n"
+        "Pin content here.\n"
+        "\n"
+        "## Working Memory\n"
+        "### 2026-04-12 21:00\n"
+        "Some working memory entry.\n"
+    )
+
+    def test_output_has_managed_boundary(self):
+        """Migrated output must start with PACT_MANAGED_START and contain PACT_MANAGED_END."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert result.startswith(_MANAGED_START)
+        assert _MANAGED_END in result
+
+    def test_output_has_memory_boundary(self):
+        """Migrated output must contain PACT_MEMORY_START and PACT_MEMORY_END."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert _MEMORY_START in result
+        assert _MEMORY_END in result
+
+    def test_new_heading_replaces_old(self):
+        """Old '# Project Memory' is replaced by '# PACT Framework for Agentic Orchestration'."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert "# PACT Framework for Agentic Orchestration" in result
+        # Old heading text should not survive as a top-level heading
+        lines = result.splitlines()
+        top_level_headings = [l for l in lines if l.startswith("# ") and not l.startswith("## ")]
+        assert "# Project Memory" not in top_level_headings
+
+    def test_memory_sections_inside_memory_boundary(self):
+        """Retrieved Context, Pinned Context, and Working Memory must appear
+        between PACT_MEMORY_START and PACT_MEMORY_END.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+
+        assert "## Retrieved Context" in memory_region
+        assert "## Pinned Context" in memory_region
+        assert "## Working Memory" in memory_region
+
+    def test_memory_content_preserved(self):
+        """Content under memory sections must survive migration."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert "Some retrieved context." in result
+        assert "Pin content here." in result
+        assert "Some working memory entry." in result
+
+    def test_routing_block_preserved(self):
+        """The routing block (between its markers) must survive migration."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert _ROUTING_START in result
+        assert _ROUTING_END in result
+        assert "Some routing instructions here." in result
+
+    def test_session_block_preserved(self):
+        """The session block (between its markers) must survive migration."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert _SESSION_START in result
+        assert _SESSION_END in result
+        assert "pact-abc123" in result
+
+    def test_stale_orchestrator_line_stripped(self):
+        """The 'loaded from ~/.claude/CLAUDE.md' line must be removed."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert "project-specific memory managed by the PACT framework" not in result
+
+    def test_marker_ordering(self):
+        """Markers must appear in the correct order: MANAGED_START -> ROUTING ->
+        SESSION -> MEMORY_START -> memory sections -> MEMORY_END -> MANAGED_END.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        positions = {
+            "managed_start": result.index(_MANAGED_START),
+            "routing_start": result.index(_ROUTING_START),
+            "routing_end": result.index(_ROUTING_END),
+            "session_start": result.index(_SESSION_START),
+            "session_end": result.index(_SESSION_END),
+            "memory_start": result.index(_MEMORY_START),
+            "memory_end": result.index(_MEMORY_END),
+            "managed_end": result.index(_MANAGED_END),
+        }
+
+        assert positions["managed_start"] < positions["routing_start"]
+        assert positions["routing_end"] < positions["session_start"]
+        assert positions["session_end"] < positions["memory_start"]
+        assert positions["memory_start"] < positions["memory_end"]
+        assert positions["memory_end"] < positions["managed_end"]
+
+    def test_new_memory_heading_inside_memory_boundary(self):
+        """'# Project Memory (PACT-Managed)' must appear inside the memory boundary."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+
+        assert "# Project Memory (PACT-Managed)" in memory_region
+
+    def test_pinned_context_sub_heading_preserved(self):
+        """Sub-headings (### level) under memory sections must be preserved."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content(self.CURRENT_FORMAT)
+
+        assert "### Important pin" in result
+        assert "### 2026-04-12 21:00" in result
+
+
+class TestBuildMigratedContentMissingSections:
+    """_build_migrated_content() with various sections absent."""
+
+    def test_no_routing_block(self):
+        """File with no routing block should still produce valid structure."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Some context.\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        assert _MEMORY_START in result
+        assert _MEMORY_END in result
+        # No routing markers should appear
+        assert _ROUTING_START not in result
+        assert "Some context." in result
+
+    def test_no_session_block(self):
+        """File with no session block should still produce valid structure."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{_ROUTING_START}\n"
+            "## PACT Routing\n"
+            "Routing content.\n"
+            f"{_ROUTING_END}\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        assert _ROUTING_START in result
+        assert _SESSION_START not in result
+
+    def test_no_memory_sections(self):
+        """File with no memory headings should get default memory sections."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{_ROUTING_START}\n"
+            "## PACT Routing\n"
+            "Routing content.\n"
+            f"{_ROUTING_END}\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        assert _MEMORY_START in result
+        assert _MEMORY_END in result
+        # Default sections should be created
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "## Retrieved Context" in memory_region
+        assert "## Pinned Context" in memory_region
+        assert "## Working Memory" in memory_region
+
+    def test_empty_content(self):
+        """Empty string input should produce a minimal valid structure."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content("")
+
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        assert _MEMORY_START in result
+        assert _MEMORY_END in result
+        assert "# PACT Framework for Agentic Orchestration" in result
+
+    def test_only_heading_no_sections(self):
+        """Just the heading line, nothing else."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        result = _build_migrated_content("# Project Memory\n")
+
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        assert _MEMORY_START in result
+        assert "## Retrieved Context" in result  # default sections
+
+
+class TestBuildMigratedContentUserContent:
+    """_build_migrated_content() must preserve user content outside PACT sections."""
+
+    def test_user_content_after_memory_sections(self):
+        """User-owned sections after the last memory section must appear
+        after PACT_MANAGED_END.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "## My Custom Section\n"
+            "User's custom notes here.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## My Custom Section" in after_managed
+        assert "User's custom notes here." in after_managed
+
+    def test_user_content_between_memory_sections(self):
+        """A non-memory heading between memory sections splits into user content."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Some context.\n"
+            "\n"
+            "## User Notes\n"
+            "Private user notes.\n"
+            "\n"
+            "## Working Memory\n"
+            "Working memory data.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # User notes should be outside managed block
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## User Notes" in after_managed
+        assert "Private user notes." in after_managed
+
+        # Memory sections should be inside memory boundary
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "## Retrieved Context" in memory_region
+        assert "## Working Memory" in memory_region
+        assert "Working memory data." in memory_region
+
+    def test_user_content_before_memory_sections(self):
+        """Content before any memory heading (after routing/session extraction)
+        is classified as user content.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## My Early Section\n"
+            "Early user content.\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## My Early Section" in after_managed
+        assert "Early user content." in after_managed
+
+
+class TestBuildMigratedContentAdversarial:
+    """Adversarial and edge-case inputs for _build_migrated_content().
+
+    Tests the MEDIUM uncertainty flagged by the coder: user headings that
+    match memory section names could be mis-classified.
+    """
+
+    def test_user_heading_matching_memory_name_exact(self):
+        """A user heading that exactly matches a memory section name
+        (e.g., '## Retrieved Context') is classified as a memory section.
+
+        This is the expected behavior — the classifier uses heading text
+        to identify memory sections. Users should not have headings with
+        these exact names outside the memory area.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "PACT-managed retrieval data.\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "PACT-managed retrieval data." in memory_region
+
+    def test_similar_but_different_heading_not_captured(self):
+        """Headings that are similar but not exact matches should NOT be
+        classified as memory sections (e.g., '## Retrieved Context (old)').
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context (old)\n"
+            "User's old retrieval notes.\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Actual PACT context.\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # The exact-match section should be in memory
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "Actual PACT context." in memory_region
+
+        # The near-match should be user content
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## Retrieved Context (old)" in after_managed
+        assert "User's old retrieval notes." in after_managed
+
+    def test_duplicate_memory_headings(self):
+        """If '## Working Memory' appears twice, both instances and their
+        content should end up in the memory region.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "First working memory block.\n"
+            "\n"
+            "## Working Memory\n"
+            "Second working memory block.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "First working memory block." in memory_region
+        assert "Second working memory block." in memory_region
+
+    def test_content_with_no_headings_at_all(self):
+        """Flat text with no headings — everything should go to user content."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = "Just some random text in a CLAUDE.md file.\nAnother line.\n"
+
+        result = _build_migrated_content(content)
+
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "Just some random text" in after_managed
+
+    def test_partial_routing_markers_no_end(self):
+        """If only PACT_ROUTING_START is present with no END, the routing
+        block regex won't match, so the marker text remains as-is in the
+        remaining content (treated as user text).
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{_ROUTING_START}\n"
+            "Orphaned routing content.\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # With no matching END marker, routing extraction fails — the
+        # start marker and its content flow into user_parts
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+
+    def test_memory_heading_with_trailing_whitespace(self):
+        """'## Retrieved Context   ' (trailing spaces) must still match
+        as a memory heading since the code uses line.rstrip().
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context   \n"
+            "Context data.\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "Context data." in memory_region
+
+    def test_large_content_under_pinned_context(self):
+        """Pinned Context with multiple sub-sections and substantial content
+        must all be preserved inside the memory boundary.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        pinned_content = "\n".join(
+            [f"### Pin {i}\nContent for pin {i}.\n" for i in range(10)]
+        )
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            f"{pinned_content}\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        for i in range(10):
+            assert f"Content for pin {i}." in memory_region
+
+
+class TestBuildMigratedContentIdempotent:
+    """_build_migrated_content() does NOT have its own idempotency guard —
+    that lives in migrate_to_managed_structure() which checks for
+    _MANAGED_START_MARKER before calling the pure function.
+
+    Calling _build_migrated_content on already-migrated content WILL
+    double-wrap. This is by design: the function is pure and stateless.
+    The caller is responsible for the idempotency check.
+    """
+
+    def test_double_pass_produces_double_wrap(self):
+        """Calling _build_migrated_content twice wraps content again —
+        documenting that the caller must guard against re-migration.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        original = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+        first_pass = _build_migrated_content(original)
+
+        # Second pass double-wraps — this is expected, NOT a bug
+        second_pass = _build_migrated_content(first_pass)
+
+        assert second_pass.count(_MANAGED_START) == 2
+
+    def test_migrate_to_managed_structure_guards_double_call(self, tmp_path, monkeypatch):
+        """The integration wrapper migrate_to_managed_structure() prevents
+        double-migration via its idempotency check.
+        """
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n\n## Retrieved Context\n\n## Working Memory\n"
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        first = migrate_to_managed_structure()
+        assert first is not None
+
+        content_after = claude_md.read_text()
+        assert content_after.count(_MANAGED_START) == 1
+
+        second = migrate_to_managed_structure()
+        assert second is None  # no-op
+
+        assert claude_md.read_text() == content_after  # unchanged
+
+
+class TestMigrateToManagedStructure:
+    """Integration tests for migrate_to_managed_structure() — the wrapper
+    that does file I/O around _build_migrated_content().
+    """
+
+    def test_migrates_existing_file(self, tmp_path, monkeypatch):
+        """migrate_to_managed_structure() rewrites an old-format file."""
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = migrate_to_managed_structure()
+
+        assert result is not None
+        assert "Migrated" in result
+        content = claude_md.read_text(encoding="utf-8")
+        assert _MANAGED_START in content
+        assert _MANAGED_END in content
+        assert _MEMORY_START in content
+        assert _MEMORY_END in content
+
+    def test_idempotent_noop_when_already_migrated(self, tmp_path, monkeypatch):
+        """Second call returns None (no-op) when PACT_MANAGED_START is present."""
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        # First call migrates
+        first = migrate_to_managed_structure()
+        assert first is not None
+
+        content_after_first = claude_md.read_text(encoding="utf-8")
+
+        # Second call is no-op
+        second = migrate_to_managed_structure()
+        assert second is None
+
+        # File unchanged
+        assert claude_md.read_text(encoding="utf-8") == content_after_first
+
+    def test_returns_none_when_no_project_dir(self, monkeypatch):
+        """Returns None when CLAUDE_PROJECT_DIR not set."""
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        result = migrate_to_managed_structure()
+
+        assert result is None
+
+    def test_returns_none_when_file_missing(self, tmp_path, monkeypatch):
+        """Returns None when file doesn't exist (new_default source)."""
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        result = migrate_to_managed_structure()
+
+        assert result is None
+
+    def test_symlink_guard(self, tmp_path, monkeypatch):
+        """Returns 'skipped' message when target is a symlink."""
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        real_file = tmp_path / "real_claude.md"
+        real_file.write_text("# Project Memory\n")
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.symlink_to(real_file)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = migrate_to_managed_structure()
+
+        assert result is not None
+        assert "skipped" in result.lower()
+
+    def test_migrated_file_has_secure_permissions(self, tmp_path, monkeypatch):
+        """Migrated file should have 0o600 permissions."""
+        import stat
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text("# Project Memory\n\n## Retrieved Context\n")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        migrate_to_managed_structure()
+
+        file_mode = stat.S_IMODE(claude_md.stat().st_mode)
+        assert file_mode == 0o600, f"Expected 0o600, got {oct(file_mode)}"
+
+    def test_timeout_returns_fail_open_status(self, tmp_path, monkeypatch):
+        """Lock timeout returns a 'failed' message for session_init routing."""
+        import threading
+        from shared.claude_md_manager import migrate_to_managed_structure, file_lock
+        from shared import claude_md_manager as cmm
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text("# Project Memory\n\n## Working Memory\n")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 0.3)
+
+        holder_has_lock = threading.Event()
+        holder_release = threading.Event()
+
+        def holder():
+            with file_lock(claude_md):
+                holder_has_lock.set()
+                holder_release.wait(timeout=5)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_has_lock.wait(timeout=2)
+
+        result = migrate_to_managed_structure()
+
+        assert result is not None
+        assert "failed" in result.lower()
+        assert "lock" in result.lower()
+        # File was NOT mutated (fail-open)
+        assert _MANAGED_START not in claude_md.read_text(encoding="utf-8")
+
+        holder_release.set()
+        t.join(timeout=5)
+
+    def test_oserror_on_write_returns_failure(self, tmp_path, monkeypatch):
+        """OSError during write_text returns a 'failed' message."""
+        from unittest.mock import patch as mock_patch
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text("# Project Memory\n\n## Working Memory\n")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        with mock_patch.object(
+            type(claude_md), "write_text", side_effect=OSError("disk full")
+        ):
+            result = migrate_to_managed_structure()
+
+        assert result is not None
+        assert "failed" in result.lower()
+
+    def test_works_with_dot_claude_location(self, tmp_path, monkeypatch):
+        """Migration should work for files in the .claude/ subdirectory."""
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        dot_claude = project_dir / ".claude"
+        dot_claude.mkdir()
+        claude_md = dot_claude / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        result = migrate_to_managed_structure()
+
+        assert result is not None
+        assert "Migrated" in result
+        content = claude_md.read_text(encoding="utf-8")
+        assert _MANAGED_START in content
+
+
+class TestEnsureProjectMemoryMdNewMarkers:
+    """Verify that ensure_project_memory_md() template includes #404 markers."""
+
+    def test_created_file_has_managed_boundary(self, tmp_path, monkeypatch):
+        """Newly created project CLAUDE.md must have PACT_MANAGED markers."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+        assert _MANAGED_START in content
+        assert _MANAGED_END in content
+
+    def test_created_file_has_memory_boundary(self, tmp_path, monkeypatch):
+        """Newly created project CLAUDE.md must have PACT_MEMORY markers."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+        assert _MEMORY_START in content
+        assert _MEMORY_END in content
+
+    def test_created_file_has_new_top_heading(self, tmp_path, monkeypatch):
+        """Template heading is '# PACT Framework for Agentic Orchestration'."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+        assert "# PACT Framework for Agentic Orchestration" in content
+
+    def test_created_file_memory_sections_inside_boundary(self, tmp_path, monkeypatch):
+        """Memory sections in new file must be inside PACT_MEMORY boundary."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+        mem_start_idx = content.index(_MEMORY_START)
+        mem_end_idx = content.index(_MEMORY_END)
+        memory_region = content[mem_start_idx:mem_end_idx]
+        assert "## Retrieved Context" in memory_region
+        assert "## Pinned Context" in memory_region
+        assert "## Working Memory" in memory_region
+
+    def test_created_file_marker_ordering(self, tmp_path, monkeypatch):
+        """Markers in newly created file must follow the canonical order."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+
+        positions = {
+            "managed_start": content.index(_MANAGED_START),
+            "routing_start": content.index(_ROUTING_START),
+            "session_start": content.index(_SESSION_START),
+            "memory_start": content.index(_MEMORY_START),
+            "memory_end": content.index(_MEMORY_END),
+            "managed_end": content.index(_MANAGED_END),
+        }
+
+        assert positions["managed_start"] < positions["routing_start"]
+        assert positions["routing_start"] < positions["session_start"]
+        assert positions["session_start"] < positions["memory_start"]
+        assert positions["memory_start"] < positions["memory_end"]
+        assert positions["memory_end"] < positions["managed_end"]
+
+    def test_created_file_has_pact_managed_memory_heading(self, tmp_path, monkeypatch):
+        """Template includes '# Project Memory (PACT-Managed)' inside memory boundary."""
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        ensure_project_memory_md()
+
+        content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+        mem_start_idx = content.index(_MEMORY_START)
+        mem_end_idx = content.index(_MEMORY_END)
+        memory_region = content[mem_start_idx:mem_end_idx]
+        assert "# Project Memory (PACT-Managed)" in memory_region
+
+
+class TestManagedMarkerConstants:
+    """Verify the new marker constants match expected values.
+
+    Same pattern as TestPactRoutingBlock — pin the exact values here
+    so accidental drift in the implementation is caught.
+    """
+
+    def test_managed_start_marker_value(self):
+        from shared.claude_md_manager import _MANAGED_START_MARKER
+        assert _MANAGED_START_MARKER == _MANAGED_START
+
+    def test_managed_end_marker_value(self):
+        from shared.claude_md_manager import _MANAGED_END_MARKER
+        assert _MANAGED_END_MARKER == _MANAGED_END
+
+    def test_memory_start_marker_value(self):
+        from shared.claude_md_manager import _MEMORY_START_MARKER
+        assert _MEMORY_START_MARKER == _MEMORY_START
+
+    def test_memory_end_marker_value(self):
+        from shared.claude_md_manager import _MEMORY_END_MARKER
+        assert _MEMORY_END_MARKER == _MEMORY_END
+
+    def test_managed_marker_names_avoid_pact_start_collision(self):
+        """Marker names use PACT_MANAGED, NOT PACT_START, to avoid collision
+        with old kernel block markers that remove_stale_kernel_block() searches for.
+        """
+        from shared.claude_md_manager import _MANAGED_START_MARKER
+        assert "PACT_MANAGED_START" in _MANAGED_START_MARKER
+        assert "<!-- PACT_START" not in _MANAGED_START_MARKER
+
+    def test_marker_cardinality(self):
+        """Exactly 4 new marker constants were added for #404."""
+        from shared import claude_md_manager as cmm
+        new_markers = [
+            cmm._MANAGED_START_MARKER,
+            cmm._MANAGED_END_MARKER,
+            cmm._MEMORY_START_MARKER,
+            cmm._MEMORY_END_MARKER,
+        ]
+        assert len(new_markers) == 4
+        # All are unique
+        assert len(set(new_markers)) == 4
+
+
+class TestSessionInitMigrationIntegration:
+    """Verify that session_init.py calls migrate_to_managed_structure()
+    and routes its return value correctly.
+    """
+
+    def test_session_init_calls_migration(self):
+        """session_init.py must contain a call to migrate_to_managed_structure."""
+        session_init_path = (
+            Path(__file__).parent.parent / "hooks" / "session_init.py"
+        )
+        source = session_init_path.read_text(encoding="utf-8")
+        assert "migrate_to_managed_structure()" in source
+
+    def test_migration_result_routing_failed(self):
+        """session_init routes 'failed'/'skipped' migration messages to
+        system_messages, not context_parts.
+        """
+        session_init_path = (
+            Path(__file__).parent.parent / "hooks" / "session_init.py"
+        )
+        source = session_init_path.read_text(encoding="utf-8")
+        # The routing logic checks for "failed" or "skipped" in the message
+        assert '"failed"' in source or "'failed'" in source
+        assert '"skipped"' in source or "'skipped'" in source
