@@ -31,6 +31,10 @@ from .claude_md_manager import (
     update_pact_routing,
     ensure_project_memory_md,
     migrate_to_managed_structure,
+    MANAGED_START_MARKER,
+    MANAGED_END_MARKER,
+    MEMORY_START_MARKER,
+    MEMORY_END_MARKER,
 )
 from .failure_log import (
     append_failure,
@@ -74,6 +78,10 @@ __all__ = [
     "update_pact_routing",
     "ensure_project_memory_md",
     "migrate_to_managed_structure",
+    "MANAGED_START_MARKER",
+    "MANAGED_END_MARKER",
+    "MEMORY_START_MARKER",
+    "MEMORY_END_MARKER",
     "append_failure",
     "read_failures",
     "FAILURE_LOG_PATH",

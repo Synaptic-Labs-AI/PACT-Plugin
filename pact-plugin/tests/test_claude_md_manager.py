@@ -3143,7 +3143,7 @@ class TestBuildMigratedContentAdversarial:
 class TestBuildMigratedContentIdempotent:
     """_build_migrated_content() does NOT have its own idempotency guard —
     that lives in migrate_to_managed_structure() which checks for
-    _MANAGED_START_MARKER before calling the pure function.
+    MANAGED_START_MARKER before calling the pure function.
 
     Calling _build_migrated_content on already-migrated content WILL
     double-wrap. This is by design: the function is pure and stateless.
@@ -3281,6 +3281,34 @@ class TestMigrateToManagedStructure:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         result = migrate_to_managed_structure()
+
+        assert result is None
+
+    def test_returns_none_when_read_fails(self, tmp_path, monkeypatch):
+        """OSError on read_text -> returns None (file appears unreadable).
+
+        Exercises the `except OSError: return None` branch at the read_text
+        call inside migrate_to_managed_structure(). Uses identity-scoped
+        patching so file_lock internals are not affected.
+        """
+        from unittest.mock import patch as mock_patch
+        from shared.claude_md_manager import migrate_to_managed_structure
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text("# Project Memory\n\n## Working Memory\n")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        original_read_text = Path.read_text
+
+        def selective_read_text(self, *args, **kwargs):
+            if str(self) == str(claude_md):
+                raise OSError("simulated read failure")
+            return original_read_text(self, *args, **kwargs)
+
+        with mock_patch.object(Path, "read_text", selective_read_text):
+            result = migrate_to_managed_structure()
 
         assert result is None
 
@@ -3503,37 +3531,37 @@ class TestManagedMarkerConstants:
     """
 
     def test_managed_start_marker_value(self):
-        from shared.claude_md_manager import _MANAGED_START_MARKER
-        assert _MANAGED_START_MARKER == _MANAGED_START
+        from shared.claude_md_manager import MANAGED_START_MARKER
+        assert MANAGED_START_MARKER == _MANAGED_START
 
     def test_managed_end_marker_value(self):
-        from shared.claude_md_manager import _MANAGED_END_MARKER
-        assert _MANAGED_END_MARKER == _MANAGED_END
+        from shared.claude_md_manager import MANAGED_END_MARKER
+        assert MANAGED_END_MARKER == _MANAGED_END
 
     def test_memory_start_marker_value(self):
-        from shared.claude_md_manager import _MEMORY_START_MARKER
-        assert _MEMORY_START_MARKER == _MEMORY_START
+        from shared.claude_md_manager import MEMORY_START_MARKER
+        assert MEMORY_START_MARKER == _MEMORY_START
 
     def test_memory_end_marker_value(self):
-        from shared.claude_md_manager import _MEMORY_END_MARKER
-        assert _MEMORY_END_MARKER == _MEMORY_END
+        from shared.claude_md_manager import MEMORY_END_MARKER
+        assert MEMORY_END_MARKER == _MEMORY_END
 
     def test_managed_marker_names_avoid_pact_start_collision(self):
         """Marker names use PACT_MANAGED, NOT PACT_START, to avoid collision
         with old kernel block markers that remove_stale_kernel_block() searches for.
         """
-        from shared.claude_md_manager import _MANAGED_START_MARKER
-        assert "PACT_MANAGED_START" in _MANAGED_START_MARKER
-        assert "<!-- PACT_START" not in _MANAGED_START_MARKER
+        from shared.claude_md_manager import MANAGED_START_MARKER
+        assert "PACT_MANAGED_START" in MANAGED_START_MARKER
+        assert "<!-- PACT_START" not in MANAGED_START_MARKER
 
     def test_marker_cardinality(self):
         """Exactly 4 new marker constants were added for #404."""
         from shared import claude_md_manager as cmm
         new_markers = [
-            cmm._MANAGED_START_MARKER,
-            cmm._MANAGED_END_MARKER,
-            cmm._MEMORY_START_MARKER,
-            cmm._MEMORY_END_MARKER,
+            cmm.MANAGED_START_MARKER,
+            cmm.MANAGED_END_MARKER,
+            cmm.MEMORY_START_MARKER,
+            cmm.MEMORY_END_MARKER,
         ]
         assert len(new_markers) == 4
         # All are unique

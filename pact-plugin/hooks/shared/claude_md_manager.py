@@ -114,13 +114,13 @@ _ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
 # User-owned content goes OUTSIDE this block. The name PACT_MANAGED was
 # chosen over PACT_START to avoid collision with the old kernel block
 # markers that remove_stale_kernel_block() searches for (#404).
-_MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
-_MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
+MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
+MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
 
 # Inner boundary wrapping project memory sections (Retrieved Context,
 # Pinned Context, Working Memory) for hook targeting (#404).
-_MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"
-_MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
+MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"
+MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 
 # Stale line from the v3.16.2 project CLAUDE.md template. After the PR #390
 # migration the routing block supersedes it, but the stale line lingers in
@@ -577,7 +577,7 @@ def ensure_project_memory_md() -> str | None:
     # Create minimal CLAUDE.md with memory sections at the new default location.
     # Structure (#404): outer PACT_MANAGED boundary wraps all plugin-managed
     # content; inner PACT_MEMORY boundary wraps the memory sections.
-    memory_template = f"""{_MANAGED_START_MARKER}
+    memory_template = f"""{MANAGED_START_MARKER}
 # PACT Framework for Agentic Orchestration
 
 {_PACT_ROUTING_BLOCK}
@@ -587,7 +587,7 @@ def ensure_project_memory_md() -> str | None:
 <!-- Auto-managed by session_init hook. Overwritten each session. -->
 <!-- SESSION_END -->
 
-{_MEMORY_START_MARKER}
+{MEMORY_START_MARKER}
 # Project Memory (PACT-Managed)
 
 ## Retrieved Context
@@ -597,9 +597,9 @@ def ensure_project_memory_md() -> str | None:
 
 ## Working Memory
 <!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->
-{_MEMORY_END_MARKER}
+{MEMORY_END_MARKER}
 
-{_MANAGED_END_MARKER}
+{MANAGED_END_MARKER}
 """
 
     # Concurrency guard: serialize symlink check + write so two concurrent
@@ -682,7 +682,7 @@ def migrate_to_managed_structure() -> str | None:
                 return None
 
             # Idempotent guard: already migrated
-            if _MANAGED_START_MARKER in content:
+            if MANAGED_START_MARKER in content:
                 return None
 
             new_content = _build_migrated_content(content)
@@ -778,8 +778,8 @@ def _build_migrated_content(content: str) -> str:
 
     for line in lines:
         stripped = line.rstrip()
-        # Check if this line starts a memory section
-        if any(stripped == h or stripped.startswith(h + "\n") for h in memory_headings):
+        # Check if this line starts a memory section (exact match after rstrip)
+        if any(stripped == h for h in memory_headings):
             # Flush any non-memory content accumulated before this heading
             if current_section and not in_memory_section:
                 user_parts.extend(current_section)
@@ -813,7 +813,7 @@ def _build_migrated_content(content: str) -> str:
     user_text = "".join(user_parts).strip()
 
     # Build the new structure
-    parts = [_MANAGED_START_MARKER, "\n", "# PACT Framework for Agentic Orchestration\n"]
+    parts = [MANAGED_START_MARKER, "\n", "# PACT Framework for Agentic Orchestration\n"]
 
     # Routing block
     if routing_block:
@@ -824,17 +824,22 @@ def _build_migrated_content(content: str) -> str:
         parts.extend(["\n", session_block, "\n"])
 
     # Memory block
-    parts.extend(["\n", _MEMORY_START_MARKER, "\n"])
+    # NOTE: The H1 heading below sits inside PACT_MEMORY, not at file top.
+    # Current downstream parsers (staleness.py _parse_pinned_section,
+    # working_memory.py) scan forward from their target H2 heading, so they
+    # skip this H1 harmlessly. Future parsers that scan from file-top for
+    # H1/H2 boundaries must account for this interior H1.
+    parts.extend(["\n", MEMORY_START_MARKER, "\n"])
     parts.append("# Project Memory (PACT-Managed)\n")
     if memory_text:
         parts.extend(["\n", memory_text, "\n"])
     else:
         # Default memory sections when none existed
         parts.append("\n## Retrieved Context\n\n## Pinned Context\n\n## Working Memory\n")
-    parts.extend([_MEMORY_END_MARKER, "\n"])
+    parts.extend([MEMORY_END_MARKER, "\n"])
 
     # Close managed block
-    parts.extend(["\n", _MANAGED_END_MARKER, "\n"])
+    parts.extend(["\n", MANAGED_END_MARKER, "\n"])
 
     # Append user content outside the managed block
     if user_text:
