@@ -29,13 +29,20 @@ from pathlib import Path
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-_BOOTSTRAP_INSTRUCTION = (
+_BOOTSTRAP_INSTRUCTION_TEMPLATE = (
     "REQUIRED: Before responding to this message, invoke "
     'Skill("PACT:bootstrap"). Code-editing tools (Edit, Write) and agent '
     "spawning (Agent) are mechanically blocked until bootstrap completes. "
     "This loads your operating instructions, governance policy, and "
     "workflow protocols."
+    "{session_dir_hint}"
 )
+
+_SESSION_DIR_HINT = (
+    "\n\nPACT_SESSION_DIR={session_dir}"
+)
+
+_NO_SESSION_DIR_HINT = ""
 
 _MARKER_NAME = "bootstrap-complete"
 
@@ -77,8 +84,9 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     if agent_name:
         return None
 
-    # Lead session, no marker → inject bootstrap instruction
-    return _BOOTSTRAP_INSTRUCTION
+    # Lead session, no marker → inject bootstrap instruction with session dir
+    hint = _SESSION_DIR_HINT.format(session_dir=session_dir) if session_dir else _NO_SESSION_DIR_HINT
+    return _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(session_dir_hint=hint)
 
 
 def main():

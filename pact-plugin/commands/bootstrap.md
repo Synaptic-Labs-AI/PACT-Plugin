@@ -571,23 +571,11 @@ Run this command now to confirm bootstrap completion. This unlocks
 code-editing tools (Edit, Write) and agent spawning (Agent) which are
 blocked until bootstrap is confirmed.
 
-```bash
-python3 -c "
-import json, os
-from pathlib import Path
-pd = os.environ.get('CLAUDE_PROJECT_DIR', '.')
-slug = Path(pd).name
-# Read session ID from the context file
-ctx_dir = Path.home() / '.claude' / 'pact-sessions'
-# Find the session dir by reading pact-session-context.json
-for sd in sorted(ctx_dir.glob(f'{slug}/*/pact-session-context.json'), key=lambda p: p.stat().st_mtime, reverse=True):
-    data = json.loads(sd.read_text())
-    session_dir = sd.parent
-    marker = session_dir / 'bootstrap-complete'
-    marker.touch()
-    print(f'Bootstrap confirmed: {marker}')
-    break
-else:
-    print('Warning: no session context found; bootstrap marker not written')
-"
+Find the `PACT_SESSION_DIR=<path>` line in your context (injected by the
+bootstrap gate hook). Run:
+
 ```
+touch "<path>/bootstrap-complete"
+```
+
+Substitute `<path>` with the value from `PACT_SESSION_DIR=`.

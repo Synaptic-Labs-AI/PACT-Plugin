@@ -115,13 +115,15 @@ class TestCheckBootstrapNeeded:
         assert result is None
 
     def test_returns_instruction_when_no_marker(self, monkeypatch, tmp_path):
-        """No marker + lead session → bootstrap instruction string."""
-        from bootstrap_prompt_gate import _check_bootstrap_needed, _BOOTSTRAP_INSTRUCTION
+        """No marker + lead session → bootstrap instruction string with session dir."""
+        from bootstrap_prompt_gate import _check_bootstrap_needed
 
-        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
         result = _check_bootstrap_needed(_make_input())
-        assert result == _BOOTSTRAP_INSTRUCTION
+        assert result is not None
+        assert 'Skill("PACT:bootstrap")' in result
+        assert f"PACT_SESSION_DIR={session_dir}" in result
 
     def test_returns_none_when_no_session_dir(self, monkeypatch):
         """No session dir → None (non-PACT session)."""
