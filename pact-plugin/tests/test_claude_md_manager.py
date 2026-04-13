@@ -3517,6 +3517,271 @@ class TestBuildMigratedContentAdversarial:
         # The fenced example text must NOT bleed into the memory region
         assert "(this is just an example)" not in memory_region
 
+    def test_fenced_trigger_inside_preamble(self):
+        """Round 7 item 1: the preamble-cutoff scan must be fence-aware.
+
+        Adversarial scenario: a user's CLAUDE.md has real prose at the
+        top, then a fenced markdown code block whose contents happen to
+        contain PACT-managed triggers (``# Project Memory``,
+        ``<!-- PACT_ROUTING_START -->``, ``## PACT Routing``,
+        ``<!-- PACT_ROUTING_END -->``) as EXAMPLE documentation. The
+        user is showing what a PACT file looks like — NOT authoring one.
+
+        Pre-fix behavior (naive substring `_find_preamble_cutoff`):
+          1. `_find_preamble_cutoff` returned the offset of
+             ``# Project Memory`` INSIDE the fence.
+          2. `preamble_text` = the unfenced prose ABOVE the fence plus
+             the opening ```` ```markdown ```` line.
+          3. `content` (post-cutoff) = ``# Project Memory\\n``... plus
+             the routing markers, plus the closing fence.
+          4. The routing extraction regex pulled
+             ``<!-- PACT_ROUTING_START -->...<!-- PACT_ROUTING_END -->``
+             out of the middle of the user's example.
+          5. The ``re.sub`` at line 971 matched ``^# Project Memory``
+             at the start of ``remaining`` and stripped the user's
+             example heading.
+          6. The closing ```` ``` ```` fence was left orphaned far
+             below the managed block in the trailing user region.
+
+        Post-fix (fence-aware walker): triggers inside the fence are
+        invisible to `_find_preamble_cutoff`, so the cutoff lands at
+        ``len(content)`` (no non-fenced trigger). The entire user file
+        — fence intact — is treated as preamble and survives above
+        ``PACT_MANAGED_START``.
+
+        Counter-test-by-revert has been validated for this regression:
+        temporarily reverting `_find_preamble_cutoff` to the naive
+        substring-search implementation makes this test fail.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# My Personal Notes\n"
+            "Here's an example of what a PACT project CLAUDE.md looks like:\n"
+            "\n"
+            "```markdown\n"
+            "# Project Memory\n"
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
+            "## PACT Routing\n"
+            "Routing instructions go here.\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "```\n"
+            "\n"
+            "End of my notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # The PACT_MANAGED block must exist (the migration still runs).
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+
+        # The entire user file is non-fenced prose + a fence + more
+        # non-fenced prose — there is NO real PACT trigger outside the
+        # fence, so the whole file is preamble. It must all land ABOVE
+        # PACT_MANAGED_START, not be cut open by the extraction pipeline.
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+
+        # (a) Non-fenced prose above the fence is preserved in position.
+        assert "# My Personal Notes" in before_managed
+        assert (
+            "Here's an example of what a PACT project CLAUDE.md looks like:"
+            in before_managed
+        )
+
+        # (b) The fence boundaries survive intact — both the opening
+        # ```` ```markdown ```` line and the closing ```` ``` ```` line
+        # must be in the preamble region, in order.
+        fence_open_idx = before_managed.find("```markdown")
+        fence_close_idx = before_managed.find("```\n", fence_open_idx + 1)
+        assert fence_open_idx != -1, (
+            "Opening ```markdown fence must survive in preamble"
+        )
+        assert fence_close_idx != -1, (
+            "Closing ``` fence must survive in preamble"
+        )
+        assert fence_open_idx < fence_close_idx, (
+            "Closing fence must appear after opening fence"
+        )
+
+        # (c) Every line from inside the fence must be in the preamble
+        # region — nothing silently stripped, nothing extracted into
+        # managed sections.
+        assert "# Project Memory" in before_managed
+        assert (
+            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+            in before_managed
+        )
+        assert "## PACT Routing" in before_managed
+        assert "Routing instructions go here." in before_managed
+        assert "<!-- PACT_ROUTING_END -->" in before_managed
+
+        # (d) The non-fenced "End of my notes." below the fence is also
+        # part of the preamble (entire file is preamble when no non-fenced
+        # trigger exists).
+        assert "End of my notes." in before_managed
+
+        # (e) Silent stripping / extraction check: the fence's interior
+        # text must NOT leak into the managed region. The migration must
+        # not have pulled ``## PACT Routing`` out of the fence and put it
+        # inside the routing-block section of the managed region.
+        managed_end_idx = result.index(_MANAGED_END)
+        managed_region = result[managed_start_idx:managed_end_idx]
+        # The user's "Routing instructions go here." text (which lived
+        # inside the fence) must NOT appear anywhere in the managed
+        # region — if it did, the routing extraction stole it from the
+        # fence.
+        assert "Routing instructions go here." not in managed_region, (
+            "Routing block regex must not reach INTO a fenced code block "
+            "to extract its contents"
+        )
+        # Likewise, the fenced "# Project Memory" heading must not have
+        # been re-promoted to the MANAGED_TITLE position. The managed
+        # region will still contain ``MANAGED_TITLE`` (`# PACT Framework
+        # and Managed Project Memory`) at the top, which is fine; we
+        # only care that the user's fenced heading was not consumed.
+        # The fenced "# Project Memory" must still appear in the preamble
+        # (already asserted in (c)), so this is implicitly verified.
+
+        # (f) After-managed region should be empty of the fenced content
+        # (belt-and-suspenders: the whole file being preamble means the
+        # trailing user region is empty).
+        after_managed = result[managed_end_idx:]
+        assert "# My Personal Notes" not in after_managed
+        assert "```markdown" not in after_managed
+        assert "End of my notes." not in after_managed
+
+    def test_fenced_stale_orchestrator_line_preserved(self):
+        """Round 7 item 2: `_strip_legacy_lines` must be fence-aware.
+
+        Adversarial scenario: a user's CLAUDE.md has a fenced code block
+        that quotes the legacy v3.16.2 orchestrator-loader line verbatim
+        (e.g., in migration documentation, upgrade change logs, or
+        tutorial content explaining what the old PACT template looked
+        like). The line is NOT part of the live PACT config — it's an
+        example inside a fenced code block.
+
+        Pre-fix behavior (verify-backend-coder-7 counter-test):
+          `_STALE_ORCHESTRATOR_LINE_RE` was compiled with `re.MULTILINE`
+          and applied via `_STALE_ORCHESTRATOR_LINE_RE.sub("", content)`
+          against the full content. `^...$\\n?` matched every occurrence
+          at any line boundary, INCLUDING lines inside user-authored
+          fenced code blocks. The counter-test input
+              "```\\nThe global PACT Orchestrator is loaded from ...\\n```\\n"
+          produced the output
+              "```\\n```\\n"
+          with the fenced line silently destroyed.
+
+        Post-fix: `_strip_legacy_lines` walks lines, tracks in-fence
+        state via `^\\s*```` (matching
+        `staleness._find_terminator_offset` and `_find_preamble_cutoff`
+        conventions), and applies the per-line pattern ONLY to non-fenced
+        lines. Lines inside a fence are preserved byte-for-byte.
+
+        This regression test is NOT a unit test of `_strip_legacy_lines`
+        in isolation — it drives `_build_migrated_content` end-to-end to
+        prove the full migration pipeline preserves fenced content. The
+        stripping function is called in multiple places in the pipeline
+        (preamble scrub, post-cutoff remaining scrub, and in
+        update_pact_routing), so an end-to-end driver is the highest-
+        fidelity regression guard.
+
+        Counter-test-by-revert has been validated for this regression:
+        temporarily reverting `_strip_legacy_lines` to the fence-unaware
+        `_STALE_ORCHESTRATOR_LINE_RE.sub` form and reverting the regex
+        to its `re.MULTILINE` + `$\\n?` variant makes this test fail
+        (the fenced line disappears from the preamble region).
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        stale_line = (
+            "The global PACT Orchestrator is loaded from "
+            "`~/.claude/CLAUDE.md`."
+        )
+
+        content = (
+            "# My Notes\n"
+            "\n"
+            "Here is what the legacy CLAUDE.md template looked like:\n"
+            "\n"
+            "```markdown\n"
+            "# Project Memory\n"
+            "\n"
+            "This file contains project-specific memory managed by the PACT framework.\n"
+            f"{stale_line}\n"
+            "```\n"
+            "\n"
+            "The line inside the fence is an EXAMPLE, not live config.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # The PACT_MANAGED block must exist (the migration still runs).
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+
+        # The entire user file contains NO non-fenced PACT trigger, so
+        # the whole file is preamble and lands ABOVE PACT_MANAGED_START.
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+
+        # (a) The fenced stale line MUST survive verbatim in the
+        # preamble. This is the primary regression assertion — pre-fix
+        # the line was destroyed by the MULTILINE substitution.
+        assert stale_line in before_managed, (
+            "Fenced stale-orchestrator line must survive byte-for-byte. "
+            "If this fails, _strip_legacy_lines is still fence-unaware."
+        )
+
+        # (b) The fence boundaries survive intact in the preamble.
+        fence_open_idx = before_managed.find("```markdown")
+        assert fence_open_idx != -1, (
+            "Opening ```markdown fence must survive in preamble"
+        )
+        fence_close_idx = before_managed.find("```\n", fence_open_idx + 1)
+        assert fence_close_idx != -1, (
+            "Closing ``` fence must survive in preamble"
+        )
+        assert fence_open_idx < fence_close_idx, (
+            "Closing fence must appear after opening fence"
+        )
+
+        # (c) The stale line must appear BETWEEN the opening and closing
+        # fences — not orphaned elsewhere in the output, and not
+        # stripped from its position inside the fence.
+        stale_idx = before_managed.find(stale_line)
+        assert fence_open_idx < stale_idx < fence_close_idx, (
+            "Stale line must remain INSIDE the fence region, not be "
+            "relocated or stripped"
+        )
+
+        # (d) The non-fenced narrative prose survives too.
+        assert "# My Notes" in before_managed
+        assert (
+            "Here is what the legacy CLAUDE.md template looked like:"
+            in before_managed
+        )
+        assert (
+            "The line inside the fence is an EXAMPLE, not live config."
+            in before_managed
+        )
+
+        # (e) The stale line must NOT leak into the managed region. The
+        # fence-aware stripper ran on `remaining` (post-cutoff content)
+        # as well, and if that stripper were still fence-unaware AND the
+        # cutoff logic had changed, the line could end up duplicated in
+        # the managed region. Belt-and-suspenders check.
+        managed_region = result[managed_start_idx:managed_end_idx]
+        assert stale_line not in managed_region
+
+        # (f) The trailing user region (below PACT_MANAGED_END) does not
+        # contain the fenced content — the whole file was preamble.
+        assert stale_line not in after_managed
+        assert "# My Notes" not in after_managed
+
 
 class TestBuildMigratedContentOrphanRoutingMarker:
     """Round 5 item 5: `_build_migrated_content` must strip orphan
@@ -4164,6 +4429,20 @@ class TestManagedMarkerConstants:
         If a future refactor intentionally inlines the literal in a new
         comment/docstring, bump the allowed count here rather than
         allowing silent drift at a code site.
+
+        Scope (round 7 item 4): this guard catches **copy-paste drift**
+        of the literal title string across source files. It does NOT
+        catch string fragmentation — e.g., a developer writing
+        ``"# PACT " + "Framework and Managed Project Memory"`` or an
+        f-string like ``f"# PACT Framework and {suffix}"``. That class
+        of evasion is **out of scope** because the guard targets
+        accidental drift (the common failure mode), not adversarial
+        evasion. Strengthening to catch fragmentation would require AST
+        parsing, which is disproportionate — a developer who
+        deliberately hard-codes the title via concatenation is already
+        breaking the single-source-of-truth pattern regardless of how
+        they spell it, and the resulting bug surfaces through downstream
+        tests that depend on ``MANAGED_TITLE`` consistency.
         """
         source_path = (
             Path(__file__).parent.parent
@@ -4196,6 +4475,14 @@ class TestManagedMarkerConstants:
         ``MANAGED_TITLE`` symbol, not a hand-copied literal. One comment
         mention is tolerated; any additional occurrence indicates code-site
         drift.
+
+        Scope (round 7 item 4): same bounds as the sibling guard on
+        ``claude_md_manager.py`` — catches **copy-paste drift** of the
+        literal title string, does NOT catch string fragmentation
+        (concatenation, f-string interpolation). That is out of scope
+        because the guard targets accidental drift, not adversarial
+        evasion; catching fragmentation would require AST parsing and
+        is disproportionate to the threat model.
         """
         source_path = (
             Path(__file__).parent.parent

@@ -153,14 +153,22 @@ _BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
 # migration the routing block supersedes it, but the stale line lingers in
 # upgraded files and contradicts the routing block. Strip it on every
 # update_pact_routing() pass. Allows optional trailing period / whitespace.
+#
+# Round 7 item 2: this pattern is applied per-line by `_strip_legacy_lines`
+# via a fence-aware walker, NOT module-wide with `re.MULTILINE`. The per-line
+# form is anchored to the full stripped line, so `$` matches end-of-line
+# without needing a MULTILINE flag. Removing MULTILINE is load-bearing:
+# with MULTILINE the pattern was hot inside user-authored fenced code blocks
+# and silently destroyed example content that quoted the stale template line
+# (verify-backend-coder-7 counter-test). Per-line application + fence
+# tracking prevents that failure mode entirely.
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
-    r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$\n?",
-    re.MULTILINE,
+    r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
 
 
 def _strip_legacy_lines(content: str) -> str:
-    """
+    r"""
     Remove lines from older PACT template versions that are now obsolete.
 
     Currently strips the stale orchestrator-loader line from the v3.16.2
@@ -170,14 +178,90 @@ def _strip_legacy_lines(content: str) -> str:
     of legacy-line patterns here means adding a new pattern in the future
     only requires editing this helper, not both call sites.
 
+    Round 7 item 2 — fence-aware: walks `content` line by line, tracks
+    markdown fenced-code-block state via `^\s*\`\`\`` (matching
+    `staleness._find_terminator_offset` and `_find_preamble_cutoff`
+    conventions), and applies `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines
+    that are NOT inside a fence. Lines inside a fence are preserved
+    verbatim, even if they match the stale-line regex. This prevents
+    silent data loss when a user's CLAUDE.md contains a fenced code block
+    that quotes the legacy template verbatim (e.g., migration documentation,
+    tutorial content, upgrade change logs).
+
+    Prior (pre-round-7) behavior used `re.MULTILINE` on the whole content,
+    which stripped matching lines regardless of fence state. The verify-
+    backend-coder-7 counter-test showed: a fenced block containing the
+    stale orchestrator line emerged with the line deleted from inside the
+    fence, leaving the opening and closing fence markers with an empty
+    body. Per-line application plus fence tracking fixes this failure mode.
+
     Args:
         content: The raw CLAUDE.md content to scrub.
 
     Returns:
-        Content with all legacy template lines removed. Pure function.
+        Content with all legacy template lines OUTSIDE fenced code blocks
+        removed. Content inside fenced code blocks is preserved byte for
+        byte. Pure function.
     """
-    return _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
+    # Walker matches the pattern used by `_find_preamble_cutoff` in this
+    # module and `_find_terminator_offset` in staleness.py/working_memory.py.
+    # A shared helper was considered but the two consumers have divergent
+    # semantics: `_find_preamble_cutoff` stops at first match, this function
+    # accumulates every non-matching line. The twin-copy cost is ~15 lines
+    # of walker boilerplate — same bar as the existing staleness/working_memory
+    # twin and worth the isolation.
+    pos = 0
+    in_code_fence = False
+    fence_re = re.compile(r"^\s*```")
+    out_parts: list[str] = []
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            raw_segment = line
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            raw_segment = content[pos:nl + 1]
+            line_end = nl + 1
 
+        if fence_re.match(line):
+            # Fence boundary: toggle state and keep the line verbatim.
+            in_code_fence = not in_code_fence
+            out_parts.append(raw_segment)
+        elif in_code_fence:
+            # Inside a fence: keep all content verbatim, regardless of
+            # whether the line matches a legacy pattern.
+            out_parts.append(raw_segment)
+        elif _STALE_ORCHESTRATOR_LINE_RE.match(line):
+            # Non-fenced legacy line: drop it entirely (including the
+            # trailing newline, matching the pre-round-7 `$\n?` semantics).
+            pass
+        else:
+            out_parts.append(raw_segment)
+
+        pos = line_end
+
+    return "".join(out_parts)
+
+
+# Canonical PACT routing block template (round 7, item 3). The exact
+# HTML-comment-wrapped routing section that every project CLAUDE.md
+# must carry: a `<!-- PACT_ROUTING_START -->` opener, the canonical
+# `## PACT Routing` instructions, and a `<!-- PACT_ROUTING_END -->`
+# closer. Exported as a public symbol (no `_` prefix) because it is
+# consumed by `session_resume.update_session_info` and `peer_inject.py`
+# when they rewrite the session block template alongside the routing
+# block — both writers expect the full wrapper string, not just its
+# interior prose.
+#
+# Drift implications: all three writers — `update_pact_routing`,
+# `session_resume.update_session_info`, and the Case 0 session template
+# path — rewrite this block on the next session_init pass. The
+# idempotency guard in `update_pact_routing` detects drift via a regex
+# match: if the on-disk block no longer equals `PACT_ROUTING_BLOCK` byte
+# for byte, it is replaced wholesale. Changing the template here changes
+# it everywhere on the next SessionStart hook.
 PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
 ## PACT Routing
 
@@ -761,11 +845,16 @@ def migrate_to_managed_structure() -> str | None:
 # PACT_MANAGED block after migration. The list covers:
 #   - Legacy H1 / H2 section headings from older templates
 #   - PACT-managed HTML comment markers (routing, session, memory)
-# Trigger selection is substring search (not line-anchored). A deliberately
-# crafted user paragraph that contains one of these literals inside prose
-# would trigger preamble-cutoff at that spot, which is acceptable — the user
-# content STILL survives, just potentially split across the managed block
-# instead of fully above it. The safer failure mode.
+# Trigger matching is fence-aware (round 7, item 1): occurrences inside a
+# markdown fenced code block (```...```) are ignored so a user's example
+# PACT content is not treated as real managed content. The cutoff lands at
+# the earliest trigger appearing in NON-fenced prose, or at `len(content)`
+# when no trigger exists outside fences. Prior behavior used naive
+# substring search, which composed unsafely with the downstream
+# `_strip_legacy_lines` + `^# Project Memory` `re.sub` at line 971: a
+# fenced example containing `# Project Memory` + routing markers saw its
+# heading stripped and routing block extracted from inside the fence,
+# destroying the user's example block.
 _PREAMBLE_TRIGGERS: tuple[str, ...] = (
     "# Project Memory",
     "## PACT Routing",
@@ -784,30 +873,70 @@ def _find_preamble_cutoff(content: str) -> int:
     Return the byte offset where user-owned preamble ends and PACT-managed
     content begins in the original (pre-migration) CLAUDE.md content.
 
-    Scans the content for the earliest occurrence of any trigger from
-    `_PREAMBLE_TRIGGERS`. Returns the minimum such offset, or `len(content)`
-    if no trigger is present (in which case the entire file is preamble and
-    the migration will emit a shell managed block with empty memory).
+    Walks the content line by line, tracking markdown fenced code block
+    state (toggled on any line whose stripped form starts with ```). For
+    each non-fenced line, checks whether any trigger in
+    `_PREAMBLE_TRIGGERS` occurs in that line and returns the byte offset
+    of the earliest such occurrence. Triggers that appear inside a fenced
+    code block are skipped — they are treated as user example content, not
+    real PACT-managed content.
+
+    Returns `len(content)` if no trigger is found in any non-fenced line
+    (in which case the entire file is preamble and the migration will
+    emit a shell managed block with empty memory).
 
     Round 6 item 4: pre-fix behavior put all non-memory content AFTER
     PACT_MANAGED_END. Users with notes above `# Project Memory` saw their
-    content moved below all PACT-managed content. The new behavior splits
-    the file at the earliest PACT-managed trigger so preamble user content
+    content moved below all PACT-managed content. The fix split the file
+    at the earliest PACT-managed trigger so preamble user content
     survives in place above PACT_MANAGED_START.
+
+    Round 7 item 1: the round-6 implementation used naive substring
+    search (`content.find(trigger)`). That composed unsafely with the
+    downstream `_strip_legacy_lines` + `^# Project Memory` `re.sub` at
+    line 971: a user example inside a fenced code block containing
+    `# Project Memory` + routing markers saw its heading stripped, its
+    routing block extracted from inside the fence, and its closing fence
+    left orphaned in the trailing user region. The fence-aware walker
+    makes triggers inside fences invisible to the cutoff scan, so the
+    entire example block survives as preamble.
 
     Args:
         content: The pre-migration CLAUDE.md content.
 
     Returns:
-        Byte offset of the first PACT-managed trigger, or `len(content)`
-        if none found.
+        Byte offset of the first PACT-managed trigger outside any fenced
+        code block, or `len(content)` if no trigger is found outside
+        fences.
     """
-    earliest = len(content)
-    for trigger in _PREAMBLE_TRIGGERS:
-        idx = content.find(trigger)
-        if idx != -1 and idx < earliest:
-            earliest = idx
-    return earliest
+    pos = 0
+    in_code_fence = False
+    fence_re = re.compile(r"^\s*```")
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            line_end = nl + 1
+
+        if fence_re.match(line):
+            in_code_fence = not in_code_fence
+        elif not in_code_fence:
+            # Scan this line for the earliest trigger. Return the absolute
+            # offset (line start + trigger offset within the line).
+            earliest_in_line = -1
+            for trigger in _PREAMBLE_TRIGGERS:
+                idx = line.find(trigger)
+                if idx != -1 and (earliest_in_line == -1 or idx < earliest_in_line):
+                    earliest_in_line = idx
+            if earliest_in_line != -1:
+                return pos + earliest_in_line
+
+        pos = line_end
+
+    return len(content)
 
 
 def _build_migrated_content(content: str) -> str:
@@ -856,7 +985,11 @@ def _build_migrated_content(content: str) -> str:
     # Apply _strip_legacy_lines to the preamble too. An upgraded project may
     # have the v3.16.2 stale orchestrator-loader line in the preamble region
     # (above `# Project Memory`), and leaving it there would contradict the
-    # routing block that gets reinstalled below.
+    # routing block that gets reinstalled below. Round 7 item 2:
+    # `_strip_legacy_lines` is fence-aware, so a user-authored fenced code
+    # block in the preamble region that quotes the stale line verbatim (e.g.,
+    # migration documentation, tutorial content) is preserved intact. Only
+    # non-fenced matches of the stale line are stripped.
     preamble_text = _strip_legacy_lines(preamble_text)
     content = content[preamble_cutoff:]
 
@@ -967,7 +1100,12 @@ def _build_migrated_content(content: str) -> str:
     # memory sections and user content. Extract memory sections by heading.
     remaining = content_sans_session
 
-    # Remove the old top-level heading and description line
+    # Remove the old top-level heading and description line via a local
+    # anchored `re.sub`. This strips `^# Project Memory\s*\n` (plus an
+    # optional description line) at the start of `remaining` — note that
+    # `remaining` is post-cutoff content, so the match can only fire when
+    # the first line of the managed region was the legacy `# Project
+    # Memory` heading.
     remaining = re.sub(
         r"^# Project Memory\s*\n"
         r"(?:\s*\n)*"
@@ -976,16 +1114,38 @@ def _build_migrated_content(content: str) -> str:
         remaining,
     )
 
-    # Also strip any legacy template lines that lingered (e.g., the v3.16.2
-    # stale orchestrator loader line).
-    # _strip_legacy_lines runs BEFORE fence classification in the line-walker
-    # below. The legacy patterns (stale orchestrator loader line, old
-    # `# Project Memory` heading) are specific enough that false positives
-    # inside user-authored code fences are unlikely — but if a user has any
-    # of those exact patterns verbatim inside a fence, they will be stripped.
-    # Fence-aware stripping would require reordering this call to operate on
-    # walker output, which is more complex than the edge case warrants
-    # (round 6, item 2).
+    # Apply `_strip_legacy_lines` to scrub any OTHER v3.16.2 template
+    # remnants that lingered in the managed region — currently just the
+    # stale orchestrator-loader line. This is a DIFFERENT stripper from
+    # the `re.sub` immediately above:
+    #   - The `re.sub` immediately above targets the `# Project Memory` H1
+    #     at the start of `remaining`. It uses `^` without `re.MULTILINE`
+    #     so it can only match at position 0 of `remaining`.
+    #   - `_strip_legacy_lines` targets the stale orchestrator-loader line
+    #     ("The global PACT Orchestrator is loaded from ..."). It is
+    #     fence-aware (round 7, item 2): internally walks lines and only
+    #     applies the per-line pattern to non-fenced lines.
+    #
+    # Both run on post-cutoff content (`remaining`). Both are safe from
+    # the fenced-code-block failure mode, by DIFFERENT mechanisms:
+    #   - The `re.sub` above is safe because it has no `re.MULTILINE`
+    #     flag: `^` matches only the absolute start of `remaining`, and
+    #     `_find_preamble_cutoff` (round 7, item 1, fence-aware) guarantees
+    #     `remaining` never starts inside a user-authored fence. A fenced
+    #     `# Project Memory` is pushed up into the preamble region instead.
+    #   - `_strip_legacy_lines` is safe because its own walker skips any
+    #     line inside a fence. Even if a fenced stale-orchestrator line
+    #     somehow reached `remaining` (e.g. an adversarial case where the
+    #     fence opens AFTER the preamble cutoff), the walker would preserve
+    #     it verbatim. The upstream fence-aware cutoff plus the downstream
+    #     fence-aware stripper are belt-and-suspenders.
+    #
+    # Caveat: if a user has literal legacy patterns verbatim at the TOP
+    # of `remaining` (i.e., at the earliest non-fenced position of their
+    # file — effectively at the start of the managed region), the
+    # stripping is correct by design. Those ARE the patterns being
+    # migrated away from, and removing them is the whole point of the
+    # migration pass.
     remaining = _strip_legacy_lines(remaining)
 
     # Extract memory sections: Retrieved Context, Pinned Context, Working Memory
