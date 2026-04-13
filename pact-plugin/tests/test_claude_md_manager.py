@@ -3777,3 +3777,204 @@ class TestWorkingMemoryParserMarkerPreservation:
             "PACT_MANAGED_END must survive sync_to_claude_md round-trip"
         )
         assert "Test context for round-trip" in final
+
+
+class TestMigrationSyncPipeline:
+    """End-to-end tests that exercise the exact ACTUAL output of
+    _build_migrated_content through sync_to_claude_md and
+    sync_retrieved_to_claude_md.
+
+    The existing TestWorkingMemoryParserMarkerPreservation.test_full_round_trip_preserves_markers
+    test seeds CLAUDE.md with a pre-existing auto-managed comment on the line
+    after ``## Working Memory``. That hides the section_pattern bug: the
+    greedy ``(<!-- [^>]*-->)?`` group harmlessly matches the auto-managed
+    comment and stops before PACT_MEMORY_END.
+
+    But _build_migrated_content's default empty-memory layout has NO
+    auto-managed comment between ``## Working Memory`` and
+    ``<!-- PACT_MEMORY_END -->``. Without the (?!PACT_) negative lookahead,
+    the optional comment group greedily captures PACT_MEMORY_END, advancing
+    section_header_end PAST it. The marker ends up in section_content, gets
+    .strip()ed, and is silently dropped on write-back (#404 round-3 review
+    finding).
+
+    These tests exercise the bug path directly by using the real output of
+    _build_migrated_content as the input to sync.
+    """
+
+    def _assert_markers_paired(self, content: str) -> None:
+        """All 4 PACT markers must be present AND appear in structural order."""
+        assert _MANAGED_START in content, "PACT_MANAGED_START missing"
+        assert _MANAGED_END in content, "PACT_MANAGED_END missing"
+        assert _MEMORY_START in content, "PACT_MEMORY_START missing"
+        assert _MEMORY_END in content, "PACT_MEMORY_END missing"
+        # Order: MANAGED_START < MEMORY_START < MEMORY_END < MANAGED_END
+        ms = content.index(_MANAGED_START)
+        mems = content.index(_MEMORY_START)
+        meme = content.index(_MEMORY_END)
+        me = content.index(_MANAGED_END)
+        assert ms < mems < meme < me, (
+            f"Markers out of order: MANAGED_START={ms}, MEMORY_START={mems}, "
+            f"MEMORY_END={meme}, MANAGED_END={me}"
+        )
+
+    def test_sync_working_memory_against_build_migrated_content_empty_memory(
+        self, tmp_path, monkeypatch
+    ):
+        """sync_to_claude_md on the exact output of _build_migrated_content
+        (empty-memory default) must preserve all 4 PACT markers and their
+        structural order.
+
+        This is the precise bug path: no auto-managed comment follows
+        ``## Working Memory``, so the section_pattern regex's optional
+        comment group would greedily swallow ``<!-- PACT_MEMORY_END -->``
+        unless the (?!PACT_) negative lookahead blocks it.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+        from scripts.working_memory import sync_to_claude_md
+
+        project_dir = tmp_path / "project"
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir(parents=True)
+        claude_md = claude_dir / "CLAUDE.md"
+
+        # Seed with the EXACT output _build_migrated_content produces for
+        # a blank "# Project Memory\n" source. This is the empty-memory
+        # default layout that triggers the greedy match bug.
+        migrated = _build_migrated_content("# Project Memory\n")
+        claude_md.write_text(migrated, encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        memory = {
+            "context": "Migration->sync pipeline test",
+            "goal": "Prove section_pattern no longer swallows PACT_MEMORY_END",
+            "decisions": ["Use negative lookahead"],
+            "lessons_learned": ["Regex ordering matters"],
+        }
+
+        result = sync_to_claude_md(memory, memory_id="mig-1")
+        assert result is True
+
+        final = claude_md.read_text(encoding="utf-8")
+        self._assert_markers_paired(final)
+        assert "Migration->sync pipeline test" in final
+
+    def test_sync_retrieved_context_against_build_migrated_content_empty_memory(
+        self, tmp_path, monkeypatch
+    ):
+        """sync_retrieved_to_claude_md must also preserve PACT markers when
+        operating on the default empty-memory layout from _build_migrated_content.
+
+        _parse_retrieved_context_section has the symmetrical bug: the
+        ``(<!-- [^>]*-->)?`` optional comment group would swallow any
+        PACT marker appearing immediately after ``## Retrieved Context``.
+        In the default layout that comment slot is empty, so the fix must
+        apply the same (?!PACT_) negative lookahead there.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+        from scripts.working_memory import sync_retrieved_to_claude_md
+
+        project_dir = tmp_path / "project"
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir(parents=True)
+        claude_md = claude_dir / "CLAUDE.md"
+
+        migrated = _build_migrated_content("# Project Memory\n")
+        claude_md.write_text(migrated, encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        memories = [
+            {
+                "context": "Retrieved memory content",
+                "goal": "Test retrieved sync marker preservation",
+                "decisions": ["d1"],
+                "lessons_learned": ["l1"],
+            }
+        ]
+
+        result = sync_retrieved_to_claude_md(
+            memories,
+            query="test query",
+            scores=[0.95],
+            memory_ids=["ret-1"],
+        )
+        assert result is True
+
+        final = claude_md.read_text(encoding="utf-8")
+        self._assert_markers_paired(final)
+        assert "Retrieved memory content" in final
+
+    def test_full_migration_then_sync_pipeline(self, tmp_path, monkeypatch):
+        """Realistic end-to-end: a pre-#404 CLAUDE.md on disk is migrated in
+        place by migrate_to_managed_structure, then sync_to_claude_md adds a
+        memory entry. All 4 markers must remain present and paired, and the
+        new memory entry must appear inside the Working Memory section.
+
+        This is the user-facing path: an existing project upgrading to
+        v3.17.0+ will have its CLAUDE.md migrated, and the first subsequent
+        sync must not break the managed structure the migration just created.
+        """
+        from shared.claude_md_manager import migrate_to_managed_structure
+        from scripts.working_memory import sync_to_claude_md
+
+        project_dir = tmp_path / "project"
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir(parents=True)
+        claude_md = claude_dir / "CLAUDE.md"
+
+        # A realistic pre-#404 CLAUDE.md with user content and a legacy
+        # Working Memory section carrying one historical entry.
+        pre_404_content = (
+            "# Project Memory\n"
+            "\n"
+            "Some user notes that should survive migration.\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "### 2026-04-01 10:00\n"
+            "**Context**: Historical memory entry\n"
+            "**Goal**: Pre-existing\n"
+            "\n"
+        )
+        claude_md.write_text(pre_404_content, encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        # migrate_to_managed_structure resolves the CLAUDE.md location via
+        # the same get_project_claude_md_path() helper the hooks use, which
+        # honors CLAUDE_PROJECT_DIR.
+
+        migration_msg = migrate_to_managed_structure()
+        # Migration should have run (not skipped, not failed)
+        assert migration_msg is not None
+        assert "failed" not in migration_msg.lower()
+        assert "skipped" not in migration_msg.lower()
+
+        post_migration = claude_md.read_text(encoding="utf-8")
+        self._assert_markers_paired(post_migration)
+
+        # Sync a new memory after migration
+        memory = {
+            "context": "End-to-end pipeline verification",
+            "goal": "Confirm migration+sync composes correctly",
+            "decisions": ["Test the full pipeline"],
+            "lessons_learned": ["Greedy regex groups need lookaheads"],
+        }
+
+        result = sync_to_claude_md(memory, memory_id="pipeline-1")
+        assert result is True
+
+        final = claude_md.read_text(encoding="utf-8")
+
+        # All 4 markers still present and correctly ordered
+        self._assert_markers_paired(final)
+
+        # The new memory entry appears inside the Working Memory section
+        # (between the Working Memory header and the MEMORY_END marker).
+        wm_start = final.index("## Working Memory")
+        mem_end = final.index(_MEMORY_END)
+        working_memory_region = final[wm_start:mem_end]
+        assert "End-to-end pipeline verification" in working_memory_region, (
+            "New memory entry should appear inside the Working Memory section"
+        )

@@ -343,10 +343,15 @@ def _parse_working_memory_section(
         where existing_entries is a list of individual memory entry strings.
     """
     # Pattern to find the Working Memory section
-    # Match ## Working Memory followed by optional comment and entries
+    # Match ## Working Memory followed by optional comment and entries.
+    # Negative lookahead (?!PACT_) excludes PACT boundary markers from being
+    # consumed as the auto-managed comment — otherwise an empty Working Memory
+    # section followed immediately by <!-- PACT_MEMORY_END --> would greedily
+    # swallow the marker into section_header_end, and the marker would be lost
+    # on write-back (#404).
     section_pattern = re.compile(
         r'^(## Working Memory)\s*\n'
-        r'(<!-- [^>]*-->)?\s*\n?',
+        r'(<!-- (?!PACT_)[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
@@ -485,10 +490,13 @@ def _parse_retrieved_context_section(
         Tuple of (before_section, section_header, after_section, existing_entries)
         where existing_entries is a list of individual memory entry strings.
     """
-    # Pattern to find the Retrieved Context section
+    # Pattern to find the Retrieved Context section.
+    # Negative lookahead (?!PACT_) excludes PACT boundary markers from being
+    # consumed as the auto-managed comment — see _parse_working_memory_section
+    # for the full rationale (#404).
     section_pattern = re.compile(
         r'^(## Retrieved Context)\s*\n'
-        r'(<!-- [^>]*-->)?\s*\n?',
+        r'(<!-- (?!PACT_)[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
