@@ -700,18 +700,10 @@ def migrate_to_managed_structure() -> str | None:
        outside the recognized PACT sections is preserved AFTER the closing
        boundary as user-owned content
 
-    Code-fence defense (round 5, item 9): the line-walker inside
-    `_build_migrated_content` tracks markdown code fence state so a
-    triple-backtick block containing a look-alike `## Pinned Context`
-    (e.g., in a tutorial snippet) is NOT misclassified as a real memory
-    section. Fence-awareness is a property of the extraction logic itself,
-    not an after-the-fact filter. The three sync-path parsers
-    (`staleness._parse_pinned_section`,
-    `working_memory._parse_working_memory_section`,
-    `working_memory._parse_retrieved_context_section`) have symmetric
-    fence-awareness via `_find_terminator_offset` twins, so the
-    fence-defense stance is consistent end-to-end across migration AND
-    subsequent write-backs.
+    User content with fenced code blocks containing ## memory headings is
+    preserved verbatim. The classifier tracks in_code_fence state and does
+    not misclassify fence-protected headings as real memory sections
+    (round 5, item 9).
 
     Returns:
         Status message on successful migration, None on no-op (already
@@ -900,21 +892,10 @@ def _build_migrated_content(content: str) -> str:
 
     # Also strip any legacy template lines that lingered (e.g., the v3.16.2
     # stale orchestrator loader line).
-    #
-    # Fence-classification upstream (round 5, item 10): `_strip_legacy_lines`
-    # uses string-based line-by-line matching via a SESSION_START/SESSION_END
-    # boundary exclusion, NOT fence tracking. This is intentional. The
-    # fence-classification step happens DOWNSTREAM in the memory-vs-user
-    # split loop (below), where `in_code_fence` is tracked per line. Running
-    # the legacy-line strip first is safe because its target patterns
-    # (legacy orchestrator-loader comment, loader @-ref, stale
-    # "# Project Memory" heading) are short, distinctive, and extremely
-    # unlikely to appear inside a fenced tutorial block — and even if they
-    # did, the downstream classifier still preserves fenced content as
-    # user-owned regardless of what legacy-line matches fired. The ordering
-    # is: (1) strip legacy lines by simple match, (2) fence-aware
-    # memory/user classification. Do not swap these steps — the classifier
-    # needs the legacy cruft removed so it does not land in the user bucket.
+    # Fence classification happens upstream in the line-walker below, so
+    # _strip_legacy_lines does not need to track fence state — any legacy
+    # lines inside fenced blocks have already been classified as user
+    # content (round 5, item 10).
     remaining = _strip_legacy_lines(remaining)
 
     # Extract memory sections: Retrieved Context, Pinned Context, Working Memory

@@ -185,20 +185,6 @@ def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
     """
     Extract the Pinned Context section from CLAUDE.md content.
 
-    Parser symmetry (round 5, item 7): this function is now symmetric
-    with `working_memory._parse_working_memory_section` and
-    `working_memory._parse_retrieved_context_section`. All three CLAUDE.md
-    section parsers terminate on the same three-token alternation
-    (`PACT_BOUNDARY_PREFIXES`: MEMORY / MANAGED / ROUTING) and all three
-    are fence-aware via their respective `_find_terminator_offset` twins.
-    Previously, staleness.py was asymmetric — it used a plain anchored
-    regex that would have false-matched fenced look-alikes, while
-    working_memory.py was already fence-aware. Round 4 added marker
-    recognition; round 5 added fence tracking. The twin helpers are
-    private to each module (rather than a shared import) because the
-    skills/pact-memory/scripts/ path cannot cleanly import from
-    hooks/shared/.
-
     Args:
         content: Full CLAUDE.md file content.
 
@@ -206,6 +192,19 @@ def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
         Tuple of (pinned_start, pinned_end, pinned_content) or None if
         no Pinned Context section exists or it is empty.
     """
+    # NOTE (round 5, item 7): Unlike working_memory.py's
+    # _parse_working_memory_section and _parse_retrieved_context_section,
+    # which have an optional-comment sub-pattern
+    # `(<!-- (?!(?:PACT_...))[^>]*-->)?` directly after the ## heading to
+    # consume the "Auto-managed by pact-memory skill" comment, this parser
+    # has no such sub-pattern. That's intentional: the PACT template emits
+    # `## Pinned Context` without an immediate auto-managed comment below
+    # it. If a future template edit adds a comment directly below
+    # `## Pinned Context`, this parser will include it as body content —
+    # update the pattern symmetrically at that time (add an optional
+    # comment group between the heading match and pinned_start, using the
+    # same PACT_BOUNDARY_PREFIXES negative-lookahead guard as
+    # working_memory.py).
     pinned_match = re.search(r'^## Pinned Context\s*\n', content, re.MULTILINE)
     if not pinned_match:
         return None

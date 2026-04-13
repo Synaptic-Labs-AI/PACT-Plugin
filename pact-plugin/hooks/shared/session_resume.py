@@ -206,16 +206,13 @@ def update_session_info(
                 #       the historical anchor on "## Retrieved Context"
                 #       since memory sections were top-level in that shape.
                 #   (c) Neither: append at end of file.
-                # Belt-and-suspenders: check BOTH markers (round 5, item 8).
-                # The migration guarantees pair-presence — migrate_to_managed_structure
-                # emits MANAGED_START, MEMORY_START, MEMORY_END, MANAGED_END atomically.
-                # A well-formed post-migration file has all four markers. The dual
-                # check here is defense-in-depth against a partial-migration
-                # corruption scenario (e.g., a user hand-edits CLAUDE.md and
-                # deletes MEMORY_START_MARKER while leaving MANAGED_START_MARKER).
-                # In that case we fall through to the legacy branch (b) rather
-                # than attempting a .replace() that would be a no-op, producing a
-                # silent data-loss write. Keep both terms of the `and`.
+                # Both markers are checked (not just MANAGED_START) because a
+                # partially-written migration output is theoretically possible
+                # under crash: the managed-open marker could be present while
+                # memory markers are not yet written. The AND check treats such
+                # partial states as pre-migration, routing to the legacy
+                # fallback (branch b) rather than attempting a .replace() that
+                # would be a no-op producing silent data loss (round 5, item 8).
                 if MANAGED_START_MARKER in content and MEMORY_START_MARKER in content:
                     new_content = content.replace(
                         MEMORY_START_MARKER,
