@@ -798,9 +798,25 @@ def _build_migrated_content(content: str) -> str:
     lines = remaining.splitlines(keepends=True)
     current_section: list[str] = []
     in_memory_section = False
+    # Track markdown code fence state so a ``` ... ## Pinned Context ... ```
+    # block inside user content is not misclassified as a real memory section.
+    # Fence detection: stripped line starts with ``` (with optional language tag).
+    in_code_fence = False
 
     for line in lines:
         stripped = line.rstrip()
+        # Toggle fence state BEFORE heading detection so the fence marker line
+        # itself is accumulated into whichever bucket we're currently in.
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+            current_section.append(line)
+            continue
+        # While inside a code fence, treat all content as opaque — no heading
+        # detection, so fenced `## Pinned Context` stays with the surrounding
+        # user content instead of being extracted as memory.
+        if in_code_fence:
+            current_section.append(line)
+            continue
         # Check if this line starts a memory section (exact match after rstrip)
         if any(stripped == h for h in memory_headings):
             # Flush any non-memory content accumulated before this heading

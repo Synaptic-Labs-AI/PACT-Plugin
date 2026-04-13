@@ -110,6 +110,80 @@ class TestWorkingMemoryParserMarkerPreservation:
             "PACT_MANAGED_END marker should be in after_section"
         )
 
+    def test_retrieved_context_next_section_stops_at_pact_marker(self):
+        r"""Round-4 Item 6: symmetric counter-test for the Retrieved Context
+        `next_section_pattern` marker alternative in working_memory.py
+        (lines ~524-527).
+
+        Fixture: a Retrieved Context block containing CONTENT (not just
+        headers) immediately followed by PACT_MEMORY_END and PACT_MANAGED_END
+        with no Pinned Context or Working Memory heading between them. This
+        is the precise layout where `next_section_pattern` decides how much
+        of the file belongs to the Retrieved Context section.
+
+        Without the `<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_)`
+        alternative, `next_section_pattern` scans past the markers looking
+        for the next `#`/`##`/`---`, and `section_end` lands at EOF — the
+        markers get swallowed into `section_content` and .strip()ed away on
+        write-back.
+
+        Counter-test protocol: if the `next_section_pattern` regex at
+        working_memory.py:524-527 is reverted to omit the marker alternative
+        (e.g., back to `r'^(#\s|##\s(?!Retrieved Context)|---)'`), this test
+        must fail because `_MEMORY_END` will not appear in `after_section`.
+        """
+        from scripts.working_memory import (
+            _parse_retrieved_context_section,
+            RETRIEVED_CONTEXT_HEADER,
+        )
+
+        # Critical fixture shape: Retrieved Context with real content entries
+        # immediately followed by PACT markers — no intervening `##` heading.
+        # A prior test exercised only the `section_pattern` optional-comment
+        # path; this one specifically targets the `next_section_pattern`
+        # scan-for-section-end path.
+        content = (
+            f"{_MANAGED_START}\n"
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            f"{RETRIEVED_CONTEXT_HEADER}\n"
+            "### 2026-04-12 10:00\n"
+            "**Query**: \"first query\"\n"
+            "**Context**: First retrieved memory body\n"
+            "\n"
+            "### 2026-04-12 11:00\n"
+            "**Query**: \"second query\"\n"
+            "**Context**: Second retrieved memory body\n"
+            "\n"
+            f"{_MEMORY_END}\n"
+            "\n"
+            f"{_MANAGED_END}\n"
+        )
+
+        before, header, after, entries = _parse_retrieved_context_section(content)
+
+        # Primary assertion: PACT markers survive in after_section.
+        assert _MEMORY_END in after, (
+            "PACT_MEMORY_END must be in after_section — if not, "
+            "next_section_pattern scanned past the marker and the sync "
+            "round-trip will silently erode the boundary"
+        )
+        assert _MANAGED_END in after, (
+            "PACT_MANAGED_END must be in after_section"
+        )
+
+        # Entry extraction must still work — both real entries are captured
+        # so the parser isn't just skipping everything.
+        assert len(entries) == 2
+        assert any("first query" in e for e in entries)
+        assert any("second query" in e for e in entries)
+
+        # Neither marker bled into the entries.
+        for entry in entries:
+            assert "PACT_MEMORY_END" not in entry
+            assert "PACT_MANAGED_END" not in entry
+
     def test_full_round_trip_preserves_markers(self, tmp_path, monkeypatch):
         """A full sync_to_claude_md call must not erode PACT markers."""
         from scripts.working_memory import sync_to_claude_md

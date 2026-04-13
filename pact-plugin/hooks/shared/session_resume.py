@@ -188,19 +188,42 @@ def update_session_info(
                         return "Session info updated in project CLAUDE.md"
                     return None
 
-                # Case 2: No markers -- insert before "## Retrieved Context" if present
-                insert_marker = "## Retrieved Context"
-                if insert_marker in content:
+                # Case 2: No SESSION markers. Insertion order matters because
+                # the session block must be a SIBLING of PACT_MEMORY inside
+                # PACT_MANAGED — never placed inside PACT_MEMORY where it
+                # would pollute the memory region and violate the
+                # "Current Session is outside PACT_MEMORY" invariant.
+                #
+                # Ordered preference:
+                #   (a) Post-migration file (PACT_MANAGED present): insert
+                #       BEFORE MEMORY_START_MARKER so the block stays inside
+                #       PACT_MANAGED but outside PACT_MEMORY. This is the
+                #       round-4 Item-1 fix — the prior behavior anchored on
+                #       "## Retrieved Context" which, after migration, lives
+                #       INSIDE PACT_MEMORY.
+                #   (b) Legacy pre-migration file (no PACT_MANAGED): keep
+                #       the historical anchor on "## Retrieved Context"
+                #       since memory sections were top-level in that shape.
+                #   (c) Neither: append at end of file.
+                if MANAGED_START_MARKER in content and MEMORY_START_MARKER in content:
                     new_content = content.replace(
-                        insert_marker,
-                        session_block + "\n\n" + insert_marker,
+                        MEMORY_START_MARKER,
+                        session_block + "\n\n" + MEMORY_START_MARKER,
                         1,
                     )
                 else:
-                    # Fallback: append at end
-                    if not content.endswith("\n"):
-                        content += "\n"
-                    new_content = content + "\n" + session_block + "\n"
+                    insert_marker = "## Retrieved Context"
+                    if insert_marker in content:
+                        new_content = content.replace(
+                            insert_marker,
+                            session_block + "\n\n" + insert_marker,
+                            1,
+                        )
+                    else:
+                        # Fallback: append at end
+                        if not content.endswith("\n"):
+                            content += "\n"
+                        new_content = content + "\n" + session_block + "\n"
 
                 target_file.write_text(new_content, encoding="utf-8")
                 os.chmod(str(target_file), 0o600)

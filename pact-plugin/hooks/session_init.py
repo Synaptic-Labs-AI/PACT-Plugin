@@ -468,7 +468,12 @@ def main():
         # has zero cost.
         kernel_msg = remove_stale_kernel_block()
         if kernel_msg:
-            if "failed" in kernel_msg.lower():
+            # Symmetric contract: functions return "failed" for errors and
+            # "skipped" for defensive path-precondition no-ops (symlink
+            # refusal, lock contention, missing file). Both must surface
+            # to system_messages so the user can see the signal, rather
+            # than being buried in additionalContext. Round-4 Item 2.
+            if "failed" in kernel_msg.lower() or "skipped" in kernel_msg.lower():
                 system_messages.append(kernel_msg)
             else:
                 context_parts.append(kernel_msg)
@@ -476,7 +481,7 @@ def main():
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
         if project_md_msg:
-            if "failed" in project_md_msg.lower():
+            if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
                 system_messages.append(project_md_msg)
             else:
                 context_parts.append(project_md_msg)
@@ -497,7 +502,7 @@ def main():
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()
         if staleness_msg:
-            if "failed" in staleness_msg.lower():
+            if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                 system_messages.append(staleness_msg)
             else:
                 context_parts.append(staleness_msg)
@@ -768,7 +773,7 @@ def main():
         if not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
-                if "failed" in session_msg.lower():
+                if "failed" in session_msg.lower() or "skipped" in session_msg.lower():
                     system_messages.append(session_msg)
                 else:
                     context_parts.append(session_msg)
@@ -778,7 +783,7 @@ def main():
         # first; the two managed blocks use different markers and don't conflict.
         routing_msg = update_pact_routing()
         if routing_msg:
-            if "failed" in routing_msg.lower():
+            if "failed" in routing_msg.lower() or "skipped" in routing_msg.lower():
                 system_messages.append(routing_msg)
             else:
                 context_parts.append(routing_msg)

@@ -246,6 +246,76 @@ class TestRemoveStaleKernelBlockPresent:
         mode = stat.S_IMODE(target.stat().st_mode)
         assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
 
+    def test_kernel_strip_does_not_collide_with_managed_markers(self, mock_home):
+        """
+        Runtime integration guard: kernel marker strip must NOT touch
+        PACT_MANAGED_*/PACT_MEMORY_* markers.
+
+        The kernel block uses `<!-- PACT_START:` and `<!-- PACT_END -->`,
+        which are distinct literals from `<!-- PACT_MANAGED_START:`,
+        `<!-- PACT_MANAGED_END -->`, `<!-- PACT_MEMORY_START -->`, and
+        `<!-- PACT_MEMORY_END -->`. A substring-based split on
+        `<!-- PACT_START:` will NOT match the managed-start literal
+        because the colon after `PACT_START` is absent from
+        `PACT_MANAGED_START:` at that character position. This test
+        enforces that invariant at runtime so any future refactor
+        weakening the marker literal fails loudly here.
+        """
+        from shared.claude_md_manager import remove_stale_kernel_block
+
+        target = mock_home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "User preamble\n"
+            "\n"
+            "<!-- PACT_START: legacy kernel -->\n"
+            "# PACT Orchestrator (legacy)\n"
+            "Old kernel body\n"
+            "<!-- PACT_END -->\n"
+            "\n"
+            "<!-- PACT_MANAGED_START: Managed by pact-plugin -->\n"
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            "<!-- PACT_MEMORY_START -->\n"
+            "## Retrieved Context\n"
+            "- memory item\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "<!-- PACT_MANAGED_END -->\n"
+            "User trailing content\n",
+            encoding="utf-8",
+        )
+
+        result = remove_stale_kernel_block()
+
+        assert result == "Removed obsolete PACT kernel block from ~/.claude/CLAUDE.md"
+        new_content = target.read_text(encoding="utf-8")
+
+        # Legacy kernel markers and body are stripped
+        assert "<!-- PACT_START:" not in new_content
+        assert "<!-- PACT_END -->" not in new_content
+        assert "# PACT Orchestrator (legacy)" not in new_content
+        assert "Old kernel body" not in new_content
+
+        # All four managed/memory markers survive intact
+        assert "<!-- PACT_MANAGED_START: Managed by pact-plugin -->" in new_content
+        assert "<!-- PACT_MANAGED_END -->" in new_content
+        assert "<!-- PACT_MEMORY_START -->" in new_content
+        assert "<!-- PACT_MEMORY_END -->" in new_content
+
+        # Managed block body and user content survive
+        assert "# PACT Framework and Managed Project Memory" in new_content
+        assert "## Retrieved Context" in new_content
+        assert "- memory item" in new_content
+        assert "User preamble" in new_content
+        assert "User trailing content" in new_content
+
+        # Marker ordering is preserved: MANAGED_START < MEMORY_START
+        # < MEMORY_END < MANAGED_END (sibling invariant survives the strip).
+        mgr_start = new_content.index("<!-- PACT_MANAGED_START:")
+        mem_start = new_content.index("<!-- PACT_MEMORY_START -->")
+        mem_end = new_content.index("<!-- PACT_MEMORY_END -->")
+        mgr_end = new_content.index("<!-- PACT_MANAGED_END -->")
+        assert mgr_start < mem_start < mem_end < mgr_end
+
 
 class TestRemoveStaleKernelBlockAbsent:
     """No legacy block present — function must be a clean no-op."""
@@ -3205,6 +3275,100 @@ class TestBuildMigratedContentAdversarial:
         for i in range(10):
             assert f"Content for pin {i}." in memory_region
 
+    def test_code_fenced_memory_heading_preserved_as_user_content(self):
+        """A memory heading like `## Pinned Context` inside a fenced code
+        block (```...```) must NOT be extracted as a real memory section.
+        It is example/documentation text and belongs with surrounding user
+        content.
+
+        Regression guard for round-4 Item 3: the classifier previously did
+        not track code fence state, so fenced `## Pinned Context` inside a
+        user docs block was mis-classified as a memory section boundary.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Notes on how memory works\n"
+            "Here's an example of what a pinned context block looks like:\n"
+            "\n"
+            "```markdown\n"
+            "## Pinned Context\n"
+            "This is example documentation, not real memory data.\n"
+            "```\n"
+            "\n"
+            "End of notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # The fenced `## Pinned Context` text must survive outside the
+        # PACT_MANAGED region as user content.
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## Notes on how memory works" in after_managed
+        assert "```markdown" in after_managed
+        assert "## Pinned Context" in after_managed
+        assert "example documentation, not real memory data" in after_managed
+        assert "End of notes." in after_managed
+
+        # The memory region must be empty (no real memory headings existed).
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "example documentation" not in memory_region
+        assert "End of notes." not in memory_region
+
+    def test_code_fence_does_not_mask_real_memory_sections_elsewhere(self):
+        """A fenced example of a memory heading in docs PLUS a real memory
+        section elsewhere must still classify each correctly: the fenced one
+        stays with user content, the real one is extracted into memory.
+
+        Regression guard for round-4 Item 3: the fence toggle state must be
+        per-fence, not latched — after a fence closes, subsequent real memory
+        headings must still be detected.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Documentation\n"
+            "Example of a memory heading:\n"
+            "\n"
+            "```\n"
+            "## Working Memory\n"
+            "(this is just an example)\n"
+            "```\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Real retrieved context data.\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+            "- Real entry 1\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Fenced example must stay outside managed boundary as user content
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## Documentation" in after_managed
+        assert "(this is just an example)" in after_managed
+
+        # Real memory sections after the fence must be extracted into memory
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "Real retrieved context data." in memory_region
+        assert "Real entry 1" in memory_region
+
+        # The fenced example text must NOT bleed into the memory region
+        assert "(this is just an example)" not in memory_region
+
 
 class TestBuildMigratedContentIdempotent:
     """_build_migrated_content() does NOT have its own idempotency guard —
@@ -3685,4 +3849,126 @@ class TestSessionInitMigrationIntegration:
         # The routing logic checks for "failed" or "skipped" in the message
         assert '"failed"' in source or "'failed'" in source
         assert '"skipped"' in source or "'skipped'" in source
+
+
+class TestStripLegacyLines:
+    """Direct unit tests for `_strip_legacy_lines`.
+
+    Round-4 Item 7: the existing coverage is through two indirect paths
+    (`update_pact_routing` and `_build_migrated_content`), both of which
+    mask signal if `_strip_legacy_lines` itself regresses — downstream
+    assertions are dominated by the routing-block text. These tests
+    exercise the helper directly so a regression in the legacy-stripping
+    logic produces a targeted failure.
+    """
+
+    # The exact stale line the v3.16.2 template carried. Pinned here as a
+    # fixture constant so drift in _STALE_ORCHESTRATOR_LINE_RE is caught.
+    STALE_LINE = (
+        "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`."
+    )
+
+    def test_strips_exact_stale_line_with_trailing_period(self):
+        """Canonical form: stale line with trailing period and newline."""
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{self.STALE_LINE}\n"
+            "\n"
+            "## Retrieved Context\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE not in result
+        # Surrounding content survives
+        assert "# Project Memory" in result
+        assert "## Retrieved Context" in result
+
+    def test_strips_stale_line_without_trailing_period(self):
+        """Regex uses `\\.?` to match the line with OR without a trailing
+        period — the v3.16.2 template has the period; hand-edited copies
+        may lack it.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        # No trailing period after `CLAUDE.md`
+        no_period = "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`"
+        content = (
+            "# Project Memory\n"
+            f"{no_period}\n"
+            "## Retrieved Context\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert no_period not in result
+
+    def test_absent_stale_line_returns_content_unchanged(self):
+        """No-op case: when the stale line is absent, the helper returns
+        content identical to the input. Idempotency guarantee.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Some retrieved data.\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert result == content, (
+            "_strip_legacy_lines must be a no-op when no stale line is present"
+        )
+
+    def test_idempotent_across_two_invocations(self):
+        """Applying `_strip_legacy_lines` twice is the same as applying it
+        once — the function is pure and deterministic. This matches the
+        expectation of shared helper usage (both `update_pact_routing` and
+        `_build_migrated_content` call it; running both consecutively must
+        not corrupt content).
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            f"{self.STALE_LINE}\n"
+            "## Pinned Context\n"
+            "### Pin\n"
+            "Body.\n"
+        )
+
+        once = _strip_legacy_lines(content)
+        twice = _strip_legacy_lines(once)
+
+        assert once == twice
+        assert self.STALE_LINE not in once
+
+    def test_preserves_other_content_mentioning_orchestrator(self):
+        """A line that mentions the word "orchestrator" but is not the
+        exact stale template line must NOT be stripped. The regex is
+        anchored to the full stale-line text.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "The orchestrator loads from somewhere else entirely.\n"
+            "See also: orchestrator governance.\n"
+            "\n"
+            "## Pinned Context\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        # Both lines mention "orchestrator" but don't match the stale pattern
+        assert "The orchestrator loads from somewhere else entirely." in result
+        assert "See also: orchestrator governance." in result
 
