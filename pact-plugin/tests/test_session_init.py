@@ -3349,3 +3349,151 @@ class TestMainExceptionSafetyNet:
         sys_msg = output["systemMessage"]
         assert "simulated late failure after team name captured" in sys_msg
         assert "PACT hook warning (session_init)" in sys_msg
+
+
+# ---------------------------------------------------------------------------
+# #401 — bootstrap-complete marker cleanup on compact/clear
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapMarkerCleanup:
+    """Tests for bootstrap-complete marker deletion on compact/clear sources.
+
+    session_init.main() must delete the bootstrap-complete marker when
+    source is "compact" or "clear" to re-engage the bootstrap gate hooks
+    after context is reset. The marker is at:
+    ~/.claude/pact-sessions/{slug}/{session_id}/bootstrap-complete
+    """
+
+    def _run_main_with_marker(self, monkeypatch, tmp_path, source):
+        """Helper: run main() with bootstrap-complete marker present.
+
+        Returns whether bootstrap-complete marker still exists after main().
+        """
+        from session_init import main
+
+        project_dir = "/Users/mj/Sites/test-project"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", project_dir)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_id = "aabb1122-0000-0000-0000-000000000000"
+        slug = "test-project"
+
+        # Create session dir and bootstrap-complete marker
+        session_dir = (
+            tmp_path / ".claude" / "pact-sessions" / slug / session_id
+        )
+        session_dir.mkdir(parents=True)
+        marker = session_dir / "bootstrap-complete"
+        marker.touch()
+
+        stdin_data = json.dumps({
+            "session_id": session_id,
+            "source": source,
+        })
+
+        with patch("session_init.COMPACT_SUMMARY_PATH", tmp_path / "no-such-file"), \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        return marker.exists()
+
+    def test_compact_deletes_marker(self, monkeypatch, tmp_path):
+        """compact source must delete bootstrap-complete marker."""
+        still_exists = self._run_main_with_marker(monkeypatch, tmp_path, "compact")
+        assert not still_exists, (
+            "bootstrap-complete marker should be deleted for source='compact'"
+        )
+
+    def test_clear_deletes_marker(self, monkeypatch, tmp_path):
+        """clear source must delete bootstrap-complete marker."""
+        still_exists = self._run_main_with_marker(monkeypatch, tmp_path, "clear")
+        assert not still_exists, (
+            "bootstrap-complete marker should be deleted for source='clear'"
+        )
+
+    @pytest.mark.parametrize("source", ["startup", "resume"])
+    def test_non_reset_sources_preserve_marker(self, monkeypatch, tmp_path, source):
+        """startup and resume should NOT delete the marker."""
+        still_exists = self._run_main_with_marker(monkeypatch, tmp_path, source)
+        assert still_exists, (
+            f"bootstrap-complete marker should be preserved for source='{source}'"
+        )
+
+    def test_missing_marker_is_noop(self, monkeypatch, tmp_path):
+        """compact with no marker should not raise (unlink(missing_ok=True))."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        session_id = "aabb1122-0000-0000-0000-000000000000"
+        session_dir = (
+            tmp_path / ".claude" / "pact-sessions" / "test-project" / session_id
+        )
+        session_dir.mkdir(parents=True)
+        # No marker created — should not raise
+
+        stdin_data = json.dumps({
+            "session_id": session_id,
+            "source": "compact",
+        })
+
+        with patch("session_init.COMPACT_SUMMARY_PATH", tmp_path / "no-such-file"), \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Should complete without error
+        assert exc_info.value.code == 0
+
+    def test_missing_session_id_skips_cleanup(self, monkeypatch, tmp_path):
+        """No session_id in input → marker cleanup is skipped (no crash)."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps({
+            "session_id": "",
+            "source": "compact",
+        })
+
+        with patch("session_init.COMPACT_SUMMARY_PATH", tmp_path / "no-such-file"), \
+             patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
