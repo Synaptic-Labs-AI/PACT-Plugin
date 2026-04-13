@@ -41,6 +41,9 @@ import json
 import sys
 from pathlib import Path
 
+import shared.pact_context as pact_context
+from shared import BOOTSTRAP_MARKER_NAME
+
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 # Code-editing and agent-spawning tools blocked until bootstrap completes.
@@ -67,16 +70,6 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     Returns the deny reason string if the tool should be blocked, or None
     if the tool call should be allowed through.
     """
-    try:
-        sys.path.insert(
-            0,
-            str(Path(__file__).resolve().parent),
-        )
-        from shared import pact_context, BOOTSTRAP_MARKER_NAME
-    finally:
-        if sys.path and sys.path[0] == str(Path(__file__).resolve().parent):
-            sys.path.pop(0)
-
     pact_context.init(input_data)
 
     # Fast path: marker exists → allow everything

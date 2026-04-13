@@ -24,8 +24,8 @@ import json
 import sys
 from pathlib import Path
 
-# Inline shared-module imports inside main() to keep the module importable
-# for testing even when shared/ is not on sys.path.
+import shared.pact_context as pact_context
+from shared import BOOTSTRAP_MARKER_NAME
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
@@ -50,18 +50,6 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     Returns the additionalContext string to inject, or None if the gate
     should be a no-op (marker exists, non-PACT session, or teammate).
     """
-    # Import shared modules here so the top-level module remains importable
-    # without sys.path manipulation (useful for test fixtures).
-    try:
-        sys.path.insert(
-            0,
-            str(Path(__file__).resolve().parent),
-        )
-        from shared import pact_context, BOOTSTRAP_MARKER_NAME
-    finally:
-        if sys.path and sys.path[0] == str(Path(__file__).resolve().parent):
-            sys.path.pop(0)
-
     # Initialize context (sets session-scoped path from input_data)
     pact_context.init(input_data)
 
