@@ -22,13 +22,13 @@ ensure_project_memory_md() — project CLAUDE.md creation:
 10. Returns None when project CLAUDE.md already exists (legacy ./CLAUDE.md)
 11. Creates project CLAUDE.md (.claude/CLAUDE.md, new default) with memory sections
 12. Created file contains session markers
-13. Created file contains the canonical _PACT_ROUTING_BLOCK verbatim
+13. Created file contains the canonical PACT_ROUTING_BLOCK verbatim
 14. Returns None when .claude/CLAUDE.md already exists (no overwrite)
 15. Returns None when only legacy ./CLAUDE.md exists (no migration)
 16. .claude/CLAUDE.md takes precedence when both locations exist
 17. Created .claude/CLAUDE.md has 0o600 permissions; .claude/ dir 0o700
 
-_PACT_ROUTING_BLOCK constant — load-bearing fixture:
+PACT_ROUTING_BLOCK constant — load-bearing fixture:
 18. Constant matches the canonical 18-line text byte-for-byte
 19. Constant has no leading or trailing newlines (Python string precision)
 """
@@ -100,11 +100,11 @@ def mock_home(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _PACT_ROUTING_BLOCK constant — load-bearing fixture
+# PACT_ROUTING_BLOCK constant — load-bearing fixture
 # ---------------------------------------------------------------------------
 
 class TestPactRoutingBlock:
-    """Byte-exact assertions on the _PACT_ROUTING_BLOCK constant.
+    """Byte-exact assertions on the PACT_ROUTING_BLOCK constant.
 
     The constant is load-bearing: agents read it from project CLAUDE.md to
     decide which bootstrap skill to invoke. Any drift breaks role detection.
@@ -112,41 +112,41 @@ class TestPactRoutingBlock:
 
     def test_constant_matches_canonical_text(self):
         """The shared constant must match the canonical text byte-for-byte."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        assert _PACT_ROUTING_BLOCK == CANONICAL_PACT_ROUTING_BLOCK
+        assert PACT_ROUTING_BLOCK == CANONICAL_PACT_ROUTING_BLOCK
 
     def test_constant_has_no_leading_newline(self):
         """The constant must not start with a newline (insertion logic depends on it)."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        assert not _PACT_ROUTING_BLOCK.startswith("\n")
-        assert _PACT_ROUTING_BLOCK.startswith("<!-- PACT_ROUTING_START:")
+        assert not PACT_ROUTING_BLOCK.startswith("\n")
+        assert PACT_ROUTING_BLOCK.startswith("<!-- PACT_ROUTING_START:")
 
     def test_constant_has_no_trailing_newline(self):
         """The constant must not end with a newline (insertion logic depends on it)."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        assert not _PACT_ROUTING_BLOCK.endswith("\n")
-        assert _PACT_ROUTING_BLOCK.endswith("<!-- PACT_ROUTING_END -->")
+        assert not PACT_ROUTING_BLOCK.endswith("\n")
+        assert PACT_ROUTING_BLOCK.endswith("<!-- PACT_ROUTING_END -->")
 
     def test_constant_contains_em_dash(self):
         """Line 5 must contain U+2014 em dash, not ASCII --."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        assert "\u2014" in _PACT_ROUTING_BLOCK
-        assert "Do not skip \u2014" in _PACT_ROUTING_BLOCK
+        assert "\u2014" in PACT_ROUTING_BLOCK
+        assert "Do not skip \u2014" in PACT_ROUTING_BLOCK
 
     def test_constant_contains_rightwards_arrows(self):
         """Bullet items must use U+2192, not ASCII ->."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
         # Two bullet rows; both use U+2192. After cycle 2 item 15
         # line-anchor mitigation, the bullets are phrased as "Line
         # starting with `PACT ROLE: ...`" rather than the bare marker.
-        assert _PACT_ROUTING_BLOCK.count("\u2192") == 2
-        assert "Line starting with `PACT ROLE: orchestrator` \u2192" in _PACT_ROUTING_BLOCK
-        assert "Line starting with `PACT ROLE: teammate (` \u2192" in _PACT_ROUTING_BLOCK
+        assert PACT_ROUTING_BLOCK.count("\u2192") == 2
+        assert "Line starting with `PACT ROLE: orchestrator` \u2192" in PACT_ROUTING_BLOCK
+        assert "Line starting with `PACT ROLE: teammate (` \u2192" in PACT_ROUTING_BLOCK
 
     def test_line_anchor_heuristic_rejects_mid_line_pact_role(self):
         """The routing block instructs agents to check for 'PACT ROLE:'
@@ -1599,7 +1599,7 @@ class TestEnsureProjectMemoryMd:
         assert "<!-- SESSION_END -->" in content
 
     def test_created_file_contains_canonical_routing_block(self, tmp_path, monkeypatch):
-        """The created file must embed the canonical _PACT_ROUTING_BLOCK verbatim."""
+        """The created file must embed the canonical PACT_ROUTING_BLOCK verbatim."""
         from shared.claude_md_manager import ensure_project_memory_md
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
@@ -1893,7 +1893,7 @@ class TestEnsureDotClaudeParent:
 class TestMarkerConsistency:
     """Spec Section 8: cross-file fixture sanity check.
 
-    The _PACT_ROUTING_BLOCK constant in claude_md_manager.py pattern-matches
+    The PACT_ROUTING_BLOCK constant in claude_md_manager.py pattern-matches
     against two role-marker substrings to route agents to the correct
     bootstrap skill:
 
@@ -1912,7 +1912,7 @@ class TestMarkerConsistency:
     editing the routing block's search patterns without also editing
     the hook emissions (or vice versa). A single-character drift silently
     breaks routing — the unit tests still pass because each side is
-    internally consistent, but `_PACT_ROUTING_BLOCK`'s guidance would
+    internally consistent, but `PACT_ROUTING_BLOCK`'s guidance would
     point at a substring the hooks never actually emit.
 
     This test asserts the emitted strings contain the exact substrings
@@ -1946,21 +1946,21 @@ class TestMarkerConsistency:
         return "\n".join(lines)
 
     def test_routing_block_contains_orchestrator_marker(self):
-        """_PACT_ROUTING_BLOCK must reference `PACT ROLE: orchestrator`."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        """PACT_ROUTING_BLOCK must reference `PACT ROLE: orchestrator`."""
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        assert self.ORCHESTRATOR_MARKER in _PACT_ROUTING_BLOCK, (
-            f"_PACT_ROUTING_BLOCK is missing the `{self.ORCHESTRATOR_MARKER}` "
+        assert self.ORCHESTRATOR_MARKER in PACT_ROUTING_BLOCK, (
+            f"PACT_ROUTING_BLOCK is missing the `{self.ORCHESTRATOR_MARKER}` "
             f"substring — routing logic in spawned leads cannot match "
             f"what the hooks emit."
         )
 
     def test_routing_block_contains_teammate_marker_prefix(self):
-        """_PACT_ROUTING_BLOCK must reference `PACT ROLE: teammate (`."""
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        """PACT_ROUTING_BLOCK must reference `PACT ROLE: teammate (`."""
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        assert self.TEAMMATE_MARKER_PREFIX in _PACT_ROUTING_BLOCK, (
-            f"_PACT_ROUTING_BLOCK is missing the "
+        assert self.TEAMMATE_MARKER_PREFIX in PACT_ROUTING_BLOCK, (
+            f"PACT_ROUTING_BLOCK is missing the "
             f"`{self.TEAMMATE_MARKER_PREFIX}` substring — routing logic "
             f"in spawned teammates cannot match what peer_inject emits."
         )
@@ -2085,7 +2085,7 @@ class TestMarkerConsistency:
         — the routing block uses each marker to dispatch to a different
         bootstrap skill.
         """
-        from shared.claude_md_manager import _PACT_ROUTING_BLOCK
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
         from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
 
         session_init_source = self.SESSION_INIT_PATH.read_text(encoding="utf-8")
@@ -2115,7 +2115,7 @@ class TestMarkerConsistency:
         }
 
         for marker, emitters in marker_to_emitters.items():
-            assert marker in _PACT_ROUTING_BLOCK, (
+            assert marker in PACT_ROUTING_BLOCK, (
                 f"Routing block does not search for `{marker}` — test "
                 f"fixture is stale. Update the test or the routing block."
             )
@@ -3059,6 +3059,137 @@ class TestBuildMigratedContentUserContent:
         assert "# My Project Notes" in after_managed
         assert "Important notes the user added." in after_managed
 
+    def test_preamble_user_content_preserved_above_pact_managed(self):
+        """Round 6 item 4: user content that appears BEFORE the first
+        PACT-managed trigger in the original file is preserved ABOVE
+        ``PACT_MANAGED_START`` — not shoved below ``PACT_MANAGED_END``
+        with other non-memory content.
+
+        Pre-fix behavior put all non-memory content after the managed
+        block; a user with pinned notes or a custom H1 above the template
+        saw their content relocated to the bottom of the file. The fix
+        splits the file at the earliest trigger so preamble stays at the
+        top.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# My Notes\n"
+            "- pin this\n"
+            "\n"
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Some context.\n"
+            "\n"
+            "## Working Memory\n"
+            "Work data.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+        assert "# My Notes" in before_managed, (
+            "Preamble H1 must land above PACT_MANAGED_START"
+        )
+        assert "- pin this" in before_managed, (
+            "Preamble body must land above PACT_MANAGED_START"
+        )
+
+        # Memory content is still inside the memory boundary
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "Some context." in memory_region
+        assert "Work data." in memory_region
+
+    def test_trailing_user_content_still_below_pact_managed(self):
+        """Round 6 item 4: user content APPENDED after memory sections
+        must still land BELOW ``PACT_MANAGED_END`` (the existing behavior).
+        The preamble fix only moves PRE-memory user content; it must not
+        regress POST-memory user content placement.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "## Trailing Notes\n"
+            "Stuff the user appended later.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## Trailing Notes" in after_managed
+        assert "Stuff the user appended later." in after_managed
+
+        # And it must NOT have migrated into the preamble region
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+        assert "## Trailing Notes" not in before_managed
+        assert "Stuff the user appended later." not in before_managed
+
+    def test_user_content_both_sides_preserved(self):
+        """Round 6 item 4: when the user has content BOTH above and below
+        the PACT-managed section, both survive in their original positions
+        — above content lands above ``PACT_MANAGED_START``, below content
+        lands below ``PACT_MANAGED_END``. The memory body stays inside the
+        memory boundary.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Top Preamble\n"
+            "Pinned note at the top.\n"
+            "\n"
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "Retrieved body.\n"
+            "\n"
+            "## Working Memory\n"
+            "Working body.\n"
+            "\n"
+            "## Footer Section\n"
+            "Trailing content.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        managed_start_idx = result.index(_MANAGED_START)
+        managed_end_idx = result.index(_MANAGED_END)
+
+        before_managed = result[:managed_start_idx]
+        after_managed = result[managed_end_idx:]
+
+        # Preamble survives above
+        assert "# Top Preamble" in before_managed
+        assert "Pinned note at the top." in before_managed
+        # And must NOT leak into the trailing region
+        assert "# Top Preamble" not in after_managed
+        assert "Pinned note at the top." not in after_managed
+
+        # Trailing content survives below
+        assert "## Footer Section" in after_managed
+        assert "Trailing content." in after_managed
+        # And must NOT leak into the preamble region
+        assert "## Footer Section" not in before_managed
+        assert "Trailing content." not in before_managed
+
+        # Memory body stays inside the memory boundary
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "Retrieved body." in memory_region
+        assert "Working body." in memory_region
+
 
 class TestBuildMigratedContentAdversarial:
     """Adversarial and edge-case inputs for _build_migrated_content().
@@ -3154,7 +3285,18 @@ class TestBuildMigratedContentAdversarial:
         assert "Second working memory block." in memory_region
 
     def test_content_with_no_headings_at_all(self):
-        """Flat text with no headings — everything should go to user content."""
+        """Flat text with no headings and no PACT-managed triggers is
+        treated entirely as preamble (round 6, item 4): everything lands
+        ABOVE ``PACT_MANAGED_START``, not after ``PACT_MANAGED_END``.
+
+        Contract: ``_find_preamble_cutoff`` returns ``len(content)`` when
+        no trigger is found, meaning the entire file is preamble. This
+        preserves position — random user text at the top of a CLAUDE.md
+        file stays at the top after migration, not shoved below an empty
+        managed block. Prior to item 4, this content landed below the
+        managed block because the walker classified non-heading lines into
+        ``user_parts``; the new contract is intentionally more preserving.
+        """
         from shared.claude_md_manager import _build_migrated_content
 
         content = "Just some random text in a CLAUDE.md file.\nAnother line.\n"
@@ -3163,9 +3305,15 @@ class TestBuildMigratedContentAdversarial:
 
         assert _MANAGED_START in result
         assert _MANAGED_END in result
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+        assert "Just some random text" in before_managed
+        assert "Another line." in before_managed
+
+        # And it must NOT leak into the trailing region
         managed_end_idx = result.index(_MANAGED_END)
         after_managed = result[managed_end_idx:]
-        assert "Just some random text" in after_managed
+        assert "Just some random text" not in after_managed
 
     def test_partial_routing_markers_no_end(self):
         """If only PACT_ROUTING_START is present with no END, the routing
@@ -3386,7 +3534,7 @@ class TestBuildMigratedContentOrphanRoutingMarker:
     H2 block. A fresh routing block will be installed by the next
     `update_pact_routing` call, so no real content is lost (the routing
     block is plugin-authored template content rebuilt from
-    _PACT_ROUTING_BLOCK).
+    PACT_ROUTING_BLOCK).
     """
 
     _ROUTING_START = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
@@ -3985,6 +4133,88 @@ class TestManagedMarkerConstants:
                 assert b not in a, (
                     f"Marker substring collision: {b!r} is contained in {a!r}"
                 )
+
+    def test_managed_title_symbol_matches_literal(self):
+        """Round 6 item 5: symbol-level drift guard for ``MANAGED_TITLE``.
+
+        The round 5 refactor extracted ``MANAGED_TITLE`` as a module
+        constant so the three template sites (``ensure_project_memory_md``,
+        ``_build_migrated_content``, and ``session_resume.update_session_info``
+        Case 0) could not drift apart. This test pins the literal value so
+        an accidental rename (e.g., "# PACT Framework" typo'd to
+        "# PACT Framework" with an extra space) is caught by a targeted
+        assertion rather than via indirect template-shape test failures.
+        """
+        from shared.claude_md_manager import MANAGED_TITLE
+        assert MANAGED_TITLE == "# PACT Framework and Managed Project Memory"
+
+    def test_managed_title_no_literal_copies_in_claude_md_manager(self):
+        """Round 6 item 5: ensure the ``MANAGED_TITLE`` literal appears
+        in ``claude_md_manager.py`` ONLY in the constant definition —
+        not hand-copied into a template string or default argument.
+
+        This is a source-scan drift guard. The literal is allowed inside
+        docstring examples and code comments (because those are
+        documentation, not code that would drift), so the check counts
+        assignment-style RHS occurrences and tolerates docstring mentions.
+        The simple shape: the literal must appear no more than ``N+1``
+        times in the source file where ``N`` is the allowed docstring /
+        comment mentions (currently 1 — the migration strategy docstring).
+
+        If a future refactor intentionally inlines the literal in a new
+        comment/docstring, bump the allowed count here rather than
+        allowing silent drift at a code site.
+        """
+        source_path = (
+            Path(__file__).parent.parent
+            / "hooks"
+            / "shared"
+            / "claude_md_manager.py"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        literal = "# PACT Framework and Managed Project Memory"
+        # Allowed occurrences:
+        #   - 1x MANAGED_TITLE constant definition (code)
+        #   - 1x migration-strategy docstring mention in
+        #     ``migrate_to_managed_structure``
+        # Any additional copy means someone has inlined the literal at a
+        # code site instead of referencing ``MANAGED_TITLE``, which is the
+        # drift pattern item 5 guards against.
+        count = source.count(literal)
+        assert count <= 2, (
+            f"Expected at most 2 occurrences of MANAGED_TITLE literal in "
+            f"claude_md_manager.py (1 constant def + 1 docstring mention), "
+            f"found {count}. A hand-copied literal indicates drift — use "
+            f"the MANAGED_TITLE symbol at code sites instead."
+        )
+
+    def test_managed_title_no_literal_copies_in_session_resume(self):
+        """Round 6 item 5: same drift guard applied to ``session_resume.py``.
+
+        ``update_session_info`` Case 0 (the fresh-file creation path)
+        builds a PACT_MANAGED block and must use the imported
+        ``MANAGED_TITLE`` symbol, not a hand-copied literal. One comment
+        mention is tolerated; any additional occurrence indicates code-site
+        drift.
+        """
+        source_path = (
+            Path(__file__).parent.parent
+            / "hooks"
+            / "shared"
+            / "session_resume.py"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        literal = "# PACT Framework and Managed Project Memory"
+        # Allowed occurrences:
+        #   - 1x docstring/comment mention documenting the Case 0 template
+        # No code-site copy is permitted; ``MANAGED_TITLE`` is imported at
+        # the top of the file and used as a symbol at the single site.
+        count = source.count(literal)
+        assert count <= 1, (
+            f"Expected at most 1 occurrence of MANAGED_TITLE literal in "
+            f"session_resume.py (comment mention only), found {count}. "
+            f"Use the imported MANAGED_TITLE symbol at code sites."
+        )
 
 
 class TestSessionInitMigrationIntegration:

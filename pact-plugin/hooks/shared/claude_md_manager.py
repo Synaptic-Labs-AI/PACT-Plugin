@@ -131,8 +131,6 @@ MANAGED_TITLE = "# PACT Framework and Managed Project Memory"
 # Plugin-managed HTML comment boundary prefixes. Used by parsers and regex
 # sites that need to terminate scans on any PACT-managed boundary marker.
 # Extracted (round 5, item 1) so the three-prefix union is defined once.
-# Any regex alternation is built at the use site via:
-#   _BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
 #
 # Twin copy: working_memory.py maintains a parallel _PACT_BOUNDARY_PREFIXES
 # tuple because skills/pact-memory/scripts/ cannot cleanly import from
@@ -142,6 +140,14 @@ PACT_BOUNDARY_PREFIXES: tuple[str, ...] = (
     "PACT_MANAGED_",
     "PACT_ROUTING_",
 )
+
+# Regex alternation used by scan-terminator patterns in this module.
+# Mirrors the `_BOUNDARY_ALT` constant in `staleness.py` (round 6, item 1):
+# any regex that needs to terminate on a PACT boundary marker must embed
+# this alternation rather than hard-coding the three-prefix literal. That
+# way, adding a fourth prefix to `PACT_BOUNDARY_PREFIXES` automatically
+# picks it up everywhere via a one-line constant change.
+_BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
 
 # Stale line from the v3.16.2 project CLAUDE.md template. After the PR #390
 # migration the routing block supersedes it, but the stale line lingers in
@@ -172,7 +178,7 @@ def _strip_legacy_lines(content: str) -> str:
     """
     return _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
 
-_PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
+PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
 ## PACT Routing
 
 Before any other work, determine your PACT role and invoke the appropriate
@@ -463,7 +469,7 @@ def update_pact_routing() -> str | None:
                     re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
                     re.DOTALL,
                 )
-                new_content = pattern.sub(_PACT_ROUTING_BLOCK, content)
+                new_content = pattern.sub(PACT_ROUTING_BLOCK, content)
 
                 if new_content == content and not stale_line_removed:
                     return None  # Already canonical and no stale line to strip
@@ -555,7 +561,7 @@ def update_pact_routing() -> str | None:
 
             new_lines = (
                 lines[:insert_idx]
-                + ["\n", _PACT_ROUTING_BLOCK + "\n", "\n"]
+                + ["\n", PACT_ROUTING_BLOCK + "\n", "\n"]
                 + lines[insert_idx:]
             )
             new_content = "".join(new_lines)
@@ -621,7 +627,7 @@ def ensure_project_memory_md() -> str | None:
     memory_template = f"""{MANAGED_START_MARKER}
 {MANAGED_TITLE}
 
-{_PACT_ROUTING_BLOCK}
+{PACT_ROUTING_BLOCK}
 
 <!-- SESSION_START -->
 ## Current Session
@@ -749,6 +755,61 @@ def migrate_to_managed_structure() -> str | None:
         )
 
 
+# Trigger list for preamble detection (round 6, item 4). If any of these
+# literals appear in the pre-migration content, the region ABOVE the earliest
+# occurrence is user-owned "preamble" that must be preserved ABOVE the
+# PACT_MANAGED block after migration. The list covers:
+#   - Legacy H1 / H2 section headings from older templates
+#   - PACT-managed HTML comment markers (routing, session, memory)
+# Trigger selection is substring search (not line-anchored). A deliberately
+# crafted user paragraph that contains one of these literals inside prose
+# would trigger preamble-cutoff at that spot, which is acceptable — the user
+# content STILL survives, just potentially split across the managed block
+# instead of fully above it. The safer failure mode.
+_PREAMBLE_TRIGGERS: tuple[str, ...] = (
+    "# Project Memory",
+    "## PACT Routing",
+    "## Current Session",
+    "## Retrieved Context",
+    "## Pinned Context",
+    "## Working Memory",
+    _ROUTING_START_MARKER,
+    "<!-- SESSION_START -->",
+    MEMORY_START_MARKER,
+)
+
+
+def _find_preamble_cutoff(content: str) -> int:
+    """
+    Return the byte offset where user-owned preamble ends and PACT-managed
+    content begins in the original (pre-migration) CLAUDE.md content.
+
+    Scans the content for the earliest occurrence of any trigger from
+    `_PREAMBLE_TRIGGERS`. Returns the minimum such offset, or `len(content)`
+    if no trigger is present (in which case the entire file is preamble and
+    the migration will emit a shell managed block with empty memory).
+
+    Round 6 item 4: pre-fix behavior put all non-memory content AFTER
+    PACT_MANAGED_END. Users with notes above `# Project Memory` saw their
+    content moved below all PACT-managed content. The new behavior splits
+    the file at the earliest PACT-managed trigger so preamble user content
+    survives in place above PACT_MANAGED_START.
+
+    Args:
+        content: The pre-migration CLAUDE.md content.
+
+    Returns:
+        Byte offset of the first PACT-managed trigger, or `len(content)`
+        if none found.
+    """
+    earliest = len(content)
+    for trigger in _PREAMBLE_TRIGGERS:
+        idx = content.find(trigger)
+        if idx != -1 and idx < earliest:
+            earliest = idx
+    return earliest
+
+
 def _build_migrated_content(content: str) -> str:
     """
     Transform old-format CLAUDE.md content into the new managed structure.
@@ -757,6 +818,12 @@ def _build_migrated_content(content: str) -> str:
     existing content and reassembles them inside the new boundary markers.
     Any content that falls outside the recognized PACT sections is preserved
     AFTER the PACT_MANAGED_END marker as user-owned content.
+
+    Round 6 item 4: User content that appears BEFORE the first PACT-managed
+    marker/heading in the original file is preserved ABOVE the PACT_MANAGED_START
+    marker as "preamble" (instead of being shoved below PACT_MANAGED_END with
+    the rest of the non-memory user content). This preserves the intuition
+    that edits a user makes at the top of the file stay at the top.
 
     This is a pure function (no I/O) for testability.
 
@@ -776,6 +843,22 @@ def _build_migrated_content(content: str) -> str:
     # Idempotency guard: already migrated → no-op
     if MANAGED_START_MARKER in content:
         return content
+
+    # Preamble split (round 6, item 4): compute cutoff on ORIGINAL content
+    # before any extraction. Walker-level preamble detection won't work here
+    # because by the time the walker runs, routing/session have been extracted
+    # and the old `# Project Memory` heading has been stripped by
+    # _strip_legacy_lines — the walker cannot see the triggers that define
+    # "where does preamble end". Computing the cutoff first means all trigger
+    # types (including HTML comment markers) are detectable.
+    preamble_cutoff = _find_preamble_cutoff(content)
+    preamble_text = content[:preamble_cutoff]
+    # Apply _strip_legacy_lines to the preamble too. An upgraded project may
+    # have the v3.16.2 stale orchestrator-loader line in the preamble region
+    # (above `# Project Memory`), and leaving it there would contradict the
+    # routing block that gets reinstalled below.
+    preamble_text = _strip_legacy_lines(preamble_text)
+    content = content[preamble_cutoff:]
 
     # Extract routing block if present (between markers)
     routing_block = ""
@@ -804,7 +887,7 @@ def _build_migrated_content(content: str) -> str:
         # A fresh routing block will be installed by the next
         # update_pact_routing call. We lose no information — the canonical
         # routing content is a plugin template rebuilt from
-        # _PACT_ROUTING_BLOCK, not user-authored content.
+        # PACT_ROUTING_BLOCK, not user-authored content.
         orphan_marker = (
             _ROUTING_START_MARKER
             if _ROUTING_START_MARKER in content
@@ -847,8 +930,11 @@ def _build_migrated_content(content: str) -> str:
 
         # Find the next genuine section terminator (non-PACT_Routing
         # heading or any PACT boundary marker).
+        # Uses _BOUNDARY_ALT so adding a prefix to PACT_BOUNDARY_PREFIXES
+        # is still a one-line change — this was the 6th drift site that
+        # hard-coded the three-prefix literal (round 6, item 1).
         next_terminator = re.search(
-            r"^(?:#{1,2}\s|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))",
+            rf"^(?:#{{1,2}}\s|<!-- (?:{_BOUNDARY_ALT}))",
             content[scan_from:],
             re.MULTILINE,
         )
@@ -892,10 +978,14 @@ def _build_migrated_content(content: str) -> str:
 
     # Also strip any legacy template lines that lingered (e.g., the v3.16.2
     # stale orchestrator loader line).
-    # Fence classification happens upstream in the line-walker below, so
-    # _strip_legacy_lines does not need to track fence state — any legacy
-    # lines inside fenced blocks have already been classified as user
-    # content (round 5, item 10).
+    # _strip_legacy_lines runs BEFORE fence classification in the line-walker
+    # below. The legacy patterns (stale orchestrator loader line, old
+    # `# Project Memory` heading) are specific enough that false positives
+    # inside user-authored code fences are unlikely — but if a user has any
+    # of those exact patterns verbatim inside a fence, they will be stripped.
+    # Fence-aware stripping would require reordering this call to operate on
+    # walker output, which is more complex than the edge case warrants
+    # (round 6, item 2).
     remaining = _strip_legacy_lines(remaining)
 
     # Extract memory sections: Retrieved Context, Pinned Context, Working Memory
@@ -999,8 +1089,15 @@ def _build_migrated_content(content: str) -> str:
         if current_heading is not None:
             _append_body(current_heading, "".join(current_body).rstrip())
 
-    # Build the new structure
-    parts = [MANAGED_START_MARKER, "\n", f"{MANAGED_TITLE}\n"]
+    # Build the new structure. Preamble (round 6, item 4): if the user had
+    # content ABOVE the first PACT-managed trigger, emit it FIRST, then a
+    # blank-line separator, then the managed block. Empty preamble (common
+    # case: file starts with `# Project Memory`) contributes nothing.
+    parts: list[str] = []
+    preamble_stripped = preamble_text.strip()
+    if preamble_stripped:
+        parts.extend([preamble_stripped, "\n\n"])
+    parts.extend([MANAGED_START_MARKER, "\n", f"{MANAGED_TITLE}\n"])
 
     # Routing block
     if routing_block:

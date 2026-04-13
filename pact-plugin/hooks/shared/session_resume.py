@@ -25,7 +25,7 @@ from shared.claude_md_manager import (
     MANAGED_TITLE,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
-    _PACT_ROUTING_BLOCK,
+    PACT_ROUTING_BLOCK,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -152,7 +152,7 @@ def update_session_info(
                         f"{MANAGED_START_MARKER}\n"
                         f"{MANAGED_TITLE}\n"
                         "\n"
-                        f"{_PACT_ROUTING_BLOCK}\n"
+                        f"{PACT_ROUTING_BLOCK}\n"
                         "\n"
                         f"{session_block}\n"
                         "\n"

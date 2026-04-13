@@ -37,6 +37,7 @@ from .claude_md_manager import (
     MEMORY_END_MARKER,
     MANAGED_TITLE,
     PACT_BOUNDARY_PREFIXES,
+    PACT_ROUTING_BLOCK,
 )
 from .failure_log import (
     append_failure,
@@ -86,6 +87,7 @@ __all__ = [
     "MEMORY_END_MARKER",
     "MANAGED_TITLE",
     "PACT_BOUNDARY_PREFIXES",
+    "PACT_ROUTING_BLOCK",
     "append_failure",
     "read_failures",
     "FAILURE_LOG_PATH",
