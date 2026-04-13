@@ -344,14 +344,18 @@ def _parse_working_memory_section(
     """
     # Pattern to find the Working Memory section
     # Match ## Working Memory followed by optional comment and entries.
-    # Negative lookahead (?!PACT_) excludes PACT boundary markers from being
-    # consumed as the auto-managed comment — otherwise an empty Working Memory
-    # section followed immediately by <!-- PACT_MEMORY_END --> would greedily
-    # swallow the marker into section_header_end, and the marker would be lost
-    # on write-back (#404).
+    # Negative lookahead excludes the three plugin-managed boundary prefixes
+    # (PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_) from being consumed as the
+    # auto-managed comment — otherwise an empty Working Memory section
+    # followed immediately by <!-- PACT_MEMORY_END --> would greedily swallow
+    # the marker into section_header_end, and the marker would be lost on
+    # write-back (#404). Using the specific prefixes (not a broad ^PACT_)
+    # keeps the guard load-bearing to the markers we actually emit, so a
+    # hypothetical user comment like <!-- PACT_note: user-owned --> still
+    # parses as an auto-managed comment without breaking.
     section_pattern = re.compile(
         r'^(## Working Memory)\s*\n'
-        r'(<!-- (?!PACT_)[^>]*-->)?\s*\n?',
+        r'(<!-- (?!(?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
@@ -365,9 +369,13 @@ def _parse_working_memory_section(
     section_header_end = match.end()
 
     # Find where the next ## section starts (end of working memory section)
-    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or PACT
-    # boundary markers (<!-- PACT_*) to prevent silent marker erosion (#404).
-    next_section_pattern = re.compile(r'^(#\s|##\s(?!Working Memory)|---|<!-- PACT_)', re.MULTILINE)
+    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or the
+    # three plugin-managed boundary prefixes (PACT_MEMORY_, PACT_MANAGED_,
+    # PACT_ROUTING_) to prevent silent marker erosion (#404).
+    next_section_pattern = re.compile(
+        r'^(#\s|##\s(?!Working Memory)|---|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))',
+        re.MULTILINE
+    )
     next_match = next_section_pattern.search(content, section_header_end)
 
     if next_match:
@@ -491,12 +499,12 @@ def _parse_retrieved_context_section(
         where existing_entries is a list of individual memory entry strings.
     """
     # Pattern to find the Retrieved Context section.
-    # Negative lookahead (?!PACT_) excludes PACT boundary markers from being
-    # consumed as the auto-managed comment — see _parse_working_memory_section
+    # Negative lookahead narrows to the three plugin-managed boundary prefixes
+    # (PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_) — see _parse_working_memory_section
     # for the full rationale (#404).
     section_pattern = re.compile(
         r'^(## Retrieved Context)\s*\n'
-        r'(<!-- (?!PACT_)[^>]*-->)?\s*\n?',
+        r'(<!-- (?!(?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
@@ -510,9 +518,13 @@ def _parse_retrieved_context_section(
     section_header_end = match.end()
 
     # Find where the next ## section starts (end of retrieved context section)
-    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or PACT
-    # boundary markers (<!-- PACT_*) to prevent silent marker erosion (#404).
-    next_section_pattern = re.compile(r'^(#\s|##\s(?!Retrieved Context)|---|<!-- PACT_)', re.MULTILINE)
+    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or the
+    # three plugin-managed boundary prefixes (PACT_MEMORY_, PACT_MANAGED_,
+    # PACT_ROUTING_) to prevent silent marker erosion (#404).
+    next_section_pattern = re.compile(
+        r'^(#\s|##\s(?!Retrieved Context)|---|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))',
+        re.MULTILINE
+    )
     next_match = next_section_pattern.search(content, section_header_end)
 
     if next_match:

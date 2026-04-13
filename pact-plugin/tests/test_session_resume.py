@@ -84,11 +84,22 @@ class TestUpdateSessionInfo:
         # Legacy location should NOT be created when neither exists
         assert not legacy.exists()
         content = new_default.read_text()
-        # Header
-        assert content.startswith("# PACT Framework for Agentic Orchestration\n")
-        # Auto-creation comment
-        assert "PACT auto-creates this file" in content
-        assert "SESSION_START/SESSION_END markers" in content
+        # Canonical PACT_MANAGED structure: file starts with the outer boundary
+        # marker on line 1, then the single H1 heading on line 2 (#404).
+        assert content.startswith("<!-- PACT_MANAGED_START")
+        assert "# PACT Framework and Managed Project Memory\n" in content
+        # Outer PACT_MANAGED boundary
+        assert "<!-- PACT_MANAGED_START" in content
+        assert "<!-- PACT_MANAGED_END -->" in content
+        # Inner PACT_MEMORY boundary with all three canonical section headings
+        assert "<!-- PACT_MEMORY_START -->" in content
+        assert "<!-- PACT_MEMORY_END -->" in content
+        assert "## Retrieved Context" in content
+        assert "## Pinned Context" in content
+        assert "## Working Memory" in content
+        # Routing block embedded
+        assert "<!-- PACT_ROUTING_START" in content
+        assert "<!-- PACT_ROUTING_END -->" in content
         # Session block written with provided values
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content

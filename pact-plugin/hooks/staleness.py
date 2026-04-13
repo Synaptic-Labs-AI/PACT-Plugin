@@ -143,8 +143,16 @@ def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
 
     pinned_start = pinned_match.end()
 
-    # Find the end of pinned section (next H1 or H2 heading, or EOF)
-    next_section = re.search(r'^#{1,2}\s', content[pinned_start:], re.MULTILINE)
+    # Find the end of pinned section (next H1/H2 heading, or a plugin-managed
+    # boundary marker — PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_ — or EOF).
+    # Without the marker alternative, a pinned section immediately followed by
+    # <!-- PACT_MEMORY_END --> would run past the marker to the next H2, causing
+    # subsequent write-backs to eat the boundary marker (#404).
+    next_section = re.search(
+        r'^(?:#{1,2}\s|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))',
+        content[pinned_start:],
+        re.MULTILINE,
+    )
     if next_section:
         pinned_end = pinned_start + next_section.start()
     else:

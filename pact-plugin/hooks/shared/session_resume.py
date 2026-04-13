@@ -20,6 +20,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
+    MEMORY_END_MARKER,
+    MEMORY_START_MARKER,
+    _PACT_ROUTING_BLOCK,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -131,19 +136,36 @@ def update_session_info(
                 return "Session info skipped: path precondition not met."
 
             try:
-                # Case 0: File doesn't exist -- create it with a minimal template
-                # so the orchestrator has a stable Current Session block to read on
-                # the very first session in a project. The .claude/ parent was
-                # created above (before the lock) with mode 0o700.
+                # Case 0: File doesn't exist -- create it with the full canonical
+                # PACT_MANAGED structure so the orchestrator has a stable Current
+                # Session block AND a ready PACT_MEMORY container on the very first
+                # session in a project. The .claude/ parent was created above
+                # (before the lock) with mode 0o700.
+                #
+                # Structure mirrors `ensure_project_memory_md`'s template — single
+                # H1 ("# PACT Framework and Managed Project Memory"), routing block,
+                # session block, PACT_MEMORY with three default section headings,
+                # all wrapped by the PACT_MANAGED outer boundary.
                 if not target_file.exists():
                     new_content = (
-                        "# PACT Framework for Agentic Orchestration\n"
+                        f"{MANAGED_START_MARKER}\n"
+                        "# PACT Framework and Managed Project Memory\n"
                         "\n"
-                        "<!-- PACT auto-creates this file on first session. "
-                        "Safe to add your own content outside the PACT_MANAGED block; "
-                        "the SESSION_START/SESSION_END markers are auto-updated each session. -->\n"
+                        f"{_PACT_ROUTING_BLOCK}\n"
                         "\n"
                         f"{session_block}\n"
+                        "\n"
+                        f"{MEMORY_START_MARKER}\n"
+                        "## Retrieved Context\n"
+                        "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->\n"
+                        "\n"
+                        "## Pinned Context\n"
+                        "\n"
+                        "## Working Memory\n"
+                        "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->\n"
+                        f"{MEMORY_END_MARKER}\n"
+                        "\n"
+                        f"{MANAGED_END_MARKER}\n"
                     )
                     target_file.write_text(new_content, encoding="utf-8")
                     os.chmod(str(target_file), 0o600)

@@ -1512,7 +1512,7 @@ class TestEnsureProjectMemoryMd:
         assert new_default.exists()
         assert not legacy.exists()
         content = new_default.read_text()
-        assert "# Project Memory" in content
+        assert "# PACT Framework and Managed Project Memory" in content
         assert "## Retrieved Context" in content
         assert "## Working Memory" in content
 
@@ -2649,16 +2649,20 @@ class TestBuildMigratedContentCurrentFormat:
         assert _MEMORY_END in result
 
     def test_new_heading_replaces_old(self):
-        """Old '# Project Memory' is replaced by '# PACT Framework for Agentic Orchestration'."""
+        """Legacy '# Project Memory' is replaced by the single canonical H1
+        '# PACT Framework and Managed Project Memory'."""
         from shared.claude_md_manager import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
-        assert "# PACT Framework for Agentic Orchestration" in result
+        assert "# PACT Framework and Managed Project Memory" in result
         # Old heading text should not survive as a top-level heading
         lines = result.splitlines()
         top_level_headings = [l for l in lines if l.startswith("# ") and not l.startswith("## ")]
         assert "# Project Memory" not in top_level_headings
+        # Single-H1 invariant: only one top-level heading (no interior H1
+        # inside PACT_MEMORY).
+        assert len(top_level_headings) == 1
 
     def test_memory_sections_inside_memory_boundary(self):
         """Retrieved Context, Pinned Context, and Working Memory must appear
@@ -2739,8 +2743,13 @@ class TestBuildMigratedContentCurrentFormat:
         assert positions["memory_start"] < positions["memory_end"]
         assert positions["memory_end"] < positions["managed_end"]
 
-    def test_new_memory_heading_inside_memory_boundary(self):
-        """'# Project Memory (PACT-Managed)' must appear inside the memory boundary."""
+    def test_no_interior_h1_inside_memory_boundary(self):
+        """With the single-H1 restructure (#404), PACT_MEMORY must not contain
+        any top-level heading — memory sections begin directly with their H2
+        headings. Prior to the restructure, an interior H1 ('# Project Memory
+        (PACT-Managed)') lived inside the memory boundary; that has been
+        dropped in favor of a single outer H1.
+        """
         from shared.claude_md_manager import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
@@ -2749,7 +2758,11 @@ class TestBuildMigratedContentCurrentFormat:
         mem_end_idx = result.index(_MEMORY_END)
         memory_region = result[mem_start_idx:mem_end_idx]
 
-        assert "# Project Memory (PACT-Managed)" in memory_region
+        memory_lines = memory_region.splitlines()
+        h1_headings = [l for l in memory_lines if l.startswith("# ") and not l.startswith("## ")]
+        assert h1_headings == [], (
+            f"PACT_MEMORY region should have no H1 headings, found: {h1_headings}"
+        )
 
     def test_pinned_context_sub_heading_preserved(self):
         """Sub-headings (### level) under memory sections must be preserved."""
@@ -2850,7 +2863,7 @@ class TestBuildMigratedContentMissingSections:
         assert _MANAGED_END in result
         assert _MEMORY_START in result
         assert _MEMORY_END in result
-        assert "# PACT Framework for Agentic Orchestration" in result
+        assert "# PACT Framework and Managed Project Memory" in result
 
     def test_only_heading_no_sections(self):
         """Just the heading line, nothing else."""
@@ -3510,7 +3523,8 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert _MEMORY_END in content
 
     def test_created_file_has_new_top_heading(self, tmp_path, monkeypatch):
-        """Template heading is '# PACT Framework for Agentic Orchestration'."""
+        """Template heading is the single canonical H1
+        '# PACT Framework and Managed Project Memory'."""
         from shared.claude_md_manager import ensure_project_memory_md
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
@@ -3518,7 +3532,12 @@ class TestEnsureProjectMemoryMdNewMarkers:
         ensure_project_memory_md()
 
         content = (tmp_path / ".claude" / "CLAUDE.md").read_text()
-        assert "# PACT Framework for Agentic Orchestration" in content
+        assert "# PACT Framework and Managed Project Memory" in content
+        # Single-H1 invariant: only one top-level heading in the template.
+        lines = content.splitlines()
+        top_level_headings = [l for l in lines if l.startswith("# ") and not l.startswith("## ")]
+        assert len(top_level_headings) == 1
+        assert top_level_headings[0] == "# PACT Framework and Managed Project Memory"
 
     def test_created_file_memory_sections_inside_boundary(self, tmp_path, monkeypatch):
         """Memory sections in new file must be inside PACT_MEMORY boundary."""
@@ -3561,8 +3580,13 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert positions["memory_start"] < positions["memory_end"]
         assert positions["memory_end"] < positions["managed_end"]
 
-    def test_created_file_has_pact_managed_memory_heading(self, tmp_path, monkeypatch):
-        """Template includes '# Project Memory (PACT-Managed)' inside memory boundary."""
+    def test_created_file_no_interior_h1_inside_memory_boundary(
+        self, tmp_path, monkeypatch
+    ):
+        """With the single-H1 restructure (#404), the template must not put any
+        top-level heading inside PACT_MEMORY — memory sections begin directly
+        with their H2 headings.
+        """
         from shared.claude_md_manager import ensure_project_memory_md
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
@@ -3573,7 +3597,11 @@ class TestEnsureProjectMemoryMdNewMarkers:
         mem_start_idx = content.index(_MEMORY_START)
         mem_end_idx = content.index(_MEMORY_END)
         memory_region = content[mem_start_idx:mem_end_idx]
-        assert "# Project Memory (PACT-Managed)" in memory_region
+        memory_lines = memory_region.splitlines()
+        h1_headings = [l for l in memory_lines if l.startswith("# ") and not l.startswith("## ")]
+        assert h1_headings == [], (
+            f"PACT_MEMORY region should have no H1 headings, found: {h1_headings}"
+        )
 
 
 class TestManagedMarkerConstants:
@@ -3607,18 +3635,30 @@ class TestManagedMarkerConstants:
         assert "PACT_MANAGED_START" in MANAGED_START_MARKER
         assert "<!-- PACT_START" not in MANAGED_START_MARKER
 
-    def test_marker_cardinality(self):
-        """Exactly 4 new marker constants were added for #404."""
+    def test_no_marker_is_prefix_of_another(self):
+        """No marker string can be a prefix of another marker string.
+
+        A prefix collision would break substring search. For example, if
+        ``<!-- PACT_MANAGED_START`` were a prefix of ``<!-- PACT_MANAGED_START_V2``,
+        an ``in``-operator lookup for the shorter marker would spuriously match
+        the longer one. This is the semantic invariant — an explicit cardinality
+        check (len == 4) tested the counting mistake, not the substring-safety
+        contract.
+        """
         from shared import claude_md_manager as cmm
-        new_markers = [
+        markers = [
             cmm.MANAGED_START_MARKER,
             cmm.MANAGED_END_MARKER,
             cmm.MEMORY_START_MARKER,
             cmm.MEMORY_END_MARKER,
         ]
-        assert len(new_markers) == 4
-        # All are unique
-        assert len(set(new_markers)) == 4
+        for i, a in enumerate(markers):
+            for j, b in enumerate(markers):
+                if i == j:
+                    continue
+                assert not a.startswith(b), (
+                    f"Marker collision: {a!r} has prefix {b!r}"
+                )
 
 
 class TestSessionInitMigrationIntegration:
@@ -3646,335 +3686,3 @@ class TestSessionInitMigrationIntegration:
         assert '"failed"' in source or "'failed'" in source
         assert '"skipped"' in source or "'skipped'" in source
 
-
-class TestWorkingMemoryParserMarkerPreservation:
-    """working_memory.py parsers must treat PACT boundary markers as section
-    terminators so sync round-trips don't silently erode PACT_MEMORY_END and
-    PACT_MANAGED_END markers (#404 review finding).
-    """
-
-    def test_sync_working_memory_preserves_pact_markers(self, tmp_path, monkeypatch):
-        """A sync_to_working_memory round-trip on a new-format file must
-        preserve PACT_MEMORY_END and PACT_MANAGED_END markers.
-        """
-        from scripts.working_memory import (
-            _parse_working_memory_section,
-            WORKING_MEMORY_HEADER,
-        )
-
-        new_format_content = (
-            f"{_MANAGED_START}\n"
-            "# PACT Framework for Agentic Orchestration\n"
-            "\n"
-            f"{_MEMORY_START}\n"
-            "# Project Memory (PACT-Managed)\n"
-            "\n"
-            "## Retrieved Context\n"
-            "\n"
-            "## Pinned Context\n"
-            "\n"
-            f"{WORKING_MEMORY_HEADER}\n"
-            "### 2026-04-12 21:00\n"
-            "**Context**: Test entry\n"
-            "\n"
-            f"{_MEMORY_END}\n"
-            "\n"
-            f"{_MANAGED_END}\n"
-        )
-
-        before, header, after, entries = _parse_working_memory_section(new_format_content)
-
-        # The PACT markers must be in `after`, not consumed as section content
-        assert _MEMORY_END in after, (
-            "PACT_MEMORY_END marker should be in after_section, not consumed"
-        )
-        assert _MANAGED_END in after, (
-            "PACT_MANAGED_END marker should be in after_section, not consumed"
-        )
-
-    def test_sync_retrieved_context_preserves_pact_markers(self, tmp_path, monkeypatch):
-        """_parse_retrieved_context_section must also treat PACT markers as
-        section terminators.
-        """
-        from scripts.working_memory import (
-            _parse_retrieved_context_section,
-            RETRIEVED_CONTEXT_HEADER,
-        )
-
-        # Content where Retrieved Context is followed by PACT markers
-        # (no Working Memory heading between them)
-        content = (
-            f"{_MANAGED_START}\n"
-            "# PACT Framework for Agentic Orchestration\n"
-            "\n"
-            f"{_MEMORY_START}\n"
-            "# Project Memory (PACT-Managed)\n"
-            "\n"
-            f"{RETRIEVED_CONTEXT_HEADER}\n"
-            "### 2026-04-12 21:00\n"
-            "**Context**: A retrieved memory\n"
-            "\n"
-            f"{_MEMORY_END}\n"
-            "\n"
-            f"{_MANAGED_END}\n"
-        )
-
-        before, header, after, entries = _parse_retrieved_context_section(content)
-
-        assert _MEMORY_END in after, (
-            "PACT_MEMORY_END marker should be in after_section"
-        )
-        assert _MANAGED_END in after, (
-            "PACT_MANAGED_END marker should be in after_section"
-        )
-
-    def test_full_round_trip_preserves_markers(self, tmp_path, monkeypatch):
-        """A full sync_to_claude_md call must not erode PACT markers."""
-        from scripts.working_memory import sync_to_claude_md
-
-        project_dir = tmp_path / "project"
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir(parents=True)
-        claude_md = claude_dir / "CLAUDE.md"
-
-        new_format_content = (
-            f"{_MANAGED_START}\n"
-            "# PACT Framework for Agentic Orchestration\n"
-            "\n"
-            f"{_MEMORY_START}\n"
-            "# Project Memory (PACT-Managed)\n"
-            "\n"
-            "## Retrieved Context\n"
-            "\n"
-            "## Pinned Context\n"
-            "\n"
-            "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. -->\n"
-            "\n"
-            f"{_MEMORY_END}\n"
-            "\n"
-            f"{_MANAGED_END}\n"
-        )
-        claude_md.write_text(new_format_content, encoding="utf-8")
-
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-
-        memory = {
-            "context": "Test context for round-trip",
-            "goal": "Verify marker preservation",
-            "decisions": ["Decision 1"],
-            "lessons_learned": ["Lesson 1"],
-        }
-
-        result = sync_to_claude_md(memory, memory_id="test-123")
-        assert result is True
-
-        final = claude_md.read_text(encoding="utf-8")
-        assert _MEMORY_END in final, (
-            "PACT_MEMORY_END must survive sync_to_claude_md round-trip"
-        )
-        assert _MANAGED_END in final, (
-            "PACT_MANAGED_END must survive sync_to_claude_md round-trip"
-        )
-        assert "Test context for round-trip" in final
-
-
-class TestMigrationSyncPipeline:
-    """End-to-end tests that exercise the exact ACTUAL output of
-    _build_migrated_content through sync_to_claude_md and
-    sync_retrieved_to_claude_md.
-
-    The existing TestWorkingMemoryParserMarkerPreservation.test_full_round_trip_preserves_markers
-    test seeds CLAUDE.md with a pre-existing auto-managed comment on the line
-    after ``## Working Memory``. That hides the section_pattern bug: the
-    greedy ``(<!-- [^>]*-->)?`` group harmlessly matches the auto-managed
-    comment and stops before PACT_MEMORY_END.
-
-    But _build_migrated_content's default empty-memory layout has NO
-    auto-managed comment between ``## Working Memory`` and
-    ``<!-- PACT_MEMORY_END -->``. Without the (?!PACT_) negative lookahead,
-    the optional comment group greedily captures PACT_MEMORY_END, advancing
-    section_header_end PAST it. The marker ends up in section_content, gets
-    .strip()ed, and is silently dropped on write-back (#404 round-3 review
-    finding).
-
-    These tests exercise the bug path directly by using the real output of
-    _build_migrated_content as the input to sync.
-    """
-
-    def _assert_markers_paired(self, content: str) -> None:
-        """All 4 PACT markers must be present AND appear in structural order."""
-        assert _MANAGED_START in content, "PACT_MANAGED_START missing"
-        assert _MANAGED_END in content, "PACT_MANAGED_END missing"
-        assert _MEMORY_START in content, "PACT_MEMORY_START missing"
-        assert _MEMORY_END in content, "PACT_MEMORY_END missing"
-        # Order: MANAGED_START < MEMORY_START < MEMORY_END < MANAGED_END
-        ms = content.index(_MANAGED_START)
-        mems = content.index(_MEMORY_START)
-        meme = content.index(_MEMORY_END)
-        me = content.index(_MANAGED_END)
-        assert ms < mems < meme < me, (
-            f"Markers out of order: MANAGED_START={ms}, MEMORY_START={mems}, "
-            f"MEMORY_END={meme}, MANAGED_END={me}"
-        )
-
-    def test_sync_working_memory_against_build_migrated_content_empty_memory(
-        self, tmp_path, monkeypatch
-    ):
-        """sync_to_claude_md on the exact output of _build_migrated_content
-        (empty-memory default) must preserve all 4 PACT markers and their
-        structural order.
-
-        This is the precise bug path: no auto-managed comment follows
-        ``## Working Memory``, so the section_pattern regex's optional
-        comment group would greedily swallow ``<!-- PACT_MEMORY_END -->``
-        unless the (?!PACT_) negative lookahead blocks it.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-        from scripts.working_memory import sync_to_claude_md
-
-        project_dir = tmp_path / "project"
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir(parents=True)
-        claude_md = claude_dir / "CLAUDE.md"
-
-        # Seed with the EXACT output _build_migrated_content produces for
-        # a blank "# Project Memory\n" source. This is the empty-memory
-        # default layout that triggers the greedy match bug.
-        migrated = _build_migrated_content("# Project Memory\n")
-        claude_md.write_text(migrated, encoding="utf-8")
-
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-
-        memory = {
-            "context": "Migration->sync pipeline test",
-            "goal": "Prove section_pattern no longer swallows PACT_MEMORY_END",
-            "decisions": ["Use negative lookahead"],
-            "lessons_learned": ["Regex ordering matters"],
-        }
-
-        result = sync_to_claude_md(memory, memory_id="mig-1")
-        assert result is True
-
-        final = claude_md.read_text(encoding="utf-8")
-        self._assert_markers_paired(final)
-        assert "Migration->sync pipeline test" in final
-
-    def test_sync_retrieved_context_against_build_migrated_content_empty_memory(
-        self, tmp_path, monkeypatch
-    ):
-        """sync_retrieved_to_claude_md must also preserve PACT markers when
-        operating on the default empty-memory layout from _build_migrated_content.
-
-        _parse_retrieved_context_section has the symmetrical bug: the
-        ``(<!-- [^>]*-->)?`` optional comment group would swallow any
-        PACT marker appearing immediately after ``## Retrieved Context``.
-        In the default layout that comment slot is empty, so the fix must
-        apply the same (?!PACT_) negative lookahead there.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-        from scripts.working_memory import sync_retrieved_to_claude_md
-
-        project_dir = tmp_path / "project"
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir(parents=True)
-        claude_md = claude_dir / "CLAUDE.md"
-
-        migrated = _build_migrated_content("# Project Memory\n")
-        claude_md.write_text(migrated, encoding="utf-8")
-
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-
-        memories = [
-            {
-                "context": "Retrieved memory content",
-                "goal": "Test retrieved sync marker preservation",
-                "decisions": ["d1"],
-                "lessons_learned": ["l1"],
-            }
-        ]
-
-        result = sync_retrieved_to_claude_md(
-            memories,
-            query="test query",
-            scores=[0.95],
-            memory_ids=["ret-1"],
-        )
-        assert result is True
-
-        final = claude_md.read_text(encoding="utf-8")
-        self._assert_markers_paired(final)
-        assert "Retrieved memory content" in final
-
-    def test_full_migration_then_sync_pipeline(self, tmp_path, monkeypatch):
-        """Realistic end-to-end: a pre-#404 CLAUDE.md on disk is migrated in
-        place by migrate_to_managed_structure, then sync_to_claude_md adds a
-        memory entry. All 4 markers must remain present and paired, and the
-        new memory entry must appear inside the Working Memory section.
-
-        This is the user-facing path: an existing project upgrading to
-        v3.17.0+ will have its CLAUDE.md migrated, and the first subsequent
-        sync must not break the managed structure the migration just created.
-        """
-        from shared.claude_md_manager import migrate_to_managed_structure
-        from scripts.working_memory import sync_to_claude_md
-
-        project_dir = tmp_path / "project"
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir(parents=True)
-        claude_md = claude_dir / "CLAUDE.md"
-
-        # A realistic pre-#404 CLAUDE.md with user content and a legacy
-        # Working Memory section carrying one historical entry.
-        pre_404_content = (
-            "# Project Memory\n"
-            "\n"
-            "Some user notes that should survive migration.\n"
-            "\n"
-            "## Working Memory\n"
-            "\n"
-            "### 2026-04-01 10:00\n"
-            "**Context**: Historical memory entry\n"
-            "**Goal**: Pre-existing\n"
-            "\n"
-        )
-        claude_md.write_text(pre_404_content, encoding="utf-8")
-
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        # migrate_to_managed_structure resolves the CLAUDE.md location via
-        # the same get_project_claude_md_path() helper the hooks use, which
-        # honors CLAUDE_PROJECT_DIR.
-
-        migration_msg = migrate_to_managed_structure()
-        # Migration should have run (not skipped, not failed)
-        assert migration_msg is not None
-        assert "failed" not in migration_msg.lower()
-        assert "skipped" not in migration_msg.lower()
-
-        post_migration = claude_md.read_text(encoding="utf-8")
-        self._assert_markers_paired(post_migration)
-
-        # Sync a new memory after migration
-        memory = {
-            "context": "End-to-end pipeline verification",
-            "goal": "Confirm migration+sync composes correctly",
-            "decisions": ["Test the full pipeline"],
-            "lessons_learned": ["Greedy regex groups need lookaheads"],
-        }
-
-        result = sync_to_claude_md(memory, memory_id="pipeline-1")
-        assert result is True
-
-        final = claude_md.read_text(encoding="utf-8")
-
-        # All 4 markers still present and correctly ordered
-        self._assert_markers_paired(final)
-
-        # The new memory entry appears inside the Working Memory section
-        # (between the Working Memory header and the MEMORY_END marker).
-        wm_start = final.index("## Working Memory")
-        mem_end = final.index(_MEMORY_END)
-        working_memory_region = final[wm_start:mem_end]
-        assert "End-to-end pipeline verification" in working_memory_region, (
-            "New memory entry should appear inside the Working Memory section"
-        )

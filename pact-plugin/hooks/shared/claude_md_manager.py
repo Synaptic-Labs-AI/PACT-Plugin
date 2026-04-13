@@ -131,6 +131,26 @@ _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     re.MULTILINE,
 )
 
+
+def _strip_legacy_lines(content: str) -> str:
+    """
+    Remove lines from older PACT template versions that are now obsolete.
+
+    Currently strips the stale orchestrator-loader line from the v3.16.2
+    project CLAUDE.md template. Shared between `update_pact_routing` (which
+    runs on every session_init) and `_build_migrated_content` (which runs
+    once per project during the one-shot migration). Centralizing the set
+    of legacy-line patterns here means adding a new pattern in the future
+    only requires editing this helper, not both call sites.
+
+    Args:
+        content: The raw CLAUDE.md content to scrub.
+
+    Returns:
+        Content with all legacy template lines removed. Pure function.
+    """
+    return _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
+
 _PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
 ## PACT Routing
 
@@ -412,7 +432,7 @@ def update_pact_routing() -> str | None:
             except OSError:
                 return None
 
-            stripped = _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
+            stripped = _strip_legacy_lines(content)
             stale_line_removed = stripped != content
             content = stripped
 
@@ -578,7 +598,7 @@ def ensure_project_memory_md() -> str | None:
     # Structure (#404): outer PACT_MANAGED boundary wraps all plugin-managed
     # content; inner PACT_MEMORY boundary wraps the memory sections.
     memory_template = f"""{MANAGED_START_MARKER}
-# PACT Framework for Agentic Orchestration
+# PACT Framework and Managed Project Memory
 
 {_PACT_ROUTING_BLOCK}
 
@@ -588,8 +608,6 @@ def ensure_project_memory_md() -> str | None:
 <!-- SESSION_END -->
 
 {MEMORY_START_MARKER}
-# Project Memory (PACT-Managed)
-
 ## Retrieved Context
 <!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->
 
@@ -644,18 +662,22 @@ def migrate_to_managed_structure() -> str | None:
     pattern as remove_stale_kernel_block(): file_lock, symlink guard inside
     the lock, fail-open on timeout/error.
 
-    Migration strategy:
-    1. If PACT_MANAGED_START already present -> no-op (already migrated)
-    2. Locate the existing sections by their markers/headings:
+    Idempotency guard: if PACT_MANAGED_START is already present, the
+    function returns None without touching the file.
+
+    Migration strategy (applied when the guard passes):
+    1. Locate the existing sections by their markers/headings:
        - PACT_ROUTING block (between PACT_ROUTING_START/END)
        - SESSION block (between SESSION_START/END)
        - Memory sections: "## Retrieved Context", "## Pinned Context",
          "## Working Memory"
-    3. Wrap everything in PACT_MANAGED_START/END
-    4. Replace old "# Project Memory" heading with "# PACT Framework for
-       Agentic Orchestration"
-    5. Wrap memory sections in PACT_MEMORY_START/END with new heading
-       "# Project Memory (PACT-Managed)"
+    2. Replace the legacy "# Project Memory" heading with the single canonical
+       H1 "# PACT Framework and Managed Project Memory"
+    3. Wrap memory sections in PACT_MEMORY_START/END (always emitting all
+       three canonical H2 headings, even if some were absent in the source)
+    4. Wrap the entire managed region in PACT_MANAGED_START/END; content
+       outside the recognized PACT sections is preserved AFTER the closing
+       boundary as user-owned content
 
     Returns:
         Status message on successful migration, None on no-op (already
@@ -762,8 +784,9 @@ def _build_migrated_content(content: str) -> str:
         remaining,
     )
 
-    # Also strip the stale orchestrator loader line if still present
-    remaining = _STALE_ORCHESTRATOR_LINE_RE.sub("", remaining)
+    # Also strip any legacy template lines that lingered (e.g., the v3.16.2
+    # stale orchestrator loader line)
+    remaining = _strip_legacy_lines(remaining)
 
     # Extract memory sections: Retrieved Context, Pinned Context, Working Memory
     # These are identified by their ## headings. Everything from the first
@@ -812,8 +835,46 @@ def _build_migrated_content(content: str) -> str:
     memory_text = "".join(memory_parts).strip()
     user_text = "".join(user_parts).strip()
 
+    # Split preserved memory_text into a dict of {heading: body} so we can
+    # always emit all three canonical headings in order, using empty bodies
+    # for any that weren't in the source. Downstream consumers (working_memory
+    # parser, staleness checker, pact-memory skill) rely on the headings being
+    # present as insert points; a missing heading would break those writers.
+    #
+    # Duplicate headings: if the source has the same memory heading twice
+    # (e.g., two `## Working Memory` blocks), their bodies are concatenated
+    # into a single output block so no content is lost. This matches the
+    # pre-Item-5 behavior where memory_text was emitted verbatim.
+    memory_sections: dict[str, str] = {
+        "## Retrieved Context": "",
+        "## Pinned Context": "",
+        "## Working Memory": "",
+    }
+
+    def _append_body(heading: str, new_body: str) -> None:
+        existing = memory_sections[heading]
+        if existing and new_body:
+            memory_sections[heading] = existing + "\n" + new_body
+        elif new_body:
+            memory_sections[heading] = new_body
+
+    if memory_text:
+        current_heading: str | None = None
+        current_body: list[str] = []
+        for line in memory_text.splitlines(keepends=True):
+            stripped_line = line.rstrip()
+            if stripped_line in memory_sections:
+                if current_heading is not None:
+                    _append_body(current_heading, "".join(current_body).rstrip())
+                current_heading = stripped_line
+                current_body = []
+            elif current_heading is not None:
+                current_body.append(line)
+        if current_heading is not None:
+            _append_body(current_heading, "".join(current_body).rstrip())
+
     # Build the new structure
-    parts = [MANAGED_START_MARKER, "\n", "# PACT Framework for Agentic Orchestration\n"]
+    parts = [MANAGED_START_MARKER, "\n", "# PACT Framework and Managed Project Memory\n"]
 
     # Routing block
     if routing_block:
@@ -823,19 +884,21 @@ def _build_migrated_content(content: str) -> str:
     if session_block:
         parts.extend(["\n", session_block, "\n"])
 
-    # Memory block
-    # NOTE: The H1 heading below sits inside PACT_MEMORY, not at file top.
-    # Current downstream parsers (staleness.py _parse_pinned_section,
-    # working_memory.py) scan forward from their target H2 heading, so they
-    # skip this H1 harmlessly. Future parsers that scan from file-top for
-    # H1/H2 boundaries must account for this interior H1.
+    # Memory block — no interior H1; memory sections begin directly with H2
+    # headings, matching the shape in ensure_project_memory_md's template.
+    # All three canonical headings are always emitted in order, even if the
+    # source only had a subset. Missing sections get empty bodies.
     parts.extend(["\n", MEMORY_START_MARKER, "\n"])
-    parts.append("# Project Memory (PACT-Managed)\n")
-    if memory_text:
-        parts.extend(["\n", memory_text, "\n"])
-    else:
-        # Default memory sections when none existed
-        parts.append("\n## Retrieved Context\n\n## Pinned Context\n\n## Working Memory\n")
+    heading_chunks: list[str] = []
+    for heading in ("## Retrieved Context", "## Pinned Context", "## Working Memory"):
+        body = memory_sections[heading]
+        if body:
+            heading_chunks.append(f"{heading}\n{body}\n")
+        else:
+            heading_chunks.append(f"{heading}\n")
+    parts.append("\n".join(heading_chunks))
+    if not parts[-1].endswith("\n"):
+        parts.append("\n")
     parts.extend([MEMORY_END_MARKER, "\n"])
 
     # Close managed block
