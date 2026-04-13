@@ -45,25 +45,39 @@ WORKING_MEMORY_TOKEN_BUDGET = 800
 RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 # Note: PINNED_CONTEXT_TOKEN_BUDGET is defined solely in hooks/staleness.py
 
-# Plugin-managed HTML comment boundary prefixes. Used by _parse_working_memory_section
-# and _parse_retrieved_context_section to terminate scans on any PACT-managed
-# boundary marker. Extracted (round 5, item 1) so the three-prefix union is
-# defined once within this file.
-#
-# TWIN COPY: The canonical definition lives in
-# pact-plugin/hooks/shared/claude_md_manager.py as PACT_BOUNDARY_PREFIXES.
-# This module cannot cleanly import from hooks/shared/ (skills/pact-memory/scripts/
-# is a separate package), so we duplicate the tuple here and rely on a
-# drift-detection test (test_working_memory_parser.test_boundary_prefixes_in_sync)
-# to assert the two tuples stay identical. This is the same pattern as the
-# _estimate_tokens twin (see line 130).
-_PACT_BOUNDARY_PREFIXES: tuple = (
-    "PACT_MEMORY_",
-    "PACT_MANAGED_",
-    "PACT_ROUTING_",
-)
-# Regex alternation used at the three parser sites below.
-_PACT_BOUNDARY_ALT = "|".join(_PACT_BOUNDARY_PREFIXES)
+# PACT-managed boundary marker prefixes. Used by _find_terminator_offset to
+# terminate section scans on any PACT boundary marker. The canonical
+# definition lives in hooks/shared/claude_md_manager.py as
+# PACT_BOUNDARY_PREFIXES — this module cannot import from hooks/shared/
+# (separate package boundary), so the alternation is inlined here. The
+# three prefixes rarely change; if a 4th is added, update this string.
+_PACT_BOUNDARY_ALT = "PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_"
+
+# Managed-region boundary markers. Twin copies of the canonical definitions
+# in hooks/shared/claude_md_manager.py (cannot import — separate package).
+_MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
+_MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
+
+
+def _extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
+    """
+    Extract the PACT-managed region from CLAUDE.md content.
+
+    Twin of hooks/shared/claude_md_manager._extract_managed_region — kept
+    local because skills/pact-memory/scripts/ cannot import from hooks/shared/.
+
+    Returns (region_text, start_offset) where start_offset is the absolute
+    position of the first character after MANAGED_START_MARKER. Returns None
+    if either marker is missing.
+    """
+    start_idx = content.find(_MANAGED_START_MARKER)
+    if start_idx == -1:
+        return None
+    region_start = start_idx + len(_MANAGED_START_MARKER)
+    end_idx = content.find(_MANAGED_END_MARKER, region_start)
+    if end_idx == -1:
+        return None
+    return content[region_start:end_idx], region_start
 
 
 def _find_existing_claude_md(base: Path) -> Optional[Path]:
@@ -353,52 +367,27 @@ def _find_terminator_offset(
     content: str,
     start: int,
     terminator_pattern: "re.Pattern[str]",
-    in_code_fence: bool = False,
 ) -> int:
     """
-    Fence-aware line walker that finds the absolute offset of the first line
-    in `content[start:]` that matches `terminator_pattern`, skipping lines
-    inside fenced code blocks (backtick or tilde, per CommonMark §4.5).
+    Find the absolute offset of the first line matching `terminator_pattern`.
 
-    Markdown fenced code blocks open and close with a line whose stripped
-    form starts with ``` or ~~~ (optionally followed by a language tag).
-    We track the two fence types as INDEPENDENT states and suppress
-    terminator matches while inside EITHER. This prevents a user-authored
-    fenced block from prematurely terminating the section — a concern for
-    Working Memory and Retrieved Context, which may contain example
-    markdown with boundary-marker-like HTML comments.
-
-    Round 8 item 1: tilde-fence support. Pre-round-8 the walker recognized
-    only backtick fences (```). A ~~~-wrapped example containing a PACT
-    boundary marker would terminate the section inside the fence, eating
-    the user's example. Tracking tilde fences as a second independent
-    state fixes this: a ``` line inside a ~~~ fence is fence body (not a
-    toggle), and vice versa.
+    Simple line-by-line search — no fence tracking needed because callers
+    operate within the PACT-managed region (round 10 structural guarantee).
+    The managed region contains only plugin-generated content; user-authored
+    fenced code blocks live outside PACT_MANAGED_START/END.
 
     Args:
-        content: Full CLAUDE.md file content.
+        content: Text to scan (typically the managed region extract, not
+            the full file).
         start: Absolute offset in `content` where scanning begins.
-        terminator_pattern: Compiled regex (without MULTILINE — we match
-            against individual stripped lines using `.match`). The caller
-            provides a pattern that would match on its own line.
-        in_code_fence: Initial fence state. Callers who start scanning
-            mid-document after another parser has already consumed up to
-            `start` should pass the fence state at that boundary; callers
-            who start at a safe point (after a ## heading + optional
-            comment) can pass False — section headers cannot appear inside
-            a fence anyway. When True, the caller is assumed to be inside
-            a backtick fence (the pre-round-8 default); tilde-specific
-            seeding can be added if a future caller needs it.
+        terminator_pattern: Compiled regex matched against individual lines
+            via `.match`.
 
     Returns:
-        Absolute offset in `content` of the first line in `content[start:]`
-        that (a) is not inside a code fence and (b) matches
-        `terminator_pattern`. Returns `len(content)` if no terminator is
-        found — the caller should treat that as "scan to EOF".
+        Absolute offset of the first terminator line, or `len(content)` if
+        none found.
     """
     pos = start
-    in_backtick_fence = in_code_fence
-    in_tilde_fence = False
     while pos < len(content):
         nl = content.find("\n", pos)
         if nl == -1:
@@ -408,15 +397,7 @@ def _find_terminator_offset(
             line = content[pos:nl]
             line_end = nl + 1
 
-        stripped = line.lstrip()
-        is_backtick_fence_line = stripped.startswith("```")
-        is_tilde_fence_line = stripped.startswith("~~~")
-
-        if is_backtick_fence_line and not in_tilde_fence:
-            in_backtick_fence = not in_backtick_fence
-        elif is_tilde_fence_line and not in_backtick_fence:
-            in_tilde_fence = not in_tilde_fence
-        elif not (in_backtick_fence or in_tilde_fence) and terminator_pattern.match(line):
+        if terminator_pattern.match(line):
             return pos
 
         pos = line_end
@@ -430,6 +411,14 @@ def _parse_working_memory_section(
     """
     Parse CLAUDE.md content to extract working memory section.
 
+    Round 10 structural guarantee: the parser searches within the
+    PACT-managed region only. This region contains only plugin-generated
+    content (no user-authored fenced code blocks), so fence-aware scanning
+    is unnecessary. If the managed region is not present (pre-migration
+    file), falls back to scanning the full content. Returned slices
+    (before_section, after_section) are always from the FULL content for
+    correct write-back.
+
     Args:
         content: Full CLAUDE.md file content.
 
@@ -437,51 +426,46 @@ def _parse_working_memory_section(
         Tuple of (before_section, section_header_with_comment, after_section, existing_entries)
         where existing_entries is a list of individual memory entry strings.
     """
-    # Pattern to find the Working Memory section
-    # Match ## Working Memory followed by optional comment and entries.
+    # Bound to managed region if available (round 10).
+    region_result = _extract_managed_region(content)
+    if region_result is not None:
+        scan_text, offset = region_result
+    else:
+        scan_text, offset = content, 0
+
+    # Pattern to find the Working Memory section.
     # Negative lookahead excludes the three plugin-managed boundary prefixes
-    # (_PACT_BOUNDARY_PREFIXES) from being consumed as the auto-managed
-    # comment — otherwise an empty Working Memory section followed
-    # immediately by <!-- PACT_MEMORY_END --> would greedily swallow the
-    # marker into section_header_end, and the marker would be lost on
-    # write-back (#404). Using the specific prefixes (not a broad ^PACT_)
-    # keeps the guard load-bearing to the markers we actually emit, so a
-    # hypothetical user comment like <!-- PACT_note: user-owned --> still
-    # parses as an auto-managed comment without breaking.
+    # from being consumed as the auto-managed comment — otherwise an empty
+    # Working Memory section followed immediately by <!-- PACT_MEMORY_END -->
+    # would greedily swallow the marker (#404).
     section_pattern = re.compile(
         r'^(## Working Memory)\s*\n'
         rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
-    match = section_pattern.search(content)
+    match = section_pattern.search(scan_text)
 
     if not match:
         # Section doesn't exist
         return content, "", "", []
 
-    section_start = match.start()
+    section_start = match.start() + offset
     section_header_end = match.end()
 
-    # Find where the next ## section starts (end of working memory section)
-    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or any
-    # plugin-managed boundary marker (_PACT_BOUNDARY_PREFIXES) to prevent
-    # silent marker erosion (#404).
-    #
-    # Fence-aware line walker (round 5, item 4): scan line-by-line so that a
-    # fenced block containing a terminator-like line (e.g. an example H2 or
-    # a quoted boundary marker) does NOT prematurely terminate the section.
-    # The terminator regex is the same alternation as before but without the
-    # `^` anchor — we match against individual lines via `.match`.
+    # Find where the next ## section starts (end of working memory section).
+    # No fence-awareness needed — managed region contains only plugin-generated
+    # content (round 10 structural guarantee).
     next_section_pattern = re.compile(
         rf'(#\s|##\s(?!Working Memory)|---|<!-- (?:{_PACT_BOUNDARY_ALT}))',
     )
-    section_end = _find_terminator_offset(
-        content, section_header_end, next_section_pattern
+    section_end_rel = _find_terminator_offset(
+        scan_text, section_header_end, next_section_pattern
     )
+    section_end = section_end_rel + offset
 
     before_section = content[:section_start]
-    section_content = content[section_header_end:section_end].strip()
+    section_content = scan_text[section_header_end:section_end_rel].strip()
     after_section = content[section_end:]
 
     # Parse existing entries (each starts with ### YYYY-MM-DD)
@@ -588,6 +572,9 @@ def _parse_retrieved_context_section(
     """
     Parse CLAUDE.md content to extract retrieved context section.
 
+    Round 10 structural guarantee: same managed-region bounding as
+    _parse_working_memory_section — see that function's docstring.
+
     Args:
         content: Full CLAUDE.md file content.
 
@@ -595,42 +582,44 @@ def _parse_retrieved_context_section(
         Tuple of (before_section, section_header, after_section, existing_entries)
         where existing_entries is a list of individual memory entry strings.
     """
+    # Bound to managed region if available (round 10).
+    region_result = _extract_managed_region(content)
+    if region_result is not None:
+        scan_text, offset = region_result
+    else:
+        scan_text, offset = content, 0
+
     # Pattern to find the Retrieved Context section.
     # Negative lookahead narrows to the plugin-managed boundary prefixes
-    # (_PACT_BOUNDARY_PREFIXES) — see _parse_working_memory_section
-    # for the full rationale (#404).
+    # — see _parse_working_memory_section for the full rationale (#404).
     section_pattern = re.compile(
         r'^(## Retrieved Context)\s*\n'
         rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
-    match = section_pattern.search(content)
+    match = section_pattern.search(scan_text)
 
     if not match:
         # Section doesn't exist
         return content, "", "", []
 
-    section_start = match.start()
+    section_start = match.start() + offset
     section_header_end = match.end()
 
-    # Find where the next ## section starts (end of retrieved context section)
-    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or any
-    # plugin-managed boundary marker (_PACT_BOUNDARY_PREFIXES) to prevent
-    # silent marker erosion (#404).
-    #
-    # Fence-aware line walker (round 5, item 4): see _parse_working_memory_section
-    # for rationale. Terminator regex uses no `^` anchor; matched against
-    # individual lines via `_find_terminator_offset`.
+    # Find where the next ## section starts (end of retrieved context section).
+    # No fence-awareness needed — managed region contains only plugin-generated
+    # content (round 10 structural guarantee).
     next_section_pattern = re.compile(
         rf'(#\s|##\s(?!Retrieved Context)|---|<!-- (?:{_PACT_BOUNDARY_ALT}))',
     )
-    section_end = _find_terminator_offset(
-        content, section_header_end, next_section_pattern
+    section_end_rel = _find_terminator_offset(
+        scan_text, section_header_end, next_section_pattern
     )
+    section_end = section_end_rel + offset
 
     before_section = content[:section_start]
-    section_content = content[section_header_end:section_end].strip()
+    section_content = scan_text[section_header_end:section_end_rel].strip()
     after_section = content[section_end:]
 
     # Parse existing entries (each starts with ### YYYY-MM-DD)

@@ -174,7 +174,14 @@ def update_session_info(
 
                 content = target_file.read_text(encoding="utf-8")
 
-                # Case 1: Markers already exist -- replace the block
+                # Case 1: Markers already exist -- replace the block.
+                # Structural guarantee (round 10): SESSION markers are always
+                # inside the PACT_MANAGED region (placed by template in both
+                # ensure_project_memory_md and update_session_info Case 0).
+                # The re.DOTALL regex below scans the full file, but the
+                # markers can only appear in plugin-generated content — no
+                # user-authored fenced code blocks can contain real SESSION
+                # markers, so fence-aware scanning is unnecessary.
                 if SESSION_START in content and SESSION_END in content:
                     new_content = re.sub(
                         re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END),
@@ -202,6 +209,10 @@ def update_session_info(
                 #       round-4 Item-1 fix — the prior behavior anchored on
                 #       "## Retrieved Context" which, after migration, lives
                 #       INSIDE PACT_MEMORY.
+                #       Structural guarantee (round 10): MEMORY_START_MARKER
+                #       is always inside PACT_MANAGED, so the .replace()
+                #       below lands the session block in plugin-generated
+                #       content — no fence-awareness needed.
                 #   (b) Legacy pre-migration file (no PACT_MANAGED): keep
                 #       the historical anchor on "## Retrieved Context"
                 #       since memory sections were top-level in that shape.

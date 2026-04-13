@@ -22,7 +22,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from shared.claude_md_manager import PACT_BOUNDARY_PREFIXES
+from shared.claude_md_manager import (
+    PACT_BOUNDARY_PREFIXES,
+    _extract_managed_region,
+)
 
 # Boundary prefix alternation used by _parse_pinned_section. Built from
 # PACT_BOUNDARY_PREFIXES (round 5, item 1) so the three-prefix union is
@@ -137,47 +140,27 @@ def _find_terminator_offset(
     content: str,
     start: int,
     terminator_pattern: "re.Pattern[str]",
-    in_code_fence: bool = False,
 ) -> int:
     """
-    Fence-aware line walker for `_parse_pinned_section`.
+    Find the absolute offset of the first line matching `terminator_pattern`.
 
-    Twin of `working_memory._find_terminator_offset` — kept private to this
-    module because skills/pact-memory/scripts/ cannot cleanly import from
-    hooks/shared/. See that function's docstring for full rationale. The
-    two helpers have identical semantics; a behavioral twin is acceptable
-    here because fence tracking is simple and the logic is only ~30 lines.
-
-    Round 8 item 1: tilde-fence support per CommonMark §4.5. The walker
-    tracks backtick fences (```) and tilde fences (~~~) as INDEPENDENT
-    states. A pinned section whose body contains a ~~~-fenced example of
-    a PACT boundary marker must NOT terminate at the marker — the fenced
-    example is user documentation, not a real section boundary.
+    Simple line-by-line search — no fence tracking needed because callers
+    operate within the PACT-managed region (round 10 structural guarantee).
+    The managed region contains only plugin-generated content; user-authored
+    fenced code blocks live outside PACT_MANAGED_START/END.
 
     Args:
-        content: Full CLAUDE.md file content.
+        content: Text to scan (typically the managed region extract, not
+            the full file).
         start: Absolute offset in `content` where scanning begins.
         terminator_pattern: Compiled regex matched against individual lines
-            via `.match` (no `^` anchor, no MULTILINE flag needed).
-        in_code_fence: Initial fence state. Default False is safe when
-            `start` is immediately after a ## section header. When passed
-            True, it seeds BOTH fence states — the walker can only learn
-            the specific fence type from an explicit close, which is the
-            correct semantics for "we know we're inside some fence, but
-            not which kind".
+            via `.match`.
 
     Returns:
-        Absolute offset of the first terminator line that is not inside a
-        fenced code block (backtick or tilde), or `len(content)` if none
-        found.
+        Absolute offset of the first terminator line, or `len(content)` if
+        none found.
     """
-    # Two independent fence states (round 8 item 1). When the caller seeds
-    # `in_code_fence=True`, we conservatively assume backtick — the most
-    # common case and the only type that existed pre-round-8. Callers that
-    # need tilde-specific seeding can be added later if needed; none exist.
     pos = start
-    in_backtick_fence = in_code_fence
-    in_tilde_fence = False
     while pos < len(content):
         nl = content.find("\n", pos)
         if nl == -1:
@@ -187,15 +170,7 @@ def _find_terminator_offset(
             line = content[pos:nl]
             line_end = nl + 1
 
-        stripped = line.lstrip()
-        is_backtick_fence_line = stripped.startswith("```")
-        is_tilde_fence_line = stripped.startswith("~~~")
-
-        if is_backtick_fence_line and not in_tilde_fence:
-            in_backtick_fence = not in_backtick_fence
-        elif is_tilde_fence_line and not in_backtick_fence:
-            in_tilde_fence = not in_tilde_fence
-        elif not (in_backtick_fence or in_tilde_fence) and terminator_pattern.match(line):
+        if terminator_pattern.match(line):
             return pos
 
         pos = line_end
@@ -207,58 +182,53 @@ def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
     """
     Extract the Pinned Context section from CLAUDE.md content.
 
+    Returns positions in the FULL file content (not managed-region-relative)
+    so callers can use them directly for read-mutate-write on the file.
+
+    Round 10 structural guarantee: the parser operates within the
+    PACT-managed region only. This region contains only plugin-generated
+    content (no user-authored fenced code blocks), so fence-aware scanning
+    is unnecessary. If the managed region is not present (pre-migration
+    file), falls back to scanning the full content.
+
     Args:
         content: Full CLAUDE.md file content.
 
     Returns:
         Tuple of (pinned_start, pinned_end, pinned_content) or None if
-        no Pinned Context section exists or it is empty.
+        no Pinned Context section exists or it is empty. Offsets are
+        absolute positions in the original `content` string.
     """
-    # NOTE (round 5, item 7): Unlike working_memory.py's
-    # _parse_working_memory_section and _parse_retrieved_context_section,
-    # which have an optional-comment sub-pattern
-    # `(<!-- (?!(?:PACT_...))[^>]*-->)?` directly after the ## heading to
-    # consume the "Auto-managed by pact-memory skill" comment, this parser
-    # has no such sub-pattern. That's intentional: the PACT template emits
-    # `## Pinned Context` without an immediate auto-managed comment below
-    # it. If a future template edit adds a comment directly below
-    # `## Pinned Context`, this parser will include it as body content —
-    # update the pattern symmetrically at that time (add an optional
-    # comment group between the heading match and pinned_start, using the
-    # same PACT_BOUNDARY_PREFIXES negative-lookahead guard as
-    # working_memory.py).
-    pinned_match = re.search(r'^## Pinned Context\s*\n', content, re.MULTILINE)
+    # Bound to managed region if available (round 10). Offset adjustment
+    # converts managed-region-relative positions back to full-file positions.
+    region_result = _extract_managed_region(content)
+    if region_result is not None:
+        scan_text, offset = region_result
+    else:
+        scan_text, offset = content, 0
+
+    pinned_match = re.search(r'^## Pinned Context\s*\n', scan_text, re.MULTILINE)
     if not pinned_match:
         return None
 
     pinned_start = pinned_match.end()
 
     # Find the end of pinned section (next H1/H2 heading, or a plugin-managed
-    # boundary marker — PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_ — or EOF).
-    # Without the marker alternative, a pinned section immediately followed by
-    # <!-- PACT_MEMORY_END --> would run past the marker to the next H2, causing
-    # subsequent write-backs to eat the boundary marker (#404).
-    #
-    # Fence-aware scan (round 5, item 4): the Pinned Context section is
-    # free-form prose that may contain triple-backtick fenced blocks. A
-    # fenced block containing a line that looks like a PACT boundary marker
-    # (e.g. a tutorial showing the marker as an example) or an H2 heading
-    # must NOT terminate the section early. `_find_terminator_offset`
-    # tracks in_code_fence state and suppresses terminator matches while
-    # inside a fence. The terminator regex is unanchored — matched against
-    # individual lines via `.match` in the helper.
+    # boundary marker — PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_ — or end
+    # of scan region). No fence-awareness needed — managed region contains
+    # only plugin-generated content (round 10 structural guarantee).
     next_section_pattern = re.compile(
         rf'(?:#{{1,2}}\s|<!-- (?:{_BOUNDARY_ALT}))'
     )
     pinned_end = _find_terminator_offset(
-        content, pinned_start, next_section_pattern
+        scan_text, pinned_start, next_section_pattern
     )
 
-    pinned_content = content[pinned_start:pinned_end]
+    pinned_content = scan_text[pinned_start:pinned_end]
     if not pinned_content.strip():
         return None
 
-    return pinned_start, pinned_end, pinned_content
+    return pinned_start + offset, pinned_end + offset, pinned_content
 
 
 def detect_stale_entries(

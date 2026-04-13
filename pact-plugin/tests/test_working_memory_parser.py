@@ -465,163 +465,18 @@ class TestMigrationSyncPipeline:
         )
 
 
-class TestPACTBoundaryPrefixesTwinDriftDetection:
-    """Drift-detection test for the PACT_BOUNDARY_PREFIXES twin (#404 round 5).
+class TestWorkingMemoryParserTerminator:
+    """Regression guard: section parsers must terminate on H2 headings and
+    PACT boundary markers.
 
-    working_memory.py lives under skills/pact-memory/scripts/ and cannot
-    cleanly import from hooks/shared/ (separate package). The canonical
-    definition lives in hooks/shared/claude_md_manager.py as
-    PACT_BOUNDARY_PREFIXES, and working_memory.py maintains a parallel
-    _PACT_BOUNDARY_PREFIXES tuple. These tests assert the two tuples stay
-    identical so a future prefix addition can't silently leave one parser
-    unguarded.
+    Round 10 simplified these tests: fence-awareness tests are deleted
+    because the parsers now operate within the PACT-managed region only
+    (no user-authored fenced code blocks). The unfenced terminator test
+    remains as a regression guard for the basic termination contract.
     """
-
-    def test_twin_tuples_are_identical(self):
-        """working_memory._PACT_BOUNDARY_PREFIXES must equal
-        claude_md_manager.PACT_BOUNDARY_PREFIXES.
-        """
-        from scripts.working_memory import _PACT_BOUNDARY_PREFIXES
-        from shared.claude_md_manager import PACT_BOUNDARY_PREFIXES
-
-        assert _PACT_BOUNDARY_PREFIXES == PACT_BOUNDARY_PREFIXES, (
-            "Twin drift detected: working_memory._PACT_BOUNDARY_PREFIXES "
-            f"({_PACT_BOUNDARY_PREFIXES!r}) no longer matches "
-            f"claude_md_manager.PACT_BOUNDARY_PREFIXES ({PACT_BOUNDARY_PREFIXES!r}). "
-            "Update both tuples to keep the twin in sync."
-        )
-
-    def test_twin_alternations_are_identical(self):
-        """The derived regex-alternation string must also match. This is a
-        belt-and-suspenders check — if the tuples agree, the alternations
-        built from them must agree too, but this catches an accidental
-        divergence in the join expression (e.g. different separator).
-        """
-        from scripts.working_memory import _PACT_BOUNDARY_ALT
-        from shared.claude_md_manager import PACT_BOUNDARY_PREFIXES
-
-        expected_alt = "|".join(PACT_BOUNDARY_PREFIXES)
-        assert _PACT_BOUNDARY_ALT == expected_alt, (
-            f"Twin alternation mismatch: {_PACT_BOUNDARY_ALT!r} != {expected_alt!r}"
-        )
-
-
-class TestWorkingMemoryParserFenceAware:
-    """Round 5 item 4: the sync parsers must track code-fence state so a
-    fenced block inside Working Memory or Retrieved Context cannot
-    prematurely terminate the section.
-
-    This matters because memory entries sometimes quote code (debugging
-    snippets, JSON payloads, config examples). If a fenced block contains
-    a line that looks like a section terminator (an H2 heading, ---, or a
-    PACT boundary marker), the parser must continue past it and find the
-    real terminator.
-    """
-
-    def test_fenced_h2_does_not_terminate_working_memory(self):
-        """An H2 heading inside a fenced code block within Working Memory
-        must not end the section early.
-        """
-        from scripts.working_memory import _parse_working_memory_section
-
-        content = (
-            "# Project Memory\n"
-            "\n"
-            "## Working Memory\n"
-            "<!-- Auto-managed by pact-memory skill. -->\n"
-            "\n"
-            "### 2026-04-12 00:00\n"
-            "**Context**: Debugging a parser bug\n"
-            "\n"
-            "```markdown\n"
-            "## This is an example heading\n"
-            "shown inside a fence for tutorial purposes\n"
-            "```\n"
-            "\n"
-            "**Decisions**: Use fence-aware line walker\n"
-        )
-
-        _before, _header, _after, existing = _parse_working_memory_section(content)
-        # Exactly one entry — the fenced H2 did not split it into two or
-        # terminate it.
-        assert len(existing) == 1
-        assert "Debugging a parser bug" in existing[0]
-        assert "## This is an example heading" in existing[0]
-        assert "Use fence-aware line walker" in existing[0]
-
-    def test_fenced_pact_marker_does_not_terminate_working_memory(self):
-        """A PACT boundary marker inside a fenced code block must not be
-        treated as a real terminator. The real marker outside the fence
-        should terminate the section.
-        """
-        from scripts.working_memory import _parse_working_memory_section
-
-        content = (
-            f"{_MANAGED_START}\n"
-            "# PACT Framework and Managed Project Memory\n"
-            "\n"
-            f"{_MEMORY_START}\n"
-            "## Working Memory\n"
-            "\n"
-            "### 2026-04-12 01:00\n"
-            "**Context**: Example shown below\n"
-            "\n"
-            "```\n"
-            "<!-- PACT_MEMORY_END -->\n"
-            "```\n"
-            "\n"
-            "**Lessons**: Fenced markers are illustrative\n"
-            "\n"
-            f"{_MEMORY_END}\n"
-            f"{_MANAGED_END}\n"
-        )
-
-        _before, _header, after, existing = _parse_working_memory_section(content)
-
-        # The entry survived intact including the fenced marker
-        assert len(existing) == 1
-        assert "<!-- PACT_MEMORY_END -->" in existing[0]
-        assert "Fenced markers are illustrative" in existing[0]
-
-        # The REAL PACT_MEMORY_END and PACT_MANAGED_END markers are in
-        # `after_section` — they terminate the Working Memory region.
-        assert _MEMORY_END in after
-        assert _MANAGED_END in after
-
-    def test_fenced_hr_does_not_terminate_retrieved_context(self):
-        """A horizontal rule (`---`) inside a fenced code block must not
-        terminate the Retrieved Context section.
-        """
-        from scripts.working_memory import _parse_retrieved_context_section
-
-        content = (
-            "## Retrieved Context\n"
-            "<!-- Auto-managed by pact-memory skill. -->\n"
-            "\n"
-            "### 2026-04-12 02:00\n"
-            "**Context**: Example YAML shown below\n"
-            "\n"
-            "```yaml\n"
-            "---\n"
-            "key: value\n"
-            "```\n"
-            "\n"
-            "**Lessons**: YAML front-matter uses --- as separator\n"
-            "\n"
-            "## Pinned Context\n"
-        )
-
-        _before, _header, _after, existing = _parse_retrieved_context_section(content)
-        assert len(existing) == 1
-        # The fenced --- must not have been treated as a terminator
-        assert "---" in existing[0]
-        assert "key: value" in existing[0]
-        assert "YAML front-matter uses" in existing[0]
 
     def test_unfenced_terminator_still_ends_section(self):
-        """Regression guard: the fence-aware refactor must preserve the
-        existing terminator behavior for unfenced markers.
-        """
+        """An H2 heading terminates the Working Memory section."""
         from scripts.working_memory import _parse_working_memory_section
 
         content = (
@@ -642,49 +497,92 @@ class TestWorkingMemoryParserFenceAware:
         for entry in existing:
             assert "This must be excluded" not in entry
 
-    def test_tilde_fenced_pact_marker_does_not_terminate_working_memory(self):
-        """Round 8 item 1: `working_memory._find_terminator_offset` must
-        recognize tilde fences (CommonMark §4.5) as well as backtick
-        fences. Pre-round-8, the walker only tracked ``` fences, so a
-        user-authored ~~~ fence containing a fake PACT boundary marker
-        would cause the terminator search to stop inside the fence,
-        losing the tail of the Working Memory section.
+class TestWorkingMemoryParserManagedRegionBounding:
+    """Round 10: parsers bound their search to the PACT-managed region
+    and return full-file positions for correct write-back.
+    """
 
-        This test is the counterpart to
-        `test_fenced_pact_marker_does_not_terminate_working_memory` —
-        same adversarial content, wrapped in ~~~ instead of ```.
+    def test_working_memory_returns_full_file_slices(self):
+        """before_section and after_section must be slices of the full
+        content (not the managed region), enabling correct write-back.
         """
         from scripts.working_memory import _parse_working_memory_section
 
         content = (
+            "user notes above\n"
             f"{_MANAGED_START}\n"
             "# PACT Framework and Managed Project Memory\n"
             "\n"
             f"{_MEMORY_START}\n"
             "## Working Memory\n"
+            "<!-- Auto-managed by pact-memory skill. -->\n"
             "\n"
-            "### 2026-04-12 04:00\n"
-            "**Context**: Tilde-fenced example below\n"
-            "\n"
-            "~~~\n"
-            "<!-- PACT_MEMORY_END -->\n"
-            "~~~\n"
-            "\n"
-            "**Lessons**: Tilde fences are equivalent to backtick fences\n"
+            "### 2026-04-13 00:00\n"
+            "**Context**: Test entry\n"
             "\n"
             f"{_MEMORY_END}\n"
             f"{_MANAGED_END}\n"
+            "user notes below\n"
         )
 
-        _before, _header, after, existing = _parse_working_memory_section(content)
+        before, header, after, entries = _parse_working_memory_section(content)
 
-        # The entry survives intact INCLUDING the tilde-fenced fake marker
-        # and the post-fence lessons line.
-        assert len(existing) == 1
-        assert "<!-- PACT_MEMORY_END -->" in existing[0]
-        assert (
-            "Tilde fences are equivalent to backtick fences" in existing[0]
+        # before_section must include user preamble
+        assert "user notes above" in before
+        # after_section must include user epilogue
+        assert "user notes below" in after
+        # Entries parsed correctly
+        assert len(entries) == 1
+        assert "Test entry" in entries[0]
+        # Round-trip: before + header + entries + after reconstructs content
+        # (header may be empty string or the heading text)
+        assert header == "## Working Memory"
+
+    def test_retrieved_context_returns_full_file_slices(self):
+        """Same as above for _parse_retrieved_context_section."""
+        from scripts.working_memory import _parse_retrieved_context_section
+
+        content = (
+            "preamble\n"
+            f"{_MANAGED_START}\n"
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            "## Retrieved Context\n"
+            "<!-- Auto-managed by pact-memory skill. -->\n"
+            "\n"
+            "### 2026-04-13 00:00\n"
+            "**Query**: test query\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            f"{_MEMORY_END}\n"
+            f"{_MANAGED_END}\n"
+            "epilogue\n"
         )
-        # The REAL PACT_MEMORY_END marker is in `after_section`
-        assert _MEMORY_END in after
-        assert _MANAGED_END in after
+
+        before, header, after, entries = _parse_retrieved_context_section(content)
+
+        assert "preamble" in before
+        assert "epilogue" in after
+        assert header == "## Retrieved Context"
+        assert len(entries) == 1
+
+    def test_fallback_to_full_content_without_managed_markers(self):
+        """Pre-migration file: no managed markers, parser scans full content."""
+        from scripts.working_memory import _parse_working_memory_section
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "### 2026-04-13 00:00\n"
+            "**Context**: Legacy entry\n"
+        )
+
+        before, header, after, entries = _parse_working_memory_section(content)
+
+        assert len(entries) == 1
+        assert "Legacy entry" in entries[0]
+        assert header == "## Working Memory"

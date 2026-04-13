@@ -777,137 +777,6 @@ class TestUpdatePactRoutingOrphanMarkers:
         assert final.count("<!-- PACT_ROUTING_END -->") == 1
 
 
-class TestUpdatePactRoutingFenceAware:
-    """Round 8 item 2: `update_pact_routing` must be fence-aware.
-
-    Pre-round-8 behavior: the Case 1 routing replacement used naive
-    substring checks (`_ROUTING_START_MARKER in content`) plus a `re.DOTALL`
-    extraction pattern. That composed unsafely with user-authored fenced
-    code blocks: a fenced `<!-- PACT_ROUTING_START ... END -->` example
-    (e.g., in migration documentation or tutorial content) was detected
-    as a real routing block and silently replaced with the canonical
-    plugin template INSIDE the fence — destroying the user's example.
-
-    Post-round-8: Case 1 and the orphan path both route through the
-    `_find_markers_outside_fences` shared helper. Fenced markers are
-    invisible to the marker discovery; in the Case 1 fenced scenario
-    below, the function falls through to Case 2 (insert path), inserting
-    a fresh canonical routing block above the fenced example without
-    touching the fence body.
-    """
-
-    def test_fenced_routing_example_not_replaced(
-        self, tmp_path, monkeypatch
-    ):
-        """A user's fenced `<!-- PACT_ROUTING_START ... END -->` example
-        must NOT be treated as a real routing block. The Case 1 regex
-        pre-round-8 would replace the fence's body with PACT_ROUTING_BLOCK.
-        """
-        from shared.claude_md_manager import update_pact_routing
-
-        legacy = tmp_path / "CLAUDE.md"
-        original = (
-            "# Project Memory\n"
-            "\n"
-            "Documentation for the PACT routing block format:\n"
-            "\n"
-            "```markdown\n"
-            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
-            "## PACT Routing\n"
-            "\n"
-            "This is an example inside a fence — not a real routing block.\n"
-            "<!-- PACT_ROUTING_END -->\n"
-            "```\n"
-            "\n"
-            "## Working Memory\n"
-            "user notes\n"
-        )
-        legacy.write_text(original, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-
-        update_pact_routing()
-
-        new_content = legacy.read_text(encoding="utf-8")
-
-        # The fenced example must survive byte-for-byte. Pre-round-8, the
-        # Case 1 replacement silently overwrote the fence body with
-        # PACT_ROUTING_BLOCK (the canonical template).
-        assert (
-            "This is an example inside a fence — not a real routing block."
-            in new_content
-        ), "Fenced routing example must survive verbatim (round 8 item 2)"
-        # Fence boundaries intact
-        assert "```markdown" in new_content
-        assert new_content.count("```") == 2, (
-            "Both fence boundaries must still be present"
-        )
-        # A fresh canonical routing block was inserted elsewhere (Case 2
-        # insert path fires after the fence-aware marker discovery rules
-        # out the fenced markers).
-        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
-        # Count PACT_ROUTING_START: the fenced example has one AND the
-        # new inserted canonical block has one = 2 total. This is the
-        # expected post-fix state — the fence is user content, the
-        # inserted block is plugin content.
-        assert new_content.count(
-            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
-        ) == 2, (
-            "Post-fix: 1 fenced example + 1 new canonical block = 2"
-        )
-        # User content preserved
-        assert "## Working Memory" in new_content
-        assert "user notes" in new_content
-
-    def test_fenced_orphan_routing_end_not_stripped(
-        self, tmp_path, monkeypatch
-    ):
-        """A user's fenced `<!-- PACT_ROUTING_END -->` (with no matching
-        START) must NOT trigger orphan-strip handling. Pre-round-8, the
-        orphan-detection substring check `_ROUTING_END_MARKER in content`
-        would fire on the in-fence marker and the orphan-strip walker
-        would reach across the fence body.
-        """
-        from shared.claude_md_manager import update_pact_routing
-
-        legacy = tmp_path / "CLAUDE.md"
-        original = (
-            "# Project Memory\n"
-            "\n"
-            "Example of a broken routing block (for user's own reference):\n"
-            "\n"
-            "```markdown\n"
-            "Some narrative about routing blocks.\n"
-            "<!-- PACT_ROUTING_END -->\n"
-            "Extra instructional text below the orphan.\n"
-            "```\n"
-            "\n"
-            "## Working Memory\n"
-            "user notes\n"
-        )
-        legacy.write_text(original, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-
-        update_pact_routing()
-
-        new_content = legacy.read_text(encoding="utf-8")
-
-        # The fenced example body must survive byte-for-byte — the
-        # orphan-strip machinery must NOT have reached into the fence.
-        assert "Some narrative about routing blocks." in new_content
-        assert (
-            "Extra instructional text below the orphan." in new_content
-        ), "Fenced body must survive — orphan-strip must not cross fences"
-        # The fenced `<!-- PACT_ROUTING_END -->` is still user content.
-        assert new_content.count("<!-- PACT_ROUTING_END -->") == 2, (
-            "Post-fix: 1 fenced example + 1 new canonical block = 2"
-        )
-        # New canonical block inserted (Case 2 path fires because there
-        # was no real routing block).
-        assert CANONICAL_PACT_ROUTING_BLOCK in new_content
-        # Fence boundaries intact
-        assert new_content.count("```") == 2
-
-
 class TestUpdatePactRoutingSessionStartIsolation:
     """SESSION_START preservation tripwire (#366 item 5, architect S3 finding).
 
@@ -3190,51 +3059,6 @@ class TestBuildMigratedContentUserContent:
         assert "# My Project Notes" in after_managed
         assert "Important notes the user added." in after_managed
 
-    def test_preamble_user_content_preserved_above_pact_managed(self):
-        """Round 6 item 4: user content that appears BEFORE the first
-        PACT-managed trigger in the original file is preserved ABOVE
-        ``PACT_MANAGED_START`` — not shoved below ``PACT_MANAGED_END``
-        with other non-memory content.
-
-        Pre-fix behavior put all non-memory content after the managed
-        block; a user with pinned notes or a custom H1 above the template
-        saw their content relocated to the bottom of the file. The fix
-        splits the file at the earliest trigger so preamble stays at the
-        top.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-
-        content = (
-            "# My Notes\n"
-            "- pin this\n"
-            "\n"
-            "# Project Memory\n"
-            "\n"
-            "## Retrieved Context\n"
-            "Some context.\n"
-            "\n"
-            "## Working Memory\n"
-            "Work data.\n"
-        )
-
-        result = _build_migrated_content(content)
-
-        managed_start_idx = result.index(_MANAGED_START)
-        before_managed = result[:managed_start_idx]
-        assert "# My Notes" in before_managed, (
-            "Preamble H1 must land above PACT_MANAGED_START"
-        )
-        assert "- pin this" in before_managed, (
-            "Preamble body must land above PACT_MANAGED_START"
-        )
-
-        # Memory content is still inside the memory boundary
-        mem_start_idx = result.index(_MEMORY_START)
-        mem_end_idx = result.index(_MEMORY_END)
-        memory_region = result[mem_start_idx:mem_end_idx]
-        assert "Some context." in memory_region
-        assert "Work data." in memory_region
-
     def test_trailing_user_content_still_below_pact_managed(self):
         """Round 6 item 4: user content APPENDED after memory sections
         must still land BELOW ``PACT_MANAGED_END`` (the existing behavior).
@@ -3266,61 +3090,6 @@ class TestBuildMigratedContentUserContent:
         before_managed = result[:managed_start_idx]
         assert "## Trailing Notes" not in before_managed
         assert "Stuff the user appended later." not in before_managed
-
-    def test_user_content_both_sides_preserved(self):
-        """Round 6 item 4: when the user has content BOTH above and below
-        the PACT-managed section, both survive in their original positions
-        — above content lands above ``PACT_MANAGED_START``, below content
-        lands below ``PACT_MANAGED_END``. The memory body stays inside the
-        memory boundary.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-
-        content = (
-            "# Top Preamble\n"
-            "Pinned note at the top.\n"
-            "\n"
-            "# Project Memory\n"
-            "\n"
-            "## Retrieved Context\n"
-            "Retrieved body.\n"
-            "\n"
-            "## Working Memory\n"
-            "Working body.\n"
-            "\n"
-            "## Footer Section\n"
-            "Trailing content.\n"
-        )
-
-        result = _build_migrated_content(content)
-
-        managed_start_idx = result.index(_MANAGED_START)
-        managed_end_idx = result.index(_MANAGED_END)
-
-        before_managed = result[:managed_start_idx]
-        after_managed = result[managed_end_idx:]
-
-        # Preamble survives above
-        assert "# Top Preamble" in before_managed
-        assert "Pinned note at the top." in before_managed
-        # And must NOT leak into the trailing region
-        assert "# Top Preamble" not in after_managed
-        assert "Pinned note at the top." not in after_managed
-
-        # Trailing content survives below
-        assert "## Footer Section" in after_managed
-        assert "Trailing content." in after_managed
-        # And must NOT leak into the preamble region
-        assert "## Footer Section" not in before_managed
-        assert "Trailing content." not in before_managed
-
-        # Memory body stays inside the memory boundary
-        mem_start_idx = result.index(_MEMORY_START)
-        mem_end_idx = result.index(_MEMORY_END)
-        memory_region = result[mem_start_idx:mem_end_idx]
-        assert "Retrieved body." in memory_region
-        assert "Working body." in memory_region
-
 
 class TestBuildMigratedContentAdversarial:
     """Adversarial and edge-case inputs for _build_migrated_content().
@@ -3417,16 +3186,14 @@ class TestBuildMigratedContentAdversarial:
 
     def test_content_with_no_headings_at_all(self):
         """Flat text with no headings and no PACT-managed triggers is
-        treated entirely as preamble (round 6, item 4): everything lands
-        ABOVE ``PACT_MANAGED_START``, not after ``PACT_MANAGED_END``.
+        treated as user content and lands BELOW ``PACT_MANAGED_END``.
 
-        Contract: ``_find_preamble_cutoff`` returns ``len(content)`` when
-        no trigger is found, meaning the entire file is preamble. This
-        preserves position — random user text at the top of a CLAUDE.md
-        file stays at the top after migration, not shoved below an empty
-        managed block. Prior to item 4, this content landed below the
-        managed block because the walker classified non-heading lines into
-        ``user_parts``; the new contract is intentionally more preserving.
+        Round 10 design decision: all user content migrates below the
+        managed block. The prior (round 6) preamble mechanism placed such
+        content above MANAGED_START, but that required fence-awareness in
+        every downstream parser. Removing preamble handling eliminates
+        the fence-awareness bug class at the cost of this one-time
+        content relocation.
         """
         from shared.claude_md_manager import _build_migrated_content
 
@@ -3436,15 +3203,16 @@ class TestBuildMigratedContentAdversarial:
 
         assert _MANAGED_START in result
         assert _MANAGED_END in result
-        managed_start_idx = result.index(_MANAGED_START)
-        before_managed = result[:managed_start_idx]
-        assert "Just some random text" in before_managed
-        assert "Another line." in before_managed
-
-        # And it must NOT leak into the trailing region
+        # User content lands BELOW MANAGED_END (round 10 contract)
         managed_end_idx = result.index(_MANAGED_END)
         after_managed = result[managed_end_idx:]
-        assert "Just some random text" not in after_managed
+        assert "Just some random text" in after_managed
+        assert "Another line." in after_managed
+
+        # And it must NOT appear ABOVE MANAGED_START
+        managed_start_idx = result.index(_MANAGED_START)
+        before_managed = result[:managed_start_idx]
+        assert "Just some random text" not in before_managed
 
     def test_partial_routing_markers_no_end(self):
         """If only PACT_ROUTING_START is present with no END, the routing
@@ -3647,216 +3415,6 @@ class TestBuildMigratedContentAdversarial:
 
         # The fenced example text must NOT bleed into the memory region
         assert "(this is just an example)" not in memory_region
-
-    def test_fenced_trigger_inside_preamble(self):
-        """Round 7 item 1: the preamble-cutoff scan must be fence-aware.
-
-        Adversarial scenario: a user's CLAUDE.md has real prose at the
-        top, then a fenced markdown code block whose contents happen to
-        contain PACT-managed triggers (``# Project Memory``,
-        ``<!-- PACT_ROUTING_START -->``, ``## PACT Routing``,
-        ``<!-- PACT_ROUTING_END -->``) as EXAMPLE documentation. The
-        user is showing what a PACT file looks like — NOT authoring one.
-
-        Pre-fix behavior (naive substring `_find_preamble_cutoff`):
-          1. `_find_preamble_cutoff` returned the offset of
-             ``# Project Memory`` INSIDE the fence.
-          2. `preamble_text` = the unfenced prose ABOVE the fence plus
-             the opening ```` ```markdown ```` line.
-          3. `content` (post-cutoff) = ``# Project Memory\\n``... plus
-             the routing markers, plus the closing fence.
-          4. The routing extraction regex pulled
-             ``<!-- PACT_ROUTING_START -->...<!-- PACT_ROUTING_END -->``
-             out of the middle of the user's example.
-          5. The ``re.sub`` at line 971 matched ``^# Project Memory``
-             at the start of ``remaining`` and stripped the user's
-             example heading.
-          6. The closing ```` ``` ```` fence was left orphaned far
-             below the managed block in the trailing user region.
-
-        Post-fix (fence-aware walker): triggers inside the fence are
-        invisible to `_find_preamble_cutoff`, so the cutoff lands at
-        ``len(content)`` (no non-fenced trigger). The entire user file
-        — fence intact — is treated as preamble and survives above
-        ``PACT_MANAGED_START``.
-
-        Counter-test-by-revert has been validated for this regression:
-        temporarily reverting `_find_preamble_cutoff` to the naive
-        substring-search implementation makes this test fail.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-
-        content = (
-            "# My Personal Notes\n"
-            "Here's an example of what a PACT project CLAUDE.md looks like:\n"
-            "\n"
-            "```markdown\n"
-            "# Project Memory\n"
-            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
-            "## PACT Routing\n"
-            "Routing instructions go here.\n"
-            "<!-- PACT_ROUTING_END -->\n"
-            "```\n"
-            "\n"
-            "End of my notes.\n"
-        )
-
-        result = _build_migrated_content(content)
-
-        # The PACT_MANAGED block must exist (the migration still runs).
-        assert _MANAGED_START in result
-        assert _MANAGED_END in result
-
-        # The entire user file is non-fenced prose + a fence + more
-        # non-fenced prose — there is NO real PACT trigger outside the
-        # fence, so the whole file is preamble. It must all land ABOVE
-        # PACT_MANAGED_START, not be cut open by the extraction pipeline.
-        managed_start_idx = result.index(_MANAGED_START)
-        before_managed = result[:managed_start_idx]
-
-        # (a) Non-fenced prose above the fence is preserved in position.
-        assert "# My Personal Notes" in before_managed
-        assert (
-            "Here's an example of what a PACT project CLAUDE.md looks like:"
-            in before_managed
-        )
-
-        # (b) The fence boundaries survive intact — both the opening
-        # ```` ```markdown ```` line and the closing ```` ``` ```` line
-        # must be in the preamble region, in order.
-        fence_open_idx = before_managed.find("```markdown")
-        fence_close_idx = before_managed.find("```\n", fence_open_idx + 1)
-        assert fence_open_idx != -1, (
-            "Opening ```markdown fence must survive in preamble"
-        )
-        assert fence_close_idx != -1, (
-            "Closing ``` fence must survive in preamble"
-        )
-        assert fence_open_idx < fence_close_idx, (
-            "Closing fence must appear after opening fence"
-        )
-
-        # (c) Every line from inside the fence must be in the preamble
-        # region — nothing silently stripped, nothing extracted into
-        # managed sections.
-        assert "# Project Memory" in before_managed
-        assert (
-            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
-            in before_managed
-        )
-        assert "## PACT Routing" in before_managed
-        assert "Routing instructions go here." in before_managed
-        assert "<!-- PACT_ROUTING_END -->" in before_managed
-
-        # (d) The non-fenced "End of my notes." below the fence is also
-        # part of the preamble (entire file is preamble when no non-fenced
-        # trigger exists).
-        assert "End of my notes." in before_managed
-
-        # (e) Silent stripping / extraction check: the fence's interior
-        # text must NOT leak into the managed region. The migration must
-        # not have pulled ``## PACT Routing`` out of the fence and put it
-        # inside the routing-block section of the managed region.
-        managed_end_idx = result.index(_MANAGED_END)
-        managed_region = result[managed_start_idx:managed_end_idx]
-        # The user's "Routing instructions go here." text (which lived
-        # inside the fence) must NOT appear anywhere in the managed
-        # region — if it did, the routing extraction stole it from the
-        # fence.
-        assert "Routing instructions go here." not in managed_region, (
-            "Routing block regex must not reach INTO a fenced code block "
-            "to extract its contents"
-        )
-        # Likewise, the fenced "# Project Memory" heading must not have
-        # been re-promoted to the MANAGED_TITLE position. The managed
-        # region will still contain ``MANAGED_TITLE`` (`# PACT Framework
-        # and Managed Project Memory`) at the top, which is fine; we
-        # only care that the user's fenced heading was not consumed.
-        # The fenced "# Project Memory" must still appear in the preamble
-        # (already asserted in (c)), so this is implicitly verified.
-
-        # (f) After-managed region should be empty of the fenced content
-        # (belt-and-suspenders: the whole file being preamble means the
-        # trailing user region is empty).
-        after_managed = result[managed_end_idx:]
-        assert "# My Personal Notes" not in after_managed
-        assert "```markdown" not in after_managed
-        assert "End of my notes." not in after_managed
-
-    def test_tilde_fenced_trigger_inside_preamble(self):
-        """Round 8 item 1: `_find_preamble_cutoff` must recognize tilde
-        fences (CommonMark §4.5) as well as backtick fences.
-
-        This test is the tilde-fence counterpart to
-        `test_fenced_trigger_inside_preamble`. Pre-round-8, the walker
-        only tracked ``` fences, so a user's ~~~ fence containing PACT
-        triggers (``# Project Memory``, routing markers) would cause
-        `_find_preamble_cutoff` to land at a trigger inside the fence,
-        and the downstream extraction pipeline would destroy the fence
-        body. Post-round-8, triggers inside ~~~ fences are invisible to
-        the cutoff scan so the tilde-fenced example survives intact as
-        preamble.
-
-        Counter-test-by-revert: reverting the tilde-fence tracking in
-        `_find_preamble_cutoff` (reverting `in_tilde_fence` to a no-op)
-        makes this test fail because the first trigger inside the fence
-        (``# Project Memory``) becomes the cutoff.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-
-        content = (
-            "# My Tilde Notes\n"
-            "Here's an example of a PACT project CLAUDE.md using tilde fences:\n"
-            "\n"
-            "~~~markdown\n"
-            "# Project Memory\n"
-            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
-            "## PACT Routing\n"
-            "Example routing text.\n"
-            "<!-- PACT_ROUTING_END -->\n"
-            "~~~\n"
-            "\n"
-            "End of my tilde notes.\n"
-        )
-
-        result = _build_migrated_content(content)
-
-        assert _MANAGED_START in result
-        assert _MANAGED_END in result
-
-        managed_start_idx = result.index(_MANAGED_START)
-        before_managed = result[:managed_start_idx]
-        managed_end_idx = result.index(_MANAGED_END)
-        managed_region = result[managed_start_idx:managed_end_idx]
-        after_managed = result[managed_end_idx:]
-
-        # (a) Non-fenced prose above the fence is preserved in position.
-        assert "# My Tilde Notes" in before_managed
-        # (b) The tilde fence boundaries survive intact.
-        assert "~~~markdown" in before_managed
-        # The file has TWO ~~~ lines (open + close). Both must be
-        # preserved — if the preamble cutoff landed inside the fence,
-        # the closing ~~~ would have been orphaned below the managed
-        # block instead.
-        assert before_managed.count("~~~") == 2, (
-            "Both tilde fence boundaries must be in preamble"
-        )
-        # (c) The fence body content must be in the preamble region
-        # (intact and in order).
-        assert "# Project Memory" in before_managed
-        assert (
-            "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
-            in before_managed
-        )
-        assert "Example routing text." in before_managed
-        # (d) Post-fence narrative also in preamble
-        assert "End of my tilde notes." in before_managed
-        # (e) No fence content leaked into managed region
-        assert "Example routing text." not in managed_region
-        assert "~~~markdown" not in managed_region
-        # (f) Trailing user region is empty of fenced content
-        assert "# My Tilde Notes" not in after_managed
-        assert "~~~" not in after_managed
 
     def test_fenced_stale_orchestrator_line_preserved(self):
         """Round 7 item 2 / round 8 item 4: `_strip_legacy_lines` must be
@@ -4128,154 +3686,6 @@ class TestBuildMigratedContentOrphanRoutingMarker:
         assert "Real memory entry" in result
         # The paragraph before the orphan is user content and must survive
         assert "Some user paragraph before the orphan." in result
-
-
-class TestBuildMigratedContentFenceAwareRouting:
-    """Round 8 item 3: `_build_migrated_content` must be fence-aware.
-
-    Pre-round-8 behavior: the Case 1 routing extraction used naive
-    substring checks (`_ROUTING_START_MARKER in content`) plus a
-    `re.DOTALL` pattern. A user's fenced `<!-- PACT_ROUTING_START ... END -->`
-    example was silently extracted — the fence body was yanked OUT of the
-    fence and promoted as the "routing block" inside PACT_MANAGED,
-    leaving an empty decapitated fence behind in the user region.
-
-    The orphan path had the same bug: `content.find(orphan_marker)`
-    would fire on a fenced marker and the orphan-strip regex walker
-    would reach into the fence body.
-
-    Post-round-8: both Case 1 and the orphan path go through
-    `_find_markers_outside_fences`, so fenced markers are invisible to
-    marker discovery. A fenced example survives as user content
-    (landing inside the memory region as part of `## Working Memory`
-    body or preamble, depending on the file layout).
-    """
-
-    _ROUTING_START = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
-    _ROUTING_END = "<!-- PACT_ROUTING_END -->"
-
-    def test_fenced_routing_block_not_extracted(self):
-        """A fenced `<!-- PACT_ROUTING_START ... END -->` example must NOT
-        be detected as a real routing block. Pre-round-8, the fence body
-        was extracted and promoted as the routing block.
-
-        Fixture layout: file starts with `# Project Memory` (non-fenced
-        trigger at position 0), so `_find_preamble_cutoff` returns 0 and
-        the fenced example lives inside `remaining` — exactly the path
-        where Case 1 extraction runs.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-
-        content = (
-            "# Project Memory\n"
-            "\n"
-            "## Working Memory\n"
-            "\n"
-            "Documentation for the PACT routing block format:\n"
-            "\n"
-            "```markdown\n"
-            f"{self._ROUTING_START}\n"
-            "## PACT Routing\n"
-            "\n"
-            "Example routing prose (fenced — not a real block).\n"
-            f"{self._ROUTING_END}\n"
-            "```\n"
-            "\n"
-            "More user notes.\n"
-        )
-
-        result = _build_migrated_content(content)
-
-        # Fenced example body survives verbatim — NOT extracted as routing
-        assert (
-            "Example routing prose (fenced — not a real block)." in result
-        ), "Fenced routing example must survive byte-for-byte (round 8 item 3)"
-        # Fence boundaries intact — pre-fix the opening fence had an empty
-        # body left behind after Case 1 yanked the interior.
-        assert "```markdown" in result
-        assert result.count("```") == 2, (
-            "Both fence boundaries must still be present"
-        )
-        # The fenced markers still appear in the output (inside the fence)
-        assert self._ROUTING_START in result
-        assert self._ROUTING_END in result
-        # Each marker appears EXACTLY ONCE — only inside the fence, not
-        # duplicated by a Case 1 extraction that would have promoted them
-        # as a new routing block.
-        assert result.count(self._ROUTING_START) == 1
-        assert result.count(self._ROUTING_END) == 1
-        # Neither marker appears OUTSIDE the fence in the managed region.
-        # The routing block in the managed region must be absent (no real
-        # markers were discovered outside fences).
-        managed_start = result.index(
-            "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
-        )
-        managed_end = result.index("<!-- PACT_MANAGED_END -->")
-        managed_region = result[managed_start:managed_end]
-        # The fenced example lives inside the managed region (inside Working
-        # Memory), so the markers ARE inside the managed region — but they
-        # must be inside the fence specifically, not extracted to a bare
-        # routing block above the fence.
-        mr_fence_open = managed_region.find("```markdown")
-        assert mr_fence_open != -1, (
-            "Fenced example must live inside managed region's Working Memory"
-        )
-        mr_fence_close = managed_region.find("```\n", mr_fence_open + 1)
-        assert mr_fence_close != -1
-        # The PACT_ROUTING_START must be between the fence open and close.
-        routing_idx = managed_region.find(self._ROUTING_START)
-        assert mr_fence_open < routing_idx < mr_fence_close, (
-            "PACT_ROUTING_START must be INSIDE the fence (not extracted)"
-        )
-        # User notes after the fence survive
-        assert "More user notes." in result
-
-    def test_fenced_orphan_routing_marker_not_stripped(self):
-        """A fenced orphan marker (only one of START/END inside a user
-        fence) must NOT trigger orphan-strip handling. Pre-round-8, the
-        substring `_ROUTING_END_MARKER in content` would fire, and the
-        orphan-strip walker would reach across the fence body using the
-        regex-based terminator search.
-        """
-        from shared.claude_md_manager import _build_migrated_content
-
-        content = (
-            "# Project Memory\n"
-            "\n"
-            "## Working Memory\n"
-            "\n"
-            "Migration notes:\n"
-            "\n"
-            "```markdown\n"
-            "Some narrative about the routing block shape.\n"
-            f"{self._ROUTING_END}\n"
-            "Extra body text below the orphan marker.\n"
-            "```\n"
-            "\n"
-            "Post-fence notes.\n"
-        )
-
-        result = _build_migrated_content(content)
-
-        # The fenced example body survives byte-for-byte — orphan-strip
-        # must NOT have reached into the fence.
-        assert "Some narrative about the routing block shape." in result
-        assert (
-            "Extra body text below the orphan marker." in result
-        ), "Fenced orphan body must survive — orphan-strip must not cross fences"
-        # The fenced orphan marker is still user content
-        assert self._ROUTING_END in result
-        assert result.count(self._ROUTING_END) == 1
-        # No PACT_ROUTING_START is injected (this is just orphan handling,
-        # not Case 1 + migration of a real routing block).
-        assert self._ROUTING_START not in result
-        # Fence boundaries intact — pre-fix, the orphan-strip walker's
-        # `next_terminator` regex could reach across the closing fence
-        # and delete content past it.
-        assert result.count("```") == 2
-        # User content after the fence survives
-        assert "Post-fence notes." in result
-        assert "Migration notes:" in result
 
 
 class TestBuildMigratedContentIdempotent:
@@ -5222,4 +4632,172 @@ class TestStripLegacyLines:
         # All content lines also survive
         assert "Example: how to open a code fence in Markdown:" in result
         assert "More content inside the tilde fence." in result
+
+    def test_strip_legacy_lines_length_tracked_fence_state(self):
+        """Round 10 item 9: CommonMark §4.5 variable-length fence support.
+
+        A 4-backtick outer fence (````) containing a 3-backtick inner
+        example (```) must NOT close the outer fence on the inner line.
+        Pre-round-10 behavior used boolean toggles which would falsely
+        close the fence on the 3-backtick line, exposing the remainder
+        of the outer fence body to legacy-line stripping.
+
+        Counter-test-by-revert: revert `_strip_legacy_lines` to boolean
+        toggles -> this test MUST fail; restore length-tracked state ->
+        this test MUST pass.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Notes\n"
+            "\n"
+            "````markdown\n"
+            "Here is an inner example:\n"
+            "```\n"
+            f"{self.STALE_LINE}\n"
+            "```\n"
+            "Still inside the 4-backtick outer fence.\n"
+            "````\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE in result, (
+            "Stale line inside 4-backtick outer fence (with 3-backtick "
+            "inner example) must be preserved — length-tracked fence "
+            "state required (round 10 item 9)"
+        )
+        assert "Still inside the 4-backtick outer fence." in result
+        assert "Here is an inner example:" in result
+
+    def test_strip_legacy_lines_length_tracked_tilde_fence(self):
+        """Same as above but with tilde fences: 4-tilde outer, 3-tilde inner."""
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Notes\n"
+            "\n"
+            "~~~~\n"
+            "Inner tilde example:\n"
+            "~~~\n"
+            f"{self.STALE_LINE}\n"
+            "~~~\n"
+            "Still inside the 4-tilde outer fence.\n"
+            "~~~~\n"
+        )
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE in result, (
+            "Stale line inside 4-tilde outer fence must be preserved"
+        )
+        assert "Still inside the 4-tilde outer fence." in result
+
+    def test_strip_legacy_lines_closing_fence_needs_no_info_string(self):
+        """CommonMark §4.5: closing fence cannot have an info string.
+        A line with ``` followed by non-whitespace is NOT a closing fence.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        content = (
+            "# Notes\n"
+            "\n"
+            "```\n"
+            "```python\n"  # NOT a closing fence (has info string)
+            f"{self.STALE_LINE}\n"
+            "```\n"  # This IS the real close
+        )
+
+        result = _strip_legacy_lines(content)
+
+        # The stale line is inside the fence (```python is not a close)
+        assert self.STALE_LINE in result
+
+class TestExtractManagedRegion:
+    """Round 10: tests for _extract_managed_region helper."""
+
+    def test_returns_region_and_offset(self):
+        """When both markers are present, returns (region_text, offset)."""
+        from shared.claude_md_manager import (
+            MANAGED_START_MARKER,
+            MANAGED_END_MARKER,
+            _extract_managed_region,
+        )
+
+        content = (
+            "user preamble\n"
+            f"{MANAGED_START_MARKER}\n"
+            "managed content here\n"
+            f"{MANAGED_END_MARKER}\n"
+            "user epilogue\n"
+        )
+
+        result = _extract_managed_region(content)
+        assert result is not None
+        region_text, offset = result
+        assert "managed content here" in region_text
+        assert "user preamble" not in region_text
+        assert "user epilogue" not in region_text
+        # offset should point to just after MANAGED_START_MARKER
+        assert content[offset:].startswith("\nmanaged")
+
+    def test_returns_none_when_start_missing(self):
+        """When MANAGED_START_MARKER is absent, returns None."""
+        from shared.claude_md_manager import (
+            MANAGED_END_MARKER,
+            _extract_managed_region,
+        )
+
+        content = f"some content\n{MANAGED_END_MARKER}\n"
+        assert _extract_managed_region(content) is None
+
+    def test_returns_none_when_end_missing(self):
+        """When MANAGED_END_MARKER is absent, returns None."""
+        from shared.claude_md_manager import (
+            MANAGED_START_MARKER,
+            _extract_managed_region,
+        )
+
+        content = f"{MANAGED_START_MARKER}\nsome content\n"
+        assert _extract_managed_region(content) is None
+
+    def test_returns_none_for_empty_string(self):
+        """Empty string has no markers."""
+        from shared.claude_md_manager import _extract_managed_region
+
+        assert _extract_managed_region("") is None
+
+    def test_offset_enables_correct_writeback(self):
+        """The offset should allow callers to map managed-region positions
+        back to full-content positions for write-back operations.
+        """
+        from shared.claude_md_manager import (
+            MANAGED_START_MARKER,
+            MANAGED_END_MARKER,
+            _extract_managed_region,
+        )
+
+        preamble = "user notes above\n\n"
+        managed_body = "## Pinned Context\npin content\n"
+        epilogue = "\nuser notes below\n"
+
+        content = (
+            preamble
+            + MANAGED_START_MARKER + "\n"
+            + managed_body
+            + MANAGED_END_MARKER + "\n"
+            + epilogue
+        )
+
+        result = _extract_managed_region(content)
+        assert result is not None
+        region_text, offset = result
+
+        # Find "pin content" in the region
+        local_idx = region_text.find("pin content")
+        assert local_idx >= 0
+
+        # Map back to full content
+        full_idx = local_idx + offset
+        assert content[full_idx:full_idx + len("pin content")] == "pin content"
 

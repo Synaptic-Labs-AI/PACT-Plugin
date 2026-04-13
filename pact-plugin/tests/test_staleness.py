@@ -1031,97 +1031,18 @@ class TestCheckPinnedStalenessHardening:
         assert self.STALE_DATE in post_content
 
 
-class TestParsePinnedSectionFenceAware:
-    """Round 5 item 4: `_parse_pinned_section` must track code-fence state
-    so that a fenced block inside the Pinned Context section containing a
-    line that looks like a section terminator (H2 heading, PACT boundary
-    marker) does NOT prematurely terminate the section.
+class TestParsePinnedSectionTerminator:
+    """Regression guard: `_parse_pinned_section` must terminate on PACT
+    boundary markers and H2 headings.
 
-    Rationale: pinned prose routinely contains triple-backtick examples
-    (tutorials, config snippets, JSON blocks, quoted markers). Without
-    fence tracking the parser would truncate the pinned region at the
-    first fenced-block pseudo-terminator, and downstream write-back
-    operations would eat everything between the fake terminator and the
-    real terminator. This is the same failure mode that
-    `_parse_working_memory_section` guards against — staleness parses
-    prose content authored by both plugin and user, so fence tracking
-    is required here too.
+    Round 10 simplified these tests: fence-awareness tests are deleted
+    because the parser now operates within the PACT-managed region only
+    (no user-authored fenced code blocks). The unfenced terminator test
+    remains as a regression guard for the basic termination contract.
     """
 
-    def test_fenced_h2_does_not_terminate_pinned_section(self):
-        """An H2 heading inside a fenced code block must not be treated
-        as a section terminator.
-        """
-        from staleness import _parse_pinned_section
-
-        content = (
-            "# Project Memory\n"
-            "\n"
-            "## Pinned Context\n"
-            "\n"
-            "### Real pin entry\n"
-            "Explaining the section format:\n"
-            "\n"
-            "```markdown\n"
-            "## Not a real heading\n"
-            "This H2 lives inside a fence and must be ignored.\n"
-            "```\n"
-            "\n"
-            "More prose after the fence.\n"
-            "\n"
-            "## Working Memory\n"
-            "Real terminator — Working Memory follows Pinned Context.\n"
-        )
-
-        result = _parse_pinned_section(content)
-        assert result is not None
-        _pinned_start, _pinned_end, pinned_content = result
-
-        # The fenced fake H2 must be inside the extracted region
-        assert "## Not a real heading" in pinned_content
-        assert "More prose after the fence." in pinned_content
-        # The real terminator must NOT be inside the extracted region
-        assert "Real terminator" not in pinned_content
-
-    def test_fenced_pact_marker_does_not_terminate_pinned_section(self):
-        """A PACT boundary marker inside a fenced code block must not
-        terminate the section.
-        """
-        from staleness import _parse_pinned_section
-
-        content = (
-            "# Project Memory\n"
-            "\n"
-            "## Pinned Context\n"
-            "\n"
-            "### Documentation pin\n"
-            "Example of the managed-boundary marker:\n"
-            "\n"
-            "```html\n"
-            "<!-- PACT_MEMORY_END -->\n"
-            "```\n"
-            "\n"
-            "Further narrative.\n"
-            "\n"
-            "<!-- PACT_MEMORY_END -->\n"
-            "## After memory block\n"
-        )
-
-        result = _parse_pinned_section(content)
-        assert result is not None
-        _pinned_start, pinned_end, pinned_content = result
-
-        # The fenced fake marker must be inside the extracted region
-        assert "```html" in pinned_content
-        assert "Further narrative." in pinned_content
-        # The real marker at the bottom must be the terminator — check
-        # that pinned_end points to the real marker's line.
-        assert content[pinned_end:].lstrip().startswith("<!-- PACT_MEMORY_END -->")
-
     def test_unfenced_pact_marker_still_terminates_pinned_section(self):
-        """Regression guard: the fence-aware refactor must not weaken
-        the existing terminator behavior for unfenced markers.
-        """
+        """PACT boundary markers terminate the pinned section scan."""
         from staleness import _parse_pinned_section
 
         content = (
@@ -1145,56 +1066,51 @@ class TestParsePinnedSectionFenceAware:
         assert "PACT_MEMORY_END" not in pinned_content
         assert content[pinned_end:].lstrip().startswith("<!-- PACT_MEMORY_END -->")
 
-    def test_nested_fences_balance_correctly(self):
-        """Two separate fenced blocks in sequence: the parser must
-        properly toggle state twice, not get stuck in one.
+class TestParsePinnedSectionManagedRegionBounding:
+    """Round 10: _parse_pinned_section bounds its search to the managed region
+    and returns full-file positions for write-back.
+    """
+
+    def test_returns_full_file_offsets_with_managed_region(self):
+        """Positions in the returned tuple must be absolute in the full
+        content, not relative to the managed region.
         """
         from staleness import _parse_pinned_section
+        from shared.claude_md_manager import (
+            MANAGED_START_MARKER,
+            MANAGED_END_MARKER,
+        )
 
-        content = (
+        preamble = "user notes above\n\n"
+        managed_body = (
             "## Pinned Context\n"
             "\n"
-            "### Two examples\n"
+            "### Real pin\n"
+            "Pin content here.\n"
             "\n"
-            "```\n"
-            "## fake heading 1\n"
-            "```\n"
-            "\n"
-            "Between fences.\n"
-            "\n"
-            "```\n"
-            "## fake heading 2\n"
-            "```\n"
-            "\n"
-            "After both fences.\n"
-            "\n"
-            "## Working Memory\n"
+        )
+
+        content = (
+            preamble
+            + MANAGED_START_MARKER + "\n"
+            + managed_body
+            + MANAGED_END_MARKER + "\n"
+            + "user notes below\n"
         )
 
         result = _parse_pinned_section(content)
         assert result is not None
-        _pinned_start, _pinned_end, pinned_content = result
+        pinned_start, pinned_end, pinned_content = result
 
-        # Both fake headings must survive
-        assert "## fake heading 1" in pinned_content
-        assert "## fake heading 2" in pinned_content
-        assert "Between fences." in pinned_content
-        assert "After both fences." in pinned_content
-        # The real terminator must be excluded
-        assert "Working Memory" not in pinned_content
+        # Offsets must be in the full content, not managed-region-relative
+        assert pinned_start > len(preamble), (
+            "pinned_start must be an absolute offset past the preamble"
+        )
+        assert content[pinned_start:pinned_start + 3] == "\n##" or "### " in content[pinned_start:pinned_start + 20]
+        assert "Pin content here." in pinned_content
 
-    def test_tilde_fenced_pact_marker_does_not_terminate_pinned_section(self):
-        """Round 8 item 1: `staleness._find_terminator_offset` must
-        recognize tilde fences (CommonMark §4.5) as well as backtick
-        fences. Pre-round-8, the walker only tracked ``` fences, so a
-        user-authored ~~~ fence containing a fake PACT boundary marker
-        would cause the terminator search to stop inside the fence,
-        cutting off the pinned section mid-fence and losing user content.
-
-        This test is the counterpart to
-        `test_fenced_pact_marker_does_not_terminate_pinned_section` —
-        same adversarial content, but wrapped in ~~~ instead of ```.
-        """
+    def test_fallback_to_full_content_without_managed_markers(self):
+        """Pre-migration file: no managed markers, parser scans full content."""
         from staleness import _parse_pinned_section
 
         content = (
@@ -1202,26 +1118,13 @@ class TestParsePinnedSectionFenceAware:
             "\n"
             "## Pinned Context\n"
             "\n"
-            "### Documentation pin (tilde fence)\n"
-            "Example of the managed-boundary marker in a tilde fence:\n"
+            "### Old pin\n"
+            "Old content.\n"
             "\n"
-            "~~~html\n"
-            "<!-- PACT_MEMORY_END -->\n"
-            "~~~\n"
-            "\n"
-            "Further narrative after the tilde fence.\n"
-            "\n"
-            "<!-- PACT_MEMORY_END -->\n"
-            "## After memory block\n"
+            "## Working Memory\n"
         )
 
         result = _parse_pinned_section(content)
         assert result is not None
-        _pinned_start, pinned_end, pinned_content = result
-
-        # The tilde-fenced fake marker must be inside the extracted region
-        # (it must not be treated as the section terminator).
-        assert "~~~html" in pinned_content
-        assert "Further narrative after the tilde fence." in pinned_content
-        # The real marker at the bottom must be the terminator
-        assert content[pinned_end:].lstrip().startswith("<!-- PACT_MEMORY_END -->")
+        _, _, pinned_content = result
+        assert "Old content." in pinned_content
