@@ -42,7 +42,6 @@ _SESSION_DIR_HINT = (
     "\n\nPACT_SESSION_DIR={session_dir}"
 )
 
-_NO_SESSION_DIR_HINT = ""
 
 def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
@@ -70,8 +69,9 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         return None
 
     # Lead session, no marker → inject bootstrap instruction with session dir
-    hint = _SESSION_DIR_HINT.format(session_dir=session_dir) if session_dir else _NO_SESSION_DIR_HINT
-    return _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(session_dir_hint=hint)
+    return _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
+        session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
+    )
 
 
 def main():
