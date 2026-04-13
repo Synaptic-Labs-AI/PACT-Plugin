@@ -586,3 +586,90 @@ class TestWorkingMemoryParserManagedRegionBounding:
         assert len(entries) == 1
         assert "Legacy entry" in entries[0]
         assert header == "## Working Memory"
+
+
+class TestPACTBoundaryAltTwinDriftDetection:
+    """PR #404 round 12 item 2: drift-detection test for the
+    ``_PACT_BOUNDARY_ALT`` regex alternation string.
+
+    working_memory.py inlines ``_PACT_BOUNDARY_ALT`` because it cannot
+    import from hooks/shared/ (separate package boundary). This test
+    asserts the working_memory.py copy equals the canonical alternation
+    derived from ``PACT_BOUNDARY_PREFIXES`` in claude_md_manager.py.
+    """
+
+    def test_boundary_alt_matches_canonical(self):
+        from scripts.working_memory import _PACT_BOUNDARY_ALT
+        from shared.claude_md_manager import PACT_BOUNDARY_PREFIXES
+
+        canonical_alt = "|".join(PACT_BOUNDARY_PREFIXES)
+        assert _PACT_BOUNDARY_ALT == canonical_alt, (
+            f"_PACT_BOUNDARY_ALT in working_memory.py ({_PACT_BOUNDARY_ALT!r}) "
+            f"drifted from canonical ({canonical_alt!r}). "
+            f"Update the twin in working_memory.py to match "
+            f"PACT_BOUNDARY_PREFIXES in claude_md_manager.py."
+        )
+
+
+class TestExtractManagedRegionTwinDriftDetection:
+    """PR #404 round 12 item 3: drift-detection test for the
+    ``extract_managed_region`` twin in working_memory.py.
+
+    Both hooks/shared/claude_md_manager.py and
+    skills/pact-memory/scripts/working_memory.py carry copies of
+    ``extract_managed_region`` due to the package boundary. This test
+    exercises both copies with identical input and asserts identical output.
+    """
+
+    def test_both_copies_return_identical_output_when_markers_present(self):
+        from scripts.working_memory import (
+            extract_managed_region as wm_extract,
+        )
+        from shared.claude_md_manager import (
+            extract_managed_region as cm_extract,
+        )
+
+        content = (
+            "user preamble\n"
+            f"{_MANAGED_START}\n"
+            "managed body here\n"
+            f"{_MANAGED_END}\n"
+            "user epilogue\n"
+        )
+
+        wm_result = wm_extract(content)
+        cm_result = cm_extract(content)
+
+        assert wm_result is not None
+        assert cm_result is not None
+        assert wm_result == cm_result, (
+            f"extract_managed_region twins returned different results.\n"
+            f"working_memory.py: {wm_result!r}\n"
+            f"claude_md_manager.py: {cm_result!r}"
+        )
+
+    def test_both_copies_return_none_when_markers_missing(self):
+        from scripts.working_memory import (
+            extract_managed_region as wm_extract,
+        )
+        from shared.claude_md_manager import (
+            extract_managed_region as cm_extract,
+        )
+
+        content = "no markers at all\n"
+
+        assert wm_extract(content) is None
+        assert cm_extract(content) is None
+
+    def test_both_copies_return_none_when_only_start_marker(self):
+        from scripts.working_memory import (
+            extract_managed_region as wm_extract,
+        )
+        from shared.claude_md_manager import (
+            extract_managed_region as cm_extract,
+        )
+
+        content = f"preamble\n{_MANAGED_START}\norphan body\n"
+
+        assert wm_extract(content) is None
+        assert cm_extract(content) is None

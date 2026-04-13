@@ -59,11 +59,11 @@ _MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do no
 _MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
 
 
-def _extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
+def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
     """
     Extract the PACT-managed region from CLAUDE.md content.
 
-    Twin of hooks/shared/claude_md_manager._extract_managed_region — kept
+    Twin of hooks/shared/claude_md_manager.extract_managed_region — kept
     local because skills/pact-memory/scripts/ cannot import from hooks/shared/.
 
     Returns (region_text, start_offset) where start_offset is the absolute
@@ -427,7 +427,7 @@ def _parse_working_memory_section(
         where existing_entries is a list of individual memory entry strings.
     """
     # Bound to managed region if available (round 10).
-    region_result = _extract_managed_region(content)
+    region_result = extract_managed_region(content)
     if region_result is not None:
         scan_text, offset = region_result
     else:
@@ -583,7 +583,7 @@ def _parse_retrieved_context_section(
         where existing_entries is a list of individual memory entry strings.
     """
     # Bound to managed region if available (round 10).
-    region_result = _extract_managed_region(content)
+    region_result = extract_managed_region(content)
     if region_result is not None:
         scan_text, offset = region_result
     else:

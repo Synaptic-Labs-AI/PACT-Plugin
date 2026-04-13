@@ -122,7 +122,7 @@ MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
 MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"
 MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 
-# Canonical H1 title for the managed block. Extracted (round 5, item 3) so
+# Canonical H1 title for the managed block. Extracted as a constant so
 # the three template sites (ensure_project_memory_md, _build_migrated_content,
 # session_resume.update_session_info Case 0) cannot drift apart. Changing this
 # value changes the title everywhere in one place.
@@ -130,7 +130,7 @@ MANAGED_TITLE = "# PACT Framework and Managed Project Memory"
 
 # Plugin-managed HTML comment boundary prefixes. Used by parsers and regex
 # sites that need to terminate scans on any PACT-managed boundary marker.
-# Extracted (round 5, item 1) so the three-prefix union is defined once.
+# Extracted as a constant so the three-prefix union is defined once.
 #
 # Twin copy: working_memory.py maintains a parallel _PACT_BOUNDARY_PREFIXES
 # tuple because skills/pact-memory/scripts/ cannot cleanly import from
@@ -142,7 +142,7 @@ PACT_BOUNDARY_PREFIXES: tuple[str, ...] = (
 )
 
 # Regex alternation used by scan-terminator patterns in this module.
-# Mirrors the `_BOUNDARY_ALT` constant in `staleness.py` (round 6, item 1):
+# Mirrors the `_BOUNDARY_ALT` constant in `staleness.py`:
 # any regex that needs to terminate on a PACT boundary marker must embed
 # this alternation rather than hard-coding the three-prefix literal. That
 # way, adding a fourth prefix to `PACT_BOUNDARY_PREFIXES` automatically
@@ -154,14 +154,13 @@ _BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
 # upgraded files and contradicts the routing block. Strip it on every
 # update_pact_routing() pass. Allows optional trailing period / whitespace.
 #
-# Round 7 item 2: this pattern is applied per-line by `_strip_legacy_lines`
+# PR #404: this pattern is applied per-line by `_strip_legacy_lines`
 # via a fence-aware walker, NOT module-wide with `re.MULTILINE`. The per-line
 # form is anchored to the full stripped line, so `$` matches end-of-line
 # without needing a MULTILINE flag. Removing MULTILINE is load-bearing:
 # with MULTILINE the pattern was hot inside user-authored fenced code blocks
-# and silently destroyed example content that quoted the stale template line
-# (verify-backend-coder-7 counter-test). Per-line application + fence
-# tracking prevents that failure mode entirely.
+# and silently destroyed example content that quoted the stale template line.
+# Per-line application + fence tracking prevents that failure mode entirely.
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
@@ -178,31 +177,20 @@ def _strip_legacy_lines(content: str) -> str:
     of legacy-line patterns here means adding a new pattern in the future
     only requires editing this helper, not both call sites.
 
-    Round 7 item 2 — fence-aware: walks `content` line by line, tracks
-    markdown fenced-code-block state, and applies
+    PR #404: fence-aware line walker that applies
     `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines that are NOT inside a
-    fence. Lines inside a fence are preserved verbatim, even if they match
-    the stale-line regex. This prevents silent data loss when a user's
-    CLAUDE.md contains a fenced code block that quotes the legacy template
-    verbatim (e.g., migration documentation, tutorial content, upgrade
-    change logs).
+    fenced code block. Lines inside a fence are preserved verbatim, even
+    if they match the stale-line regex. This prevents silent data loss when
+    a user's CLAUDE.md contains a fenced code block that quotes the legacy
+    template verbatim (e.g., migration documentation, tutorial content).
 
-    Round 8 item 1 — tilde-fence support (CommonMark §4.5): the walker
-    tracks backtick fences (```) and tilde fences (~~~) as INDEPENDENT
-    states. The two fence characters are equivalent per CommonMark, and a
-    line inside a backtick fence that contains ~~~ does not affect tilde
-    state (and vice versa). Prior (round 7) behavior recognized only
-    backtick fences, so the counter-test
-        "# Notes\\n\\n~~~markdown\\nThe global PACT Orchestrator is loaded
-        from `~/.claude/CLAUDE.md`.\\n~~~\\n"
-    produced output with the stale line destroyed inside the tilde fence.
+    Supports both backtick (```) and tilde (~~~) fences as independent
+    fence types per CommonMark §4.5. A line inside a backtick fence that
+    contains ~~~ does not affect tilde state (and vice versa).
 
-    Prior (pre-round-7) behavior used `re.MULTILINE` on the whole content,
-    which stripped matching lines regardless of fence state. The verify-
-    backend-coder-7 counter-test showed: a fenced block containing the
-    stale orchestrator line emerged with the line deleted from inside the
-    fence, leaving the opening and closing fence markers with an empty
-    body. Per-line application plus fence tracking fixes this failure mode.
+    Prior behavior used `re.MULTILINE` on the whole content, which stripped
+    matching lines regardless of fence state, silently destroying fenced
+    example content. Per-line application plus fence tracking fixes this.
 
     Args:
         content: The raw CLAUDE.md content to scrub.
@@ -212,20 +200,13 @@ def _strip_legacy_lines(content: str) -> str:
         removed. Content inside fenced code blocks (backtick or tilde) is
         preserved byte for byte. Pure function.
     """
-    # Length-tracked fence state (round 10, item 9): CommonMark §4.5
-    # requires a closing fence to have a run length >= the opening fence's
-    # run length and use the same character. A 4-backtick outer fence
-    # (````) containing a 3-backtick inner example (```) must NOT toggle
-    # the fence state on the inner line. Prior (round 8) behavior used
-    # boolean toggles which failed this case — a ```` outer fence with an
-    # inner ``` would falsely close the fence, exposing the remainder of
-    # the outer fence body to legacy-line stripping.
-    #
-    # State: fence_open_len > 0 means we're inside a fence; fence_char
-    # records which character (` or ~) opened it. A subsequent line closes
-    # the fence only if it uses the SAME char AND its run length >=
-    # fence_open_len. This is the only walker that stays after round 10's
-    # structural simplification (it processes user content during migration).
+    # PR #404: length-tracked fence state per CommonMark §4.5 — closing
+    # fence must use the same character and run length >= the opening. A
+    # 4-backtick outer fence containing a 3-backtick inner example must
+    # NOT toggle state on the inner line. fence_open_len > 0 means we're
+    # inside a fence; fence_char records which character opened it. This
+    # is the only fence walker that remains after the structural
+    # simplification (it processes user content during migration).
     pos = 0
     fence_open_len = 0  # 0 = not inside a fence
     fence_char = ""     # "`" or "~" when inside a fence
@@ -286,7 +267,7 @@ def _strip_legacy_lines(content: str) -> str:
 
 
 
-# Canonical PACT routing block template (round 7, item 3). The exact
+# Canonical PACT routing block template (PR #404). The exact
 # HTML-comment-wrapped routing section that every project CLAUDE.md
 # must carry: a `<!-- PACT_ROUTING_START -->` opener, the canonical
 # `## PACT Routing` instructions, and a `<!-- PACT_ROUTING_END -->`
@@ -331,7 +312,7 @@ Re-invoke after compaction if the bootstrap content is no longer present.
 <!-- PACT_ROUTING_END -->"""
 
 
-def _extract_managed_region(content: str) -> tuple[str, int] | None:
+def extract_managed_region(content: str) -> tuple[str, int] | None:
     """
     Extract the PACT-managed region from a CLAUDE.md file.
 
@@ -619,7 +600,7 @@ def update_pact_routing() -> str | None:
             stale_line_removed = stripped != content
             content = stripped
 
-            # Marker discovery: simple substring check. Round 10 structural
+            # Marker discovery: simple substring check. PR #404 structural
             # simplification — routing markers (PACT_ROUTING_START/END) are
             # always inside the PACT_MANAGED region (post-migration) or in
             # plugin-generated content (pre-migration). No user-authored
@@ -675,7 +656,7 @@ def update_pact_routing() -> str | None:
             # lines OUTSIDE any <!-- SESSION_START --> ... <!-- SESSION_END -->
             # region to avoid corrupting session metadata.
             #
-            # Round 10: fence tracking removed from orphan strip — routing
+            # PR #404: fence tracking removed from orphan strip — routing
             # markers are always in plugin-generated content, not user fences.
             orphan_stripped = False
             if has_start != has_end:
@@ -873,7 +854,7 @@ def migrate_to_managed_structure() -> str | None:
     User content with fenced code blocks containing ## memory headings is
     preserved verbatim. The classifier tracks in_code_fence state and does
     not misclassify fence-protected headings as real memory sections
-    (round 5, item 9).
+    (PR #404).
 
     Returns:
         Status message on successful migration, None on no-op (already
@@ -932,16 +913,15 @@ def _build_migrated_content(content: str) -> str:
 
     This is a pure function (no I/O) for testability.
 
-    Idempotency guard (round 5, item 2): if the content already contains
-    MANAGED_START_MARKER, return it unchanged.
+    Idempotency guard: if the content already contains MANAGED_START_MARKER,
+    return it unchanged.
 
-    Design decision (round 10): user content that appears ABOVE the first
+    Design decision (PR #404): user content that appears ABOVE the first
     PACT-managed section heading in the original file is classified as
     user_parts and lands BELOW PACT_MANAGED_END after migration. This is a
-    one-time event on upgrade. The previous behavior (round 6) preserved
-    top-of-file notes above MANAGED_START via a preamble-cutoff mechanism,
-    but that mechanism required fence-awareness in every downstream parser
-    and accumulated 4 rounds of bug-fixing (rounds 6-9). Removing preamble
+    one-time event on upgrade. A previous iteration preserved top-of-file
+    notes above MANAGED_START via a preamble-cutoff mechanism, but that
+    required fence-awareness in every downstream parser. Removing preamble
     handling eliminates the fence-awareness bug class at the cost of this
     one-time content relocation.
 
@@ -974,7 +954,7 @@ def _build_migrated_content(content: str) -> str:
             routing_block = content[start_idx:end_of_block]
             content_sans_routing = content[:start_idx] + content[end_of_block:]
     elif has_start or has_end:
-        # Orphan PACT_ROUTING marker (round 5, item 5): drop the orphan
+        # Orphan PACT_ROUTING marker (PR #404): drop the orphan
         # marker AND any adjacent `## PACT Routing` H2 block.
         orphan_marker = (
             _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
@@ -1056,17 +1036,45 @@ def _build_migrated_content(content: str) -> str:
     lines = remaining.splitlines(keepends=True)
     current_section: list[str] = []
     in_memory_section = False
-    # Track code fence state so fenced `## Pinned Context` is not
-    # misclassified as a real memory section.
-    in_code_fence = False
+    # Length-tracked fence state (PR #404): CommonMark §4.5 requires a
+    # closing fence to use the same character and run length >= the opening.
+    # A boolean toggle fails on tilde fences and 4+ backtick nesting. This
+    # mirrors the model in _strip_legacy_lines.
+    fence_open_len = 0  # 0 = not inside a fence
+    fence_char = ""     # "`" or "~" when inside a fence
 
     for line in lines:
         stripped = line.rstrip()
-        if stripped.startswith("```"):
-            in_code_fence = not in_code_fence
-            current_section.append(line)
-            continue
-        if in_code_fence:
+        lstripped = stripped.lstrip()
+        if fence_open_len == 0:
+            # Not inside a fence — check for fence open
+            if lstripped.startswith("```"):
+                run_len = len(lstripped) - len(lstripped.lstrip("`"))
+                fence_open_len = run_len
+                fence_char = "`"
+                current_section.append(line)
+                continue
+            elif lstripped.startswith("~~~"):
+                run_len = len(lstripped) - len(lstripped.lstrip("~"))
+                fence_open_len = run_len
+                fence_char = "~"
+                current_section.append(line)
+                continue
+        else:
+            # Inside a fence — check for fence close (same char, run >= open)
+            if fence_char == "`" and lstripped.startswith("```"):
+                run_len = len(lstripped) - len(lstripped.lstrip("`"))
+                after_run = lstripped[run_len:].strip()
+                if run_len >= fence_open_len and not after_run:
+                    fence_open_len = 0
+                    fence_char = ""
+            elif fence_char == "~" and lstripped.startswith("~~~"):
+                run_len = len(lstripped) - len(lstripped.lstrip("~"))
+                after_run = lstripped[run_len:].strip()
+                if run_len >= fence_open_len and not after_run:
+                    fence_open_len = 0
+                    fence_char = ""
+            # Keep fence body verbatim regardless
             current_section.append(line)
             continue
         if any(stripped == h for h in memory_headings):

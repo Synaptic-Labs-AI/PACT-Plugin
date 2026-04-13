@@ -24,7 +24,7 @@ from typing import List, Optional, Tuple
 
 from shared.claude_md_manager import (
     PACT_BOUNDARY_PREFIXES,
-    _extract_managed_region,
+    extract_managed_region,
 )
 
 # Boundary prefix alternation used by _parse_pinned_section. Built from
@@ -201,7 +201,7 @@ def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
     """
     # Bound to managed region if available (round 10). Offset adjustment
     # converts managed-region-relative positions back to full-file positions.
-    region_result = _extract_managed_region(content)
+    region_result = extract_managed_region(content)
     if region_result is not None:
         scan_text, offset = region_result
     else:

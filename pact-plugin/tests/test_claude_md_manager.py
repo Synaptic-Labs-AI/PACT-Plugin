@@ -3560,6 +3560,104 @@ class TestBuildMigratedContentAdversarial:
         assert "```markdown" not in after_managed
 
 
+    def test_tilde_fenced_memory_heading_classified_as_user_content(self):
+        """PR #404 round 12 item 1: tilde-fenced ``## Working Memory``
+        inside user content must NOT be extracted as a real memory section.
+
+        The prior body classifier used a backtick-only boolean toggle
+        (``in_code_fence``). Tilde fences (``~~~~``) are a valid CommonMark
+        §4.5 alternative that the classifier must recognize.
+
+        Counter-test-by-revert validated: reverting to the boolean toggle
+        causes this test to fail because the tilde fence is invisible to
+        ``startswith("```")``, so the ``## Working Memory`` heading inside
+        the tilde fence is misclassified as a memory section boundary.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## User Notes\n"
+            "Example of a memory section in tilde fence:\n"
+            "\n"
+            "~~~~markdown\n"
+            "## Working Memory\n"
+            "This is example text inside a tilde fence.\n"
+            "~~~~\n"
+            "\n"
+            "End of user notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Fenced content must land as user content below MANAGED_END
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## User Notes" in after_managed
+        assert "~~~~markdown" in after_managed
+        assert "## Working Memory" in after_managed
+        assert "example text inside a tilde fence" in after_managed
+        assert "End of user notes." in after_managed
+
+        # Memory region must not contain the fenced heading
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "example text inside a tilde fence" not in memory_region
+
+    def test_nested_4backtick_fence_does_not_toggle_on_inner_3backtick(self):
+        """PR #404 round 12 item 1: a ```````` outer fence containing an
+        inner ````` must not toggle the fence state.
+
+        CommonMark §4.5: closing fence must have run length >= opening.
+        A 4-backtick outer fence containing a 3-backtick inner example
+        line must stay open through the inner line. A boolean toggle
+        would falsely close on the inner ````` and expose the remainder
+        of the outer fence body to heading classification.
+
+        Counter-test-by-revert validated: reverting to the boolean toggle
+        causes the inner ````` to close the fence, so ``## Pinned Context``
+        on the next line is misclassified as a memory section boundary.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Migration Guide\n"
+            "Example with nested fences:\n"
+            "\n"
+            "````markdown\n"
+            "Here is a code block:\n"
+            "```\n"
+            "## Pinned Context\n"
+            "Some inner content\n"
+            "```\n"
+            "End of inner example.\n"
+            "````\n"
+            "\n"
+            "Post-fence user notes.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # All fenced content must land as user content below MANAGED_END
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "## Migration Guide" in after_managed
+        assert "````markdown" in after_managed
+        assert "## Pinned Context" in after_managed
+        assert "Some inner content" in after_managed
+        assert "Post-fence user notes." in after_managed
+
+        # Memory region must not contain the fenced heading
+        mem_start_idx = result.index(_MEMORY_START)
+        mem_end_idx = result.index(_MEMORY_END)
+        memory_region = result[mem_start_idx:mem_end_idx]
+        assert "Some inner content" not in memory_region
+
+
 class TestBuildMigratedContentOrphanRoutingMarker:
     """Round 5 item 5: `_build_migrated_content` must strip orphan
     PACT_ROUTING markers (exactly one of START/END present) to avoid
@@ -4191,9 +4289,9 @@ class TestManagedMarkerConstants:
         assert MANAGED_TITLE == "# PACT Framework and Managed Project Memory"
 
     def test_managed_title_no_literal_copies_in_claude_md_manager(self):
-        """Round 6 item 5: ensure the ``MANAGED_TITLE`` literal appears
-        in ``claude_md_manager.py`` ONLY in the constant definition —
-        not hand-copied into a template string or default argument.
+        """PR #404: ensure the ``MANAGED_TITLE`` literal appears in
+        ``claude_md_manager.py`` exactly 2 times (1 constant definition +
+        1 docstring mention) — not hand-copied into a template string.
 
         This is a source-scan drift guard. The literal is allowed inside
         docstring examples and code comments (because those are
@@ -4237,15 +4335,15 @@ class TestManagedMarkerConstants:
         # code site instead of referencing ``MANAGED_TITLE``, which is the
         # drift pattern item 5 guards against.
         count = source.count(literal)
-        assert count <= 2, (
-            f"Expected at most 2 occurrences of MANAGED_TITLE literal in "
+        assert count == 2, (
+            f"Expected exactly 2 occurrences of MANAGED_TITLE literal in "
             f"claude_md_manager.py (1 constant def + 1 docstring mention), "
             f"found {count}. A hand-copied literal indicates drift — use "
             f"the MANAGED_TITLE symbol at code sites instead."
         )
 
     def test_managed_title_no_literal_copies_in_session_resume(self):
-        """Round 6 item 5: same drift guard applied to ``session_resume.py``.
+        """PR #404: drift guard for ``session_resume.py``.
 
         ``update_session_info`` Case 0 (the fresh-file creation path)
         builds a PACT_MANAGED block and must use the imported
@@ -4274,8 +4372,8 @@ class TestManagedMarkerConstants:
         # No code-site copy is permitted; ``MANAGED_TITLE`` is imported at
         # the top of the file and used as a symbol at the single site.
         count = source.count(literal)
-        assert count <= 1, (
-            f"Expected at most 1 occurrence of MANAGED_TITLE literal in "
+        assert count == 1, (
+            f"Expected exactly 1 occurrence of MANAGED_TITLE literal in "
             f"session_resume.py (comment mention only), found {count}. "
             f"Use the imported MANAGED_TITLE symbol at code sites."
         )
@@ -4713,15 +4811,87 @@ class TestStripLegacyLines:
         # The stale line is inside the fence (```python is not a close)
         assert self.STALE_LINE in result
 
+    def test_strip_legacy_lines_no_trailing_newline(self):
+        """PR #404 round 12 item 6: content with no trailing newline
+        must still strip the stale line on the final line.
+
+        Covers lines 217-219: the ``nl == -1`` branch where the last
+        line in content has no ``\\n`` terminator.
+        """
+        from shared.claude_md_manager import _strip_legacy_lines
+
+        # Stale line is the last line, no trailing newline
+        content = f"# Notes\n{self.STALE_LINE}"
+
+        result = _strip_legacy_lines(content)
+
+        assert self.STALE_LINE not in result
+        assert "# Notes" in result
+
+
+class TestEnsureProjectMemoryMdOSErrorOnMkdir:
+    """PR #404 round 12 item 6: OSError during .claude/ directory creation
+    in ``ensure_project_memory_md``.
+
+    Covers lines 823-824: the ``except OSError`` branch where
+    ``target_dir.mkdir`` fails (e.g., read-only filesystem).
+    """
+
+    def test_oserror_during_mkdir_returns_failure_message(self, tmp_path, monkeypatch):
+        from shared.claude_md_manager import ensure_project_memory_md
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+        # Make the .claude directory creation fail
+        dot_claude = tmp_path / ".claude"
+        # Create a file at .claude to block mkdir
+        dot_claude.write_text("blocker")
+
+        result = ensure_project_memory_md()
+
+        assert result is not None
+        assert "failed" in result.lower() or "skipped" in result.lower()
+
+
+class TestBuildMigratedContentOrphanMarkerAtEof:
+    """PR #404 round 12 item 6: orphan routing marker at EOF with no
+    trailing newline and no following section terminator.
+
+    Covers lines 974 and 993: the ``scan_from = len(content)`` and
+    ``strip_end = len(content)`` branches in the orphan-marker handler
+    inside ``_build_migrated_content``.
+    """
+
+    def test_orphan_start_marker_at_eof_no_trailing_newline(self):
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Working Memory\n"
+            "data here\n"
+            # Orphan start marker at EOF, no newline, no end marker
+            f"{_ROUTING_START}"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Migration should still succeed
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        # The orphan marker should be stripped, not carried through
+        assert _ROUTING_START not in result
+
+
 class TestExtractManagedRegion:
-    """Round 10: tests for _extract_managed_region helper."""
+    """Round 10: tests for extract_managed_region helper."""
 
     def test_returns_region_and_offset(self):
         """When both markers are present, returns (region_text, offset)."""
         from shared.claude_md_manager import (
             MANAGED_START_MARKER,
             MANAGED_END_MARKER,
-            _extract_managed_region,
+            extract_managed_region,
         )
 
         content = (
@@ -4732,7 +4902,7 @@ class TestExtractManagedRegion:
             "user epilogue\n"
         )
 
-        result = _extract_managed_region(content)
+        result = extract_managed_region(content)
         assert result is not None
         region_text, offset = result
         assert "managed content here" in region_text
@@ -4745,27 +4915,27 @@ class TestExtractManagedRegion:
         """When MANAGED_START_MARKER is absent, returns None."""
         from shared.claude_md_manager import (
             MANAGED_END_MARKER,
-            _extract_managed_region,
+            extract_managed_region,
         )
 
         content = f"some content\n{MANAGED_END_MARKER}\n"
-        assert _extract_managed_region(content) is None
+        assert extract_managed_region(content) is None
 
     def test_returns_none_when_end_missing(self):
         """When MANAGED_END_MARKER is absent, returns None."""
         from shared.claude_md_manager import (
             MANAGED_START_MARKER,
-            _extract_managed_region,
+            extract_managed_region,
         )
 
         content = f"{MANAGED_START_MARKER}\nsome content\n"
-        assert _extract_managed_region(content) is None
+        assert extract_managed_region(content) is None
 
     def test_returns_none_for_empty_string(self):
         """Empty string has no markers."""
-        from shared.claude_md_manager import _extract_managed_region
+        from shared.claude_md_manager import extract_managed_region
 
-        assert _extract_managed_region("") is None
+        assert extract_managed_region("") is None
 
     def test_offset_enables_correct_writeback(self):
         """The offset should allow callers to map managed-region positions
@@ -4774,7 +4944,7 @@ class TestExtractManagedRegion:
         from shared.claude_md_manager import (
             MANAGED_START_MARKER,
             MANAGED_END_MARKER,
-            _extract_managed_region,
+            extract_managed_region,
         )
 
         preamble = "user notes above\n\n"
@@ -4789,7 +4959,7 @@ class TestExtractManagedRegion:
             + epilogue
         )
 
-        result = _extract_managed_region(content)
+        result = extract_managed_region(content)
         assert result is not None
         region_text, offset = result
 
