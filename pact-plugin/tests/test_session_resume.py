@@ -85,7 +85,7 @@ class TestUpdateSessionInfo:
         assert not legacy.exists()
         content = new_default.read_text()
         # Header
-        assert content.startswith("# Project Memory\n")
+        assert content.startswith("# PACT Framework for Agentic Orchestration\n")
         # Auto-creation comment
         assert "PACT auto-creates this file" in content
         assert "SESSION_START/SESSION_END markers" in content

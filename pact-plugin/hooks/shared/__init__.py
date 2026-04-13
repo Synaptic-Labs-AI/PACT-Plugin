@@ -30,6 +30,7 @@ from .claude_md_manager import (
     remove_stale_kernel_block,
     update_pact_routing,
     ensure_project_memory_md,
+    migrate_to_managed_structure,
 )
 from .failure_log import (
     append_failure,
@@ -72,6 +73,7 @@ __all__ = [
     "remove_stale_kernel_block",
     "update_pact_routing",
     "ensure_project_memory_md",
+    "migrate_to_managed_structure",
     "append_failure",
     "read_failures",
     "FAILURE_LOG_PATH",

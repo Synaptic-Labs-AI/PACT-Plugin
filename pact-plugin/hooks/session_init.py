@@ -9,6 +9,7 @@ Performs:
 1. Creates plugin symlinks for @reference resolution
 2. One-time migration: strips obsolete PACT kernel block from ~/.claude/CLAUDE.md
 3. Ensures project CLAUDE.md exists with memory sections
+3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
 4. Checks for stale pinned context (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
@@ -70,6 +71,7 @@ from shared.claude_md_manager import (
     remove_stale_kernel_block,
     update_pact_routing,
     ensure_project_memory_md,
+    migrate_to_managed_structure,
     resolve_project_claude_md_path,
 )
 from shared.session_resume import (
@@ -478,6 +480,19 @@ def main():
                 system_messages.append(project_md_msg)
             else:
                 context_parts.append(project_md_msg)
+
+        # 3b. One-time migration: wrap existing project CLAUDE.md in
+        # PACT_MANAGED boundary and add PACT_MEMORY markers (#404).
+        # Runs after ensure_project_memory_md() so newly created files
+        # already have the new structure, and before staleness checks
+        # so the staleness parser sees the migrated layout.
+        # Idempotent no-op when PACT_MANAGED_START marker is already present.
+        migration_msg = migrate_to_managed_structure()
+        if migration_msg:
+            if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
+                system_messages.append(migration_msg)
+            else:
+                context_parts.append(migration_msg)
 
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()

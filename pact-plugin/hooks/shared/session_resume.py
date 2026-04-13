@@ -137,11 +137,11 @@ def update_session_info(
                 # created above (before the lock) with mode 0o700.
                 if not target_file.exists():
                     new_content = (
-                        "# Project Memory\n"
+                        "# PACT Framework for Agentic Orchestration\n"
                         "\n"
                         "<!-- PACT auto-creates this file on first session. "
-                        "Safe to add your own content; the SESSION_START/SESSION_END "
-                        "markers are auto-updated each session. -->\n"
+                        "Safe to add your own content outside the PACT_MANAGED block; "
+                        "the SESSION_START/SESSION_END markers are auto-updated each session. -->\n"
                         "\n"
                         f"{session_block}\n"
                     )
