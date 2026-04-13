@@ -3500,3 +3500,170 @@ class TestBootstrapMarkerCleanup:
                 main()
 
         assert exc_info.value.code == 0
+
+
+# =============================================================================
+# Issue #414 R2: session_start event includes `source` field
+# =============================================================================
+
+
+class TestSessionStartSourceField:
+    """Issue #414 R2 — the `session_start` journal event written by
+    session_init.main() must include the normalized session source so
+    downstream triage can directly attribute the event to startup vs
+    auto-compact vs user `/clear` vs `/resume`, instead of triangulating
+    from timing clusters (which is how R1 was diagnosed — painfully).
+
+    The value persisted is the same `source` already computed at line 431
+    of session_init.py: any unrecognized stdin source clamps to `"unknown"`
+    so the journal field is bounded to {startup, resume, compact, clear,
+    unknown}. Fail-open is SACROSANCT — a missing or non-string source
+    must NEVER block session start; it lands in the journal as
+    `"unknown"` (or as `"startup"` when stdin omits the key entirely,
+    matching the existing default at line 430).
+    """
+
+    def _captured_session_start_event(self, mock_append):
+        """Helper: pull the session_start dict out of an append_event mock."""
+        starts = [
+            call.args[0]
+            for call in mock_append.call_args_list
+            if call.args and call.args[0].get("type") == "session_start"
+        ]
+        assert len(starts) == 1, (
+            f"Expected exactly one session_start event, got {len(starts)}: "
+            f"{starts!r}"
+        )
+        return starts[0]
+
+    def _run_main_and_capture_event(self, monkeypatch, tmp_path, stdin_payload):
+        """Helper: run session_init.main() with the given stdin payload and
+        return the dict that was passed to append_event for session_start."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdin_data = json.dumps(stdin_payload)
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("session_init.write_context", return_value=None), \
+             patch("session_init.append_event") as mock_append, \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Fail-open: session start must always succeed regardless of source.
+        assert exc_info.value.code == 0
+        return self._captured_session_start_event(mock_append)
+
+    @pytest.mark.parametrize(
+        "source", ["startup", "resume", "compact", "clear"]
+    )
+    def test_canonical_source_round_trips_into_event(
+        self, monkeypatch, tmp_path, source
+    ):
+        """All four canonical Claude-Code sources land in the event
+        verbatim — no remapping, no clamping."""
+        event = self._run_main_and_capture_event(
+            monkeypatch,
+            tmp_path,
+            {
+                "session_id": "aabb1122-0000-0000-0000-000000000000",
+                "source": source,
+            },
+        )
+        assert event.get("source") == source
+
+    def test_unknown_source_clamps_to_unknown_in_event(
+        self, monkeypatch, tmp_path
+    ):
+        """An unrecognized stdin source clamps to `"unknown"` in the
+        event — symmetric with the input validation at line 431 that
+        prevents arbitrary text from bleeding into source-conditioned
+        downstream logic."""
+        event = self._run_main_and_capture_event(
+            monkeypatch,
+            tmp_path,
+            {
+                "session_id": "aabb1122-0000-0000-0000-000000000000",
+                "source": "garbage-not-a-real-source",
+            },
+        )
+        assert event.get("source") == "unknown"
+
+    def test_missing_source_defaults_to_startup_in_event(
+        self, monkeypatch, tmp_path
+    ):
+        """When stdin omits `source` entirely, the existing default at
+        line 430 applies: source is `"startup"`. The event mirrors that
+        default rather than synthesizing `"unknown"` — preserving the
+        backwards-compat contract with older Claude Code releases that
+        never sent a source key."""
+        event = self._run_main_and_capture_event(
+            monkeypatch,
+            tmp_path,
+            {"session_id": "aabb1122-0000-0000-0000-000000000000"},
+        )
+        assert event.get("source") == "startup"
+
+    def test_non_string_source_clamps_to_unknown_in_event(
+        self, monkeypatch, tmp_path
+    ):
+        """Fail-open: a non-string `source` (int, list, dict, bool, None)
+        from stdin MUST NOT block session start. It clamps to `"unknown"`
+        because the membership test against `_VALID_SOURCES` cannot match
+        a non-string."""
+        # `None` is treated as missing-key by `dict.get(..., default)`
+        # only when the key itself is absent — an explicit `None` value
+        # bypasses the default and reaches the validator. Test it
+        # explicitly to lock that branch in.
+        for bad_source in (42, [], {}, True, None):
+            event = self._run_main_and_capture_event(
+                monkeypatch,
+                tmp_path,
+                {
+                    "session_id": "aabb1122-0000-0000-0000-000000000000",
+                    "source": bad_source,
+                },
+            )
+            assert event.get("source") == "unknown", (
+                f"non-string source {bad_source!r} should clamp to "
+                f"'unknown', got {event.get('source')!r}"
+            )
+
+    def test_event_preserves_all_existing_fields(
+        self, monkeypatch, tmp_path
+    ):
+        """Additive-only contract: adding `source` MUST NOT drop or
+        rename any of the pre-R2 session_start fields. This guards
+        against an accidental kwarg replacement during refactors."""
+        event = self._run_main_and_capture_event(
+            monkeypatch,
+            tmp_path,
+            {
+                "session_id": "aabb1122-0000-0000-0000-000000000000",
+                "source": "compact",
+            },
+        )
+        assert event.get("type") == "session_start"
+        assert event.get("session_id") == (
+            "aabb1122-0000-0000-0000-000000000000"
+        )
+        assert event.get("project_dir") == "/Users/mj/Sites/test-project"
+        assert event.get("team") == "pact-aabb1122"
+        # `worktree` is always written as "" at this point in the hook —
+        # the worktree is not yet created. The empty string is the
+        # documented placeholder, not a missing value.
+        assert event.get("worktree") == ""
+        # And the new field rides alongside.
+        assert event.get("source") == "compact"
