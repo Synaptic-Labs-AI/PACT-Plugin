@@ -29,6 +29,7 @@ VALID_HOOK_EVENTS = {
     "PostCompact",
     "PreToolUse",
     "PostToolUse",
+    "UserPromptSubmit",
     "SubagentStart",
     "SubagentStop",
     "Stop",
@@ -40,6 +41,8 @@ VALID_HOOK_EVENTS = {
 MUST_BE_SYNC = {
     "team_guard.py",      # Blocks Task dispatch if no team
     "worktree_guard.py",  # Blocks edits outside worktree
+    "bootstrap_gate.py",  # Blocks implementation tools until bootstrap
+    "bootstrap_prompt_gate.py",  # Injects bootstrap instruction on prompts
     "validate_handoff.py",  # Validates agent output
     "handoff_gate.py",    # Blocks task completion without metadata
     "peer_inject.py",     # Injects peer context on agent start
