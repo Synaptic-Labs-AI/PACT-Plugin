@@ -575,7 +575,7 @@ Find the `PACT_SESSION_DIR=<path>` line in your context (injected by the
 bootstrap gate hook). Run:
 
 ```
-touch "<path>/bootstrap-complete"
+mkdir -p "<path>" && touch "<path>/bootstrap-complete"
 ```
 
 Substitute `<path>` with the value from `PACT_SESSION_DIR=`.
