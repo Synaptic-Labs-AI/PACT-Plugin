@@ -128,6 +128,7 @@ class TestMainEntryPoint:
         assert exc_info.value.code == 2
         captured = capsys.readouterr()
         output = json.loads(captured.out)
+        assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_main_exits_0_on_invalid_json(self):
