@@ -45,6 +45,40 @@ WORKING_MEMORY_TOKEN_BUDGET = 800
 RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 # Note: PINNED_CONTEXT_TOKEN_BUDGET is defined solely in hooks/staleness.py
 
+# PACT-managed boundary marker prefixes. Used by _find_terminator_offset to
+# terminate section scans on any PACT boundary marker. The canonical
+# definition lives in hooks/shared/claude_md_manager.py as
+# PACT_BOUNDARY_PREFIXES — this module cannot import from hooks/shared/
+# (separate package boundary), so the alternation is inlined here. The
+# three prefixes rarely change; if a 4th is added, update this string.
+_PACT_BOUNDARY_ALT = "PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_"
+
+# Managed-region boundary markers. Twin copies of the canonical definitions
+# in hooks/shared/claude_md_manager.py (cannot import — separate package).
+_MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
+_MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
+
+
+def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
+    """
+    Extract the PACT-managed region from CLAUDE.md content.
+
+    Twin of hooks/shared/claude_md_manager.extract_managed_region — kept
+    local because skills/pact-memory/scripts/ cannot import from hooks/shared/.
+
+    Returns (region_text, start_offset) where start_offset is the absolute
+    position of the first character after MANAGED_START_MARKER. Returns None
+    if either marker is missing.
+    """
+    start_idx = content.find(_MANAGED_START_MARKER)
+    if start_idx == -1:
+        return None
+    region_start = start_idx + len(_MANAGED_START_MARKER)
+    end_idx = content.find(_MANAGED_END_MARKER, region_start)
+    if end_idx == -1:
+        return None
+    return content[region_start:end_idx], region_start
+
 
 def _find_existing_claude_md(base: Path) -> Optional[Path]:
     """
@@ -329,11 +363,61 @@ def _format_memory_entry(
     return "\n".join(lines)
 
 
+def _find_terminator_offset(
+    content: str,
+    start: int,
+    terminator_pattern: "re.Pattern[str]",
+) -> int:
+    """
+    Find the absolute offset of the first line matching `terminator_pattern`.
+
+    Simple line-by-line search — no fence tracking needed because callers
+    operate within the PACT-managed region (round 10 structural guarantee).
+    The managed region contains only plugin-generated content; user-authored
+    fenced code blocks live outside PACT_MANAGED_START/END.
+
+    Args:
+        content: Text to scan (typically the managed region extract, not
+            the full file).
+        start: Absolute offset in `content` where scanning begins.
+        terminator_pattern: Compiled regex matched against individual lines
+            via `.match`.
+
+    Returns:
+        Absolute offset of the first terminator line, or `len(content)` if
+        none found.
+    """
+    pos = start
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            line_end = nl + 1
+
+        if terminator_pattern.match(line):
+            return pos
+
+        pos = line_end
+
+    return len(content)
+
+
 def _parse_working_memory_section(
     content: str
 ) -> Tuple[str, str, str, List[str]]:
     """
     Parse CLAUDE.md content to extract working memory section.
+
+    Round 10 structural guarantee: the parser searches within the
+    PACT-managed region only. This region contains only plugin-generated
+    content (no user-authored fenced code blocks), so fence-aware scanning
+    is unnecessary. If the managed region is not present (pre-migration
+    file), falls back to scanning the full content. Returned slices
+    (before_section, after_section) are always from the FULL content for
+    correct write-back.
 
     Args:
         content: Full CLAUDE.md file content.
@@ -342,35 +426,46 @@ def _parse_working_memory_section(
         Tuple of (before_section, section_header_with_comment, after_section, existing_entries)
         where existing_entries is a list of individual memory entry strings.
     """
-    # Pattern to find the Working Memory section
-    # Match ## Working Memory followed by optional comment and entries
+    # Bound to managed region if available (round 10).
+    region_result = extract_managed_region(content)
+    if region_result is not None:
+        scan_text, offset = region_result
+    else:
+        scan_text, offset = content, 0
+
+    # Pattern to find the Working Memory section.
+    # Negative lookahead excludes the three plugin-managed boundary prefixes
+    # from being consumed as the auto-managed comment — otherwise an empty
+    # Working Memory section followed immediately by <!-- PACT_MEMORY_END -->
+    # would greedily swallow the marker (#404).
     section_pattern = re.compile(
         r'^(## Working Memory)\s*\n'
-        r'(<!-- [^>]*-->)?\s*\n?',
+        rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
-    match = section_pattern.search(content)
+    match = section_pattern.search(scan_text)
 
     if not match:
         # Section doesn't exist
         return content, "", "", []
 
-    section_start = match.start()
+    section_start = match.start() + offset
     section_header_end = match.end()
 
-    # Find where the next ## section starts (end of working memory section)
-    # Also stop at H1 (#), other H2 (##), or horizontal rules (---) to protect footers
-    next_section_pattern = re.compile(r'^(#\s|##\s(?!Working Memory)|---)', re.MULTILINE)
-    next_match = next_section_pattern.search(content, section_header_end)
-
-    if next_match:
-        section_end = next_match.start()
-    else:
-        section_end = len(content)
+    # Find where the next ## section starts (end of working memory section).
+    # No fence-awareness needed — managed region contains only plugin-generated
+    # content (round 10 structural guarantee).
+    next_section_pattern = re.compile(
+        rf'(#\s|##\s(?!Working Memory)|---|<!-- (?:{_PACT_BOUNDARY_ALT}))',
+    )
+    section_end_rel = _find_terminator_offset(
+        scan_text, section_header_end, next_section_pattern
+    )
+    section_end = section_end_rel + offset
 
     before_section = content[:section_start]
-    section_content = content[section_header_end:section_end].strip()
+    section_content = scan_text[section_header_end:section_end_rel].strip()
     after_section = content[section_end:]
 
     # Parse existing entries (each starts with ### YYYY-MM-DD)
@@ -477,6 +572,9 @@ def _parse_retrieved_context_section(
     """
     Parse CLAUDE.md content to extract retrieved context section.
 
+    Round 10 structural guarantee: same managed-region bounding as
+    _parse_working_memory_section — see that function's docstring.
+
     Args:
         content: Full CLAUDE.md file content.
 
@@ -484,34 +582,44 @@ def _parse_retrieved_context_section(
         Tuple of (before_section, section_header, after_section, existing_entries)
         where existing_entries is a list of individual memory entry strings.
     """
-    # Pattern to find the Retrieved Context section
+    # Bound to managed region if available (round 10).
+    region_result = extract_managed_region(content)
+    if region_result is not None:
+        scan_text, offset = region_result
+    else:
+        scan_text, offset = content, 0
+
+    # Pattern to find the Retrieved Context section.
+    # Negative lookahead narrows to the plugin-managed boundary prefixes
+    # — see _parse_working_memory_section for the full rationale (#404).
     section_pattern = re.compile(
         r'^(## Retrieved Context)\s*\n'
-        r'(<!-- [^>]*-->)?\s*\n?',
+        rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
-    match = section_pattern.search(content)
+    match = section_pattern.search(scan_text)
 
     if not match:
         # Section doesn't exist
         return content, "", "", []
 
-    section_start = match.start()
+    section_start = match.start() + offset
     section_header_end = match.end()
 
-    # Find where the next ## section starts (end of retrieved context section)
-    # Also stop at H1 (#), other H2 (##), or horizontal rules (---) to protect footers
-    next_section_pattern = re.compile(r'^(#\s|##\s(?!Retrieved Context)|---)', re.MULTILINE)
-    next_match = next_section_pattern.search(content, section_header_end)
-
-    if next_match:
-        section_end = next_match.start()
-    else:
-        section_end = len(content)
+    # Find where the next ## section starts (end of retrieved context section).
+    # No fence-awareness needed — managed region contains only plugin-generated
+    # content (round 10 structural guarantee).
+    next_section_pattern = re.compile(
+        rf'(#\s|##\s(?!Retrieved Context)|---|<!-- (?:{_PACT_BOUNDARY_ALT}))',
+    )
+    section_end_rel = _find_terminator_offset(
+        scan_text, section_header_end, next_section_pattern
+    )
+    section_end = section_end_rel + offset
 
     before_section = content[:section_start]
-    section_content = content[section_header_end:section_end].strip()
+    section_content = scan_text[section_header_end:section_end_rel].strip()
     after_section = content[section_end:]
 
     # Parse existing entries (each starts with ### YYYY-MM-DD)

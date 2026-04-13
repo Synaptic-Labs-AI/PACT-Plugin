@@ -9,6 +9,7 @@ Performs:
 1. Creates plugin symlinks for @reference resolution
 2. One-time migration: strips obsolete PACT kernel block from ~/.claude/CLAUDE.md
 3. Ensures project CLAUDE.md exists with memory sections
+3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
 4. Checks for stale pinned context (delegated to staleness.py)
 5. Generates session-unique PACT team name and reminds orchestrator to create it
 5b. Writes session resume info (resume command, team, timestamp) to project CLAUDE.md
@@ -70,6 +71,7 @@ from shared.claude_md_manager import (
     remove_stale_kernel_block,
     update_pact_routing,
     ensure_project_memory_md,
+    migrate_to_managed_structure,
     resolve_project_claude_md_path,
 )
 from shared.session_resume import (
@@ -466,7 +468,12 @@ def main():
         # has zero cost.
         kernel_msg = remove_stale_kernel_block()
         if kernel_msg:
-            if "failed" in kernel_msg.lower():
+            # Symmetric contract: functions return "failed" for errors and
+            # "skipped" for defensive path-precondition no-ops (symlink
+            # refusal, lock contention, missing file). Both must surface
+            # to system_messages so the user can see the signal, rather
+            # than being buried in additionalContext. Round-4 Item 2.
+            if "failed" in kernel_msg.lower() or "skipped" in kernel_msg.lower():
                 system_messages.append(kernel_msg)
             else:
                 context_parts.append(kernel_msg)
@@ -474,15 +481,28 @@ def main():
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
         if project_md_msg:
-            if "failed" in project_md_msg.lower():
+            if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
                 system_messages.append(project_md_msg)
             else:
                 context_parts.append(project_md_msg)
 
+        # 3b. One-time migration: wrap existing project CLAUDE.md in
+        # PACT_MANAGED boundary and add PACT_MEMORY markers (#404).
+        # Runs after ensure_project_memory_md() so newly created files
+        # already have the new structure, and before staleness checks
+        # so the staleness parser sees the migrated layout.
+        # Idempotent no-op when PACT_MANAGED_START marker is already present.
+        migration_msg = migrate_to_managed_structure()
+        if migration_msg:
+            if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
+                system_messages.append(migration_msg)
+            else:
+                context_parts.append(migration_msg)
+
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()
         if staleness_msg:
-            if "failed" in staleness_msg.lower():
+            if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                 system_messages.append(staleness_msg)
             else:
                 context_parts.append(staleness_msg)
@@ -753,7 +773,7 @@ def main():
         if not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
             if session_msg:
-                if "failed" in session_msg.lower():
+                if "failed" in session_msg.lower() or "skipped" in session_msg.lower():
                     system_messages.append(session_msg)
                 else:
                     context_parts.append(session_msg)
@@ -763,7 +783,7 @@ def main():
         # first; the two managed blocks use different markers and don't conflict.
         routing_msg = update_pact_routing()
         if routing_msg:
-            if "failed" in routing_msg.lower():
+            if "failed" in routing_msg.lower() or "skipped" in routing_msg.lower():
                 system_messages.append(routing_msg)
             else:
                 context_parts.append(routing_msg)

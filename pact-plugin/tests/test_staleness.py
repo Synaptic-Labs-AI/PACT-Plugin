@@ -582,6 +582,154 @@ class TestStalenessModuleDirect:
         assert result is None
 
 
+class TestParsePinnedSectionMarkerBoundary:
+    r"""Direct unit tests for `staleness._parse_pinned_section`'s marker-aware
+    section-end detection.
+
+    Round-4 Item 4: the integration test `TestCheckPinnedStaleness.test_pinned_content_before_memory_end_marker`
+    passes even if the next_section regex is relaxed back to `^#{1,2}\s`
+    because the fixture content has no stale entries, so no write-back occurs
+    and the marker is never touched. A unit-level test on `_parse_pinned_section`
+    directly asserts that the returned `pinned_end` index stops BEFORE the
+    marker — this is the differentiated behavior the round-3 fix protects.
+
+    Counter-test protocol: if the `next_section` regex in
+    `staleness._parse_pinned_section` is reverted to `^#{1,2}\s`, this test
+    must fail because the returned `pinned_end` would overshoot into the
+    marker and any downstream content.
+    """
+
+    def test_pinned_end_stops_before_pact_memory_end_marker(self):
+        """`_parse_pinned_section` must return `pinned_end` at the line that
+        begins with `<!-- PACT_MEMORY_END -->`, not past it.
+
+        Without the marker alternative in the regex, the parser would scan
+        past the marker looking for the next H1/H2 heading, and `pinned_end`
+        would either land on that later heading or on EOF — both causing
+        subsequent write-back to eat the boundary marker.
+        """
+        from staleness import _parse_pinned_section
+
+        content = (
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            "<!-- PACT_MEMORY_START -->\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "### Some pin (PR #100, merged 2026-04-01)\n"
+            "Pin body content.\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "\n"
+            "<!-- PACT_MANAGED_END -->\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        pinned_start, pinned_end, pinned_content = result
+
+        # The returned pinned_content must contain the pin body but must
+        # STOP before the marker line. The marker itself must NOT appear
+        # inside the extracted pinned_content.
+        assert "### Some pin" in pinned_content
+        assert "Pin body content." in pinned_content
+        assert "<!-- PACT_MEMORY_END -->" not in pinned_content
+        assert "<!-- PACT_MANAGED_END -->" not in pinned_content
+
+        # pinned_end must point to the start of the PACT_MEMORY_END marker
+        # line, not past it. The character at content[pinned_end] should
+        # be the start of the `<!-- PACT_MEMORY_END -->` marker.
+        marker_idx = content.index("<!-- PACT_MEMORY_END -->")
+        assert pinned_end == marker_idx, (
+            f"pinned_end ({pinned_end}) should point to the PACT_MEMORY_END "
+            f"marker start ({marker_idx}), not past it"
+        )
+
+    def test_pinned_end_stops_before_pact_managed_end_marker(self):
+        """Same boundary behavior for PACT_MANAGED_END when the memory
+        marker is absent (e.g., malformed file missing PACT_MEMORY_END).
+        """
+        from staleness import _parse_pinned_section
+
+        content = (
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            "## Pinned Context\n"
+            "### Pin one\n"
+            "Body one.\n"
+            "<!-- PACT_MANAGED_END -->\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        _, pinned_end, pinned_content = result
+
+        assert "Pin one" in pinned_content
+        assert "<!-- PACT_MANAGED_END -->" not in pinned_content
+
+        marker_idx = content.index("<!-- PACT_MANAGED_END -->")
+        assert pinned_end == marker_idx
+
+    def test_pinned_end_stops_before_pact_routing_end_marker(self):
+        """Same boundary behavior for PACT_ROUTING_END. This is an edge
+        case — normally routing precedes Pinned Context in the file, but
+        the regex alternative lists all three prefixes symmetrically.
+
+        Defensive coverage: the regex alternative lists all three boundary
+        prefixes (PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_) symmetrically,
+        and the parser must terminate the pinned section at ANY of them
+        even when the canonical file layout would never put PACT_ROUTING_END
+        after ## Pinned Context. This test guarantees the invariant holds
+        regardless of file layout reshuffling in the future.
+        """
+        from staleness import _parse_pinned_section
+
+        content = (
+            "## Pinned Context\n"
+            "### Pin two\n"
+            "Body two.\n"
+            "<!-- PACT_ROUTING_END -->\n"
+            "\n"
+            "## Some Later Heading\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        _, pinned_end, pinned_content = result
+
+        assert "Pin two" in pinned_content
+        assert "<!-- PACT_ROUTING_END -->" not in pinned_content
+
+        marker_idx = content.index("<!-- PACT_ROUTING_END -->")
+        assert pinned_end == marker_idx
+
+    def test_pinned_end_still_stops_at_heading_when_no_markers(self):
+        """Regression: the marker alternative must NOT break the pre-existing
+        heading-based boundary when no markers are present. Pre-migration
+        files must still parse correctly.
+        """
+        from staleness import _parse_pinned_section
+
+        content = (
+            "## Pinned Context\n"
+            "### Pre-migration pin\n"
+            "Legacy body.\n"
+            "\n"
+            "## Working Memory\n"
+            "- entry\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        _, pinned_end, pinned_content = result
+
+        assert "Pre-migration pin" in pinned_content
+        assert "## Working Memory" not in pinned_content
+
+        heading_idx = content.index("## Working Memory")
+        assert pinned_end == heading_idx
+
+
 class TestEstimateTokensEquivalence:
     """Verify _estimate_tokens is identical across its two twin copies.
 
@@ -881,3 +1029,102 @@ class TestCheckPinnedStalenessHardening:
         post_content = claude_md.read_text(encoding="utf-8")
         assert "<!-- STALE: Last relevant" in post_content
         assert self.STALE_DATE in post_content
+
+
+class TestParsePinnedSectionTerminator:
+    """Regression guard: `_parse_pinned_section` must terminate on PACT
+    boundary markers and H2 headings.
+
+    Round 10 simplified these tests: fence-awareness tests are deleted
+    because the parser now operates within the PACT-managed region only
+    (no user-authored fenced code blocks). The unfenced terminator test
+    remains as a regression guard for the basic termination contract.
+    """
+
+    def test_unfenced_pact_marker_still_terminates_pinned_section(self):
+        """PACT boundary markers terminate the pinned section scan."""
+        from staleness import _parse_pinned_section
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "### Regular pin\n"
+            "No fences here.\n"
+            "\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "## Working Memory\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        _pinned_start, pinned_end, pinned_content = result
+
+        assert "Regular pin" in pinned_content
+        # The marker is the terminator — pinned_content must NOT contain it
+        assert "PACT_MEMORY_END" not in pinned_content
+        assert content[pinned_end:].lstrip().startswith("<!-- PACT_MEMORY_END -->")
+
+class TestParsePinnedSectionManagedRegionBounding:
+    """Round 10: _parse_pinned_section bounds its search to the managed region
+    and returns full-file positions for write-back.
+    """
+
+    def test_returns_full_file_offsets_with_managed_region(self):
+        """Positions in the returned tuple must be absolute in the full
+        content, not relative to the managed region.
+        """
+        from staleness import _parse_pinned_section
+        from shared.claude_md_manager import (
+            MANAGED_START_MARKER,
+            MANAGED_END_MARKER,
+        )
+
+        preamble = "user notes above\n\n"
+        managed_body = (
+            "## Pinned Context\n"
+            "\n"
+            "### Real pin\n"
+            "Pin content here.\n"
+            "\n"
+        )
+
+        content = (
+            preamble
+            + MANAGED_START_MARKER + "\n"
+            + managed_body
+            + MANAGED_END_MARKER + "\n"
+            + "user notes below\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        pinned_start, pinned_end, pinned_content = result
+
+        # Offsets must be in the full content, not managed-region-relative
+        assert pinned_start > len(preamble), (
+            "pinned_start must be an absolute offset past the preamble"
+        )
+        assert content[pinned_start:pinned_start + 3] == "\n##" or "### " in content[pinned_start:pinned_start + 20]
+        assert "Pin content here." in pinned_content
+
+    def test_fallback_to_full_content_without_managed_markers(self):
+        """Pre-migration file: no managed markers, parser scans full content."""
+        from staleness import _parse_pinned_section
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "### Old pin\n"
+            "Old content.\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _parse_pinned_section(content)
+        assert result is not None
+        _, _, pinned_content = result
+        assert "Old content." in pinned_content

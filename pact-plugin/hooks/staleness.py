@@ -22,6 +22,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from shared.claude_md_manager import (
+    PACT_BOUNDARY_PREFIXES,
+    extract_managed_region,
+)
+
+# Boundary prefix alternation used by _parse_pinned_section. Built from
+# PACT_BOUNDARY_PREFIXES (round 5, item 1) so the three-prefix union is
+# defined in one place.
+_BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
+
 
 # Staleness detection constants
 
@@ -126,35 +136,99 @@ def estimate_tokens(text: str) -> int:
 _estimate_tokens = estimate_tokens
 
 
+def _find_terminator_offset(
+    content: str,
+    start: int,
+    terminator_pattern: "re.Pattern[str]",
+) -> int:
+    """
+    Find the absolute offset of the first line matching `terminator_pattern`.
+
+    Simple line-by-line search — no fence tracking needed because callers
+    operate within the PACT-managed region (round 10 structural guarantee).
+    The managed region contains only plugin-generated content; user-authored
+    fenced code blocks live outside PACT_MANAGED_START/END.
+
+    Args:
+        content: Text to scan (typically the managed region extract, not
+            the full file).
+        start: Absolute offset in `content` where scanning begins.
+        terminator_pattern: Compiled regex matched against individual lines
+            via `.match`.
+
+    Returns:
+        Absolute offset of the first terminator line, or `len(content)` if
+        none found.
+    """
+    pos = start
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            line_end = nl + 1
+
+        if terminator_pattern.match(line):
+            return pos
+
+        pos = line_end
+
+    return len(content)
+
+
 def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
     """
     Extract the Pinned Context section from CLAUDE.md content.
+
+    Returns positions in the FULL file content (not managed-region-relative)
+    so callers can use them directly for read-mutate-write on the file.
+
+    Round 10 structural guarantee: the parser operates within the
+    PACT-managed region only. This region contains only plugin-generated
+    content (no user-authored fenced code blocks), so fence-aware scanning
+    is unnecessary. If the managed region is not present (pre-migration
+    file), falls back to scanning the full content.
 
     Args:
         content: Full CLAUDE.md file content.
 
     Returns:
         Tuple of (pinned_start, pinned_end, pinned_content) or None if
-        no Pinned Context section exists or it is empty.
+        no Pinned Context section exists or it is empty. Offsets are
+        absolute positions in the original `content` string.
     """
-    pinned_match = re.search(r'^## Pinned Context\s*\n', content, re.MULTILINE)
+    # Bound to managed region if available (round 10). Offset adjustment
+    # converts managed-region-relative positions back to full-file positions.
+    region_result = extract_managed_region(content)
+    if region_result is not None:
+        scan_text, offset = region_result
+    else:
+        scan_text, offset = content, 0
+
+    pinned_match = re.search(r'^## Pinned Context\s*\n', scan_text, re.MULTILINE)
     if not pinned_match:
         return None
 
     pinned_start = pinned_match.end()
 
-    # Find the end of pinned section (next H1 or H2 heading, or EOF)
-    next_section = re.search(r'^#{1,2}\s', content[pinned_start:], re.MULTILINE)
-    if next_section:
-        pinned_end = pinned_start + next_section.start()
-    else:
-        pinned_end = len(content)
+    # Find the end of pinned section (next H1/H2 heading, or a plugin-managed
+    # boundary marker — PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_ — or end
+    # of scan region). No fence-awareness needed — managed region contains
+    # only plugin-generated content (round 10 structural guarantee).
+    next_section_pattern = re.compile(
+        rf'(?:#{{1,2}}\s|<!-- (?:{_BOUNDARY_ALT}))'
+    )
+    pinned_end = _find_terminator_offset(
+        scan_text, pinned_start, next_section_pattern
+    )
 
-    pinned_content = content[pinned_start:pinned_end]
+    pinned_content = scan_text[pinned_start:pinned_end]
     if not pinned_content.strip():
         return None
 
-    return pinned_start, pinned_end, pinned_content
+    return pinned_start + offset, pinned_end + offset, pinned_content
 
 
 def detect_stale_entries(

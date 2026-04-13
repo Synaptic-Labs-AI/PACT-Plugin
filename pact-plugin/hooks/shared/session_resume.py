@@ -20,6 +20,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
+    MANAGED_TITLE,
+    MEMORY_END_MARKER,
+    MEMORY_START_MARKER,
+    PACT_ROUTING_BLOCK,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -131,19 +137,36 @@ def update_session_info(
                 return "Session info skipped: path precondition not met."
 
             try:
-                # Case 0: File doesn't exist -- create it with a minimal template
-                # so the orchestrator has a stable Current Session block to read on
-                # the very first session in a project. The .claude/ parent was
-                # created above (before the lock) with mode 0o700.
+                # Case 0: File doesn't exist -- create it with the full canonical
+                # PACT_MANAGED structure so the orchestrator has a stable Current
+                # Session block AND a ready PACT_MEMORY container on the very first
+                # session in a project. The .claude/ parent was created above
+                # (before the lock) with mode 0o700.
+                #
+                # Structure mirrors `ensure_project_memory_md`'s template — single
+                # H1 ("# PACT Framework and Managed Project Memory"), routing block,
+                # session block, PACT_MEMORY with three default section headings,
+                # all wrapped by the PACT_MANAGED outer boundary.
                 if not target_file.exists():
                     new_content = (
-                        "# Project Memory\n"
+                        f"{MANAGED_START_MARKER}\n"
+                        f"{MANAGED_TITLE}\n"
                         "\n"
-                        "<!-- PACT auto-creates this file on first session. "
-                        "Safe to add your own content; the SESSION_START/SESSION_END "
-                        "markers are auto-updated each session. -->\n"
+                        f"{PACT_ROUTING_BLOCK}\n"
                         "\n"
                         f"{session_block}\n"
+                        "\n"
+                        f"{MEMORY_START_MARKER}\n"
+                        "## Retrieved Context\n"
+                        "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->\n"
+                        "\n"
+                        "## Pinned Context\n"
+                        "\n"
+                        "## Working Memory\n"
+                        "<!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->\n"
+                        f"{MEMORY_END_MARKER}\n"
+                        "\n"
+                        f"{MANAGED_END_MARKER}\n"
                     )
                     target_file.write_text(new_content, encoding="utf-8")
                     os.chmod(str(target_file), 0o600)
@@ -151,7 +174,14 @@ def update_session_info(
 
                 content = target_file.read_text(encoding="utf-8")
 
-                # Case 1: Markers already exist -- replace the block
+                # Case 1: Markers already exist -- replace the block.
+                # Structural guarantee (round 10): SESSION markers are always
+                # inside the PACT_MANAGED region (placed by template in both
+                # ensure_project_memory_md and update_session_info Case 0).
+                # The re.DOTALL regex below scans the full file, but the
+                # markers can only appear in plugin-generated content — no
+                # user-authored fenced code blocks can contain real SESSION
+                # markers, so fence-aware scanning is unnecessary.
                 if SESSION_START in content and SESSION_END in content:
                     new_content = re.sub(
                         re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END),
@@ -166,19 +196,53 @@ def update_session_info(
                         return "Session info updated in project CLAUDE.md"
                     return None
 
-                # Case 2: No markers -- insert before "## Retrieved Context" if present
-                insert_marker = "## Retrieved Context"
-                if insert_marker in content:
+                # Case 2: No SESSION markers. Insertion order matters because
+                # the session block must be a SIBLING of PACT_MEMORY inside
+                # PACT_MANAGED — never placed inside PACT_MEMORY where it
+                # would pollute the memory region and violate the
+                # "Current Session is outside PACT_MEMORY" invariant.
+                #
+                # Ordered preference:
+                #   (a) Post-migration file (PACT_MANAGED present): insert
+                #       BEFORE MEMORY_START_MARKER so the block stays inside
+                #       PACT_MANAGED but outside PACT_MEMORY. This is the
+                #       round-4 Item-1 fix — the prior behavior anchored on
+                #       "## Retrieved Context" which, after migration, lives
+                #       INSIDE PACT_MEMORY.
+                #       Structural guarantee (round 10): MEMORY_START_MARKER
+                #       is always inside PACT_MANAGED, so the .replace()
+                #       below lands the session block in plugin-generated
+                #       content — no fence-awareness needed.
+                #   (b) Legacy pre-migration file (no PACT_MANAGED): keep
+                #       the historical anchor on "## Retrieved Context"
+                #       since memory sections were top-level in that shape.
+                #   (c) Neither: append at end of file.
+                # Both markers are checked (not just MANAGED_START) because a
+                # partially-written migration output is theoretically possible
+                # under crash: the managed-open marker could be present while
+                # memory markers are not yet written. The AND check treats such
+                # partial states as pre-migration, routing to the legacy
+                # fallback (branch b) rather than attempting a .replace() that
+                # would be a no-op producing silent data loss (round 5, item 8).
+                if MANAGED_START_MARKER in content and MEMORY_START_MARKER in content:
                     new_content = content.replace(
-                        insert_marker,
-                        session_block + "\n\n" + insert_marker,
+                        MEMORY_START_MARKER,
+                        session_block + "\n\n" + MEMORY_START_MARKER,
                         1,
                     )
                 else:
-                    # Fallback: append at end
-                    if not content.endswith("\n"):
-                        content += "\n"
-                    new_content = content + "\n" + session_block + "\n"
+                    insert_marker = "## Retrieved Context"
+                    if insert_marker in content:
+                        new_content = content.replace(
+                            insert_marker,
+                            session_block + "\n\n" + insert_marker,
+                            1,
+                        )
+                    else:
+                        # Fallback: append at end
+                        if not content.endswith("\n"):
+                            content += "\n"
+                        new_content = content + "\n" + session_block + "\n"
 
                 target_file.write_text(new_content, encoding="utf-8")
                 os.chmod(str(target_file), 0o600)

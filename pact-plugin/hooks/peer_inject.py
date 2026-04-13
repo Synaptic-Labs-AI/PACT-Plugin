@@ -63,7 +63,7 @@ def _sanitize_agent_name(agent_name: str) -> str:
     before this hardening.
 
     Note: this is producer-side sanitization. The line-anchor consumer
-    check in _PACT_ROUTING_BLOCK is the second layer of defense
+    check in PACT_ROUTING_BLOCK is the second layer of defense
     (cycle 2 minor item 15) — together they provide defense in depth
     against marker spoofing via either malicious agent names or
     embedded prose containing the marker phrase.

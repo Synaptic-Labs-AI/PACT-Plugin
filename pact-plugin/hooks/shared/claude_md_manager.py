@@ -2,14 +2,16 @@
 Location: pact-plugin/hooks/shared/claude_md_manager.py
 Summary: CLAUDE.md file manipulation for PACT environment setup.
 Used by: session_init.py during SessionStart hook to migrate any obsolete
-         kernel block out of the home CLAUDE.md and to keep the project
-         CLAUDE.md routing block canonical.
+         kernel block out of the home CLAUDE.md, keep the project CLAUDE.md
+         routing block canonical, and migrate legacy project CLAUDE.md files
+         to the PACT_MANAGED boundary structure (#404).
 
 Manages two CLAUDE.md files:
 1. ~/.claude/CLAUDE.md -- one-time migration: strip the obsolete
    PACT_START/PACT_END kernel block left over from prior plugin versions.
 2. {project}/CLAUDE.md -- project-level file (at .claude/CLAUDE.md preferred,
-   or legacy ./CLAUDE.md) with memory sections and the PACT_ROUTING block.
+   or legacy ./CLAUDE.md) with PACT_MANAGED boundary, routing block, session
+   block, and PACT_MEMORY-wrapped memory sections.
 
 Project CLAUDE.md location resolution:
 Claude Code supports two locations for project-level memory:
@@ -108,16 +110,181 @@ def file_lock(target_file: Path):
 _ROUTING_START_MARKER = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
 _ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
 
+# Outer boundary wrapping all PACT-managed content in project CLAUDE.md.
+# User-owned content goes OUTSIDE this block. The name PACT_MANAGED was
+# chosen over PACT_START to avoid collision with the old kernel block
+# markers that remove_stale_kernel_block() searches for (#404).
+MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->"
+MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
+
+# Inner boundary wrapping project memory sections (Retrieved Context,
+# Pinned Context, Working Memory) for hook targeting (#404).
+MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"
+MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
+
+# Canonical H1 title for the managed block. Extracted as a constant so
+# the three template sites (ensure_project_memory_md, _build_migrated_content,
+# session_resume.update_session_info Case 0) cannot drift apart. Changing this
+# value changes the title everywhere in one place.
+MANAGED_TITLE = "# PACT Framework and Managed Project Memory"
+
+# Plugin-managed HTML comment boundary prefixes. Used by parsers and regex
+# sites that need to terminate scans on any PACT-managed boundary marker.
+# Extracted as a constant so the three-prefix union is defined once.
+#
+# Twin copy: working_memory.py maintains a parallel _PACT_BOUNDARY_PREFIXES
+# tuple because skills/pact-memory/scripts/ cannot cleanly import from
+# hooks/shared/. A drift-detection test asserts the two tuples stay in sync.
+PACT_BOUNDARY_PREFIXES: tuple[str, ...] = (
+    "PACT_MEMORY_",
+    "PACT_MANAGED_",
+    "PACT_ROUTING_",
+)
+
+# Regex alternation used by scan-terminator patterns in this module.
+# Mirrors the `_BOUNDARY_ALT` constant in `staleness.py`:
+# any regex that needs to terminate on a PACT boundary marker must embed
+# this alternation rather than hard-coding the three-prefix literal. That
+# way, adding a fourth prefix to `PACT_BOUNDARY_PREFIXES` automatically
+# picks it up everywhere via a one-line constant change.
+_BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
+
 # Stale line from the v3.16.2 project CLAUDE.md template. After the PR #390
 # migration the routing block supersedes it, but the stale line lingers in
 # upgraded files and contradicts the routing block. Strip it on every
 # update_pact_routing() pass. Allows optional trailing period / whitespace.
+#
+# PR #404: this pattern is applied per-line by `_strip_legacy_lines`
+# via a fence-aware walker, NOT module-wide with `re.MULTILINE`. The per-line
+# form is anchored to the full stripped line, so `$` matches end-of-line
+# without needing a MULTILINE flag. Removing MULTILINE is load-bearing:
+# with MULTILINE the pattern was hot inside user-authored fenced code blocks
+# and silently destroyed example content that quoted the stale template line.
+# Per-line application + fence tracking prevents that failure mode entirely.
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
-    r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$\n?",
-    re.MULTILINE,
+    r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
 
-_PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
+
+def _strip_legacy_lines(content: str) -> str:
+    r"""
+    Remove lines from older PACT template versions that are now obsolete.
+
+    Currently strips the stale orchestrator-loader line from the v3.16.2
+    project CLAUDE.md template. Shared between `update_pact_routing` (which
+    runs on every session_init) and `_build_migrated_content` (which runs
+    once per project during the one-shot migration). Centralizing the set
+    of legacy-line patterns here means adding a new pattern in the future
+    only requires editing this helper, not both call sites.
+
+    PR #404: fence-aware line walker that applies
+    `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines that are NOT inside a
+    fenced code block. Lines inside a fence are preserved verbatim, even
+    if they match the stale-line regex. This prevents silent data loss when
+    a user's CLAUDE.md contains a fenced code block that quotes the legacy
+    template verbatim (e.g., migration documentation, tutorial content).
+
+    Supports both backtick (```) and tilde (~~~) fences as independent
+    fence types per CommonMark §4.5. A line inside a backtick fence that
+    contains ~~~ does not affect tilde state (and vice versa).
+
+    Prior behavior used `re.MULTILINE` on the whole content, which stripped
+    matching lines regardless of fence state, silently destroying fenced
+    example content. Per-line application plus fence tracking fixes this.
+
+    Args:
+        content: The raw CLAUDE.md content to scrub.
+
+    Returns:
+        Content with all legacy template lines OUTSIDE fenced code blocks
+        removed. Content inside fenced code blocks (backtick or tilde) is
+        preserved byte for byte. Pure function.
+    """
+    # PR #404: length-tracked fence state per CommonMark §4.5 — closing
+    # fence must use the same character and run length >= the opening. A
+    # 4-backtick outer fence containing a 3-backtick inner example must
+    # NOT toggle state on the inner line. fence_open_len > 0 means we're
+    # inside a fence; fence_char records which character opened it. This
+    # is the only fence walker that remains after the structural
+    # simplification (it processes user content during migration).
+    pos = 0
+    fence_open_len = 0  # 0 = not inside a fence
+    fence_char = ""     # "`" or "~" when inside a fence
+    out_parts: list[str] = []
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            raw_segment = line
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            raw_segment = content[pos:nl + 1]
+            line_end = nl + 1
+
+        stripped = line.lstrip()
+
+        if fence_open_len == 0:
+            # Not inside a fence — check for fence open
+            if stripped.startswith("```"):
+                run_len = len(stripped) - len(stripped.lstrip("`"))
+                fence_open_len = run_len
+                fence_char = "`"
+                out_parts.append(raw_segment)
+            elif stripped.startswith("~~~"):
+                run_len = len(stripped) - len(stripped.lstrip("~"))
+                fence_open_len = run_len
+                fence_char = "~"
+                out_parts.append(raw_segment)
+            elif _STALE_ORCHESTRATOR_LINE_RE.match(line):
+                # Non-fenced legacy line: drop it entirely
+                pass
+            else:
+                out_parts.append(raw_segment)
+        else:
+            # Inside a fence — check for fence close (same char, run >= open)
+            if fence_char == "`" and stripped.startswith("```"):
+                run_len = len(stripped) - len(stripped.lstrip("`"))
+                # Close only if the line is ONLY fence chars (+ optional
+                # trailing whitespace). CommonMark §4.5: closing fence
+                # cannot have info string.
+                after_run = stripped[run_len:].strip()
+                if run_len >= fence_open_len and not after_run:
+                    fence_open_len = 0
+                    fence_char = ""
+            elif fence_char == "~" and stripped.startswith("~~~"):
+                run_len = len(stripped) - len(stripped.lstrip("~"))
+                after_run = stripped[run_len:].strip()
+                if run_len >= fence_open_len and not after_run:
+                    fence_open_len = 0
+                    fence_char = ""
+            # Keep fence body verbatim regardless
+            out_parts.append(raw_segment)
+
+        pos = line_end
+
+    return "".join(out_parts)
+
+
+
+# Canonical PACT routing block template (PR #404). The exact
+# HTML-comment-wrapped routing section that every project CLAUDE.md
+# must carry: a `<!-- PACT_ROUTING_START -->` opener, the canonical
+# `## PACT Routing` instructions, and a `<!-- PACT_ROUTING_END -->`
+# closer. Exported as a public symbol (no `_` prefix) because it is
+# consumed by `session_resume.update_session_info` and `peer_inject.py`
+# when they rewrite the session block template alongside the routing
+# block — both writers expect the full wrapper string, not just its
+# interior prose.
+#
+# Drift implications: all three writers — `update_pact_routing`,
+# `session_resume.update_session_info`, and the Case 0 session template
+# path — rewrite this block on the next session_init pass. The
+# idempotency guard in `update_pact_routing` detects drift via a regex
+# match: if the on-disk block no longer equals `PACT_ROUTING_BLOCK` byte
+# for byte, it is replaced wholesale. Changing the template here changes
+# it everywhere on the next SessionStart hook.
+PACT_ROUTING_BLOCK = """<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->
 ## PACT Routing
 
 Before any other work, determine your PACT role and invoke the appropriate
@@ -143,6 +310,37 @@ the main session (invoke the orchestrator bootstrap).
 
 Re-invoke after compaction if the bootstrap content is no longer present.
 <!-- PACT_ROUTING_END -->"""
+
+
+def extract_managed_region(content: str) -> tuple[str, int] | None:
+    """
+    Extract the PACT-managed region from a CLAUDE.md file.
+
+    Returns the content between MANAGED_START_MARKER and MANAGED_END_MARKER
+    (exclusive of the markers themselves), or None if either marker is missing.
+
+    The managed region contains only plugin-generated content — no user-authored
+    fenced code blocks. This is the structural guarantee that makes fence-aware
+    parsing unnecessary for consumers that operate within the managed region.
+
+    Args:
+        content: Full CLAUDE.md file content.
+
+    Returns:
+        Tuple of (region_text, start_offset) where start_offset is the absolute
+        byte offset of the first character after MANAGED_START_MARKER in the
+        original content. Callers that need to write back to the full file must
+        add start_offset to any positions computed within region_text.
+        Returns None if either marker is missing.
+    """
+    start_idx = content.find(MANAGED_START_MARKER)
+    if start_idx == -1:
+        return None
+    region_start = start_idx + len(MANAGED_START_MARKER)
+    end_idx = content.find(MANAGED_END_MARKER, region_start)
+    if end_idx == -1:
+        return None
+    return content[region_start:end_idx], region_start
 
 
 def resolve_project_claude_md_path(
@@ -398,63 +596,75 @@ def update_pact_routing() -> str | None:
             except OSError:
                 return None
 
-            stripped = _STALE_ORCHESTRATOR_LINE_RE.sub("", content)
+            stripped = _strip_legacy_lines(content)
             stale_line_removed = stripped != content
             content = stripped
 
-            # Case 1: markers present — replace content between them
-            if _ROUTING_START_MARKER in content and _ROUTING_END_MARKER in content:
-                pattern = re.compile(
-                    re.escape(_ROUTING_START_MARKER) + r".*?" + re.escape(_ROUTING_END_MARKER),
-                    re.DOTALL,
-                )
-                new_content = pattern.sub(_PACT_ROUTING_BLOCK, content)
-
-                if new_content == content and not stale_line_removed:
-                    return None  # Already canonical and no stale line to strip
-
-                try:
-                    target_file.write_text(new_content, encoding="utf-8")
-                    os.chmod(str(target_file), 0o600)
-                    if new_content == content:
-                        return (
-                            "Removed stale orchestrator-loader line from project "
-                            "CLAUDE.md (routing block already canonical)"
-                        )
-                    if stale_line_removed:
-                        return (
-                            "PACT routing block updated in project CLAUDE.md "
-                            "(stripped stale orchestrator-loader line)"
-                        )
-                    return "PACT routing block updated in project CLAUDE.md"
-                except OSError as e:
-                    return f"Failed to update PACT routing: {str(e)[:50]}"
-
-            # Orphan marker handling: if exactly one of the two markers is present
-            # (the other was manually deleted, or a prior write crashed mid-file),
-            # strip the orphan marker before falling through to the insert path.
-            # Without this, the insert path blindly prepends a new routing block
-            # on every session because the update guard requires BOTH markers to
-            # be present — leading to file accumulation over N sessions.
-            #
-            # SESSION_START isolation (#366 item 5): the strip is scoped to lines
-            # OUTSIDE any <!-- SESSION_START --> ... <!-- SESSION_END --> region.
-            # Without this scope, a SESSION_START block whose content happened to
-            # contain a line matching the routing marker (pathological but
-            # possible — e.g., user pasted routing-block docs into session
-            # metadata) would be silently corrupted: the orphan strip would drop
-            # the line, then the insert path would add a fresh routing block at
-            # the top while the SESSION_START body was left missing a line.
+            # Marker discovery: simple substring check. PR #404 structural
+            # simplification — routing markers (PACT_ROUTING_START/END) are
+            # always inside the PACT_MANAGED region (post-migration) or in
+            # plugin-generated content (pre-migration). No user-authored
+            # fenced code blocks can contain real routing markers, so
+            # fence-aware discovery is unnecessary. Pre-migration files with
+            # fenced PACT_ROUTING markers would be mis-parsed, but this is
+            # near-zero probability since pre-migration files are generated
+            # by older plugin versions that don't produce fenced examples.
             has_start = _ROUTING_START_MARKER in content
             has_end = _ROUTING_END_MARKER in content
+
+            # Case 1: both markers present — replace content between them
+            # with the canonical routing block.
+            if has_start and has_end:
+                start_idx = content.find(_ROUTING_START_MARKER)
+                end_idx = content.find(_ROUTING_END_MARKER, start_idx)
+                if start_idx < end_idx:
+                    end_of_block = end_idx + len(_ROUTING_END_MARKER)
+                    new_content = (
+                        content[:start_idx]
+                        + PACT_ROUTING_BLOCK
+                        + content[end_of_block:]
+                    )
+
+                    if new_content == content and not stale_line_removed:
+                        return None  # Already canonical and no stale line
+
+                    try:
+                        target_file.write_text(new_content, encoding="utf-8")
+                        os.chmod(str(target_file), 0o600)
+                        if new_content == content:
+                            return (
+                                "Removed stale orchestrator-loader line from project "
+                                "CLAUDE.md (routing block already canonical)"
+                            )
+                        if stale_line_removed:
+                            return (
+                                "PACT routing block updated in project CLAUDE.md "
+                                "(stripped stale orchestrator-loader line)"
+                            )
+                        return "PACT routing block updated in project CLAUDE.md"
+                    except OSError as e:
+                        return f"Failed to update PACT routing: {str(e)[:50]}"
+
+            # Orphan marker handling: if exactly one of the two markers is
+            # present (the other was manually deleted, or a prior write
+            # crashed mid-file), strip the orphan marker before falling
+            # through to the insert path. Without this, the insert path
+            # blindly prepends a new routing block on every session because
+            # the update guard requires BOTH markers to be present.
+            #
+            # SESSION_START isolation (#366 item 5): the strip is scoped to
+            # lines OUTSIDE any <!-- SESSION_START --> ... <!-- SESSION_END -->
+            # region to avoid corrupting session metadata.
+            #
+            # PR #404: fence tracking removed from orphan strip — routing
+            # markers are always in plugin-generated content, not user fences.
             orphan_stripped = False
             if has_start != has_end:
-                # Strip whichever orphan marker is present. The text on the same
-                # line as the marker is also stripped if the marker is on its
-                # own line — otherwise just remove the marker substring. Lines
-                # inside a SESSION_START/SESSION_END region are preserved
-                # verbatim even if they contain the marker substring.
-                orphan = _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
+                orphan = (
+                    _ROUTING_START_MARKER
+                    if has_start
+                    else _ROUTING_END_MARKER
+                )
                 content_lines = content.splitlines(keepends=True)
                 cleaned_lines = []
                 inside_session_block = False
@@ -468,15 +678,11 @@ def update_pact_routing() -> str | None:
                         cleaned_lines.append(ln)
                         continue
                     if inside_session_block:
-                        # Preserve SESSION_START body verbatim — the strip
-                        # must never reach into this region.
                         cleaned_lines.append(ln)
                         continue
                     if orphan in ln and ln.strip() == orphan:
-                        # Whole-line marker — drop the line entirely
                         continue
                     elif orphan in ln:
-                        # Inline marker — strip just the substring
                         cleaned_lines.append(ln.replace(orphan, ""))
                     else:
                         cleaned_lines.append(ln)
@@ -500,7 +706,7 @@ def update_pact_routing() -> str | None:
 
             new_lines = (
                 lines[:insert_idx]
-                + ["\n", _PACT_ROUTING_BLOCK + "\n", "\n"]
+                + ["\n", PACT_ROUTING_BLOCK + "\n", "\n"]
                 + lines[insert_idx:]
             )
             new_content = "".join(new_lines)
@@ -534,8 +740,10 @@ def ensure_project_memory_md() -> str | None:
     """
     Ensure project has a CLAUDE.md with memory sections.
 
-    Creates a minimal project-level CLAUDE.md containing only the memory
-    sections (Retrieved Context, Working Memory) if one doesn't exist.
+    Creates a minimal project-level CLAUDE.md containing the PACT-managed
+    structure: outer PACT_MANAGED boundary, routing block, session block,
+    and inner PACT_MEMORY boundary wrapping memory sections (Retrieved
+    Context, Pinned Context, Working Memory) if one doesn't exist.
     These sections are project-specific and managed by the pact-memory skill.
 
     Honors both supported project CLAUDE.md locations:
@@ -558,23 +766,30 @@ def ensure_project_memory_md() -> str | None:
     if source != "new_default":
         return None
 
-    # Create minimal CLAUDE.md with memory sections at the new default location
-    memory_template = f"""# Project Memory
+    # Create minimal CLAUDE.md with memory sections at the new default location.
+    # Structure (#404): outer PACT_MANAGED boundary wraps all plugin-managed
+    # content; inner PACT_MEMORY boundary wraps the memory sections.
+    memory_template = f"""{MANAGED_START_MARKER}
+{MANAGED_TITLE}
 
-This file contains project-specific memory managed by the PACT framework.
-
-{_PACT_ROUTING_BLOCK}
+{PACT_ROUTING_BLOCK}
 
 <!-- SESSION_START -->
 ## Current Session
 <!-- Auto-managed by session_init hook. Overwritten each session. -->
 <!-- SESSION_END -->
 
+{MEMORY_START_MARKER}
 ## Retrieved Context
 <!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->
 
+## Pinned Context
+
 ## Working Memory
 <!-- Auto-managed by pact-memory skill. Last 3 memories shown. Full history searchable via pact-memory skill. -->
+{MEMORY_END_MARKER}
+
+{MANAGED_END_MARKER}
 """
 
     # Concurrency guard: serialize symlink check + write so two concurrent
@@ -607,3 +822,346 @@ This file contains project-specific memory managed by the PACT framework.
         )
     except OSError as e:
         return f"Project CLAUDE.md failed: {str(e)[:50]}"
+
+
+def migrate_to_managed_structure() -> str | None:
+    """
+    One-time migration: wrap existing project CLAUDE.md content in the
+    PACT_MANAGED boundary and add PACT_MEMORY markers around memory sections.
+
+    Called from session_init.py on every SessionStart. Idempotent no-op when
+    PACT_MANAGED_START marker is already present. Follows the same hardening
+    pattern as remove_stale_kernel_block(): file_lock, symlink guard inside
+    the lock, fail-open on timeout/error.
+
+    Idempotency guard: if PACT_MANAGED_START is already present, the
+    function returns None without touching the file.
+
+    Migration strategy (applied when the guard passes):
+    1. Locate the existing sections by their markers/headings:
+       - PACT_ROUTING block (between PACT_ROUTING_START/END)
+       - SESSION block (between SESSION_START/END)
+       - Memory sections: "## Retrieved Context", "## Pinned Context",
+         "## Working Memory"
+    2. Replace the legacy "# Project Memory" heading with the single canonical
+       H1 "# PACT Framework and Managed Project Memory"
+    3. Wrap memory sections in PACT_MEMORY_START/END (always emitting all
+       three canonical H2 headings, even if some were absent in the source)
+    4. Wrap the entire managed region in PACT_MANAGED_START/END; content
+       outside the recognized PACT sections is preserved AFTER the closing
+       boundary as user-owned content
+
+    User content with fenced code blocks containing ## memory headings is
+    preserved verbatim. The classifier tracks in_code_fence state and does
+    not misclassify fence-protected headings as real memory sections
+    (PR #404).
+
+    Returns:
+        Status message on successful migration, None on no-op (already
+        migrated or file doesn't exist), or a "failed"/"skipped" string
+        on error (routed to systemMessages by session_init.py).
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir:
+        return None
+
+    target_file, source = resolve_project_claude_md_path(project_dir)
+
+    if source == "new_default":
+        return None  # File doesn't exist; ensure_project_memory_md() handles creation
+
+    try:
+        with file_lock(target_file):
+            if target_file.is_symlink():
+                return "Migration skipped: project CLAUDE.md path precondition not met."
+
+            try:
+                content = target_file.read_text(encoding="utf-8")
+            except OSError:
+                return None
+
+            # Idempotent guard: already migrated
+            if MANAGED_START_MARKER in content:
+                return None
+
+            new_content = _build_migrated_content(content)
+
+            try:
+                target_file.write_text(new_content, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
+                return "Migrated project CLAUDE.md to managed structure (#404)"
+            except OSError as e:
+                return f"Migration failed: {str(e)[:50]}"
+    except TimeoutError:
+        return (
+            "Failed to acquire lock on project CLAUDE.md within 5s "
+            "(another session_init hook may be running concurrently). "
+            "CLAUDE.md migration skipped; will retry on next session start."
+        )
+
+
+
+
+def _build_migrated_content(content: str) -> str:
+    """
+    Transform old-format CLAUDE.md content into the new managed structure.
+
+    Extracts the PACT-managed sections (routing, session, memory) from the
+    existing content and reassembles them inside the new boundary markers.
+    Any content that falls outside the recognized PACT sections is preserved
+    AFTER the PACT_MANAGED_END marker as user-owned content.
+
+    This is a pure function (no I/O) for testability.
+
+    Idempotency guard: if the content already contains MANAGED_START_MARKER,
+    return it unchanged.
+
+    Design decision (PR #404): user content that appears ABOVE the first
+    PACT-managed section heading in the original file is classified as
+    user_parts and lands BELOW PACT_MANAGED_END after migration. This is a
+    one-time event on upgrade. A previous iteration preserved top-of-file
+    notes above MANAGED_START via a preamble-cutoff mechanism, but that
+    required fence-awareness in every downstream parser. Removing preamble
+    handling eliminates the fence-awareness bug class at the cost of this
+    one-time content relocation.
+
+    Args:
+        content: The existing CLAUDE.md file content.
+
+    Returns:
+        The restructured content with PACT_MANAGED and PACT_MEMORY boundaries,
+        or the original content unchanged if already migrated.
+    """
+    # Idempotency guard: already migrated → no-op
+    if MANAGED_START_MARKER in content:
+        return content
+
+    # Extract routing block if present (between markers).
+    # Simple substring check — routing markers are always plugin-generated
+    # content, not user-authored fenced examples. Pre-migration files with
+    # fenced PACT_ROUTING markers would be mis-parsed, but this is near-zero
+    # probability since pre-migration files are generated by older plugin
+    # versions that don't produce fenced examples.
+    routing_block = ""
+    content_sans_routing = content
+    has_start = _ROUTING_START_MARKER in content
+    has_end = _ROUTING_END_MARKER in content
+    if has_start and has_end:
+        start_idx = content.find(_ROUTING_START_MARKER)
+        end_idx = content.find(_ROUTING_END_MARKER, start_idx)
+        if start_idx < end_idx:
+            end_of_block = end_idx + len(_ROUTING_END_MARKER)
+            routing_block = content[start_idx:end_of_block]
+            content_sans_routing = content[:start_idx] + content[end_of_block:]
+    elif has_start or has_end:
+        # Orphan PACT_ROUTING marker (PR #404): drop the orphan
+        # marker AND any adjacent `## PACT Routing` H2 block.
+        orphan_marker = (
+            _ROUTING_START_MARKER if has_start else _ROUTING_END_MARKER
+        )
+        marker_idx = content.find(orphan_marker)
+
+        lookback_start = max(0, marker_idx - 200)
+        lookback = content[lookback_start:marker_idx]
+        heading_match = re.search(r"\n## PACT Routing\s*\n", lookback)
+        if heading_match:
+            strip_start = lookback_start + heading_match.start()
+        else:
+            strip_start = marker_idx
+
+        scan_from = content.find("\n", marker_idx)
+        if scan_from == -1:
+            scan_from = len(content)
+        else:
+            scan_from += 1
+
+        post_heading_match = re.match(
+            r"## PACT Routing\s*\n",
+            content[scan_from:],
+        )
+        if post_heading_match:
+            scan_from += post_heading_match.end()
+
+        next_terminator = re.search(
+            rf"^(?:#{{1,2}}\s|<!-- (?:{_BOUNDARY_ALT}))",
+            content[scan_from:],
+            re.MULTILINE,
+        )
+        if next_terminator:
+            strip_end = scan_from + next_terminator.start()
+        else:
+            strip_end = len(content)
+
+        content_sans_routing = content[:strip_start] + content[strip_end:]
+
+    # Extract session block if present (between markers)
+    session_block = ""
+    content_sans_session = content_sans_routing
+    session_start = "<!-- SESSION_START -->"
+    session_end = "<!-- SESSION_END -->"
+    if session_start in content_sans_routing and session_end in content_sans_routing:
+        pattern = re.compile(
+            re.escape(session_start) + r".*?" + re.escape(session_end),
+            re.DOTALL,
+        )
+        match = pattern.search(content_sans_routing)
+        if match:
+            session_block = match.group(0)
+            content_sans_session = (
+                content_sans_routing[:match.start()]
+                + content_sans_routing[match.end():]
+            )
+
+    # What remains after extracting routing + session is candidate for
+    # memory sections and user content.
+    remaining = content_sans_session
+
+    # Remove the old top-level heading and description line
+    remaining = re.sub(
+        r"^# Project Memory\s*\n"
+        r"(?:\s*\n)*"
+        r"(?:This file contains project-specific memory managed by the PACT framework\.\s*\n)?",
+        "",
+        remaining,
+    )
+
+    # Strip legacy template lines (e.g., stale orchestrator-loader line)
+    remaining = _strip_legacy_lines(remaining)
+
+    # Extract memory sections: Retrieved Context, Pinned Context, Working Memory
+    memory_headings = ["## Retrieved Context", "## Pinned Context", "## Working Memory"]
+    memory_parts = []
+    user_parts = []
+
+    lines = remaining.splitlines(keepends=True)
+    current_section: list[str] = []
+    in_memory_section = False
+    # Length-tracked fence state (PR #404): CommonMark §4.5 requires a
+    # closing fence to use the same character and run length >= the opening.
+    # A boolean toggle fails on tilde fences and 4+ backtick nesting. This
+    # mirrors the model in _strip_legacy_lines.
+    fence_open_len = 0  # 0 = not inside a fence
+    fence_char = ""     # "`" or "~" when inside a fence
+
+    for line in lines:
+        stripped = line.rstrip()
+        lstripped = stripped.lstrip()
+        if fence_open_len == 0:
+            # Not inside a fence — check for fence open
+            if lstripped.startswith("```"):
+                run_len = len(lstripped) - len(lstripped.lstrip("`"))
+                fence_open_len = run_len
+                fence_char = "`"
+                current_section.append(line)
+                continue
+            elif lstripped.startswith("~~~"):
+                run_len = len(lstripped) - len(lstripped.lstrip("~"))
+                fence_open_len = run_len
+                fence_char = "~"
+                current_section.append(line)
+                continue
+        else:
+            # Inside a fence — check for fence close (same char, run >= open)
+            if fence_char == "`" and lstripped.startswith("```"):
+                run_len = len(lstripped) - len(lstripped.lstrip("`"))
+                after_run = lstripped[run_len:].strip()
+                if run_len >= fence_open_len and not after_run:
+                    fence_open_len = 0
+                    fence_char = ""
+            elif fence_char == "~" and lstripped.startswith("~~~"):
+                run_len = len(lstripped) - len(lstripped.lstrip("~"))
+                after_run = lstripped[run_len:].strip()
+                if run_len >= fence_open_len and not after_run:
+                    fence_open_len = 0
+                    fence_char = ""
+            # Keep fence body verbatim regardless
+            current_section.append(line)
+            continue
+        if any(stripped == h for h in memory_headings):
+            if current_section and not in_memory_section:
+                user_parts.extend(current_section)
+                current_section = []
+            elif current_section and in_memory_section:
+                memory_parts.extend(current_section)
+                current_section = []
+            in_memory_section = True
+            current_section.append(line)
+        elif stripped.startswith("## ") or stripped.startswith("# "):
+            if current_section:
+                if in_memory_section:
+                    memory_parts.extend(current_section)
+                else:
+                    user_parts.extend(current_section)
+                current_section = []
+            in_memory_section = False
+            current_section.append(line)
+        else:
+            current_section.append(line)
+
+    if current_section:
+        if in_memory_section:
+            memory_parts.extend(current_section)
+        else:
+            user_parts.extend(current_section)
+
+    memory_text = "".join(memory_parts).strip()
+    user_text = "".join(user_parts).strip()
+
+    # Split memory into {heading: body} dict — always emit all 3 headings.
+    memory_sections: dict[str, str] = {
+        "## Retrieved Context": "",
+        "## Pinned Context": "",
+        "## Working Memory": "",
+    }
+
+    def _append_body(heading: str, new_body: str) -> None:
+        existing = memory_sections[heading]
+        if existing and new_body:
+            memory_sections[heading] = existing + "\n" + new_body
+        elif new_body:
+            memory_sections[heading] = new_body
+
+    if memory_text:
+        current_heading: str | None = None
+        current_body: list[str] = []
+        for line in memory_text.splitlines(keepends=True):
+            stripped_line = line.rstrip()
+            if stripped_line in memory_sections:
+                if current_heading is not None:
+                    _append_body(current_heading, "".join(current_body).rstrip())
+                current_heading = stripped_line
+                current_body = []
+            elif current_heading is not None:
+                current_body.append(line)
+        if current_heading is not None:
+            _append_body(current_heading, "".join(current_body).rstrip())
+
+    # Build the new structure — all content goes inside the managed block
+    parts: list[str] = []
+    parts.extend([MANAGED_START_MARKER, "\n", f"{MANAGED_TITLE}\n"])
+
+    if routing_block:
+        parts.extend(["\n", routing_block, "\n"])
+
+    if session_block:
+        parts.extend(["\n", session_block, "\n"])
+
+    parts.extend(["\n", MEMORY_START_MARKER, "\n"])
+    heading_chunks: list[str] = []
+    for heading in ("## Retrieved Context", "## Pinned Context", "## Working Memory"):
+        body = memory_sections[heading]
+        if body:
+            heading_chunks.append(f"{heading}\n{body}\n")
+        else:
+            heading_chunks.append(f"{heading}\n")
+    parts.append("\n".join(heading_chunks))
+    if not parts[-1].endswith("\n"):
+        parts.append("\n")
+    parts.extend([MEMORY_END_MARKER, "\n"])
+
+    parts.extend(["\n", MANAGED_END_MARKER, "\n"])
+
+    if user_text:
+        parts.extend(["\n", user_text, "\n"])
+
+    return "".join(parts)

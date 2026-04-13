@@ -84,11 +84,22 @@ class TestUpdateSessionInfo:
         # Legacy location should NOT be created when neither exists
         assert not legacy.exists()
         content = new_default.read_text()
-        # Header
-        assert content.startswith("# Project Memory\n")
-        # Auto-creation comment
-        assert "PACT auto-creates this file" in content
-        assert "SESSION_START/SESSION_END markers" in content
+        # Canonical PACT_MANAGED structure: file starts with the outer boundary
+        # marker on line 1, then the single H1 heading on line 2 (#404).
+        assert content.startswith("<!-- PACT_MANAGED_START")
+        assert "# PACT Framework and Managed Project Memory\n" in content
+        # Outer PACT_MANAGED boundary
+        assert "<!-- PACT_MANAGED_START" in content
+        assert "<!-- PACT_MANAGED_END -->" in content
+        # Inner PACT_MEMORY boundary with all three canonical section headings
+        assert "<!-- PACT_MEMORY_START -->" in content
+        assert "<!-- PACT_MEMORY_END -->" in content
+        assert "## Retrieved Context" in content
+        assert "## Pinned Context" in content
+        assert "## Working Memory" in content
+        # Routing block embedded
+        assert "<!-- PACT_ROUTING_START" in content
+        assert "<!-- PACT_ROUTING_END -->" in content
         # Session block written with provided values
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content
@@ -1587,3 +1598,188 @@ class TestBuildJournalResumeDefensive:
         assert not journal_file.exists()
         result = _build_journal_resume(session_dir)
         assert result is None
+
+
+class TestMigrateAndSessionUpdate:
+    """Integration tests for the migrate -> update_session_info pipeline.
+
+    Round-4 Item 5: verifies that `update_session_info` Case 2 respects the
+    architectural invariant that Current Session is a SIBLING of PACT_MEMORY
+    inside PACT_MANAGED, never nested inside PACT_MEMORY.
+
+    Counter-test protocol for the Item 1 fix: if the fix in
+    `session_resume.update_session_info` Case 2 is reverted to anchor on
+    "## Retrieved Context", these tests must fail because the session block
+    would be inserted inside the PACT_MEMORY region after migration.
+    """
+
+    def test_session_block_inserted_outside_pact_memory_after_migration(
+        self, tmp_path, monkeypatch,
+    ):
+        """After migration, a file with no SESSION markers gets the session
+        block inserted BEFORE PACT_MEMORY_START — inside PACT_MANAGED but
+        outside PACT_MEMORY.
+
+        The fixture simulates a pre-#404 project CLAUDE.md (no markers at
+        all). The migration wraps memory sections in PACT_MANAGED +
+        PACT_MEMORY boundaries. Then update_session_info runs; since no
+        SESSION markers exist, it takes Case 2. The Item 1 fix ensures the
+        insertion anchors on MEMORY_START_MARKER rather than
+        "## Retrieved Context" (which now lives inside PACT_MEMORY).
+        """
+        from shared.claude_md_manager import (
+            MANAGED_END_MARKER,
+            MANAGED_START_MARKER,
+            MEMORY_END_MARKER,
+            MEMORY_START_MARKER,
+            migrate_to_managed_structure,
+        )
+        from shared.session_resume import update_session_info
+
+        SESSION_START = "<!-- SESSION_START -->"
+        SESSION_END = "<!-- SESSION_END -->"
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+
+        # Pre-#404 shape: top-level memory headings with no markers
+        pre_content = (
+            "# Project Memory\n"
+            "\n"
+            "This file contains project-specific memory managed by the PACT framework.\n"
+            "\n"
+            "## Retrieved Context\n"
+            "<!-- Auto-managed by pact-memory skill. -->\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+            "- **abc123** (2026-04-01): Pre-migration entry\n"
+        )
+        target.write_text(pre_content)
+
+        # Step 1: migrate
+        migrate_result = migrate_to_managed_structure()
+        assert migrate_result is not None and "Migrated" in migrate_result
+        post_migration = target.read_text()
+        assert MANAGED_START_MARKER in post_migration
+        assert MEMORY_START_MARKER in post_migration
+        # Pre-migration fixture has no SESSION markers — still absent after migrate
+        assert SESSION_START not in post_migration
+        assert SESSION_END not in post_migration
+
+        # Step 2: update_session_info (triggers Case 2 — no SESSION markers)
+        result = update_session_info(
+            "sess-integ-1", "pact-integ1",
+            session_dir="/abs/path/to/session-dir",
+            plugin_root="/abs/path/to/plugin",
+        )
+        assert result is not None and "failed" not in result.lower()
+
+        final_content = target.read_text()
+
+        # Invariant: SESSION markers now present
+        assert SESSION_START in final_content
+        assert SESSION_END in final_content
+
+        # Invariant: marker ORDER must be
+        #   MANAGED_START < SESSION_START < MEMORY_START < MEMORY_END < MANAGED_END
+        managed_start_idx = final_content.index(MANAGED_START_MARKER)
+        session_start_idx = final_content.index(SESSION_START)
+        session_end_idx = final_content.index(SESSION_END)
+        memory_start_idx = final_content.index(MEMORY_START_MARKER)
+        memory_end_idx = final_content.index(MEMORY_END_MARKER)
+        managed_end_idx = final_content.index(MANAGED_END_MARKER)
+
+        assert managed_start_idx < session_start_idx, (
+            "SESSION_START must be after MANAGED_START (inside PACT_MANAGED)"
+        )
+        assert session_start_idx < session_end_idx, (
+            "SESSION_START must precede SESSION_END"
+        )
+        assert session_end_idx < memory_start_idx, (
+            "SESSION block must end BEFORE MEMORY_START — session is a SIBLING "
+            "of PACT_MEMORY, not nested inside it"
+        )
+        assert memory_start_idx < memory_end_idx, (
+            "PACT_MEMORY markers must be properly paired"
+        )
+        assert memory_end_idx < managed_end_idx, (
+            "PACT_MEMORY must close before PACT_MANAGED"
+        )
+
+        # The session block's data must NOT appear anywhere inside the
+        # PACT_MEMORY region — this is the invariant the Item 1 fix protects.
+        memory_region = final_content[memory_start_idx:memory_end_idx]
+        assert "sess-integ-1" not in memory_region
+        assert "pact-integ1" not in memory_region
+        assert SESSION_START not in memory_region
+        assert SESSION_END not in memory_region
+
+        # User content from the pre-migration file (the memory sections)
+        # must survive inside PACT_MEMORY after the full pipeline.
+        assert "Pre-migration entry" in memory_region
+
+    def test_session_update_without_migration_still_respects_invariant(
+        self, tmp_path, monkeypatch,
+    ):
+        """A file that already has PACT_MANAGED + PACT_MEMORY markers but
+        no SESSION markers (e.g., user manually stripped them) must also
+        route Case 2 correctly.
+
+        This exercises the fix directly without going through the migration
+        step — ensures the invariant check is in update_session_info itself,
+        not accidentally gated on some migration side effect.
+        """
+        from shared.claude_md_manager import (
+            MANAGED_END_MARKER,
+            MANAGED_START_MARKER,
+            MEMORY_END_MARKER,
+            MEMORY_START_MARKER,
+        )
+        from shared.session_resume import update_session_info
+
+        SESSION_START = "<!-- SESSION_START -->"
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        target = tmp_path / "CLAUDE.md"
+
+        # Post-migration file but session markers stripped
+        content = (
+            f"{MANAGED_START_MARKER}\n"
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            f"{MEMORY_START_MARKER}\n"
+            "## Retrieved Context\n"
+            "<!-- Auto-managed by pact-memory skill. -->\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+            f"{MEMORY_END_MARKER}\n"
+            "\n"
+            f"{MANAGED_END_MARKER}\n"
+        )
+        target.write_text(content)
+
+        result = update_session_info("sess-direct", "pact-direct")
+        assert result is not None
+
+        final = target.read_text()
+
+        # Session block is inside PACT_MANAGED but NOT inside PACT_MEMORY.
+        managed_start_idx = final.index(MANAGED_START_MARKER)
+        session_start_idx = final.index(SESSION_START)
+        memory_start_idx = final.index(MEMORY_START_MARKER)
+        memory_end_idx = final.index(MEMORY_END_MARKER)
+        managed_end_idx = final.index(MANAGED_END_MARKER)
+
+        assert managed_start_idx < session_start_idx < memory_start_idx, (
+            "Session block must be inserted BEFORE MEMORY_START_MARKER"
+        )
+        assert memory_end_idx < managed_end_idx
+
+        # No session metadata bleeds into PACT_MEMORY
+        memory_region = final[memory_start_idx:memory_end_idx]
+        assert "sess-direct" not in memory_region
+        assert SESSION_START not in memory_region
