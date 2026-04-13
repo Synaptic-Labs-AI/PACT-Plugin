@@ -360,8 +360,9 @@ def _parse_working_memory_section(
     section_header_end = match.end()
 
     # Find where the next ## section starts (end of working memory section)
-    # Also stop at H1 (#), other H2 (##), or horizontal rules (---) to protect footers
-    next_section_pattern = re.compile(r'^(#\s|##\s(?!Working Memory)|---)', re.MULTILINE)
+    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or PACT
+    # boundary markers (<!-- PACT_*) to prevent silent marker erosion (#404).
+    next_section_pattern = re.compile(r'^(#\s|##\s(?!Working Memory)|---|<!-- PACT_)', re.MULTILINE)
     next_match = next_section_pattern.search(content, section_header_end)
 
     if next_match:
@@ -501,8 +502,9 @@ def _parse_retrieved_context_section(
     section_header_end = match.end()
 
     # Find where the next ## section starts (end of retrieved context section)
-    # Also stop at H1 (#), other H2 (##), or horizontal rules (---) to protect footers
-    next_section_pattern = re.compile(r'^(#\s|##\s(?!Retrieved Context)|---)', re.MULTILINE)
+    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or PACT
+    # boundary markers (<!-- PACT_*) to prevent silent marker erosion (#404).
+    next_section_pattern = re.compile(r'^(#\s|##\s(?!Retrieved Context)|---|<!-- PACT_)', re.MULTILINE)
     next_match = next_section_pattern.search(content, section_header_end)
 
     if next_match:

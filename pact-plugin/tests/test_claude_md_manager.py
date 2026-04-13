@@ -2952,6 +2952,30 @@ class TestBuildMigratedContentUserContent:
         assert "## My Early Section" in after_managed
         assert "Early user content." in after_managed
 
+    def test_user_h1_heading_survives_migration(self):
+        """A user-owned H1 heading (e.g., '# My Project Notes') must be
+        preserved outside the PACT_MANAGED block after migration.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Working Memory\n"
+            "\n"
+            "# My Project Notes\n"
+            "Important notes the user added.\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        managed_end_idx = result.index(_MANAGED_END)
+        after_managed = result[managed_end_idx:]
+        assert "# My Project Notes" in after_managed
+        assert "Important notes the user added." in after_managed
+
 
 class TestBuildMigratedContentAdversarial:
     """Adversarial and edge-case inputs for _build_migrated_content().
@@ -3086,6 +3110,35 @@ class TestBuildMigratedContentAdversarial:
         # start marker and its content flow into user_parts
         assert _MANAGED_START in result
         assert _MANAGED_END in result
+
+    def test_partial_session_markers_start_only(self):
+        """If only SESSION_START is present with no SESSION_END, the session
+        block regex won't match, so the marker text remains in the remaining
+        content. Must not crash or corrupt the output.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{_SESSION_START}\n"
+            "## Current Session\n"
+            "- Team: pact-orphaned\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Working Memory\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Output must still have valid structure
+        assert _MANAGED_START in result
+        assert _MANAGED_END in result
+        assert _MEMORY_START in result
+        assert _MEMORY_END in result
+        # The orphaned SESSION_START text should survive somewhere
+        assert "pact-orphaned" in result
 
     def test_memory_heading_with_trailing_whitespace(self):
         """'## Retrieved Context   ' (trailing spaces) must still match
@@ -3592,3 +3645,135 @@ class TestSessionInitMigrationIntegration:
         # The routing logic checks for "failed" or "skipped" in the message
         assert '"failed"' in source or "'failed'" in source
         assert '"skipped"' in source or "'skipped'" in source
+
+
+class TestWorkingMemoryParserMarkerPreservation:
+    """working_memory.py parsers must treat PACT boundary markers as section
+    terminators so sync round-trips don't silently erode PACT_MEMORY_END and
+    PACT_MANAGED_END markers (#404 review finding).
+    """
+
+    def test_sync_working_memory_preserves_pact_markers(self, tmp_path, monkeypatch):
+        """A sync_to_working_memory round-trip on a new-format file must
+        preserve PACT_MEMORY_END and PACT_MANAGED_END markers.
+        """
+        from scripts.working_memory import (
+            _parse_working_memory_section,
+            WORKING_MEMORY_HEADER,
+        )
+
+        new_format_content = (
+            f"{_MANAGED_START}\n"
+            "# PACT Framework for Agentic Orchestration\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            "# Project Memory (PACT-Managed)\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            f"{WORKING_MEMORY_HEADER}\n"
+            "### 2026-04-12 21:00\n"
+            "**Context**: Test entry\n"
+            "\n"
+            f"{_MEMORY_END}\n"
+            "\n"
+            f"{_MANAGED_END}\n"
+        )
+
+        before, header, after, entries = _parse_working_memory_section(new_format_content)
+
+        # The PACT markers must be in `after`, not consumed as section content
+        assert _MEMORY_END in after, (
+            "PACT_MEMORY_END marker should be in after_section, not consumed"
+        )
+        assert _MANAGED_END in after, (
+            "PACT_MANAGED_END marker should be in after_section, not consumed"
+        )
+
+    def test_sync_retrieved_context_preserves_pact_markers(self, tmp_path, monkeypatch):
+        """_parse_retrieved_context_section must also treat PACT markers as
+        section terminators.
+        """
+        from scripts.working_memory import (
+            _parse_retrieved_context_section,
+            RETRIEVED_CONTEXT_HEADER,
+        )
+
+        # Content where Retrieved Context is followed by PACT markers
+        # (no Working Memory heading between them)
+        content = (
+            f"{_MANAGED_START}\n"
+            "# PACT Framework for Agentic Orchestration\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            "# Project Memory (PACT-Managed)\n"
+            "\n"
+            f"{RETRIEVED_CONTEXT_HEADER}\n"
+            "### 2026-04-12 21:00\n"
+            "**Context**: A retrieved memory\n"
+            "\n"
+            f"{_MEMORY_END}\n"
+            "\n"
+            f"{_MANAGED_END}\n"
+        )
+
+        before, header, after, entries = _parse_retrieved_context_section(content)
+
+        assert _MEMORY_END in after, (
+            "PACT_MEMORY_END marker should be in after_section"
+        )
+        assert _MANAGED_END in after, (
+            "PACT_MANAGED_END marker should be in after_section"
+        )
+
+    def test_full_round_trip_preserves_markers(self, tmp_path, monkeypatch):
+        """A full sync_to_claude_md call must not erode PACT markers."""
+        from scripts.working_memory import sync_to_claude_md
+
+        project_dir = tmp_path / "project"
+        claude_dir = project_dir / ".claude"
+        claude_dir.mkdir(parents=True)
+        claude_md = claude_dir / "CLAUDE.md"
+
+        new_format_content = (
+            f"{_MANAGED_START}\n"
+            "# PACT Framework for Agentic Orchestration\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            "# Project Memory (PACT-Managed)\n"
+            "\n"
+            "## Retrieved Context\n"
+            "\n"
+            "## Pinned Context\n"
+            "\n"
+            "## Working Memory\n"
+            "<!-- Auto-managed by pact-memory skill. -->\n"
+            "\n"
+            f"{_MEMORY_END}\n"
+            "\n"
+            f"{_MANAGED_END}\n"
+        )
+        claude_md.write_text(new_format_content, encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+        memory = {
+            "context": "Test context for round-trip",
+            "goal": "Verify marker preservation",
+            "decisions": ["Decision 1"],
+            "lessons_learned": ["Lesson 1"],
+        }
+
+        result = sync_to_claude_md(memory, memory_id="test-123")
+        assert result is True
+
+        final = claude_md.read_text(encoding="utf-8")
+        assert _MEMORY_END in final, (
+            "PACT_MEMORY_END must survive sync_to_claude_md round-trip"
+        )
+        assert _MANAGED_END in final, (
+            "PACT_MANAGED_END must survive sync_to_claude_md round-trip"
+        )
+        assert "Test context for round-trip" in final
