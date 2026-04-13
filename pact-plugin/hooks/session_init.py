@@ -438,6 +438,32 @@ def main():
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
 
+        # Clear bootstrap-complete marker on context reset (#401).
+        # Re-engages the bootstrap gate hooks (Layers 2 & 3) so the
+        # orchestrator must re-invoke Skill("PACT:bootstrap") after
+        # compaction or context clear. The narrow gate allowlist ensures
+        # exploration tools (Read, Glob, Grep) remain available for state
+        # recovery during the rebootstrap window.
+        #
+        # Cannot use get_session_dir() here because pact_context hasn't been
+        # initialized yet (write_context() runs at step 5a below). Compute
+        # the session dir path directly from input_data and env vars.
+        if is_context_reset:
+            try:
+                _reset_session_id = input_data.get("session_id", "")
+                if _reset_session_id and project_dir:
+                    _slug = Path(project_dir).name
+                    _session_path = (
+                        Path.home()
+                        / ".claude"
+                        / "pact-sessions"
+                        / _slug
+                        / str(_reset_session_id)
+                    )
+                    (_session_path / "bootstrap-complete").unlink(missing_ok=True)
+            except OSError:
+                pass  # Fail-open: don't block session init for marker cleanup
+
         # 0. Check if ~/.claude/teams is in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check
         if not is_context_reset:

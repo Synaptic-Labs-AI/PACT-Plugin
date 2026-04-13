@@ -562,3 +562,32 @@ After agent reviews completed:
 3. **Delegation is survival.** Act alone and you will run out of memory and fail.
 
 **To orchestrate is to delegate.**
+
+---
+
+## BOOTSTRAP CONFIRMATION (Required)
+
+Run this command now to confirm bootstrap completion. This unlocks
+implementation tools (Edit, Write, Bash, Agent) which are blocked until
+bootstrap is confirmed.
+
+```bash
+python3 -c "
+import json, os
+from pathlib import Path
+pd = os.environ.get('CLAUDE_PROJECT_DIR', '.')
+slug = Path(pd).name
+# Read session ID from the context file
+ctx_dir = Path.home() / '.claude' / 'pact-sessions'
+# Find the session dir by reading pact-session-context.json
+for sd in sorted(ctx_dir.glob(f'{slug}/*/pact-session-context.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+    data = json.loads(sd.read_text())
+    session_dir = sd.parent
+    marker = session_dir / 'bootstrap-complete'
+    marker.touch()
+    print(f'Bootstrap confirmed: {marker}')
+    break
+else:
+    print('Warning: no session context found; bootstrap marker not written')
+"
+```
