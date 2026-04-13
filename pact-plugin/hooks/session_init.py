@@ -445,9 +445,10 @@ def main():
         # exploration tools (Read, Glob, Grep) remain available for state
         # recovery during the rebootstrap window.
         #
-        # Cannot use get_session_dir() here because pact_context hasn't been
-        # initialized yet (write_context() runs at step 5a below). Compute
-        # the session dir path directly from input_data and env vars.
+        # Cannot use get_session_dir() here because the context module
+        # hasn't been initialized yet (write_context() runs at step 5a
+        # below). Compute the session dir path directly from input_data
+        # and env vars.
         if is_context_reset:
             try:
                 _reset_session_id = input_data.get("session_id", "")
