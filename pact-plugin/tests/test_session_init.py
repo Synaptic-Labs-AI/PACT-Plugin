@@ -3354,16 +3354,17 @@ class TestMainExceptionSafetyNet:
 
 
 # ---------------------------------------------------------------------------
-# #401 — bootstrap-complete marker cleanup on compact/clear
+# #414 — bootstrap-complete marker cleanup on clear only (compact excluded)
 # ---------------------------------------------------------------------------
 
 
 class TestBootstrapMarkerCleanup:
-    """Tests for bootstrap-complete marker deletion on compact/clear sources.
+    """Tests for bootstrap-complete marker deletion on clear source only.
 
-    session_init.main() must delete the bootstrap-complete marker when
-    source is "compact" or "clear" to re-engage the bootstrap gate hooks
-    after context is reset. The marker is at:
+    session_init.main() must delete the bootstrap-complete marker only when
+    source is "clear" (user-initiated reset). Compact is excluded because
+    auto-compaction is involuntary and the orchestrator is still mid-work
+    (#414). The marker is at:
     ~/.claude/pact-sessions/{slug}/{session_id}/bootstrap-complete
     """
 
@@ -3412,11 +3413,11 @@ class TestBootstrapMarkerCleanup:
         assert exc_info.value.code == 0
         return marker.exists()
 
-    def test_compact_deletes_marker(self, monkeypatch, tmp_path):
-        """compact source must delete bootstrap-complete marker."""
+    def test_compact_preserves_marker(self, monkeypatch, tmp_path):
+        """compact source must NOT delete bootstrap-complete marker (#414)."""
         still_exists = self._run_main_with_marker(monkeypatch, tmp_path, "compact")
-        assert not still_exists, (
-            "bootstrap-complete marker should be deleted for source='compact'"
+        assert still_exists, (
+            "bootstrap-complete marker should be preserved for source='compact' (#414)"
         )
 
     def test_clear_deletes_marker(self, monkeypatch, tmp_path):
@@ -3426,16 +3427,16 @@ class TestBootstrapMarkerCleanup:
             "bootstrap-complete marker should be deleted for source='clear'"
         )
 
-    @pytest.mark.parametrize("source", ["startup", "resume"])
+    @pytest.mark.parametrize("source", ["startup", "resume", "compact"])
     def test_non_reset_sources_preserve_marker(self, monkeypatch, tmp_path, source):
-        """startup and resume should NOT delete the marker."""
+        """startup, resume, and compact should NOT delete the marker (#414)."""
         still_exists = self._run_main_with_marker(monkeypatch, tmp_path, source)
         assert still_exists, (
             f"bootstrap-complete marker should be preserved for source='{source}'"
         )
 
     def test_missing_marker_is_noop(self, monkeypatch, tmp_path):
-        """compact with no marker should not raise (unlink(missing_ok=True))."""
+        """clear with no marker should not raise (unlink(missing_ok=True))."""
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
@@ -3450,7 +3451,7 @@ class TestBootstrapMarkerCleanup:
 
         stdin_data = json.dumps({
             "session_id": session_id,
-            "source": "compact",
+            "source": "clear",
         })
 
         with patch("session_init.COMPACT_SUMMARY_PATH", tmp_path / "no-such-file"), \
@@ -3480,7 +3481,7 @@ class TestBootstrapMarkerCleanup:
 
         stdin_data = json.dumps({
             "session_id": "",
-            "source": "compact",
+            "source": "clear",
         })
 
         with patch("session_init.COMPACT_SUMMARY_PATH", tmp_path / "no-such-file"), \
