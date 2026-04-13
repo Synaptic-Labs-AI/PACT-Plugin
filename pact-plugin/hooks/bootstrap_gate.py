@@ -94,6 +94,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
         return None
 
     # Blocked implementation tools
+    # frozenset membership is type-safe — no isinstance guard needed
     if tool_name in _BLOCKED_TOOLS:
         return _DENY_REASON
 
