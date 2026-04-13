@@ -22,6 +22,7 @@ from typing import Any
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
     MANAGED_START_MARKER,
+    MANAGED_TITLE,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
     _PACT_ROUTING_BLOCK,
@@ -149,7 +150,7 @@ def update_session_info(
                 if not target_file.exists():
                     new_content = (
                         f"{MANAGED_START_MARKER}\n"
-                        "# PACT Framework and Managed Project Memory\n"
+                        f"{MANAGED_TITLE}\n"
                         "\n"
                         f"{_PACT_ROUTING_BLOCK}\n"
                         "\n"
@@ -205,6 +206,16 @@ def update_session_info(
                 #       the historical anchor on "## Retrieved Context"
                 #       since memory sections were top-level in that shape.
                 #   (c) Neither: append at end of file.
+                # Belt-and-suspenders: check BOTH markers (round 5, item 8).
+                # The migration guarantees pair-presence — migrate_to_managed_structure
+                # emits MANAGED_START, MEMORY_START, MEMORY_END, MANAGED_END atomically.
+                # A well-formed post-migration file has all four markers. The dual
+                # check here is defense-in-depth against a partial-migration
+                # corruption scenario (e.g., a user hand-edits CLAUDE.md and
+                # deletes MEMORY_START_MARKER while leaving MANAGED_START_MARKER).
+                # In that case we fall through to the legacy branch (b) rather
+                # than attempting a .replace() that would be a no-op, producing a
+                # silent data-loss write. Keep both terms of the `and`.
                 if MANAGED_START_MARKER in content and MEMORY_START_MARKER in content:
                     new_content = content.replace(
                         MEMORY_START_MARKER,

@@ -22,6 +22,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from shared.claude_md_manager import PACT_BOUNDARY_PREFIXES
+
+# Boundary prefix alternation used by _parse_pinned_section. Built from
+# PACT_BOUNDARY_PREFIXES (round 5, item 1) so the three-prefix union is
+# defined in one place.
+_BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
+
 
 # Staleness detection constants
 
@@ -126,9 +133,71 @@ def estimate_tokens(text: str) -> int:
 _estimate_tokens = estimate_tokens
 
 
+def _find_terminator_offset(
+    content: str,
+    start: int,
+    terminator_pattern: "re.Pattern[str]",
+    in_code_fence: bool = False,
+) -> int:
+    """
+    Fence-aware line walker for `_parse_pinned_section`.
+
+    Twin of `working_memory._find_terminator_offset` — kept private to this
+    module because skills/pact-memory/scripts/ cannot cleanly import from
+    hooks/shared/. See that function's docstring for full rationale. The
+    two helpers have identical semantics; a behavioral twin is acceptable
+    here because fence tracking is simple and the logic is only ~25 lines.
+
+    Args:
+        content: Full CLAUDE.md file content.
+        start: Absolute offset in `content` where scanning begins.
+        terminator_pattern: Compiled regex matched against individual lines
+            via `.match` (no `^` anchor, no MULTILINE flag needed).
+        in_code_fence: Initial fence state. Default False is safe when
+            `start` is immediately after a ## section header.
+
+    Returns:
+        Absolute offset of the first terminator line that is not inside a
+        fenced code block, or `len(content)` if none found.
+    """
+    pos = start
+    fence_re = re.compile(r'^\s*```')
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            line_end = nl + 1
+
+        if fence_re.match(line):
+            in_code_fence = not in_code_fence
+        elif not in_code_fence and terminator_pattern.match(line):
+            return pos
+
+        pos = line_end
+
+    return len(content)
+
+
 def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
     """
     Extract the Pinned Context section from CLAUDE.md content.
+
+    Parser symmetry (round 5, item 7): this function is now symmetric
+    with `working_memory._parse_working_memory_section` and
+    `working_memory._parse_retrieved_context_section`. All three CLAUDE.md
+    section parsers terminate on the same three-token alternation
+    (`PACT_BOUNDARY_PREFIXES`: MEMORY / MANAGED / ROUTING) and all three
+    are fence-aware via their respective `_find_terminator_offset` twins.
+    Previously, staleness.py was asymmetric — it used a plain anchored
+    regex that would have false-matched fenced look-alikes, while
+    working_memory.py was already fence-aware. Round 4 added marker
+    recognition; round 5 added fence tracking. The twin helpers are
+    private to each module (rather than a shared import) because the
+    skills/pact-memory/scripts/ path cannot cleanly import from
+    hooks/shared/.
 
     Args:
         content: Full CLAUDE.md file content.
@@ -148,15 +217,21 @@ def _parse_pinned_section(content: str) -> Optional[Tuple[int, int, str]]:
     # Without the marker alternative, a pinned section immediately followed by
     # <!-- PACT_MEMORY_END --> would run past the marker to the next H2, causing
     # subsequent write-backs to eat the boundary marker (#404).
-    next_section = re.search(
-        r'^(?:#{1,2}\s|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))',
-        content[pinned_start:],
-        re.MULTILINE,
+    #
+    # Fence-aware scan (round 5, item 4): the Pinned Context section is
+    # free-form prose that may contain triple-backtick fenced blocks. A
+    # fenced block containing a line that looks like a PACT boundary marker
+    # (e.g. a tutorial showing the marker as an example) or an H2 heading
+    # must NOT terminate the section early. `_find_terminator_offset`
+    # tracks in_code_fence state and suppresses terminator matches while
+    # inside a fence. The terminator regex is unanchored — matched against
+    # individual lines via `.match` in the helper.
+    next_section_pattern = re.compile(
+        rf'(?:#{{1,2}}\s|<!-- (?:{_BOUNDARY_ALT}))'
     )
-    if next_section:
-        pinned_end = pinned_start + next_section.start()
-    else:
-        pinned_end = len(content)
+    pinned_end = _find_terminator_offset(
+        content, pinned_start, next_section_pattern
+    )
 
     pinned_content = content[pinned_start:pinned_end]
     if not pinned_content.strip():

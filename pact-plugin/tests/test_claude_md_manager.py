@@ -3370,19 +3370,152 @@ class TestBuildMigratedContentAdversarial:
         assert "(this is just an example)" not in memory_region
 
 
-class TestBuildMigratedContentIdempotent:
-    """_build_migrated_content() does NOT have its own idempotency guard —
-    that lives in migrate_to_managed_structure() which checks for
-    MANAGED_START_MARKER before calling the pure function.
+class TestBuildMigratedContentOrphanRoutingMarker:
+    """Round 5 item 5: `_build_migrated_content` must strip orphan
+    PACT_ROUTING markers (exactly one of START/END present) to avoid
+    leaving the downstream `update_pact_routing` with a half-block it
+    cannot repair.
 
-    Calling _build_migrated_content on already-migrated content WILL
-    double-wrap. This is by design: the function is pure and stateless.
-    The caller is responsible for the idempotency check.
+    Scenarios:
+      - User manually deletes half of the routing block during editing
+      - Partial-write corruption truncates the file mid-routing-block
+      - A hand-rolled CLAUDE.md with a leftover marker from an older
+        plugin version
+
+    Recovery: drop the orphan marker and any adjacent `## PACT Routing`
+    H2 block. A fresh routing block will be installed by the next
+    `update_pact_routing` call, so no real content is lost (the routing
+    block is plugin-authored template content rebuilt from
+    _PACT_ROUTING_BLOCK).
     """
 
-    def test_double_pass_produces_double_wrap(self):
-        """Calling _build_migrated_content twice wraps content again —
-        documenting that the caller must guard against re-migration.
+    _ROUTING_START = "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->"
+    _ROUTING_END = "<!-- PACT_ROUTING_END -->"
+
+    def test_orphan_routing_start_is_stripped(self):
+        """A PACT_ROUTING_START marker with no matching END must be removed
+        along with its adjacent `## PACT Routing` H2 block.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{self._ROUTING_START}\n"
+            "## PACT Routing\n"
+            "Orphaned routing prose that should be removed.\n"
+            "\n"
+            "## Working Memory\n"
+            "- Real memory entry\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Orphan marker is gone from the final output
+        assert self._ROUTING_START not in result
+        # The adjacent `## PACT Routing` heading is gone too
+        assert "## PACT Routing" not in result
+        # The orphaned routing prose is gone
+        assert "Orphaned routing prose" not in result
+
+        # Real memory content survives
+        assert "Real memory entry" in result
+
+    def test_orphan_routing_end_is_stripped(self):
+        """A PACT_ROUTING_END marker with no matching START must also be
+        removed — the symmetric case.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "## PACT Routing\n"
+            "Orphaned routing prose.\n"
+            "\n"
+            f"{self._ROUTING_END}\n"
+            "\n"
+            "## Working Memory\n"
+            "- Real memory entry\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        assert self._ROUTING_END not in result
+        assert "## PACT Routing" not in result
+        assert "Orphaned routing prose" not in result
+        assert "Real memory entry" in result
+
+    def test_paired_routing_markers_preserved_as_routing_block(self):
+        """Regression guard: when BOTH markers are present, the orphan-strip
+        branch must not fire — the routing block should be extracted and
+        re-emitted normally.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            f"{self._ROUTING_START}\n"
+            "## PACT Routing\n"
+            "Canonical routing prose.\n"
+            f"{self._ROUTING_END}\n"
+            "\n"
+            "## Working Memory\n"
+            "- Real memory entry\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        # Both markers present in result — routing block preserved
+        assert self._ROUTING_START in result
+        assert self._ROUTING_END in result
+        assert "Canonical routing prose." in result
+        assert "Real memory entry" in result
+
+    def test_orphan_start_no_adjacent_h2(self):
+        """A PACT_ROUTING_START marker with no adjacent `## PACT Routing`
+        heading — just the marker in isolation — must still be stripped.
+        """
+        from shared.claude_md_manager import _build_migrated_content
+
+        content = (
+            "# Project Memory\n"
+            "\n"
+            "Some user paragraph before the orphan.\n"
+            "\n"
+            f"{self._ROUTING_START}\n"
+            "\n"
+            "## Working Memory\n"
+            "- Real memory entry\n"
+        )
+
+        result = _build_migrated_content(content)
+
+        assert self._ROUTING_START not in result
+        assert "Real memory entry" in result
+        # The paragraph before the orphan is user content and must survive
+        assert "Some user paragraph before the orphan." in result
+
+
+class TestBuildMigratedContentIdempotent:
+    """_build_migrated_content() has its own idempotency guard (round 5 item 2).
+
+    The guard checks for MANAGED_START_MARKER at the top of the function and
+    returns the content unchanged if already migrated. The integration wrapper
+    migrate_to_managed_structure also has this guard, so the two layers provide
+    belt-and-suspenders protection. Duplicating it at the pure-function layer
+    means any caller (including tests and future consumers) gets the safety
+    for free and double-passes can never double-wrap.
+    """
+
+    def test_double_pass_is_idempotent(self):
+        """Calling _build_migrated_content twice returns the same content.
+
+        Round 5, item 2: _build_migrated_content now guards on
+        MANAGED_START_MARKER presence and returns unchanged content on the
+        second call. The prior behavior was to double-wrap; that contract
+        was intentional documentation, not a design goal.
         """
         from shared.claude_md_manager import _build_migrated_content
 
@@ -3397,10 +3530,31 @@ class TestBuildMigratedContentIdempotent:
         )
         first_pass = _build_migrated_content(original)
 
-        # Second pass double-wraps — this is expected, NOT a bug
+        # Second pass: the guard returns first_pass unchanged
         second_pass = _build_migrated_content(first_pass)
 
-        assert second_pass.count(_MANAGED_START) == 2
+        assert second_pass.count(_MANAGED_START) == 1
+        assert second_pass == first_pass
+
+    def test_already_migrated_input_returns_unchanged(self):
+        """Passing already-wrapped content returns byte-identical output."""
+        from shared.claude_md_manager import _build_migrated_content
+
+        already_managed = (
+            f"{_MANAGED_START}\n"
+            "# PACT Framework and Managed Project Memory\n"
+            "\n"
+            f"{_MEMORY_START}\n"
+            "## Retrieved Context\n"
+            "## Pinned Context\n"
+            "## Working Memory\n"
+            f"{_MEMORY_END}\n"
+            f"{_MANAGED_END}\n"
+        )
+
+        result = _build_migrated_content(already_managed)
+
+        assert result == already_managed
 
     def test_migrate_to_managed_structure_guards_double_call(self, tmp_path, monkeypatch):
         """The integration wrapper migrate_to_managed_structure() prevents
@@ -3799,15 +3953,20 @@ class TestManagedMarkerConstants:
         assert "PACT_MANAGED_START" in MANAGED_START_MARKER
         assert "<!-- PACT_START" not in MANAGED_START_MARKER
 
-    def test_no_marker_is_prefix_of_another(self):
-        """No marker string can be a prefix of another marker string.
+    def test_markers_mutually_distinct(self):
+        """No marker string may be a prefix of — or a substring of — any other.
 
-        A prefix collision would break substring search. For example, if
-        ``<!-- PACT_MANAGED_START`` were a prefix of ``<!-- PACT_MANAGED_START_V2``,
-        an ``in``-operator lookup for the shorter marker would spuriously match
-        the longer one. This is the semantic invariant — an explicit cardinality
-        check (len == 4) tested the counting mistake, not the substring-safety
-        contract.
+        A prefix collision would break substring search via ``str.startswith``.
+        A substring collision would break ``in``-operator lookup at any
+        position. For example, if ``<!-- PACT_MANAGED_START`` were embedded
+        inside ``<!-- PACT_META_MANAGED_START_V2``, an ``in``-operator lookup
+        for the shorter marker would spuriously match the longer one even
+        though ``startswith`` would not. This is the semantic invariant —
+        an explicit cardinality check (len == 4) tested the counting mistake,
+        not the substring-safety contract.
+
+        Both relations are checked (``startswith`` AND ``in``) so future
+        marker additions with embedded patterns are caught.
         """
         from shared import claude_md_manager as cmm
         markers = [
@@ -3821,7 +3980,10 @@ class TestManagedMarkerConstants:
                 if i == j:
                     continue
                 assert not a.startswith(b), (
-                    f"Marker collision: {a!r} has prefix {b!r}"
+                    f"Marker prefix collision: {a!r} starts with {b!r}"
+                )
+                assert b not in a, (
+                    f"Marker substring collision: {b!r} is contained in {a!r}"
                 )
 
 

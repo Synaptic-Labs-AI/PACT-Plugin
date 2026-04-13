@@ -122,6 +122,27 @@ MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
 MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"
 MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 
+# Canonical H1 title for the managed block. Extracted (round 5, item 3) so
+# the three template sites (ensure_project_memory_md, _build_migrated_content,
+# session_resume.update_session_info Case 0) cannot drift apart. Changing this
+# value changes the title everywhere in one place.
+MANAGED_TITLE = "# PACT Framework and Managed Project Memory"
+
+# Plugin-managed HTML comment boundary prefixes. Used by parsers and regex
+# sites that need to terminate scans on any PACT-managed boundary marker.
+# Extracted (round 5, item 1) so the three-prefix union is defined once.
+# Any regex alternation is built at the use site via:
+#   _BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
+#
+# Twin copy: working_memory.py maintains a parallel _PACT_BOUNDARY_PREFIXES
+# tuple because skills/pact-memory/scripts/ cannot cleanly import from
+# hooks/shared/. A drift-detection test asserts the two tuples stay in sync.
+PACT_BOUNDARY_PREFIXES: tuple[str, ...] = (
+    "PACT_MEMORY_",
+    "PACT_MANAGED_",
+    "PACT_ROUTING_",
+)
+
 # Stale line from the v3.16.2 project CLAUDE.md template. After the PR #390
 # migration the routing block supersedes it, but the stale line lingers in
 # upgraded files and contradicts the routing block. Strip it on every
@@ -598,7 +619,7 @@ def ensure_project_memory_md() -> str | None:
     # Structure (#404): outer PACT_MANAGED boundary wraps all plugin-managed
     # content; inner PACT_MEMORY boundary wraps the memory sections.
     memory_template = f"""{MANAGED_START_MARKER}
-# PACT Framework and Managed Project Memory
+{MANAGED_TITLE}
 
 {_PACT_ROUTING_BLOCK}
 
@@ -679,6 +700,19 @@ def migrate_to_managed_structure() -> str | None:
        outside the recognized PACT sections is preserved AFTER the closing
        boundary as user-owned content
 
+    Code-fence defense (round 5, item 9): the line-walker inside
+    `_build_migrated_content` tracks markdown code fence state so a
+    triple-backtick block containing a look-alike `## Pinned Context`
+    (e.g., in a tutorial snippet) is NOT misclassified as a real memory
+    section. Fence-awareness is a property of the extraction logic itself,
+    not an after-the-fact filter. The three sync-path parsers
+    (`staleness._parse_pinned_section`,
+    `working_memory._parse_working_memory_section`,
+    `working_memory._parse_retrieved_context_section`) have symmetric
+    fence-awareness via `_find_terminator_offset` twins, so the
+    fence-defense stance is consistent end-to-end across migration AND
+    subsequent write-backs.
+
     Returns:
         Status message on successful migration, None on no-op (already
         migrated or file doesn't exist), or a "failed"/"skipped" string
@@ -734,12 +768,23 @@ def _build_migrated_content(content: str) -> str:
 
     This is a pure function (no I/O) for testability.
 
+    Idempotency guard (round 5, item 2): if the content already contains
+    MANAGED_START_MARKER, return it unchanged. The integration wrapper
+    migrate_to_managed_structure also has this guard, but duplicating it
+    here means any caller (including tests and future consumers) gets the
+    safety for free and double-passes can never double-wrap.
+
     Args:
         content: The existing CLAUDE.md file content.
 
     Returns:
-        The restructured content with PACT_MANAGED and PACT_MEMORY boundaries.
+        The restructured content with PACT_MANAGED and PACT_MEMORY boundaries,
+        or the original content unchanged if already migrated.
     """
+    # Idempotency guard: already migrated → no-op
+    if MANAGED_START_MARKER in content:
+        return content
+
     # Extract routing block if present (between markers)
     routing_block = ""
     content_sans_routing = content
@@ -752,6 +797,75 @@ def _build_migrated_content(content: str) -> str:
         if match:
             routing_block = match.group(0)
             content_sans_routing = content[:match.start()] + content[match.end():]
+    elif _ROUTING_START_MARKER in content or _ROUTING_END_MARKER in content:
+        # Orphan PACT_ROUTING marker (round 5, item 5): exactly one of
+        # START/END is present. This happens if a user manually edits the
+        # routing block and deletes half of it, or if a partial write
+        # corrupts the file. Without this branch, the orphan marker would
+        # be preserved in memory_parts or user_parts and the downstream
+        # update_pact_routing would see a half-block it refuses to touch
+        # (because its regex requires both markers), leaving the project
+        # in a permanently broken routing state.
+        #
+        # Recovery strategy: drop the orphan marker AND any adjacent
+        # `## PACT Routing` H2 block (before or after the orphan marker).
+        # A fresh routing block will be installed by the next
+        # update_pact_routing call. We lose no information — the canonical
+        # routing content is a plugin template rebuilt from
+        # _PACT_ROUTING_BLOCK, not user-authored content.
+        orphan_marker = (
+            _ROUTING_START_MARKER
+            if _ROUTING_START_MARKER in content
+            else _ROUTING_END_MARKER
+        )
+        marker_idx = content.find(orphan_marker)
+
+        # Find the start of the strip region: prefer the preceding
+        # `## PACT Routing` heading if it appears just before the orphan
+        # marker (within the last ~200 chars). This handles the case
+        # where the routing-end marker is orphaned but the heading and
+        # prose are still upstream.
+        preamble_start = max(0, marker_idx - 200)
+        preamble = content[preamble_start:marker_idx]
+        heading_match = re.search(r"\n## PACT Routing\s*\n", preamble)
+        if heading_match:
+            strip_start = preamble_start + heading_match.start()
+        else:
+            strip_start = marker_idx
+
+        # Find the end of the strip region. Scan forward from the line
+        # AFTER the orphan marker, and also consume an immediately
+        # following `## PACT Routing` heading + body (handles the
+        # routing-start orphan case where the heading sits between the
+        # marker and the next terminator).
+        scan_from = content.find("\n", marker_idx)
+        if scan_from == -1:
+            scan_from = len(content)
+        else:
+            scan_from += 1
+
+        # Skip over an adjacent `## PACT Routing` heading if present
+        # (the heading itself must be stripped along with the orphan).
+        post_heading_match = re.match(
+            r"## PACT Routing\s*\n",
+            content[scan_from:],
+        )
+        if post_heading_match:
+            scan_from += post_heading_match.end()
+
+        # Find the next genuine section terminator (non-PACT_Routing
+        # heading or any PACT boundary marker).
+        next_terminator = re.search(
+            r"^(?:#{1,2}\s|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))",
+            content[scan_from:],
+            re.MULTILINE,
+        )
+        if next_terminator:
+            strip_end = scan_from + next_terminator.start()
+        else:
+            strip_end = len(content)
+
+        content_sans_routing = content[:strip_start] + content[strip_end:]
 
     # Extract session block if present (between markers)
     session_block = ""
@@ -785,7 +899,22 @@ def _build_migrated_content(content: str) -> str:
     )
 
     # Also strip any legacy template lines that lingered (e.g., the v3.16.2
-    # stale orchestrator loader line)
+    # stale orchestrator loader line).
+    #
+    # Fence-classification upstream (round 5, item 10): `_strip_legacy_lines`
+    # uses string-based line-by-line matching via a SESSION_START/SESSION_END
+    # boundary exclusion, NOT fence tracking. This is intentional. The
+    # fence-classification step happens DOWNSTREAM in the memory-vs-user
+    # split loop (below), where `in_code_fence` is tracked per line. Running
+    # the legacy-line strip first is safe because its target patterns
+    # (legacy orchestrator-loader comment, loader @-ref, stale
+    # "# Project Memory" heading) are short, distinctive, and extremely
+    # unlikely to appear inside a fenced tutorial block — and even if they
+    # did, the downstream classifier still preserves fenced content as
+    # user-owned regardless of what legacy-line matches fired. The ordering
+    # is: (1) strip legacy lines by simple match, (2) fence-aware
+    # memory/user classification. Do not swap these steps — the classifier
+    # needs the legacy cruft removed so it does not land in the user bucket.
     remaining = _strip_legacy_lines(remaining)
 
     # Extract memory sections: Retrieved Context, Pinned Context, Working Memory
@@ -890,7 +1019,7 @@ def _build_migrated_content(content: str) -> str:
             _append_body(current_heading, "".join(current_body).rstrip())
 
     # Build the new structure
-    parts = [MANAGED_START_MARKER, "\n", "# PACT Framework and Managed Project Memory\n"]
+    parts = [MANAGED_START_MARKER, "\n", f"{MANAGED_TITLE}\n"]
 
     # Routing block
     if routing_block:

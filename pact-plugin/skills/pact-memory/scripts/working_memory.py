@@ -45,6 +45,26 @@ WORKING_MEMORY_TOKEN_BUDGET = 800
 RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 # Note: PINNED_CONTEXT_TOKEN_BUDGET is defined solely in hooks/staleness.py
 
+# Plugin-managed HTML comment boundary prefixes. Used by _parse_working_memory_section
+# and _parse_retrieved_context_section to terminate scans on any PACT-managed
+# boundary marker. Extracted (round 5, item 1) so the three-prefix union is
+# defined once within this file.
+#
+# TWIN COPY: The canonical definition lives in
+# pact-plugin/hooks/shared/claude_md_manager.py as PACT_BOUNDARY_PREFIXES.
+# This module cannot cleanly import from hooks/shared/ (skills/pact-memory/scripts/
+# is a separate package), so we duplicate the tuple here and rely on a
+# drift-detection test (test_working_memory_parser.test_boundary_prefixes_in_sync)
+# to assert the two tuples stay identical. This is the same pattern as the
+# _estimate_tokens twin (see line 130).
+_PACT_BOUNDARY_PREFIXES: tuple = (
+    "PACT_MEMORY_",
+    "PACT_MANAGED_",
+    "PACT_ROUTING_",
+)
+# Regex alternation used at the three parser sites below.
+_PACT_BOUNDARY_ALT = "|".join(_PACT_BOUNDARY_PREFIXES)
+
 
 def _find_existing_claude_md(base: Path) -> Optional[Path]:
     """
@@ -329,6 +349,65 @@ def _format_memory_entry(
     return "\n".join(lines)
 
 
+def _find_terminator_offset(
+    content: str,
+    start: int,
+    terminator_pattern: "re.Pattern[str]",
+    in_code_fence: bool = False,
+) -> int:
+    """
+    Fence-aware line walker that finds the absolute offset of the first line
+    in `content[start:]` that matches `terminator_pattern`, skipping lines
+    inside triple-backtick code fences.
+
+    Markdown fenced code blocks open and close with a line whose stripped
+    form starts with ``` (optionally followed by a language tag). We track
+    `in_code_fence` state and suppress terminator matches while inside a
+    fence. This prevents a user-authored fenced block from prematurely
+    terminating the section — a concern for Working Memory and Retrieved
+    Context, which may contain example markdown with boundary-marker-like
+    HTML comments.
+
+    Args:
+        content: Full CLAUDE.md file content.
+        start: Absolute offset in `content` where scanning begins.
+        terminator_pattern: Compiled regex (without MULTILINE — we match
+            against individual stripped lines using `.match`). The caller
+            provides a pattern that would match on its own line.
+        in_code_fence: Initial fence state. Callers who start scanning
+            mid-document after another parser has already consumed up to
+            `start` should pass the fence state at that boundary; callers
+            who start at a safe point (after a ## heading + optional
+            comment) can pass False — section headers cannot appear inside
+            a fence anyway.
+
+    Returns:
+        Absolute offset in `content` of the first line in `content[start:]`
+        that (a) is not inside a code fence and (b) matches
+        `terminator_pattern`. Returns `len(content)` if no terminator is
+        found — the caller should treat that as "scan to EOF".
+    """
+    pos = start
+    fence_re = re.compile(r'^\s*```')
+    while pos < len(content):
+        nl = content.find("\n", pos)
+        if nl == -1:
+            line = content[pos:]
+            line_end = len(content)
+        else:
+            line = content[pos:nl]
+            line_end = nl + 1
+
+        if fence_re.match(line):
+            in_code_fence = not in_code_fence
+        elif not in_code_fence and terminator_pattern.match(line):
+            return pos
+
+        pos = line_end
+
+    return len(content)
+
+
 def _parse_working_memory_section(
     content: str
 ) -> Tuple[str, str, str, List[str]]:
@@ -345,17 +424,17 @@ def _parse_working_memory_section(
     # Pattern to find the Working Memory section
     # Match ## Working Memory followed by optional comment and entries.
     # Negative lookahead excludes the three plugin-managed boundary prefixes
-    # (PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_) from being consumed as the
-    # auto-managed comment — otherwise an empty Working Memory section
-    # followed immediately by <!-- PACT_MEMORY_END --> would greedily swallow
-    # the marker into section_header_end, and the marker would be lost on
+    # (_PACT_BOUNDARY_PREFIXES) from being consumed as the auto-managed
+    # comment — otherwise an empty Working Memory section followed
+    # immediately by <!-- PACT_MEMORY_END --> would greedily swallow the
+    # marker into section_header_end, and the marker would be lost on
     # write-back (#404). Using the specific prefixes (not a broad ^PACT_)
     # keeps the guard load-bearing to the markers we actually emit, so a
     # hypothetical user comment like <!-- PACT_note: user-owned --> still
     # parses as an auto-managed comment without breaking.
     section_pattern = re.compile(
         r'^(## Working Memory)\s*\n'
-        r'(<!-- (?!(?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))[^>]*-->)?\s*\n?',
+        rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
@@ -369,19 +448,21 @@ def _parse_working_memory_section(
     section_header_end = match.end()
 
     # Find where the next ## section starts (end of working memory section)
-    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or the
-    # three plugin-managed boundary prefixes (PACT_MEMORY_, PACT_MANAGED_,
-    # PACT_ROUTING_) to prevent silent marker erosion (#404).
+    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or any
+    # plugin-managed boundary marker (_PACT_BOUNDARY_PREFIXES) to prevent
+    # silent marker erosion (#404).
+    #
+    # Fence-aware line walker (round 5, item 4): scan line-by-line so that a
+    # fenced block containing a terminator-like line (e.g. an example H2 or
+    # a quoted boundary marker) does NOT prematurely terminate the section.
+    # The terminator regex is the same alternation as before but without the
+    # `^` anchor — we match against individual lines via `.match`.
     next_section_pattern = re.compile(
-        r'^(#\s|##\s(?!Working Memory)|---|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))',
-        re.MULTILINE
+        rf'(#\s|##\s(?!Working Memory)|---|<!-- (?:{_PACT_BOUNDARY_ALT}))',
     )
-    next_match = next_section_pattern.search(content, section_header_end)
-
-    if next_match:
-        section_end = next_match.start()
-    else:
-        section_end = len(content)
+    section_end = _find_terminator_offset(
+        content, section_header_end, next_section_pattern
+    )
 
     before_section = content[:section_start]
     section_content = content[section_header_end:section_end].strip()
@@ -499,12 +580,12 @@ def _parse_retrieved_context_section(
         where existing_entries is a list of individual memory entry strings.
     """
     # Pattern to find the Retrieved Context section.
-    # Negative lookahead narrows to the three plugin-managed boundary prefixes
-    # (PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_) — see _parse_working_memory_section
+    # Negative lookahead narrows to the plugin-managed boundary prefixes
+    # (_PACT_BOUNDARY_PREFIXES) — see _parse_working_memory_section
     # for the full rationale (#404).
     section_pattern = re.compile(
         r'^(## Retrieved Context)\s*\n'
-        r'(<!-- (?!(?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))[^>]*-->)?\s*\n?',
+        rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}))[^>]*-->)?\s*\n?',
         re.MULTILINE
     )
 
@@ -518,19 +599,19 @@ def _parse_retrieved_context_section(
     section_header_end = match.end()
 
     # Find where the next ## section starts (end of retrieved context section)
-    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or the
-    # three plugin-managed boundary prefixes (PACT_MEMORY_, PACT_MANAGED_,
-    # PACT_ROUTING_) to prevent silent marker erosion (#404).
+    # Also stop at H1 (#), other H2 (##), horizontal rules (---), or any
+    # plugin-managed boundary marker (_PACT_BOUNDARY_PREFIXES) to prevent
+    # silent marker erosion (#404).
+    #
+    # Fence-aware line walker (round 5, item 4): see _parse_working_memory_section
+    # for rationale. Terminator regex uses no `^` anchor; matched against
+    # individual lines via `_find_terminator_offset`.
     next_section_pattern = re.compile(
-        r'^(#\s|##\s(?!Retrieved Context)|---|<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))',
-        re.MULTILINE
+        rf'(#\s|##\s(?!Retrieved Context)|---|<!-- (?:{_PACT_BOUNDARY_ALT}))',
     )
-    next_match = next_section_pattern.search(content, section_header_end)
-
-    if next_match:
-        section_end = next_match.start()
-    else:
-        section_end = len(content)
+    section_end = _find_terminator_offset(
+        content, section_header_end, next_section_pattern
+    )
 
     before_section = content[:section_start]
     section_content = content[section_header_end:section_end].strip()
