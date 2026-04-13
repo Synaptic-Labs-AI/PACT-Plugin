@@ -60,6 +60,7 @@ from staleness import (  # noqa: F401
     _estimate_tokens,
 )
 
+from shared import BOOTSTRAP_MARKER_NAME, build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
@@ -447,21 +448,15 @@ def main():
         #
         # Cannot use get_session_dir() here because the context module
         # hasn't been initialized yet (write_context() runs at step 5a
-        # below). Compute the session dir path directly from input_data
-        # and env vars.
+        # below). Uses build_session_path() directly — it has its own
+        # path traversal guard (Path.parents containment check).
         if is_context_reset:
             try:
                 _reset_session_id = input_data.get("session_id", "")
                 if _reset_session_id and project_dir:
                     _slug = Path(project_dir).name
-                    _session_path = (
-                        Path.home()
-                        / ".claude"
-                        / "pact-sessions"
-                        / _slug
-                        / str(_reset_session_id)
-                    )
-                    (_session_path / "bootstrap-complete").unlink(missing_ok=True)
+                    _session_path = build_session_path(_slug, str(_reset_session_id))
+                    (_session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for marker cleanup
 

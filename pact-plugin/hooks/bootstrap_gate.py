@@ -54,8 +54,6 @@ _BLOCKED_TOOLS = frozenset({
     "NotebookEdit",
 })
 
-_MARKER_NAME = "bootstrap-complete"
-
 _DENY_REASON = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
     "Code-editing tools (Edit, Write) and agent spawning (Agent) are blocked "
@@ -74,7 +72,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
             0,
             str(Path(__file__).resolve().parent),
         )
-        from shared import pact_context
+        from shared import pact_context, BOOTSTRAP_MARKER_NAME
     finally:
         if sys.path and sys.path[0] == str(Path(__file__).resolve().parent):
             sys.path.pop(0)
@@ -86,7 +84,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     if not session_dir:
         return None
 
-    marker_path = Path(session_dir) / _MARKER_NAME
+    marker_path = Path(session_dir) / BOOTSTRAP_MARKER_NAME
     if marker_path.exists():
         return None
 

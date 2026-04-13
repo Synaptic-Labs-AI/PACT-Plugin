@@ -579,3 +579,6 @@ touch "<path>/bootstrap-complete"
 ```
 
 Substitute `<path>` with the value from `PACT_SESSION_DIR=`.
+
+<!-- Coupling: marker name "bootstrap-complete" must match shared.BOOTSTRAP_MARKER_NAME
+     in pact-plugin/hooks/shared/__init__.py -->

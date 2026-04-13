@@ -53,6 +53,8 @@ import pytest
 # Add hooks directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+from shared import BOOTSTRAP_MARKER_NAME
+
 
 class TestGenerateTeamName:
     """Tests for generate_team_name() -- session-unique team name generation."""
@@ -3384,7 +3386,7 @@ class TestBootstrapMarkerCleanup:
             tmp_path / ".claude" / "pact-sessions" / slug / session_id
         )
         session_dir.mkdir(parents=True)
-        marker = session_dir / "bootstrap-complete"
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
         marker.touch()
 
         stdin_data = json.dumps({

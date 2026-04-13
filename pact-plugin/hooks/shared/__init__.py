@@ -59,9 +59,16 @@ from .merge_guard_common import (
 )
 from .error_output import hook_error_json
 from .constants import PACT_AGENTS
+
+# Bootstrap gate marker — the session-scoped file whose presence signals that
+# Skill("PACT:bootstrap") has been invoked and the tool gate can self-disable.
+# Used by bootstrap_gate.py, bootstrap_prompt_gate.py, and session_init.py.
+# Also referenced (as a string literal) in commands/bootstrap.md.
+BOOTSTRAP_MARKER_NAME = "bootstrap-complete"
 # Convenience re-exports for the public API. Hooks import directly from
 # shared.pact_context, but these re-exports allow `from shared import get_team_name`.
 from .pact_context import (
+    _build_session_path as build_session_path,
     get_pact_context,
     get_team_name,
     get_session_id,
@@ -103,6 +110,8 @@ __all__ = [
     "cleanup_consumed_tokens",
     "hook_error_json",
     "PACT_AGENTS",
+    "BOOTSTRAP_MARKER_NAME",
+    "build_session_path",
     "get_pact_context",
     "get_team_name",
     "get_session_id",

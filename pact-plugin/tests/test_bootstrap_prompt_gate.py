@@ -25,6 +25,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+from shared import BOOTSTRAP_MARKER_NAME
+
 _SUPPRESS_EXPECTED = {"suppressOutput": True}
 
 # Session identity constants used across all tests
@@ -92,7 +94,7 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False):
     monkeypatch.setattr(ctx_module, "_cache", None)
 
     if with_marker:
-        (session_dir / "bootstrap-complete").touch()
+        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
 
     return session_dir
 
@@ -378,7 +380,7 @@ class TestMarkerLifecycle:
         assert "hookSpecificOutput" in output_before
 
         # Create marker
-        (session_dir / "bootstrap-complete").touch()
+        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
 
         # Reset cache for second call
         ctx_module._cache = None

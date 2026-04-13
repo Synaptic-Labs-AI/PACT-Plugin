@@ -60,6 +60,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+from shared import BOOTSTRAP_MARKER_NAME
+
 _SUPPRESS_EXPECTED = {"suppressOutput": True}
 
 # Session identity constants
@@ -121,7 +123,7 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False):
     monkeypatch.setattr(ctx_module, "_cache", None)
 
     if with_marker:
-        (session_dir / "bootstrap-complete").touch()
+        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
 
     return session_dir
 
@@ -552,7 +554,7 @@ class TestMarkerLifecycle:
         assert "permissionDecision" in output_before.get("hookSpecificOutput", {})
 
         # Create marker
-        (session_dir / "bootstrap-complete").touch()
+        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
 
         # Reset cache for second call
         ctx_module._cache = None
@@ -574,3 +576,24 @@ class TestMarkerLifecycle:
             exit_code, output = _run_main(_make_input(tool), capsys)
             assert exit_code == 2
             assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# =============================================================================
+# Cross-module marker name consistency — P2 priority
+# =============================================================================
+
+
+class TestMarkerNameConsistency:
+    """P2: All bootstrap gate files must use the same marker name."""
+
+    def test_shared_constant_value(self):
+        """BOOTSTRAP_MARKER_NAME is the expected string."""
+        assert BOOTSTRAP_MARKER_NAME == "bootstrap-complete"
+
+    def test_bootstrap_md_references_same_marker(self):
+        """bootstrap.md touch command must reference the shared marker name."""
+        bootstrap_md = (
+            Path(__file__).parent.parent / "commands" / "bootstrap.md"
+        )
+        content = bootstrap_md.read_text(encoding="utf-8")
+        assert f"touch \"<path>/{BOOTSTRAP_MARKER_NAME}\"" in content

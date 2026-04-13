@@ -44,9 +44,6 @@ _SESSION_DIR_HINT = (
 
 _NO_SESSION_DIR_HINT = ""
 
-_MARKER_NAME = "bootstrap-complete"
-
-
 def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
 
@@ -60,7 +57,7 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
             0,
             str(Path(__file__).resolve().parent),
         )
-        from shared import pact_context
+        from shared import pact_context, BOOTSTRAP_MARKER_NAME
     finally:
         if sys.path and sys.path[0] == str(Path(__file__).resolve().parent):
             sys.path.pop(0)
@@ -74,7 +71,7 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         # No session dir → non-PACT session or uninitialized context → no-op
         return None
 
-    marker_path = Path(session_dir) / _MARKER_NAME
+    marker_path = Path(session_dir) / BOOTSTRAP_MARKER_NAME
     if marker_path.exists():
         # Bootstrap already done → suppress (zero tokens)
         return None
