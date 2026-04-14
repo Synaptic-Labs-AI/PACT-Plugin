@@ -2279,6 +2279,15 @@ class TestSessionInitJournalWrite:
         self, journal_home, monkeypatch, stdin_source, expected_on_disk
     ):
         """session_init.main() writes session_start event to journal."""
+        # NOTE: The class-level `mock_get_session_dir` autouse fixture at
+        # test_session_journal.py:188-197 patches `_get_session_dir()` on the
+        # session_journal module, so this test bypasses the real
+        # `pact_context`-backed session-dir derivation. What IS verified
+        # end-to-end: the source-normalization branches in
+        # session_init.main(), journal serialization to JSONL on disk, and
+        # read_events() round-trip — including the non-string isinstance
+        # guard via the (42, "unknown") case. What is NOT exercised:
+        # `pact_context.init()` path resolution.
         import io
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(journal_home / "project"))
