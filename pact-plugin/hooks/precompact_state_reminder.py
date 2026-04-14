@@ -28,7 +28,7 @@ import json
 import sys
 
 from shared.error_output import hook_error_json
-from shared.task_scanner import analyze_task_state, scan_team_members
+from shared.session_state import summarize_session_state
 
 
 # ---------------------------------------------------------------------------
@@ -145,9 +145,14 @@ def build_hook_output(
 
     Returns dict ready for json.dumps().
     """
-    task_state = analyze_task_state(tasks_base_dir)
-    team_info = scan_team_members(teams_base_dir)
-    state_summary = _build_state_summary(task_state, team_info)
+    state = summarize_session_state(
+        tasks_base_dir=tasks_base_dir,
+        teams_base_dir=teams_base_dir,
+    )
+    # The legacy helpers took two dicts (task_state, team_info) reading
+    # disjoint keys from each. The new unified 10-key dict carries all
+    # those keys, so passing the same dict twice is a minimal diff.
+    state_summary = _build_state_summary(state, state)
 
     system_message = (
         f"Compaction imminent — mechanical state snapshot:\n"
@@ -157,7 +162,7 @@ def build_hook_output(
         f"{BRAIN_DUMP_INSTRUCTIONS}"
     )
 
-    custom_instructions = build_custom_instructions(task_state, team_info)
+    custom_instructions = build_custom_instructions(state, state)
 
     return {
         "custom_instructions": custom_instructions,
