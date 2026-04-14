@@ -2264,8 +2264,30 @@ class TestHandoffGateJournalWrite:
 class TestSessionInitJournalWrite:
     """Tests that session_init.main() writes session_start event to journal."""
 
-    def test_writes_session_start_event(self, journal_home, monkeypatch):
+    @pytest.mark.parametrize(
+        "stdin_source, expected_on_disk",
+        [
+            ("startup", "startup"),
+            ("resume", "resume"),
+            ("compact", "compact"),
+            ("clear", "clear"),
+            ("unknown", "unknown"),
+            (42, "unknown"),
+        ],
+    )
+    def test_writes_session_start_event(
+        self, journal_home, monkeypatch, stdin_source, expected_on_disk
+    ):
         """session_init.main() writes session_start event to journal."""
+        # NOTE: The class-level `mock_get_session_dir` autouse fixture at
+        # test_session_journal.py:188-197 patches `_get_session_dir()` on the
+        # session_journal module, so this test bypasses the real
+        # `pact_context`-backed session-dir derivation. What IS verified
+        # end-to-end: the source-normalization branches in
+        # session_init.main(), journal serialization to JSONL on disk, and
+        # read_events() round-trip — including the non-string isinstance
+        # guard via the (42, "unknown") case. What is NOT exercised:
+        # `pact_context.init()` path resolution.
         import io
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(journal_home / "project"))
@@ -2274,7 +2296,7 @@ class TestSessionInitJournalWrite:
 
         input_data = {
             "session_id": "abc12345-test",
-            "source": "startup",
+            "source": stdin_source,
         }
 
         with patch("sys.stdin", io.StringIO(json.dumps(input_data))), \
@@ -2301,6 +2323,7 @@ class TestSessionInitJournalWrite:
         events = read_events("session_start")
         assert len(events) >= 1
         assert events[0]["team"] == "pact-abc12345"
+        assert events[0].get("source") == expected_on_disk
 
 
 # ---------------------------------------------------------------------------
@@ -3324,3 +3347,231 @@ class TestValidateEventSchemaPerType:
             "non-empty string"
         ) in result.stderr
         assert not journal_file.exists() or journal_file.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-type optional-field validation (BR-M2)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateOptionalFieldTypes:
+    """Per-type optional-field schema validation tests for BR-M2.
+
+    The validator enforces type on optional fields declared in
+    _OPTIONAL_FIELDS_BY_TYPE. A field is optional iff absent is OK; when
+    present, it must match the declared Python type. This is the schema
+    contract counterpart to runtime clamps (e.g. the `source` isinstance
+    guard in session_init.py) — a future writer that bypasses the clamp
+    and emits the wrong type directly to `make_event` is rejected at
+    validate time instead of landing a bad type on disk.
+    """
+
+    def test_optional_fields_dict_shape(self):
+        """_OPTIONAL_FIELDS_BY_TYPE maps event_type → {field: type}.
+
+        Meta-test: validates the declaration shape so a malformed entry
+        fails here rather than surfacing as a cryptic TypeError inside
+        the validator.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert isinstance(_OPTIONAL_FIELDS_BY_TYPE, dict)
+        for event_type, field_types in _OPTIONAL_FIELDS_BY_TYPE.items():
+            assert isinstance(event_type, str) and event_type.strip()
+            assert isinstance(field_types, dict)
+            for field, expected_type in field_types.items():
+                assert isinstance(field, str) and field.strip()
+                assert isinstance(expected_type, type)
+
+    def test_session_start_source_declared_optional(self):
+        """session_start has `source: str` in _OPTIONAL_FIELDS_BY_TYPE.
+
+        Pins the canonical case — the isinstance guard in session_init.py
+        clamps `source` at runtime; this schema entry pins the contract
+        at the journal boundary.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {"source": str}
+
+    def test_optional_field_correct_type_passes(self):
+        """Optional field with correct type passes validation."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_start",
+            session_id="s1",
+            project_dir="/tmp/p",
+            source="startup",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_optional_field_absent_passes(self):
+        """Optional field missing entirely passes validation.
+
+        That's what "optional" means — absence is not a violation. All
+        existing session_init writers prior to R2 took this code path.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("session_start", session_id="s1", project_dir="/tmp/p")
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_optional_field_none_passes(self):
+        """Optional field explicitly set to None passes validation.
+
+        Symmetric with the required-field check (`field not in event or
+        event[field] is None`): for optional fields, None is treated the
+        same as missing — both skip the type check.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_start",
+            session_id="s1",
+            project_dir="/tmp/p",
+            source=None,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    @pytest.mark.parametrize(
+        "bad_value, got_name",
+        [
+            (42, "int"),
+            (3.14, "float"),
+            ([1, 2], "list"),
+            ({"k": "v"}, "dict"),
+            ((1, 2), "tuple"),
+            (b"bytes", "bytes"),
+        ],
+        ids=["int", "float", "list", "dict", "tuple", "bytes"],
+    )
+    def test_optional_field_wrong_type_rejected(self, bad_value, got_name):
+        """Optional field with wrong type fails validation with precise reason.
+
+        Reason-string format mirrors the required-field mismatch reason
+        but uses "optional field" prefix so CLI stderr diagnostics make
+        the source of the failure unambiguous. This pins the format so
+        operators get a sharp diagnostic instead of a generic 'invalid
+        event schema'.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_start",
+            session_id="s1",
+            project_dir="/tmp/p",
+            source=bad_value,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False, f"source={bad_value!r} should be rejected"
+        expected = (
+            f"optional field 'source' for type 'session_start' must "
+            f"be str, got {got_name}"
+        )
+        assert reason == expected, f"expected {expected!r}, got {reason!r}"
+
+    def test_optional_str_field_rejects_empty_and_whitespace(self):
+        """Optional str fields reject empty/whitespace-only values.
+
+        Symmetric with required-str semantics — a whitespace-only
+        `source` ("" or "   ") is indistinguishable from missing for
+        downstream consumers. The validator strips before checking.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        for bad in ["", "   ", "\t", "\n", "   \t  "]:
+            event = make_event(
+                "session_start",
+                session_id="s1",
+                project_dir="/tmp/p",
+                source=bad,
+            )
+            ok, reason = _validate_event_schema(event)
+            assert ok is False, f"source={bad!r} should be rejected"
+            assert reason == (
+                "optional field 'source' for type 'session_start' must "
+                "be non-empty string"
+            )
+
+    def test_undeclared_event_type_with_optional_looking_field_passes(self):
+        """Event types with no optional declaration don't trip on arbitrary fields.
+
+        `phase_transition` is not in _OPTIONAL_FIELDS_BY_TYPE, so even a
+        same-named field with a wrong type on that event passes optional
+        validation. This guards against cross-contamination — optional
+        declarations are per-event-type, not global.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "phase_transition",
+            phase="CODE",
+            status="started",
+            source=42,  # Would fail on session_start; passes on phase_transition.
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_unknown_event_type_passes_optional_check(self):
+        """Unknown event types bypass the optional-field loop.
+
+        Mirrors the required-field "unknown type is opt-in" behavior:
+        per-type checks are opt-in whitelists, so free-form "test" types
+        used in unit tests sail through regardless of payload shape.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "some_unit_test_type_not_in_dict",
+            source=42,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_append_event_rejects_wrong_typed_optional_field(self, journal_home):
+        """append_event returns False when optional field has wrong type.
+
+        End-to-end check: the write path (fail-open) rejects the event
+        without ever touching disk. A future session_init regression that
+        forgets the isinstance guard would produce a wrong-typed source;
+        this test is the schema-level bulwark against that reaching disk.
+        """
+        from shared.session_journal import append_event, make_event
+
+        bad_event = make_event(
+            "session_start",
+            session_id="s1",
+            project_dir="/tmp/p",
+            source=42,
+        )
+        assert append_event(bad_event) is False
+
+    def test_append_event_accepts_correct_optional_field(self, journal_home):
+        """append_event returns True for a well-formed session_start with source.
+
+        The positive end-to-end case — pins the happy path of the R2
+        contract so a regression in the validator (e.g. rejecting str
+        values accidentally) fails here instead of silently dropping
+        every session_start write.
+        """
+        from shared.session_journal import append_event, make_event, read_events
+
+        good_event = make_event(
+            "session_start",
+            session_id="s1",
+            project_dir="/tmp/p",
+            source="startup",
+        )
+        assert append_event(good_event) is True
+        events = read_events("session_start")
+        assert len(events) == 1
+        assert events[0].get("source") == "startup"

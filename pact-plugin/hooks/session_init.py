@@ -426,9 +426,17 @@ def main():
         # Default to "startup" if missing (backwards compat with older Claude Code).
         # Validate against the known set — an unrecognized source is surfaced
         # as "unknown" so it cannot inject arbitrary text into additionalContext.
+        # isinstance(str) guard short-circuits the `in _VALID_SOURCES` test for
+        # unhashable inputs (list, dict) that would otherwise raise TypeError,
+        # bubble to the outer safety-net, and skip the session_start journal
+        # write — breaking #414 R2's fail-open contract.
         _VALID_SOURCES = {"startup", "resume", "compact", "clear"}
         raw_source = input_data.get("source", "startup")
-        source = raw_source if raw_source in _VALID_SOURCES else "unknown"
+        source = (
+            raw_source
+            if isinstance(raw_source, str) and raw_source in _VALID_SOURCES
+            else "unknown"
+        )
         is_context_reset = source in ("compact", "clear")
         # Marker deletion uses a narrower guard: only user-initiated clear
         # triggers it. Compact is involuntary (auto-compaction under context
@@ -661,6 +669,11 @@ def main():
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
             # Write session_start event to journal (after write_context so path is available).
+            # `source` is the already-normalized value from the `_VALID_SOURCES`
+            # check above — one of {startup, resume, compact, clear, unknown}.
+            # Persisting it here gives downstream triage direct attribution for
+            # marker-wipe and other source-conditioned behavior, instead of
+            # forcing triangulation from timing clusters (#414 R2).
             append_event(
                 make_event(
                     "session_start",
@@ -668,6 +681,7 @@ def main():
                     session_id=session_id,
                     project_dir=project_dir,
                     worktree="",  # Not yet created at this point
+                    source=source,
                 ),
             )
 

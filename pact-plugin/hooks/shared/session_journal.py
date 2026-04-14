@@ -147,6 +147,28 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
 }
 
 
+# Per-type optional fields, with expected Python type. Fields listed here
+# are NOT required — an event missing them still passes validation — but
+# when they ARE present, the validator enforces type. This is the schema
+# contract counterpart to runtime clamps (e.g. the `_VALID_SOURCES` clamp
+# in session_init.py): if a future writer bypasses the normalization
+# path and emits the wrong type directly to `make_event`, the event is
+# rejected at validate time rather than landing on disk.
+# Same type-symmetry rules as _REQUIRED_FIELDS_BY_TYPE: `int` fields
+# reject `bool` because bool subclasses int.
+#
+# When adding a new optional field, add it here and add a matching
+# happy-path + wrong-type case to TestValidateOptionalFieldTypes in
+# test_session_journal.py.
+_OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
+    # hooks/session_init.py writes session_start with an optional `source`
+    # drawn from stdin. The session_init normalization path clamps non-str
+    # inputs to "unknown" before the journal write; this schema contract
+    # catches any future writer that bypasses that path.
+    "session_start": {"source": str},
+}
+
+
 # --- Write API ---
 
 
@@ -206,6 +228,15 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
       `make_event("…")` call site silently bypasses per-type checks. The
       TestValidateEventSchemaPerType suite catches that at test time.
 
+    Optional fields (for types in _OPTIONAL_FIELDS_BY_TYPE):
+    - Absent fields pass (the field is optional by definition).
+    - Present fields must match the declared type, applying the same
+      bool-in-int + empty-str rules as required fields. This is the
+      schema-level counterpart to runtime clamping paths such as the
+      `source` isinstance guard in session_init.py — a future writer
+      that bypasses the clamp and emits the wrong type directly to
+      `make_event` is rejected at validate time.
+
     This is the bulwark that prevents BugF1: a malformed `phase_transition`
     event (missing `phase` field, or `phase=""`, or `phase=42`) from any
     writer causes `append_event` or the CLI write path to return False
@@ -260,6 +291,35 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
                 False,
                 f"field '{field}' for type '{event_type}' must be "
                 f"non-empty string",
+            )
+    # Per-type optional field checks. Absent fields pass (that's what
+    # "optional" means); present fields must match the declared type.
+    # Symmetric with required-field checks: rejects bool in int fields,
+    # rejects empty/whitespace-only str. Event types with no optional
+    # declarations (the common case) get a no-op empty dict from .get()
+    # and skip the loop entirely.
+    optional = _OPTIONAL_FIELDS_BY_TYPE.get(event_type, {})
+    for field, expected_type in optional.items():
+        if field not in event or event[field] is None:
+            continue  # Absent optional field — pass through.
+        value = event[field]
+        if expected_type is int and isinstance(value, bool):
+            return (
+                False,
+                f"optional field '{field}' for type '{event_type}' must "
+                f"be int, got bool",
+            )
+        if not isinstance(value, expected_type):
+            return (
+                False,
+                f"optional field '{field}' for type '{event_type}' must "
+                f"be {expected_type.__name__}, got {type(value).__name__}",
+            )
+        if expected_type is str and not value.strip():
+            return (
+                False,
+                f"optional field '{field}' for type '{event_type}' must "
+                f"be non-empty string",
             )
     return True, "ok"
 
