@@ -426,15 +426,10 @@ def main():
         # Default to "startup" if missing (backwards compat with older Claude Code).
         # Validate against the known set — an unrecognized source is surfaced
         # as "unknown" so it cannot inject arbitrary text into additionalContext.
-        # The isinstance(str) guard short-circuits the membership test for
-        # unhashable values (list, dict): without it, the `in` check on the
-        # _VALID_SOURCES set raises TypeError("unhashable type"), which would
-        # bubble out of the input-normalization step and bypass both the
-        # journal write at the bottom of the try and the source-conditioned
-        # branches that depend on it. With the guard, any non-string source
-        # cleanly clamps to "unknown" and the rest of main() runs to
-        # completion, persisting source="unknown" into the session_start
-        # event (#414 R2 fail-open contract).
+        # isinstance(str) guard short-circuits the `in _VALID_SOURCES` test for
+        # unhashable inputs (list, dict) that would otherwise raise TypeError,
+        # bubble to the outer safety-net, and skip the session_start journal
+        # write — breaking #414 R2's fail-open contract.
         _VALID_SOURCES = {"startup", "resume", "compact", "clear"}
         raw_source = input_data.get("source", "startup")
         source = (
@@ -674,11 +669,11 @@ def main():
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
             # Write session_start event to journal (after write_context so path is available).
-            # `source` is the already-normalized value from line 431 — one of
-            # {startup, resume, compact, clear, unknown}. Persisting it here
-            # gives downstream triage direct attribution for marker-wipe and
-            # other source-conditioned behavior, instead of forcing
-            # triangulation from timing clusters (#414 R2).
+            # `source` is the already-normalized value from the `_VALID_SOURCES`
+            # check above — one of {startup, resume, compact, clear, unknown}.
+            # Persisting it here gives downstream triage direct attribution for
+            # marker-wipe and other source-conditioned behavior, instead of
+            # forcing triangulation from timing clusters (#414 R2).
             append_event(
                 make_event(
                     "session_start",
