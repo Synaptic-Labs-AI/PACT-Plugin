@@ -3523,6 +3523,24 @@ class TestSessionStartSourceField:
     matching the existing default at line 430).
     """
 
+    @pytest.fixture(autouse=True)
+    def _reset_pact_context_cache(self, monkeypatch):
+        """Reset `shared.pact_context` module state between tests in this
+        class. Mirrors the identically-named fixture on
+        `TestPluginRootEnvWiring` (see that class for the full rationale).
+
+        Why this class needs it: tests here exercise `main()` against the
+        same tmp_path-rooted Path.home() but patch `write_context`, so the
+        cache doesn't get populated from inside the test. That makes the
+        tests incidentally safe today — but a future refactor that stops
+        patching `write_context` (e.g. to exercise real context writes)
+        would inherit silent cache leakage from a prior test. Matching
+        the sibling class's pattern now hardens the class against that
+        regression."""
+        import shared.pact_context as pact_context
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        monkeypatch.setattr(pact_context, "_cache", None)
+
     def _captured_session_start_event(self, mock_append):
         """Helper: pull the session_start dict out of an append_event mock."""
         starts = [
@@ -3584,19 +3602,33 @@ class TestSessionStartSourceField:
         )
         assert event.get("source") == source
 
+    @pytest.mark.parametrize(
+        "unknown_source",
+        [
+            "",                       # empty string — no whitespace, no characters
+            "   ",                    # whitespace-only — would pass a naive .strip()-based normalization
+            "STARTUP",                # case variant — catches accidental .lower() in the clamp path
+            "startup_but_extra",      # long/compound — catches accidental startswith/prefix match
+            "\u03a0\u039b\u0397\u03a1\u039f\u03a6\u039f\u03a1\u0399\u0391",
+            # Unicode (Greek "INFORMATION") — non-ASCII, valid str, must still clamp via set-membership miss
+        ],
+    )
     def test_unknown_source_clamps_to_unknown_in_event(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, unknown_source
     ):
         """An unrecognized stdin source clamps to `"unknown"` in the
         event — symmetric with the input validation at line 431 that
         prevents arbitrary text from bleeding into source-conditioned
-        downstream logic."""
+        downstream logic. Parametrized over empty, whitespace,
+        case-variant, compound, and Unicode strings to catch
+        normalization regressions (e.g., an accidental `.lower()`
+        that would silently map `"STARTUP"` → `"startup"`)."""
         event = self._run_main_and_capture_event(
             monkeypatch,
             tmp_path,
             {
                 "session_id": "aabb1122-0000-0000-0000-000000000000",
-                "source": "garbage-not-a-real-source",
+                "source": unknown_source,
             },
         )
         assert event.get("source") == "unknown"
@@ -3616,30 +3648,33 @@ class TestSessionStartSourceField:
         )
         assert event.get("source") == "startup"
 
+    @pytest.mark.parametrize("bad_source", [42, [], {}, True, None])
     def test_non_string_source_clamps_to_unknown_in_event(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, bad_source
     ):
         """Fail-open: a non-string `source` (int, list, dict, bool, None)
         from stdin MUST NOT block session start. It clamps to `"unknown"`
         because the membership test against `_VALID_SOURCES` cannot match
-        a non-string."""
-        # `None` is treated as missing-key by `dict.get(..., default)`
-        # only when the key itself is absent — an explicit `None` value
-        # bypasses the default and reaches the validator. Test it
-        # explicitly to lock that branch in.
-        for bad_source in (42, [], {}, True, None):
-            event = self._run_main_and_capture_event(
-                monkeypatch,
-                tmp_path,
-                {
-                    "session_id": "aabb1122-0000-0000-0000-000000000000",
-                    "source": bad_source,
-                },
-            )
-            assert event.get("source") == "unknown", (
-                f"non-string source {bad_source!r} should clamp to "
-                f"'unknown', got {event.get('source')!r}"
-            )
+        a non-string. Parametrized so each bad-value type is reported
+        independently — without parametrization, the first failure aborts
+        the remaining iterations and loses diagnostic power.
+
+        `None` is treated as missing-key by `dict.get(..., default)`
+        only when the key itself is absent — an explicit `None` value
+        bypasses the default and reaches the validator. This case locks
+        that branch in."""
+        event = self._run_main_and_capture_event(
+            monkeypatch,
+            tmp_path,
+            {
+                "session_id": "aabb1122-0000-0000-0000-000000000000",
+                "source": bad_source,
+            },
+        )
+        assert event.get("source") == "unknown", (
+            f"non-string source {bad_source!r} should clamp to "
+            f"'unknown', got {event.get('source')!r}"
+        )
 
     def test_event_preserves_all_existing_fields(
         self, monkeypatch, tmp_path
