@@ -846,11 +846,12 @@ class TestCompactSummaryCleanup:
 
 
 class TestCheckAdditionalDirectories:
-    """Tests for check_additional_directories() — ~/.claude/teams tip.
+    """Tests for check_additional_directories() — multi-directory tip.
 
-    The function reads ~/.claude/settings.json and checks if ~/.claude/teams
-    (or its absolute equivalent) is listed in permissions.additionalDirectories.
-    Returns a tip message if missing, None if present. Fail-open on all errors.
+    The function reads ~/.claude/settings.json and checks if both ~/.claude/teams
+    and ~/.claude/pact-sessions (or their absolute equivalents) are listed in
+    permissions.additionalDirectories. Returns a tip message listing whichever
+    directories are missing, or None if all are present. Fail-open on all errors.
     """
 
     def _write_settings(self, tmp_path, settings_data):
@@ -861,22 +862,38 @@ class TestCheckAdditionalDirectories:
         settings_file.write_text(json.dumps(settings_data), encoding="utf-8")
         return settings_file
 
-    def test_returns_none_when_absolute_path_present(self, monkeypatch, tmp_path):
-        """Should return None when absolute path to teams dir is in additionalDirectories."""
+    def test_returns_none_when_both_dirs_present_absolute(self, monkeypatch, tmp_path):
+        """Should return None when absolute paths to both dirs are in additionalDirectories."""
         from session_init import check_additional_directories
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         teams_abs = str(tmp_path / ".claude" / "teams")
+        sessions_abs = str(tmp_path / ".claude" / "pact-sessions")
         self._write_settings(tmp_path, {
-            "permissions": {"additionalDirectories": [teams_abs]}
+            "permissions": {"additionalDirectories": [teams_abs, sessions_abs]}
         })
 
         result = check_additional_directories()
 
         assert result is None
 
-    def test_returns_none_when_tilde_path_present(self, monkeypatch, tmp_path):
-        """Should return None when ~/.claude/teams (tilde form) is in additionalDirectories."""
+    def test_returns_none_when_both_dirs_present_tilde(self, monkeypatch, tmp_path):
+        """Should return None when tilde-form paths to both dirs are in additionalDirectories."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": [
+                "~/.claude/teams", "~/.claude/pact-sessions"
+            ]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_returns_tip_for_pact_sessions_when_only_teams_present(self, monkeypatch, tmp_path):
+        """Should return tip mentioning pact-sessions when only teams is configured."""
         from session_init import check_additional_directories
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -886,10 +903,27 @@ class TestCheckAdditionalDirectories:
 
         result = check_additional_directories()
 
-        assert result is None
+        assert result is not None
+        assert "~/.claude/pact-sessions" in result
+        assert "~/.claude/teams" not in result
 
-    def test_returns_tip_when_setting_missing(self, monkeypatch, tmp_path):
-        """Should return tip message when teams dir is not in additionalDirectories."""
+    def test_returns_tip_for_teams_when_only_pact_sessions_present(self, monkeypatch, tmp_path):
+        """Should return tip mentioning teams when only pact-sessions is configured."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": ["~/.claude/pact-sessions"]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is not None
+        assert "~/.claude/teams" in result
+        assert "~/.claude/pact-sessions" not in result
+
+    def test_returns_tip_for_both_when_neither_present(self, monkeypatch, tmp_path):
+        """Should return tip mentioning both dirs when neither is configured."""
         from session_init import check_additional_directories
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -902,9 +936,10 @@ class TestCheckAdditionalDirectories:
         assert result is not None
         assert "additionalDirectories" in result
         assert "~/.claude/teams" in result
+        assert "~/.claude/pact-sessions" in result
 
     def test_returns_tip_when_additional_directories_empty(self, monkeypatch, tmp_path):
-        """Should return tip when additionalDirectories is an empty list."""
+        """Should return tip mentioning both dirs when additionalDirectories is empty."""
         from session_init import check_additional_directories
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -916,6 +951,7 @@ class TestCheckAdditionalDirectories:
 
         assert result is not None
         assert "~/.claude/teams" in result
+        assert "~/.claude/pact-sessions" in result
 
     def test_returns_none_when_settings_file_missing(self, monkeypatch, tmp_path):
         """Should return None (fail-open) when settings.json does not exist."""
@@ -951,9 +987,10 @@ class TestCheckAdditionalDirectories:
         result = check_additional_directories()
 
         # permissions missing → .get("permissions", {}).get("additionalDirectories", [])
-        # returns [] → no matching entry → tip message returned
+        # returns [] → no matching entry → tip message with both dirs
         assert result is not None
         assert "~/.claude/teams" in result
+        assert "~/.claude/pact-sessions" in result
 
     def test_returns_none_when_additional_dirs_not_list(self, monkeypatch, tmp_path):
         """Should return None (fail-open) when additionalDirectories is not a list."""
@@ -982,18 +1019,21 @@ class TestCheckAdditionalDirectories:
         assert result is None
 
     def test_ignores_non_string_entries(self, monkeypatch, tmp_path):
-        """Should skip non-string entries in additionalDirectories without crashing."""
+        """Should skip non-string entries and still find valid paths."""
         from session_init import check_additional_directories
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         teams_abs = str(tmp_path / ".claude" / "teams")
+        sessions_abs = str(tmp_path / ".claude" / "pact-sessions")
         self._write_settings(tmp_path, {
-            "permissions": {"additionalDirectories": [42, None, teams_abs]}
+            "permissions": {"additionalDirectories": [
+                42, None, teams_abs, sessions_abs
+            ]}
         })
 
         result = check_additional_directories()
 
-        assert result is None  # Found the valid path after skipping non-strings
+        assert result is None  # Found both valid paths after skipping non-strings
 
 
 class TestCheckAdditionalDirectoriesMainIntegration:
@@ -1035,20 +1075,22 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         system_msg = output.get("systemMessage", "")
         assert "additionalDirectories" in system_msg
         assert "~/.claude/teams" in system_msg
+        assert "~/.claude/pact-sessions" in system_msg
 
     def test_no_tip_when_setting_present(self, monkeypatch, tmp_path):
-        """No tip should appear when teams dir is already configured."""
+        """No tip should appear when both required dirs are configured."""
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        # Create settings.json WITH ~/.claude/teams in additionalDirectories
+        # Create settings.json WITH both dirs in additionalDirectories
         teams_abs = str(tmp_path / ".claude" / "teams")
+        sessions_abs = str(tmp_path / ".claude" / "pact-sessions")
         settings_dir = tmp_path / ".claude"
         settings_dir.mkdir(parents=True)
         (settings_dir / "settings.json").write_text(
-            json.dumps({"permissions": {"additionalDirectories": [teams_abs]}}),
+            json.dumps({"permissions": {"additionalDirectories": [teams_abs, sessions_abs]}}),
             encoding="utf-8",
         )
 
