@@ -150,10 +150,10 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
 # Per-type optional fields, with expected Python type. Fields listed here
 # are NOT required — an event missing them still passes validation — but
 # when they ARE present, the validator enforces type. This is the schema
-# contract counterpart to runtime clamps (e.g. the `source` isinstance
-# guard in session_init.py:425-444): if a future writer bypasses the
-# normalization path and emits the wrong type directly to `make_event`,
-# the event is rejected at validate time rather than landing on disk.
+# contract counterpart to runtime clamps (e.g. the `_VALID_SOURCES` clamp
+# in session_init.py): if a future writer bypasses the normalization
+# path and emits the wrong type directly to `make_event`, the event is
+# rejected at validate time rather than landing on disk.
 # Same type-symmetry rules as _REQUIRED_FIELDS_BY_TYPE: `int` fields
 # reject `bool` because bool subclasses int.
 #
