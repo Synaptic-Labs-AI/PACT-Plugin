@@ -32,7 +32,6 @@ if str(_hooks_dir) not in sys.path:
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_session_id
 
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import (

@@ -858,8 +858,7 @@ class TestCompactionRefreshSuppressOutput:
         input_data = json.dumps({"source": "compact"})
         completed_tasks = [{"id": "1", "subject": "test", "status": "completed"}]
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("compaction_refresh.get_task_list", return_value=completed_tasks), \
-             patch("compaction_refresh.get_session_id", return_value="test"):
+             patch("compaction_refresh.get_task_list", return_value=completed_tasks):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
