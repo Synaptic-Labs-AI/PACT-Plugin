@@ -121,13 +121,12 @@ def _mark_warned(
         pass  # Non-critical — worst case is repeated warnings
 
 
-# Why a custom scanner instead of shared/task_scanner.py:
-# - task_scanner.scan_all_tasks() scans ALL team directories (needed by compaction
-#   hooks that operate across the full task tree). This hook only needs the current
-#   team's tasks — narrower scope, fewer I/O operations.
+# Why a custom scanner instead of calling into shared/session_state.py:
+# - session_state summarizes the WHOLE session (task counts + roster + journal-
+#   derived fields). This hook only needs per-task teachback_sent metadata for
+#   the current agent's in_progress tasks — narrower scope, fewer I/O operations.
 # - Returns (bool, task_id) tuple after scanning ALL matching tasks (sorted for
-#   deterministic iteration order), vs task_scanner which collects all tasks
-#   into a list for analysis.
+#   deterministic iteration order), vs session_state which aggregates counts.
 # - Needs per-file task_id (filename stem) for per-task marker support.
 def check_teachback_sent(
     agent_name: str,

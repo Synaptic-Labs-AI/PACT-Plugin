@@ -7,7 +7,8 @@ Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
-2. Reads current task state from disk (via shared.task_scanner)
+2. Reads current session state (via shared.session_state) — hybrid of
+   session journal events and session-scoped disk reads
 3. Checks if the compact_summary mentions key items: feature task ID,
    current phase, active agents
 4. Writes the compact_summary to the canonical COMPACT_SUMMARY_PATH
@@ -27,7 +28,7 @@ from pathlib import Path
 
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
-from shared.task_scanner import analyze_task_state, scan_team_members
+from shared.session_state import summarize_session_state
 
 
 # ---------------------------------------------------------------------------
@@ -80,21 +81,24 @@ def _gather_expected_items(
     """
     Gather key items that should appear in the compact summary.
 
-    Uses shared analyze_task_state() for feature/phase detection and
-    scan_team_members() for agent/team name gathering.
+    Uses shared summarize_session_state() for all session-state fields
+    (journal-sourced feature/phase/variety + session-scoped teammate
+    and task-count snapshots).
 
     Returns dict with keys: feature_id, feature_subject, current_phase,
     agent_names, team_names.
     """
-    task_state = analyze_task_state(tasks_base_dir)
-    team_info = scan_team_members(teams_base_dir)
+    state = summarize_session_state(
+        tasks_base_dir=tasks_base_dir,
+        teams_base_dir=teams_base_dir,
+    )
 
     return {
-        "feature_id": task_state.get("feature_id"),
-        "feature_subject": task_state.get("feature_subject"),
-        "current_phase": task_state.get("current_phase"),
-        "agent_names": team_info.get("teammates", []),
-        "team_names": team_info.get("team_names", []),
+        "feature_id": state.get("feature_id"),
+        "feature_subject": state.get("feature_subject"),
+        "current_phase": state.get("current_phase"),
+        "agent_names": state.get("teammates", []),
+        "team_names": state.get("team_names", []),
     }
 
 

@@ -231,14 +231,41 @@ class TestBuildVerificationMessage:
         )
         assert "preserved" in result.lower()
 
-    def test_gaps_message_includes_items(self, tmp_path):
+    def test_gaps_message_includes_items(self, tmp_path, monkeypatch):
+        """Gaps detected when compact_summary misses the journal-identified
+        feature_id. A variety_assessed event names feature_id=42; the
+        summarizer surfaces it; check_summary_gaps flags its absence.
+
+        Exercises the new journal-based code path — build_verification_message
+        takes only tasks/teams base dirs, so session_dir and team_name are
+        threaded in via monkeypatched pact_context."""
+        from shared.session_journal import make_event
+        import shared.pact_context as ctx_module
         from postcompact_verify import build_verification_message
+
         tasks_dir = tmp_path / "tasks"
+        session_dir = tmp_path / "session-xyz"
+
+        # Journal event names feature_id=42
+        session_dir.mkdir(parents=True)
+        (session_dir / "session-journal.jsonl").write_text(
+            json.dumps(make_event(
+                "variety_assessed", task_id="42",
+                variety={"score": 7, "level": "MEDIUM"},
+                ts="2026-04-14T00:00:01Z",
+            )) + "\n",
+            encoding="utf-8",
+        )
+
         _create_task_file(tasks_dir / "pact-t", "42", {
             "id": "42",
             "status": "in_progress",
             "subject": "Build auth",
         })
+
+        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
+        monkeypatch.setattr(ctx_module, "get_team_name", lambda: "pact-t")
+
         result = build_verification_message(
             "Some unrelated summary",
             str(tasks_dir),

@@ -32,3 +32,17 @@ PACT_AGENTS = [
 # (session briefing). Single-use: secretary deletes after processing.
 # Also referenced in: pact-plugin/agents/pact-secretary.md (documentation only).
 COMPACT_SUMMARY_PATH = Path.home() / ".claude" / "pact-sessions" / "compact-summary.txt"
+
+
+# Subject prefixes that indicate synthetic / system-level tasks (phase
+# markers and algedonic signal tasks) as opposed to real feature work.
+# Used by session_state._derive_feature_from_journal and
+# _read_feature_subject_from_disk to reject system tasks from the
+# feature-subject derivation path.
+#
+# NOTE: This is distinct from `phase_prefixes` in task_utils.py
+# (`PREPARE:`, `ARCHITECT:`, `CODE:`, `TEST:`, `Review:`) — those are
+# phase-marker-task-subject prefixes, a narrower set used by
+# find_feature_task / find_current_phase. The two tuples have
+# different semantics and should not be unified.
+SYSTEM_TASK_PREFIXES = ("Phase:", "BLOCKER:", "ALERT:", "HALT:")

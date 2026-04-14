@@ -12,7 +12,7 @@ Tests cover:
 6. Outer exception handler (hook_error_json output on unexpected errors)
 
 Note: Disk state gathering (task analysis, team scanning) is tested in
-test_task_scanner.py since those functions now live in shared/task_scanner.py.
+test_session_state.py since those functions now live in shared/session_state.py.
 """
 import json
 import subprocess
@@ -77,13 +77,13 @@ class TestBuildStateSummary:
 
     def test_full_summary(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 3, "in_progress": 2, "pending": 1, "total": 6,
             "feature_subject": "Add auth flow", "feature_id": "5",
             "current_phase": "Phase: CODE", "variety_score": 9,
+            "teammates": ["coder", "tester"], "team_names": ["pact-abc"],
         }
-        team_info = {"teammates": ["coder", "tester"], "team_names": ["pact-abc"]}
-        result = _build_state_summary(task_state, team_info)
+        result = _build_state_summary(state)
         assert "3 completed" in result
         assert "2 in_progress" in result
         assert "total: 6" in result
@@ -94,33 +94,35 @@ class TestBuildStateSummary:
 
     def test_no_tasks(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 0, "in_progress": 0, "pending": 0, "total": 0,
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        team_info = {"teammates": [], "team_names": []}
-        result = _build_state_summary(task_state, team_info)
+        result = _build_state_summary(state)
         assert "none found on disk" in result
 
     def test_no_feature_omits_feature_line(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 1, "in_progress": 0, "pending": 0, "total": 1,
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        result = _build_state_summary(task_state, {"teammates": [], "team_names": []})
+        result = _build_state_summary(state)
         assert "Feature:" not in result
 
     def test_no_phase_omits_phase_line(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 0, "in_progress": 0, "pending": 0, "total": 0,
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        result = _build_state_summary(task_state, {"teammates": [], "team_names": []})
+        result = _build_state_summary(state)
         assert "Current phase:" not in result
 
 
@@ -134,12 +136,12 @@ class TestBuildCustomInstructions:
 
     def test_full_instructions(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": "Add auth", "feature_id": "5",
             "current_phase": "Phase: CODE", "variety_score": 9,
+            "teammates": ["coder", "tester"], "team_names": ["pact-abc"],
         }
-        team_info = {"teammates": ["coder", "tester"], "team_names": ["pact-abc"]}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "CRITICAL CONTEXT TO PRESERVE" in result
         assert "Add auth" in result
         assert "task #5" in result
@@ -151,12 +153,12 @@ class TestBuildCustomInstructions:
 
     def test_minimal_state(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        team_info = {"teammates": [], "team_names": []}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "CRITICAL CONTEXT" in result
         assert "unknown" in result  # phase unknown
         assert "none found" in result  # agents none found
@@ -164,23 +166,57 @@ class TestBuildCustomInstructions:
 
     def test_no_variety_omits_variety_line(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": "X", "feature_id": "1",
             "current_phase": "Phase: TEST", "variety_score": None,
+            "teammates": ["a"], "team_names": ["t"],
         }
-        team_info = {"teammates": ["a"], "team_names": ["t"]}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "Variety" not in result
 
     def test_variety_zero_included(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": "X", "feature_id": "1",
             "current_phase": None, "variety_score": 0,
+            "teammates": [], "team_names": [],
         }
-        team_info = {"teammates": [], "team_names": []}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "Variety score: 0" in result
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _extract_variety_total
+# ---------------------------------------------------------------------------
+
+
+class TestExtractVarietyTotal:
+    """Direct tests for the _extract_variety_total helper.
+
+    Defensive code rejects bool because Python's bool is a subclass of
+    int — `isinstance(True, int) is True`. Without the explicit
+    `not isinstance(_, bool)` guards, a `variety_score: True` would
+    render as "Variety score: 1" in the compaction-model context, and
+    a dict `{"total": False}` would render as "Variety score: 0". Both
+    are misleading.
+
+    Round-2 review (PR #426 F4) found these guards silently removable.
+    Counter-test: removing `and not isinstance(_, bool)` from the two
+    type checks at precompact_state_reminder.py:56,59 makes these
+    fail with the assertion `is None` violated."""
+
+    def test_bool_true_at_top_level_rejected(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(True) is None
+
+    def test_bool_false_at_top_level_rejected(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(False) is None
+
+    def test_dict_with_bool_total_rejected(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total({"total": True}) is None
+        assert _extract_variety_total({"total": False}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +245,45 @@ class TestBuildHookOutput:
         assert "custom_instructions" in result
         assert "systemMessage" in result
 
-    def test_custom_instructions_has_feature(self, tmp_path):
+    def test_custom_instructions_has_feature(self, tmp_path, monkeypatch):
+        """Feature surfaces when a journal event names the feature task
+        and the team's task file is reachable via session-scoped disk read.
+
+        Exercises the new journal-based code path: variety_assessed in the
+        journal identifies feature_id=3; with no matching agent_handoff,
+        session_state reads ~/.claude/tasks/pact-t/3.json for the subject.
+        build_hook_output accepts only tasks/teams base dirs, so session_dir
+        and team_name are threaded in via monkeypatched pact_context."""
+        from shared.session_journal import make_event
+        import shared.pact_context as ctx_module
         from precompact_state_reminder import build_hook_output
+
         tasks_dir = tmp_path / "tasks"
         teams_dir = tmp_path / "teams"
+        session_dir = tmp_path / "session-abc"
+
+        # Journal event: feature_id=3; no handoff → disk fallback supplies subject
+        session_dir.mkdir(parents=True)
+        (session_dir / "session-journal.jsonl").write_text(
+            json.dumps(make_event(
+                "variety_assessed", task_id="3",
+                variety={"score": 6, "level": "MEDIUM"},
+                ts="2026-04-14T00:00:01Z",
+            )) + "\n",
+            encoding="utf-8",
+        )
+
         _create_task_file(tasks_dir / "pact-t", "3", {
             "id": "3",
             "status": "in_progress",
             "subject": "Auth feature",
         })
         _create_team_config(teams_dir, "pact-t", [{"name": "coder"}], name="pact-t")
+
+        # Thread session_dir + team_name via pact_context (build_hook_output
+        # does not accept them directly)
+        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
+        monkeypatch.setattr(ctx_module, "get_team_name", lambda: "pact-t")
 
         result = build_hook_output(str(tasks_dir), str(teams_dir))
         assert "Auth feature" in result["custom_instructions"]
