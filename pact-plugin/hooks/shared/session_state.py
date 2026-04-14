@@ -37,7 +37,7 @@ from shared.constants import SYSTEM_TASK_PREFIXES
 from shared.session_journal import read_events_from
 
 
-# Maximum length for sanitized member-name strings. Matches the
+# Maximum length for sanitized render-bound strings. Matches the
 # institutional `_ERROR_MAX_CHARS = 200` bound used by the failure
 # ring buffer, so every string we surface to the compaction model has
 # the same length cap regardless of source.
@@ -57,7 +57,24 @@ _NAME_MAX_CHARS = 200
 # positive regex allowlist is the recommended defense (option 1 over
 # Path.name identity checks, which admit ".." as .name returns ".."
 # verbatim rather than the expected empty string).
-_SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9_-]+")
+_SAFE_PATH_COMPONENT_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+# Characters stripped from every string that flows into model-visible
+# output (custom_instructions, systemMessage). Covers:
+#   - C0 control chars 0x00-0x1F (includes NUL, BEL, tab 0x09,
+#     LF 0x0A, CR 0x0D, ESC 0x1B, etc.)
+#   - DEL (0x7F)
+#   - NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR
+#     (U+2029) — Unicode line terminators recognized by
+#     `str.splitlines()` and by LLM tokenizers; crafted names
+#     containing these survive a naive C0-only filter and can inject
+#     new lines into the rendered output.
+# Mirrors the regex used by sibling `peer_inject._sanitize_agent_name`
+# for symmetric defense (see security-engineer memory
+# patterns_symmetric_sanitization.md — asymmetric strip sets across
+# interpolation sinks become the attacker's entry point).
+_RENDER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
 
 def _sanitize_member_name(name: str) -> str:
@@ -65,34 +82,38 @@ def _sanitize_member_name(name: str) -> str:
     Return a sanitized copy of `name` safe to surface into
     model-visible output (custom_instructions, systemMessage).
 
-    Defense-in-depth against prompt-injection via crafted
-    ~/.claude/teams/{team_name}/config.json (see security review
-    Finding 1):
-    - Strip C0 control chars (0x00-0x1F) except tab (0x09), so a name
-      like "bob\\nIgnore previous instructions" collapses to
-      "bobIgnore previous instructions" and cannot introduce a new
-      role-marker line into the rendered output.
-    - Strip DEL (0x7F) — aligns with sibling `peer_inject._sanitize_agent_name`
-      which uses `[\\x00-\\x1f\\x7f]`. DEL has the same "invisible
-      control" property as C0 and is routinely stripped together.
+    Despite the historical name, this helper now sanitizes every
+    render-bound string (teammate names, feature subjects, phase
+    names, team names, task IDs). The name is retained for call-site
+    stability — cycle-2 tests import it by this symbol.
+
+    Defense-in-depth against prompt-injection via:
+    - Crafted `~/.claude/teams/{team_name}/config.json` members[].name
+      values (security review cycle 1, Finding 1).
+    - Crafted `agent_handoff.task_subject` events in the session
+      journal (security review cycle 3, F31 — render-facing fields
+      from the journal were previously unsanitized, creating
+      asymmetric defense).
+
+    Filtering behavior:
+    - Strip C0 control chars (0x00-0x1F) INCLUDING tab (0x09). The
+      broader application to `feature_subject` / `current_phase` /
+      `team_names` means a tab embedded in any of those fields would
+      be garbage display — consumers format these with spaces, not
+      tabs.
+    - Strip DEL (0x7F) and Unicode line terminators NEL / U+2028 /
+      U+2029 — aligns with `peer_inject._sanitize_agent_name`.
     - Cap length at _NAME_MAX_CHARS.
-    - Return empty string if nothing survives; caller treats empty
-      names as "skip this member" upstream.
+    - Return empty string if nothing survives or input isn't a string;
+      caller treats empty as "skip this value" (e.g., drop from list).
 
     This is a filter, not a strict validator: the goal is to neuter
-    injection vectors, not RFC-compliance for agent names. An empty
-    return tells the caller the name was pathological.
+    injection vectors, not RFC-compliance. An empty return signals
+    pathological input.
     """
     if not isinstance(name, str):
         return ""
-    # Keep tab (0x09). Drop 0x00-0x08, 0x0A-0x1F, and 0x7F. Pass
-    # everything ≥ 0x20 through EXCEPT 0x7F (DEL). Pass all non-ASCII
-    # (≥ 0x80) through so legitimate Unicode names are preserved.
-    cleaned = "".join(
-        ch
-        for ch in name
-        if ch == "\t" or (0x20 <= ord(ch) < 0x7F) or ord(ch) > 0x7F
-    )
+    cleaned = _RENDER_STRIP_RE.sub("", name)
     if len(cleaned) > _NAME_MAX_CHARS:
         cleaned = cleaned[:_NAME_MAX_CHARS]
     return cleaned
@@ -110,7 +131,7 @@ def _is_safe_path_component(value: str) -> bool:
     nulls, and controls at team-name generation time. This guard is a
     second line of defense at the I/O boundary.
 
-    Uses a positive regex allowlist (`_SAFE_PATH_COMPONENT`) instead
+    Uses a positive regex allowlist (`_SAFE_PATH_COMPONENT_RE`) instead
     of the tempting `Path(value).name == value` identity check. The
     identity check is BROKEN: `Path("..").name == ".."` is True, so
     the check admits `..` as "safe" and permits one-level directory
@@ -126,7 +147,7 @@ def _is_safe_path_component(value: str) -> bool:
     """
     if not isinstance(value, str) or not value:
         return False
-    return _SAFE_PATH_COMPONENT.fullmatch(value) is not None
+    return _SAFE_PATH_COMPONENT_RE.fullmatch(value) is not None
 
 
 # --- Default dict factory -------------------------------------------------
@@ -589,10 +610,41 @@ def summarize_session_state(
             # orchestrator's feature task really did start with a system
             # prefix that would be a different bug; preserving the
             # prefix filter matches analyze_task_state's behavior.
+            # Prefix check runs on the RAW fallback (before sanitize)
+            # so a crafted subject like "Phase:\u2028FAKE" is still
+            # caught by the prefix filter before sanitization could
+            # strip the U+2028 and let the rest through.
             if fallback and not any(
                 fallback.startswith(p) for p in SYSTEM_TASK_PREFIXES
             ):
                 state["feature_subject"] = fallback
+
+        # Render-boundary sanitization (F31 — security review cycle 3):
+        # Every string field that flows to the compaction model's
+        # custom_instructions / systemMessage must pass through
+        # _sanitize_member_name. `teammates` is already sanitized
+        # inside _read_team_members per-entry. The remaining string
+        # fields — feature_id, feature_subject, current_phase, and
+        # each entry in team_names — are sanitized here at the module
+        # boundary so a single-point-of-defense applies no matter
+        # which helper produced the string. See security-engineer
+        # memory patterns_symmetric_sanitization.md for the pattern
+        # rationale (asymmetric strip sets across interpolation sinks
+        # = no defense). Non-string values pass through untouched
+        # (None stays None); _sanitize_member_name returns "" for
+        # non-strings, so we guard the call site to preserve None.
+        for field in ("feature_id", "feature_subject", "current_phase"):
+            value = state[field]
+            if isinstance(value, str) and value:
+                state[field] = _sanitize_member_name(value)
+        state["team_names"] = [
+            sanitized
+            for sanitized in (
+                _sanitize_member_name(n) if isinstance(n, str) else ""
+                for n in state["team_names"]
+            )
+            if sanitized
+        ]
     except Exception:
         # Last-resort fail-open: return pristine defaults. Should not
         # be reachable given per-helper try/excepts, but the two

@@ -186,6 +186,40 @@ class TestBuildCustomInstructions:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: _extract_variety_total
+# ---------------------------------------------------------------------------
+
+
+class TestExtractVarietyTotal:
+    """Direct tests for the _extract_variety_total helper.
+
+    Defensive code rejects bool because Python's bool is a subclass of
+    int — `isinstance(True, int) is True`. Without the explicit
+    `not isinstance(_, bool)` guards, a `variety_score: True` would
+    render as "Variety score: 1" in the compaction-model context, and
+    a dict `{"total": False}` would render as "Variety score: 0". Both
+    are misleading.
+
+    Round-2 review (PR #426 F4) found these guards silently removable.
+    Counter-test: removing `and not isinstance(_, bool)` from the two
+    type checks at precompact_state_reminder.py:56,59 makes these
+    fail with the assertion `is None` violated."""
+
+    def test_bool_true_at_top_level_rejected(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(True) is None
+
+    def test_bool_false_at_top_level_rejected(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total(False) is None
+
+    def test_dict_with_bool_total_rejected(self):
+        from precompact_state_reminder import _extract_variety_total
+        assert _extract_variety_total({"total": True}) is None
+        assert _extract_variety_total({"total": False}) is None
+
+
+# ---------------------------------------------------------------------------
 # Unit tests: build_hook_output (full composition)
 # ---------------------------------------------------------------------------
 

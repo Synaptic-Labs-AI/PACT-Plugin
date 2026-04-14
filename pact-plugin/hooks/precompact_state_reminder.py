@@ -26,6 +26,7 @@ Output: JSON with custom_instructions and systemMessage on stdout
 
 import json
 import sys
+from typing import Any
 
 from shared.error_output import hook_error_json
 from shared.session_state import summarize_session_state
@@ -36,7 +37,7 @@ from shared.session_state import summarize_session_state
 # ---------------------------------------------------------------------------
 
 
-def _extract_variety_total(variety) -> int | None:
+def _extract_variety_total(variety: Any) -> int | None:
     """
     Normalize the `variety_score` field (opaque passthrough from the
     journal) into a scalar suitable for f-string rendering.

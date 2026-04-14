@@ -70,9 +70,16 @@ def _sanitize_agent_name(agent_name: str) -> str:
     """
     if not agent_name:
         return "unknown"
-    # Strip all C0 control chars (0x00-0x1F) and DEL (0x7F) first — covers
-    # NUL, BEL, ESC, etc. in addition to the \n and \r caught below.
-    sanitized = re.sub(r"[\x00-\x1f\x7f]", "_", agent_name)
+    # Strip all C0 control chars (0x00-0x1F), DEL (0x7F), and Unicode
+    # line terminators NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH
+    # SEPARATOR (U+2029). The Unicode terminators are recognized by
+    # `str.splitlines()` and by LLM tokenizers — a name containing
+    # U+2028 can inject a fake line into the PACT ROLE prelude
+    # template, bypassing the line-anchor consumer check that is the
+    # second layer of defense (see security-engineer memory
+    # patterns_symmetric_sanitization.md). Matches the sibling filter
+    # in session_state._sanitize_rendered_string.
+    sanitized = re.sub(r"[\x00-\x1f\x7f\u0085\u2028\u2029]", "_", agent_name)
     return sanitized.replace(")", "_")
 
 
