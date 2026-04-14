@@ -81,6 +81,26 @@ def _write_team_config(
     return config_path
 
 
+def _partial_event(event_type: str, **fields: object) -> dict:
+    """
+    Construct a deliberately-partial journal event for malformed-input tests.
+
+    Mirrors session_journal.make_event's shape (sets `v` and `type`) but
+    intentionally accepts callers that omit required fields like `phase`,
+    `task_id`, or `ts`. Use this for tests that exercise per-event
+    isinstance / truthiness guards in the deriver helpers.
+
+    DO NOT use this for happy-path tests — use make_event there. The
+    distinction matters: if session_journal ever gains read-path schema
+    validation (currently only append-side), happy-path tests should still
+    pass; malformed-input tests will keep working because they bypass the
+    write path entirely (callers feed events directly to the derivers).
+    """
+    event: dict = {"v": 1, "type": event_type}
+    event.update(fields)
+    return event
+
+
 def _write_task(
     tasks_base: Path,
     team_name: str,
@@ -446,12 +466,18 @@ class TestSummarize:
             teams_base_dir=str(teams),
         )
 
-        # 10 keys exactly, nothing missing, nothing extra
-        assert set(result.keys()) == {
+        # The 10 required keys must be present; additive future fields are
+        # permitted (subset-not-equality keeps this test stable across
+        # forward-compatible schema growth, while still failing if any
+        # required key is removed or renamed).
+        required_keys = {
             "completed", "in_progress", "pending", "total",
             "feature_subject", "feature_id", "current_phase",
             "variety_score", "teammates", "team_names",
         }
+        assert required_keys.issubset(result.keys()), (
+            f"Missing required keys: {required_keys - set(result.keys())}"
+        )
         # Types
         assert isinstance(result["completed"], int)
         assert isinstance(result["in_progress"], int)
@@ -742,12 +768,26 @@ class TestNoCrossTeamScan:
         assert result["in_progress"] == 1
         assert result["completed"] == 0
 
-        # NO ghost data leaks
+        # Structural assertions — primary guard. Each ghost member must
+        # be absent from the typed teammates list (membership-not-substring),
+        # and the ghost team must not surface in team_names. These are
+        # robust against future numeric-string fields being added to the
+        # output dict (whereas raw substring checks on json.dumps could
+        # false-positive on e.g. a future variety_score == 99).
+        for ghost in ("ghost-phantom-1", "ghost-phantom-2", "ghost-phantom-3"):
+            assert ghost not in result["teammates"]
+        assert "pact-ghost" not in result["team_names"]
+        # Ghost task counts must not have inflated the totals: pact-ghost
+        # has 2 tasks; if cross-team scan had occurred, total would be 3.
+        assert result["total"] != 3
+
+        # Defense-in-depth — broad raw-string sweep. Kept as a backstop
+        # in case a future field surfaces ghost data via an unexpected
+        # path (e.g., a debug field). The structural asserts above are
+        # the load-bearing checks; these are belt-and-suspenders.
         raw = json.dumps(result)
         assert "ghost-phantom" not in raw
         assert "pact-ghost" not in raw
-        assert "99" not in raw
-        assert "100" not in raw
 
     def test_sibling_team_subject_does_not_leak_into_feature_subject(
         self, tmp_path,
@@ -783,8 +823,13 @@ class TestNoCrossTeamScan:
         # The journal identified feature_id=42, but the disk fallback is
         # scoped to pact-test/42.json (which does not exist) — so the
         # phantom subject from pact-ghost/42.json must NOT leak.
+        # Structural primary check: feature_subject is the field that
+        # would carry the leaked subject — assert it directly. The raw
+        # substring sweep is defense-in-depth.
         assert result["feature_id"] == "42"
         assert result["feature_subject"] is None
+        assert result["feature_subject"] != "PHANTOM FEATURE SUBJECT"
+        # Defense-in-depth raw sweep
         assert "PHANTOM" not in json.dumps(result)
 
 
@@ -832,16 +877,35 @@ class TestDerivePhaseFromJournal:
         """A phase event missing 'phase' or with wrong type is ignored."""
         events = [
             # Missing phase name → skipped by isinstance guard
-            {"type": "phase_transition", "status": "started",
-             "ts": "2026-04-14T00:00:01Z"},
+            _partial_event("phase_transition", status="started",
+                           ts="2026-04-14T00:00:01Z"),
             # Wrong-type phase → skipped
-            {"type": "phase_transition", "phase": 42, "status": "started",
-             "ts": "2026-04-14T00:00:02Z"},
+            _partial_event("phase_transition", phase=42, status="started",
+                           ts="2026-04-14T00:00:02Z"),
             # Valid entry
             make_event("phase_transition", phase="CODE", status="started",
                        ts="2026-04-14T00:00:03Z"),
         ]
         assert _derive_phase_from_journal(events) == "CODE"
+
+    def test_derive_phase_tied_ts_completed_wins(self):
+        """Same-ts started+completed pair → completed event wins, returning
+        None (no active phase). Locks in the docstring invariant at
+        session_state._derive_phase_from_journal:80-81 that mirrors
+        session_resume._build_journal_resume_inner's `>=` tie-break.
+
+        Order matters: the canonical journal-write order is started before
+        completed, so the stable sort + later-seen-wins rule produces None.
+        Counter-test: changing `>=` to `>` in the production code would
+        leave the phase as "started" and this test would fail with
+        "expected None, got CODE"."""
+        events = [
+            make_event("phase_transition", phase="CODE", status="started",
+                       ts="2026-04-14T00:00:01Z"),
+            make_event("phase_transition", phase="CODE", status="completed",
+                       ts="2026-04-14T00:00:01Z"),
+        ]
+        assert _derive_phase_from_journal(events) is None
 
 
 class TestDeriveFeatureFromJournal:
@@ -892,9 +956,9 @@ class TestDeriveFeatureFromJournal:
     def test_invalid_task_id_in_variety_falls_back(self):
         """variety_assessed with empty/non-str task_id → fall back to dispatch."""
         events = [
-            {"type": "variety_assessed", "task_id": "",
-             "variety": {"score": 1}, "v": 1,
-             "ts": "2026-04-14T00:00:01Z"},
+            _partial_event("variety_assessed", task_id="",
+                           variety={"score": 1},
+                           ts="2026-04-14T00:00:01Z"),
             make_event("agent_dispatch", agent="c", task_id="REAL-ID",
                        phase="CODE", ts="2026-04-14T00:00:02Z"),
         ]

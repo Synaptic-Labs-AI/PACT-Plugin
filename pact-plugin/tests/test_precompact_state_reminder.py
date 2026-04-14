@@ -12,7 +12,7 @@ Tests cover:
 6. Outer exception handler (hook_error_json output on unexpected errors)
 
 Note: Disk state gathering (task analysis, team scanning) is tested in
-test_task_scanner.py since those functions now live in shared/task_scanner.py.
+test_session_state.py since those functions now live in shared/session_state.py.
 """
 import json
 import subprocess
@@ -77,13 +77,13 @@ class TestBuildStateSummary:
 
     def test_full_summary(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 3, "in_progress": 2, "pending": 1, "total": 6,
             "feature_subject": "Add auth flow", "feature_id": "5",
             "current_phase": "Phase: CODE", "variety_score": 9,
+            "teammates": ["coder", "tester"], "team_names": ["pact-abc"],
         }
-        team_info = {"teammates": ["coder", "tester"], "team_names": ["pact-abc"]}
-        result = _build_state_summary(task_state, team_info)
+        result = _build_state_summary(state)
         assert "3 completed" in result
         assert "2 in_progress" in result
         assert "total: 6" in result
@@ -94,33 +94,35 @@ class TestBuildStateSummary:
 
     def test_no_tasks(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 0, "in_progress": 0, "pending": 0, "total": 0,
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        team_info = {"teammates": [], "team_names": []}
-        result = _build_state_summary(task_state, team_info)
+        result = _build_state_summary(state)
         assert "none found on disk" in result
 
     def test_no_feature_omits_feature_line(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 1, "in_progress": 0, "pending": 0, "total": 1,
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        result = _build_state_summary(task_state, {"teammates": [], "team_names": []})
+        result = _build_state_summary(state)
         assert "Feature:" not in result
 
     def test_no_phase_omits_phase_line(self):
         from precompact_state_reminder import _build_state_summary
-        task_state = {
+        state = {
             "completed": 0, "in_progress": 0, "pending": 0, "total": 0,
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        result = _build_state_summary(task_state, {"teammates": [], "team_names": []})
+        result = _build_state_summary(state)
         assert "Current phase:" not in result
 
 
@@ -134,12 +136,12 @@ class TestBuildCustomInstructions:
 
     def test_full_instructions(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": "Add auth", "feature_id": "5",
             "current_phase": "Phase: CODE", "variety_score": 9,
+            "teammates": ["coder", "tester"], "team_names": ["pact-abc"],
         }
-        team_info = {"teammates": ["coder", "tester"], "team_names": ["pact-abc"]}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "CRITICAL CONTEXT TO PRESERVE" in result
         assert "Add auth" in result
         assert "task #5" in result
@@ -151,12 +153,12 @@ class TestBuildCustomInstructions:
 
     def test_minimal_state(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": None, "feature_id": None,
             "current_phase": None, "variety_score": None,
+            "teammates": [], "team_names": [],
         }
-        team_info = {"teammates": [], "team_names": []}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "CRITICAL CONTEXT" in result
         assert "unknown" in result  # phase unknown
         assert "none found" in result  # agents none found
@@ -164,22 +166,22 @@ class TestBuildCustomInstructions:
 
     def test_no_variety_omits_variety_line(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": "X", "feature_id": "1",
             "current_phase": "Phase: TEST", "variety_score": None,
+            "teammates": ["a"], "team_names": ["t"],
         }
-        team_info = {"teammates": ["a"], "team_names": ["t"]}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "Variety" not in result
 
     def test_variety_zero_included(self):
         from precompact_state_reminder import build_custom_instructions
-        task_state = {
+        state = {
             "feature_subject": "X", "feature_id": "1",
             "current_phase": None, "variety_score": 0,
+            "teammates": [], "team_names": [],
         }
-        team_info = {"teammates": [], "team_names": []}
-        result = build_custom_instructions(task_state, team_info)
+        result = build_custom_instructions(state)
         assert "Variety score: 0" in result
 
 

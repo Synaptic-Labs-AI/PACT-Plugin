@@ -180,7 +180,7 @@ class TestCheckTeachbackSent:
     - (False, task_id) when unconfirmed — task_id is the filename stem
 
     This is the primary test surface for the auditor's YELLOW note about
-    using custom task scanning instead of shared/task_scanner.py.
+    using custom task scanning instead of shared/session_state.py.
     """
 
     def test_returns_confirmed_when_teachback_set(self, tmp_path):

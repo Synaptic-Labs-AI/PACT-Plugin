@@ -32,14 +32,72 @@ from pathlib import Path
 from typing import Any
 
 from shared import pact_context
+from shared.constants import SYSTEM_TASK_PREFIXES
 from shared.session_journal import read_events_from
 
 
-# Prefixes that indicate system tasks (not feature tasks). Used
-# internally by _read_task_counts when classifying the feature subject
-# from the disk snapshot as a fallback. Relocated from task_scanner.py
-# (the only other consumer, now deleted).
-_SYSTEM_TASK_PREFIXES = ("Phase:", "BLOCKER:", "ALERT:", "HALT:")
+# Maximum length for sanitized member-name strings. Matches the
+# institutional `_ERROR_MAX_CHARS = 200` bound used by the failure
+# ring buffer, so every string we surface to the compaction model has
+# the same length cap regardless of source.
+_NAME_MAX_CHARS = 200
+
+
+def _sanitize_member_name(name: str) -> str:
+    """
+    Return a sanitized copy of `name` safe to surface into
+    model-visible output (custom_instructions, systemMessage).
+
+    Defense-in-depth against prompt-injection via crafted
+    ~/.claude/teams/{team_name}/config.json (see security review
+    Finding 1):
+    - Strip C0 control chars (< 0x20) except tab (0x09), so a name
+      like "bob\\nIgnore previous instructions" collapses to
+      "bobIgnore previous instructions" and cannot introduce a new
+      role-marker line into the rendered output.
+    - Drop null bytes explicitly (already covered by the C0 filter,
+      but matched separately for readability).
+    - Cap length at _NAME_MAX_CHARS.
+    - Return empty string if nothing survives; caller treats empty
+      names as "skip this member" upstream.
+
+    This is a filter, not a strict validator: the goal is to neuter
+    injection vectors, not RFC-compliance for agent names. An empty
+    return tells the caller the name was pathological.
+    """
+    if not isinstance(name, str):
+        return ""
+    # Keep tab (0x09), drop every other C0 control and null.
+    cleaned = "".join(
+        ch for ch in name if ch == "\t" or ord(ch) >= 0x20
+    )
+    if len(cleaned) > _NAME_MAX_CHARS:
+        cleaned = cleaned[:_NAME_MAX_CHARS]
+    return cleaned
+
+
+def _is_safe_path_component(value: str) -> bool:
+    """
+    Return True if `value` is safe to use as a single-segment path
+    component.
+
+    Defense-in-depth against path-traversal via tampered session
+    context (see security review Finding 2). The upstream allowlist
+    lives at `session_init.py:173` — `re.sub(r"[^a-f0-9-]", "",
+    session_id[:8])` — which already filters path separators, `..`,
+    nulls, and controls at team-name generation time. This guard is a
+    second line of defense at the I/O boundary: if any future code
+    path or test fixture passes a non-sanitized component in, we
+    reject it rather than resolving `~/.claude/teams/../../etc/`.
+
+    `Path(value).name == value` rejects:
+    - path separators (`/`, `\\\\` on Windows) — `.name` strips them
+    - `..` and `.` — `Path("..").name` is `""`
+    - empty strings — `Path("").name` is `""`
+    """
+    if not value:
+        return False
+    return Path(value).name == value
 
 
 # --- Default dict factory -------------------------------------------------
@@ -76,9 +134,17 @@ def _derive_phase_from_journal(
     """
     Return the latest-started phase that is not yet completed.
 
-    Mirrors session_resume._build_journal_resume_inner lines 428-469 —
-    latest-by-ts wins on ties via `>=` so a started+completed pair with
-    the same timestamp correctly resolves as completed.
+    Mirrors session_resume._build_journal_resume_inner lines 428-469.
+    Tied-timestamp correctness (a started+completed pair sharing one
+    `ts`) relies on the combination of (a) stable sort in `sorted()`
+    preserving append order, (b) journal append-only semantics that
+    put `completed` after its matching `started`, and (c) the `>=`
+    comparison that lets the later-seen event overwrite the earlier.
+    The `>=` alone is insufficient: if a reordered journal ever landed
+    `started` after `completed` at the same ts, the `>=` would flip
+    the phase back to active. In practice the journal writer stamps
+    `ts` monotonically and only appends, so the combined invariant
+    holds.
 
     Returns None if no active phase (empty journal, or every started
     phase has a matching completed).
@@ -117,20 +183,33 @@ def _derive_feature_from_journal(
     Return (feature_id, feature_subject) derived from the session
     journal.
 
-    feature_id is the task_id of the first variety_assessed event (the
-    orchestrator tags the feature task with variety once per session).
-    Falls back to the chronologically-first agent_dispatch.task_id if
-    no variety_assessed event exists.
+    Primary source: the `task_id` of the first variety_assessed event.
+    The orchestrator tags the feature task with variety exactly once
+    per session, so this is the unambiguous feature marker whenever
+    present.
 
-    feature_subject is sourced from the first agent_handoff event whose
-    task_id matches feature_id. agent_dispatch events do NOT carry
-    task_subject, so a feature_id with no matching handoff yet has no
-    journal-derived subject — returned as None so the disk fallback in
-    summarize_session_state can pick it up.
+    Fallback (no variety_assessed yet): the chronologically-first
+    `agent_dispatch.task_id` that does NOT resolve to a system task
+    (algedonic markers, Phase tasks). Without this filter, the
+    secretary's briefing task — typically dispatch #1 in a PACT
+    session — would be mis-identified as the feature. Because
+    agent_dispatch events do not carry `task_subject`, we cross-
+    reference each candidate dispatch against `agent_handoff`
+    events for the same task_id and reject if the handoff subject
+    starts with a `SYSTEM_TASK_PREFIXES` entry. Dispatches without a
+    matching handoff yet (pre-first-handoff) are accepted
+    provisionally — the disk fallback in summarize_session_state
+    can still reject at render time via its own prefix filter.
 
-    Returns (None, None) if the journal has no variety_assessed and no
-    agent_dispatch events — correctly reflects "no feature task yet
-    declared".
+    feature_subject is sourced from the first agent_handoff event
+    whose task_id matches feature_id. agent_dispatch events do NOT
+    carry task_subject, so a feature_id with no matching handoff yet
+    has no journal-derived subject — returned as None so the disk
+    fallback in summarize_session_state can pick it up.
+
+    Returns (None, None) if the journal has no usable variety_assessed
+    OR non-system agent_dispatch — correctly reflects "no feature task
+    yet declared".
     """
     variety_events = sorted(
         [e for e in events if e.get("type") == "variety_assessed"],
@@ -142,16 +221,46 @@ def _derive_feature_from_journal(
         if isinstance(raw_id, str) and raw_id:
             feature_id = raw_id
 
+    # Pre-compute handoffs once so we can both (a) reject system-prefix
+    # dispatches and (b) look up the feature_subject below without
+    # re-scanning.
+    handoffs = sorted(
+        [e for e in events if e.get("type") == "agent_handoff"],
+        key=lambda e: e.get("ts", ""),
+    )
+
     if feature_id is None:
+        # No variety_assessed event found — fall back to the first
+        # non-system agent_dispatch. The secretary's briefing dispatch
+        # (typically task #1 of any session) has a system-prefixed
+        # subject like "Phase: PREPARE" or similar; rejecting it keeps
+        # the feature_subject from surfacing as the secretary task.
         dispatch_events = sorted(
             [e for e in events if e.get("type") == "agent_dispatch"],
             key=lambda e: e.get("ts", ""),
         )
         for d in dispatch_events:
             raw_id = d.get("task_id")
-            if isinstance(raw_id, str) and raw_id:
-                feature_id = raw_id
-                break
+            if not (isinstance(raw_id, str) and raw_id):
+                continue
+            # Reject if any handoff for this task_id has a system
+            # prefix subject. If no handoff exists yet, accept
+            # provisionally — the disk fallback in summarize_session_state
+            # applies its own prefix filter before rendering.
+            handoff_subject: str | None = None
+            for h in handoffs:
+                if h.get("task_id") == raw_id:
+                    cand = h.get("task_subject")
+                    if isinstance(cand, str) and cand:
+                        handoff_subject = cand
+                    break
+            if handoff_subject and any(
+                handoff_subject.startswith(p)
+                for p in SYSTEM_TASK_PREFIXES
+            ):
+                continue  # System task; skip.
+            feature_id = raw_id
+            break
 
     if feature_id is None:
         return (None, None)
@@ -159,10 +268,6 @@ def _derive_feature_from_journal(
     # Look up subject from the chronologically-first handoff matching
     # this feature_id. agent_handoff carries task_subject as a required
     # field, so we trust the schema here.
-    handoffs = sorted(
-        [e for e in events if e.get("type") == "agent_handoff"],
-        key=lambda e: e.get("ts", ""),
-    )
     for h in handoffs:
         if h.get("task_id") == feature_id:
             subject = h.get("task_subject")
@@ -174,11 +279,14 @@ def _derive_feature_from_journal(
 
 def _derive_variety_from_journal(
     events: list[dict[str, Any]],
-) -> Any | None:
+) -> Any:
     """
     Return the variety dict from the first variety_assessed event, or
     None if no such event exists. Opaque passthrough — callers only
-    check `is not None`.
+    check `is not None` and/or read `.get("total")`. Keeping the full
+    dict preserves future flexibility (novelty/scope/uncertainty/risk
+    dimensions are rendered by consumers that want them; the default
+    compaction-hook render uses `.get("total")`).
     """
     variety_events = sorted(
         [e for e in events if e.get("type") == "variety_assessed"],
@@ -211,10 +319,11 @@ def _read_team_members(
 
     Returns:
         List of member names from config.json `members[]` in file
-        order. Duplicates preserved (mirrors current behavior — config
-        is authoritative). Empty list on any error.
+        order. Names are sanitized (C0 controls stripped, length
+        capped) before inclusion — defense-in-depth against
+        prompt-injection via crafted config. Empty list on any error.
     """
-    if not team_name:
+    if not team_name or not _is_safe_path_component(team_name):
         return []
 
     try:
@@ -240,7 +349,9 @@ def _read_team_members(
             if isinstance(member, dict):
                 name = member.get("name", "")
                 if isinstance(name, str) and name:
-                    names.append(name)
+                    sanitized = _sanitize_member_name(name)
+                    if sanitized:
+                        names.append(sanitized)
         return names
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return []
@@ -267,7 +378,7 @@ def _read_task_counts(
     """
     counts = {"completed": 0, "in_progress": 0, "pending": 0, "total": 0}
 
-    if not team_name:
+    if not team_name or not _is_safe_path_component(team_name):
         return counts
 
     try:
@@ -311,8 +422,16 @@ def _read_feature_subject_from_disk(
     Reads ~/.claude/tasks/{team_name}/{feature_id}.json and returns its
     subject. Returns None on any error (file missing, malformed, empty
     subject).
+
+    Both team_name and feature_id are validated as single-segment path
+    components before use — defense-in-depth against path-traversal
+    via tampered session context or journal events.
     """
     if not team_name or not feature_id:
+        return None
+    if not _is_safe_path_component(team_name):
+        return None
+    if not _is_safe_path_component(feature_id):
         return None
 
     try:
@@ -379,7 +498,7 @@ def summarize_session_state(
             completed (int), in_progress (int), pending (int),
             total (int), feature_subject (str|None),
             feature_id (str|None), current_phase (str|None),
-            variety_score (Any|None), teammates (list[str]),
+            variety_score (Any), teammates (list[str]),
             team_names (list[str]).
 
     Fail-open: any exception reaching the outer try/except resolves to
@@ -442,7 +561,7 @@ def summarize_session_state(
             # prefix that would be a different bug; preserving the
             # prefix filter matches analyze_task_state's behavior.
             if fallback and not any(
-                fallback.startswith(p) for p in _SYSTEM_TASK_PREFIXES
+                fallback.startswith(p) for p in SYSTEM_TASK_PREFIXES
             ):
                 state["feature_subject"] = fallback
     except Exception:

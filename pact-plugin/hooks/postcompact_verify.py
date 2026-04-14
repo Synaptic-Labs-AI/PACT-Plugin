@@ -81,8 +81,9 @@ def _gather_expected_items(
     """
     Gather key items that should appear in the compact summary.
 
-    Uses shared analyze_task_state() for feature/phase detection and
-    scan_team_members() for agent/team name gathering.
+    Uses shared summarize_session_state() for all session-state fields
+    (journal-sourced feature/phase/variety + session-scoped teammate
+    and task-count snapshots).
 
     Returns dict with keys: feature_id, feature_subject, current_phase,
     agent_names, team_names.
