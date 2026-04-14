@@ -209,16 +209,45 @@ class TestBuildHookOutput:
         assert "custom_instructions" in result
         assert "systemMessage" in result
 
-    def test_custom_instructions_has_feature(self, tmp_path):
+    def test_custom_instructions_has_feature(self, tmp_path, monkeypatch):
+        """Feature surfaces when a journal event names the feature task
+        and the team's task file is reachable via session-scoped disk read.
+
+        Exercises the new journal-based code path: variety_assessed in the
+        journal identifies feature_id=3; with no matching agent_handoff,
+        session_state reads ~/.claude/tasks/pact-t/3.json for the subject.
+        build_hook_output accepts only tasks/teams base dirs, so session_dir
+        and team_name are threaded in via monkeypatched pact_context."""
+        from shared.session_journal import make_event
+        import shared.pact_context as ctx_module
         from precompact_state_reminder import build_hook_output
+
         tasks_dir = tmp_path / "tasks"
         teams_dir = tmp_path / "teams"
+        session_dir = tmp_path / "session-abc"
+
+        # Journal event: feature_id=3; no handoff → disk fallback supplies subject
+        session_dir.mkdir(parents=True)
+        (session_dir / "session-journal.jsonl").write_text(
+            json.dumps(make_event(
+                "variety_assessed", task_id="3",
+                variety={"score": 6, "level": "MEDIUM"},
+                ts="2026-04-14T00:00:01Z",
+            )) + "\n",
+            encoding="utf-8",
+        )
+
         _create_task_file(tasks_dir / "pact-t", "3", {
             "id": "3",
             "status": "in_progress",
             "subject": "Auth feature",
         })
         _create_team_config(teams_dir, "pact-t", [{"name": "coder"}], name="pact-t")
+
+        # Thread session_dir + team_name via pact_context (build_hook_output
+        # does not accept them directly)
+        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
+        monkeypatch.setattr(ctx_module, "get_team_name", lambda: "pact-t")
 
         result = build_hook_output(str(tasks_dir), str(teams_dir))
         assert "Auth feature" in result["custom_instructions"]
