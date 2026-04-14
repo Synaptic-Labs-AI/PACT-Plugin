@@ -1035,6 +1035,39 @@ class TestCheckAdditionalDirectories:
 
         assert result is None  # Found both valid paths after skipping non-strings
 
+    def test_returns_none_when_mixed_tilde_and_absolute_forms(self, monkeypatch, tmp_path):
+        """Should return None when one dir uses tilde form and the other uses absolute form."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        sessions_abs = str(tmp_path / ".claude" / "pact-sessions")
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": [
+                "~/.claude/teams", sessions_abs
+            ]}
+        })
+
+        result = check_additional_directories()
+
+        assert result is None
+
+    def test_tip_mentions_exactly_two_directories_when_none_configured(self, monkeypatch, tmp_path):
+        """Cardinality check: exactly 2 required directories should be checked."""
+        from session_init import check_additional_directories
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self._write_settings(tmp_path, {
+            "permissions": {"additionalDirectories": []}
+        })
+
+        result = check_additional_directories()
+
+        assert result is not None
+        # Count occurrences of ~/.claude/ paths in the tip message
+        import re
+        dir_mentions = re.findall(r"`~/.claude/[^`]+`", result)
+        assert len(dir_mentions) == 2, f"Expected exactly 2 directory mentions, got {dir_mentions}"
+
 
 class TestCheckAdditionalDirectoriesMainIntegration:
     """Integration tests: check_additional_directories wiring in session_init.main()."""

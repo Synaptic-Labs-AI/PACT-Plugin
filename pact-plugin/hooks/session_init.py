@@ -485,12 +485,12 @@ def main():
             except OSError:
                 pass  # Fail-open: don't block session init for marker cleanup
 
-        # 0. Check if ~/.claude/teams is in additionalDirectories (one-time tip)
+        # 0. Check required PACT dirs are in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check
         if not is_context_reset:
-            teams_tip = check_additional_directories()
-            if teams_tip:
-                system_messages.append(teams_tip)
+            dirs_tip = check_additional_directories()
+            if dirs_tip:
+                system_messages.append(dirs_tip)
 
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session
