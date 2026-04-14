@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.17.5
+> **Version**: 3.17.6
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -14,13 +14,14 @@ Turn a single Claude Code session into a managed team of specialist AI agents th
 cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
-Then add `~/.claude/teams` to your `additionalDirectories` and PACT allow rules in `~/.claude/settings.json` to prevent permission prompts during agent operations:
+Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDirectories` and PACT allow rules in `~/.claude/settings.json` to prevent permission prompts during agent operations:
 
 ```json
 {
   "permissions": {
     "additionalDirectories": [
-      "~/.claude/teams"
+      "~/.claude/teams",
+      "~/.claude/pact-sessions"
     ],
     "allow": [
       "Write(~/.claude/agent-memory/**)",

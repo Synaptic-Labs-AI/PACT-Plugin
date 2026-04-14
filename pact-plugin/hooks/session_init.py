@@ -96,9 +96,11 @@ def check_pinned_staleness():
 
 def check_additional_directories() -> str | None:
     """
-    Check if ~/.claude/teams is in additionalDirectories in settings.json.
+    Check if required PACT directories are in additionalDirectories in settings.json.
 
-    Returns a tip message if the setting is missing, or None if already present.
+    Checks for both ~/.claude/teams and ~/.claude/pact-sessions.
+    Returns a tip message listing whichever directories are missing,
+    or None if all are already present.
     Fail-open: returns None on any error (file missing, malformed JSON, etc.).
     """
     try:
@@ -114,9 +116,8 @@ def check_additional_directories() -> str | None:
         if not isinstance(additional_dirs, list):
             return None  # Unexpected type — fail-open
 
-        # Normalize the target path for comparison
-        target = Path.home() / ".claude" / "teams"
-
+        # Resolve all configured paths for comparison
+        configured: set[Path] = set()
         for entry in additional_dirs:
             if not isinstance(entry, str):
                 continue
@@ -125,13 +126,28 @@ def check_additional_directories() -> str | None:
                 expanded = (Path.home() / entry[2:]).resolve()
             else:
                 expanded = Path(entry).resolve()
-            if expanded == target.resolve():
-                return None  # Already configured
+            configured.add(expanded)
 
+        # Check which required directories are missing
+        required = {
+            "~/.claude/teams": (Path.home() / ".claude" / "teams").resolve(),
+            "~/.claude/pact-sessions": (
+                Path.home() / ".claude" / "pact-sessions"
+            ).resolve(),
+        }
+        missing = [
+            tilde for tilde, resolved in required.items()
+            if resolved not in configured
+        ]
+
+        if not missing:
+            return None  # All required directories configured
+
+        dirs_list = ", ".join(f"`{d}`" for d in missing)
         return (
-            "PACT tip: Add `~/.claude/teams` to `additionalDirectories` in your "
-            "~/.claude/settings.json to avoid permission prompts for team file "
-            "operations."
+            f"PACT tip: Add {dirs_list} to `additionalDirectories` in your "
+            "~/.claude/settings.json to avoid permission prompts for team and "
+            "session file operations."
         )
     except Exception:
         return None  # Fail-open: never block session start
@@ -469,12 +485,12 @@ def main():
             except OSError:
                 pass  # Fail-open: don't block session init for marker cleanup
 
-        # 0. Check if ~/.claude/teams is in additionalDirectories (one-time tip)
+        # 0. Check required PACT dirs are in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check
         if not is_context_reset:
-            teams_tip = check_additional_directories()
-            if teams_tip:
-                system_messages.append(teams_tip)
+            dirs_tip = check_additional_directories()
+            if dirs_tip:
+                system_messages.append(dirs_tip)
 
         # 1. Set up plugin symlinks (enables @~/.claude/protocols/pact-plugin/ references)
         # Context resets (compact/clear): symlinks are already set up from original session
