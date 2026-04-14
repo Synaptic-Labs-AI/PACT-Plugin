@@ -729,53 +729,6 @@ class TestErrorOutputEdgeCases:
         assert "missing_key" in parsed["systemMessage"]
 
 
-class TestPrecompactRefreshErrorOutput:
-    """precompact_refresh.py exception handler produces JSON on stdout.
-
-    This hook previously used a hand-rolled systemMessage format.
-    Now it uses the shared hook_error_json helper for consistency.
-    """
-
-    def test_exception_outputs_json_with_system_message(self, capsys):
-        from precompact_refresh import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_error_json(captured.out, "precompact_refresh")
-
-    def test_exception_preserves_stderr(self, capsys):
-        """stderr should contain error info."""
-        from precompact_refresh import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit):
-                main()
-
-        captured = capsys.readouterr()
-        assert "PreCompact hook error" in captured.err
-        assert len(captured.err) > 0
-
-    def test_error_uses_standard_format(self, capsys):
-        """Error output should use the standard 'PACT hook warning' format,
-        not the old 'PACT: checkpoint error' format."""
-        from precompact_refresh import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit):
-                main()
-
-        captured = capsys.readouterr()
-        parsed = _parse_stdout_json(captured.out)
-        assert "PACT hook warning" in parsed["systemMessage"]
-        assert "precompact_refresh" in parsed["systemMessage"]
-        # Old format should NOT appear
-        assert parsed["systemMessage"] != "PACT: checkpoint error"
-
-
 class TestPrecompactStateReminderErrorOutput:
     """precompact_state_reminder.py exception handler produces JSON on stdout."""
 
@@ -905,56 +858,7 @@ class TestCompactionRefreshSuppressOutput:
         input_data = json.dumps({"source": "compact"})
         completed_tasks = [{"id": "1", "subject": "test", "status": "completed"}]
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("compaction_refresh.get_task_list", return_value=completed_tasks), \
-             patch("compaction_refresh.get_session_id", return_value="test"):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_no_checkpoint_suppress(self, capsys, tmp_path):
-        """No checkpoint file outputs suppressOutput."""
-        from compaction_refresh import main
-
-        input_data = json.dumps({"source": "compact"})
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("compaction_refresh.get_task_list", return_value=[]), \
-             patch("compaction_refresh.get_session_id", return_value="test"), \
-             patch.dict(os.environ, {
-                 "CLAUDE_PROJECT_DIR": "/test/project",
-             }, clear=False), \
-             patch("pathlib.Path.home", return_value=tmp_path):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_workflow_none_suppress(self, capsys, tmp_path):
-        """Checkpoint with workflow 'none' outputs suppressOutput."""
-        from compaction_refresh import main
-
-        checkpoint_dir = tmp_path / ".claude" / "pact-refresh"
-        checkpoint_dir.mkdir(parents=True)
-        checkpoint_path = checkpoint_dir / "-test-project.json"
-        checkpoint_path.write_text(json.dumps({
-            "version": "1.0",
-            "session_id": "test-session",
-            "workflow": {"name": "none"},
-            "extraction": {"confidence": 1.0},
-        }))
-
-        input_data = json.dumps({"source": "compact"})
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("compaction_refresh.get_task_list", return_value=[]), \
-             patch("compaction_refresh.get_session_id", return_value="test-session"), \
-             patch.dict(os.environ, {
-                 "CLAUDE_PROJECT_DIR": "/test/project",
-             }, clear=False), \
-             patch("pathlib.Path.home", return_value=tmp_path):
+             patch("compaction_refresh.get_task_list", return_value=completed_tasks):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 

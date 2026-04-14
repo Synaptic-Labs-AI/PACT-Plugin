@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/compaction_refresh.py
-Summary: SessionStart hook that detects post-compaction sessions and injects refresh instructions.
+Summary: SessionStart hook that detects post-compaction sessions and injects
+         refresh instructions based on the current TaskList.
 Used by: Claude Code hooks.json SessionStart hook (after session_init.py)
 
-This hook fires on SessionStart. It checks if the session was triggered by compaction
-(source="compact") and if so, reads workflow state from TaskList (which survives compaction)
-to build refresh context. If no TaskList is available, falls back to checkpoint file.
+This hook fires on SessionStart. On source="compact" sessions it reads workflow
+state from TaskList (Tasks persist across compaction at ~/.claude/tasks/{sessionId}/).
+If no active workflow is in progress, emits suppressOutput.
 
-The Task system (TaskCreate, TaskUpdate, TaskGet, TaskList) is PACT's single source of truth
-for workflow state. Tasks persist across compaction at ~/.claude/tasks/{sessionId}/*.json.
+The Task system is PACT's single source of truth for workflow state.
 
 Input: JSON from stdin with:
-  - source: Session start source ("compact" for post-compaction, others for normal start)
+  - source: Session start source ("compact" for post-compaction)
 
-Output: JSON with hookSpecificOutput.additionalContext (refresh instructions if applicable)
-
-Fallback checkpoint location: ~/.claude/pact-refresh/{encoded-path}.json
+Output: JSON with hookSpecificOutput.additionalContext, or suppressOutput.
 """
 
 import json
@@ -27,22 +25,13 @@ from typing import Any
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Add hooks directory to path for refresh and shared package imports
+# Add hooks directory to path for shared package imports
 _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
-# Import checkpoint utilities from refresh package (always available - same directory)
-# These are used as fallback when TaskList is unavailable
-from refresh.checkpoint_builder import (
-    get_checkpoint_path,
-    get_encoded_project_path,
-    checkpoint_to_refresh_message,
-)
-
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_session_id
 
 # Import shared Task utilities (DRY - used by multiple hooks)
 from shared.task_utils import (
@@ -131,84 +120,6 @@ def build_refresh_from_tasks(
 
 
 # -----------------------------------------------------------------------------
-# Checkpoint Fallback (Legacy State Source)
-# -----------------------------------------------------------------------------
-
-def read_checkpoint(checkpoint_path: Path) -> dict | None:
-    """
-    Read and parse the checkpoint file (fallback when Tasks unavailable).
-
-    Args:
-        checkpoint_path: Path to the checkpoint file
-
-    Returns:
-        Parsed checkpoint data, or None if file doesn't exist or is invalid
-    """
-    try:
-        if not checkpoint_path.exists():
-            return None
-        content = checkpoint_path.read_text(encoding='utf-8')
-        return json.loads(content)
-    except (IOError, json.JSONDecodeError):
-        return None
-
-
-def validate_checkpoint(checkpoint: dict, current_session_id: str) -> bool:
-    """
-    Validate that the checkpoint is applicable to the current session.
-
-    Checks:
-    - Session ID matches (compaction preserves session ID)
-    - Checkpoint has required fields
-    - Version is supported
-
-    Args:
-        checkpoint: The checkpoint data
-        current_session_id: Current session ID from environment
-
-    Returns:
-        True if checkpoint is valid and applicable
-    """
-    if not checkpoint:
-        return False
-
-    # Check version (handle None values)
-    version = checkpoint.get("version", "")
-    if not version or not version.startswith("1."):
-        return False
-
-    # Check session ID matches
-    checkpoint_session = checkpoint.get("session_id", "")
-    if checkpoint_session != current_session_id:
-        return False
-
-    # Check workflow field exists
-    if "workflow" not in checkpoint:
-        return False
-
-    return True
-
-
-def build_refresh_message_from_checkpoint(checkpoint: dict) -> str:
-    """
-    Build the refresh instruction message from checkpoint (fallback).
-
-    Delegates to checkpoint_to_refresh_message from the refresh package.
-
-    Args:
-        checkpoint: The validated checkpoint data
-
-    Returns:
-        Formatted refresh message string
-    """
-    return checkpoint_to_refresh_message(checkpoint)
-
-
-# Alias for backward compatibility with tests
-build_refresh_message = build_refresh_message_from_checkpoint
-
-
-# -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
 
@@ -216,12 +127,9 @@ def main():
     """
     Main entry point for the SessionStart refresh hook.
 
-    Strategy:
-    1. Primary: Read TaskList directly (Tasks survive compaction)
-    2. Fallback: Read checkpoint file if TaskList unavailable
-
-    Checks if this is a post-compaction session and injects refresh instructions
-    if an active workflow was in progress.
+    On source="compact" sessions, reads TaskList (which persists across
+    compaction) and emits a refresh message if any task is in_progress.
+    Otherwise emits suppressOutput.
     """
     try:
         # Parse input
@@ -239,15 +147,10 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        session_id = get_session_id() or "unknown"
-
-        # ---------------------------------------------------------------------
-        # Primary: Try TaskList first (Tasks survive compaction)
-        # ---------------------------------------------------------------------
+        # Read TaskList (Tasks survive compaction; single source of truth)
         tasks = get_task_list()
 
         if tasks:
-            # Find workflow state from Tasks
             in_progress = [t for t in tasks if t.get("status") == "in_progress"]
 
             if in_progress:
@@ -272,63 +175,8 @@ def main():
                 print(json.dumps(output))
                 sys.exit(0)
 
-            # Tasks exist but nothing in_progress - no active workflow
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-
-        # ---------------------------------------------------------------------
-        # Fallback: Read checkpoint file (legacy approach)
-        # ---------------------------------------------------------------------
-        encoded_path = get_encoded_project_path("")
-
-        if encoded_path == "unknown-project":
-            # Cannot determine project, skip refresh
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": "Refresh skipped: project path unavailable"
-                }
-            }))
-            sys.exit(0)
-
-        # Read checkpoint
-        checkpoint_path = get_checkpoint_path(encoded_path)
-        checkpoint = read_checkpoint(checkpoint_path)
-
-        if not checkpoint:
-            # No checkpoint file, nothing to recover
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-
-        # Validate checkpoint
-        if not validate_checkpoint(checkpoint, session_id):
-            # Checkpoint invalid or from different session
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": "Refresh skipped: checkpoint validation failed"
-                }
-            }))
-            sys.exit(0)
-
-        # Check if there was an active workflow
-        workflow_name = checkpoint.get("workflow", {}).get("name", "none")
-        if workflow_name == "none":
-            # No active workflow at compaction time
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
-
-        # Build and inject refresh instructions from checkpoint
-        refresh_message = build_refresh_message_from_checkpoint(checkpoint)
-
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": refresh_message
-            }
-        }
-
-        print(json.dumps(output))
+        # No tasks, or tasks exist but nothing in_progress — no active workflow
+        print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     except Exception as e:

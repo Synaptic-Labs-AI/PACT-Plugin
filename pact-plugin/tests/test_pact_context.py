@@ -1588,11 +1588,9 @@ class TestInitBeforeReaderOrdering:
     HOOKS_WITH_READERS = [
         ("handoff_gate.py", {"get_team_name"}),
         ("teachback_check.py", {"get_team_name", "resolve_agent_name"}),
-        ("compaction_refresh.py", {"get_session_id"}),
         ("peer_inject.py", {"get_team_name"}),
         ("memory_adhoc_reminder.py", {"get_team_name"}),
         ("file_tracker.py", {"get_team_name", "resolve_agent_name"}),
-        ("precompact_refresh.py", {"get_session_id"}),
         ("track_files.py", {"get_session_id"}),
         ("merge_guard_pre.py", {"get_session_id"}),
         ("merge_guard_post.py", {"get_session_id"}),
