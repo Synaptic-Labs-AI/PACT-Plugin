@@ -31,8 +31,10 @@ from shared.session_state import (
     _derive_feature_from_journal,
     _derive_phase_from_journal,
     _derive_variety_from_journal,
+    _is_safe_path_component,
     _read_task_counts,
     _read_team_members,
+    _sanitize_member_name,
     _default_state,
     summarize_session_state,
 )
@@ -1073,3 +1075,166 @@ class TestFeatureSubjectDiskFallback:
         )
 
         assert result["feature_subject"] == "JOURNAL WINS"
+
+
+# ---------------------------------------------------------------------------
+# TestIsSafePathComponent — cycle-2 regression: _is_safe_path_component
+# must reject "..", ".", and other path-traversal fragments. Prior
+# implementation used `Path(value).name == value` which returned True
+# for ".." (since `Path("..").name == ".."`), admitting a one-directory
+# escape at the disk-helper boundary. See security-engineer memory
+# patterns_path_name_fallback_escape.md.
+# ---------------------------------------------------------------------------
+
+
+class TestIsSafePathComponent:
+    """Regression guards for the path-component allowlist primitive."""
+
+    def test_rejects_parent_directory_reference(self):
+        # The cycle-1 bug: `Path("..").name` returns ".." verbatim,
+        # not empty string — the old identity-check admitted this.
+        assert _is_safe_path_component("..") is False
+
+    def test_rejects_current_directory_reference(self):
+        assert _is_safe_path_component(".") is False
+
+    def test_rejects_parent_directory_with_suffix(self):
+        assert _is_safe_path_component("../etc") is False
+
+    def test_rejects_absolute_path(self):
+        assert _is_safe_path_component("/tmp") is False
+
+    def test_rejects_path_separator(self):
+        assert _is_safe_path_component("a/b") is False
+
+    def test_rejects_empty_string(self):
+        assert _is_safe_path_component("") is False
+
+    def test_rejects_null_byte(self):
+        assert _is_safe_path_component("a\x00b") is False
+
+    def test_rejects_whitespace(self):
+        assert _is_safe_path_component("a b") is False
+        assert _is_safe_path_component("a\tb") is False
+
+    def test_rejects_dot_in_middle(self):
+        # "a.b" is a filename with extension, not a safe path component
+        # for the team_name/feature_id slots we're guarding. Allow-list
+        # is intentionally strict.
+        assert _is_safe_path_component("a.b") is False
+
+    def test_rejects_non_string(self):
+        # type: ignore[arg-type]
+        assert _is_safe_path_component(None) is False  # type: ignore[arg-type]
+
+    def test_accepts_happy_path_team_name(self):
+        # Upstream generate_team_name produces "pact-" + hex-with-hyphens.
+        assert _is_safe_path_component("pact-b90de955") is True
+
+    def test_accepts_numeric_task_id(self):
+        # Task IDs are typically bare integers written as strings.
+        assert _is_safe_path_component("12") is True
+
+    def test_accepts_uuid_form(self):
+        assert _is_safe_path_component("ccabd798-d42f-4412-8dea-699bcca40de8") is True
+
+    def test_accepts_underscore_identifier(self):
+        assert _is_safe_path_component("abc_def") is True
+
+    def test_accepts_uppercase(self):
+        assert _is_safe_path_component("ABC") is True
+
+
+class TestReadHelpersRejectTraversal:
+    """
+    End-to-end regression guards that the three disk-reading helpers
+    refuse to compose path-traversal components. These exercise the
+    integration of `_is_safe_path_component` with the helpers.
+    """
+
+    def test_read_team_members_rejects_parent_reference(self, tmp_path):
+        # If team_name=".." were accepted, we'd read
+        # <tmp_path/teams/../config.json> == <tmp_path/config.json>.
+        # Place a file there to prove the helper does NOT read it.
+        (tmp_path / "config.json").write_text(
+            '{"members": [{"name": "LEAKED"}]}', encoding="utf-8"
+        )
+        teams = tmp_path / "teams"
+        teams.mkdir()
+        result = _read_team_members("..", teams_base_dir=str(teams))
+        assert result == []
+
+    def test_read_task_counts_rejects_parent_reference(self, tmp_path):
+        # Analogous setup: place a task file one level up.
+        tasks = tmp_path / "tasks"
+        tasks.mkdir()
+        (tmp_path / "leaked.json").write_text(
+            '{"status": "completed"}', encoding="utf-8"
+        )
+        result = _read_task_counts("..", tasks_base_dir=str(tasks))
+        assert result == {"completed": 0, "in_progress": 0, "pending": 0, "total": 0}
+
+    def test_read_team_members_rejects_dot(self, tmp_path):
+        # "." resolves to the parent itself; the helper must still reject.
+        teams = tmp_path / "teams"
+        teams.mkdir()
+        (teams / "config.json").write_text(
+            '{"members": [{"name": "LEAKED"}]}', encoding="utf-8"
+        )
+        result = _read_team_members(".", teams_base_dir=str(teams))
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestSanitizeMemberName — cycle-2 cosmetic alignment: sanitizer must
+# strip DEL (0x7F) matching sibling peer_inject._sanitize_agent_name's
+# coverage of `[\x00-\x1f\x7f]`.
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeMemberName:
+    """Character-class coverage for the member-name sanitizer."""
+
+    def test_strips_newline(self):
+        # Primary prompt-injection vector — a name containing "\n"
+        # would emit a second line into the model-visible rendering.
+        assert _sanitize_member_name("bob\nEVIL") == "bobEVIL"
+
+    def test_strips_carriage_return(self):
+        assert _sanitize_member_name("bob\rEVIL") == "bobEVIL"
+
+    def test_strips_null_byte(self):
+        assert _sanitize_member_name("a\x00b") == "ab"
+
+    def test_strips_del(self):
+        # Cycle-2 alignment with peer_inject._sanitize_agent_name:
+        # DEL (0x7F) is an invisible control and belongs in the strip
+        # set alongside C0 controls.
+        assert _sanitize_member_name("a\x7fb") == "ab"
+
+    def test_preserves_tab(self):
+        # Tab is deliberately preserved — it is not a line-break and
+        # not a role-marker injector, and some shell-produced names
+        # may legitimately contain tabs.
+        assert _sanitize_member_name("\ta") == "\ta"
+
+    def test_preserves_printable_ascii(self):
+        assert _sanitize_member_name("hello-world_42") == "hello-world_42"
+
+    def test_preserves_non_ascii(self):
+        # Non-ASCII names should pass through — the filter targets
+        # control chars, not Unicode.
+        assert _sanitize_member_name("bøb") == "bøb"
+
+    def test_caps_length_at_200(self):
+        long = "a" * 500
+        result = _sanitize_member_name(long)
+        assert len(result) == 200
+
+    def test_returns_empty_for_non_string(self):
+        # type: ignore[arg-type]
+        assert _sanitize_member_name(None) == ""  # type: ignore[arg-type]
+
+    def test_returns_empty_for_all_stripped(self):
+        # A name consisting entirely of C0 controls collapses to empty.
+        assert _sanitize_member_name("\n\r\x00\x01") == ""

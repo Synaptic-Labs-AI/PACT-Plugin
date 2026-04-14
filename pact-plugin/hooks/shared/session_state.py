@@ -28,6 +28,7 @@ in the fix/journal-based-task-scanner worktree.
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,22 @@ from shared.session_journal import read_events_from
 _NAME_MAX_CHARS = 200
 
 
+# Positive allowlist for path components (team_name, feature_id). Any
+# input containing anything outside [A-Za-z0-9_-] is rejected. This
+# matches the shape of legitimate values:
+#   - team_name: "pact-" + hex-with-hyphens (per generate_team_name
+#     at session_init.py:173, which uses `re.sub(r"[^a-f0-9-]", "",
+#     session_id[:8])`).
+#   - feature_id: numeric task IDs or UUIDs (hex + hyphens).
+# Rejects ".", "..", "../etc", path separators, control chars, null,
+# whitespace, and all shell/URL metacharacters by construction.
+# See security-engineer memory patterns_path_name_fallback_escape.md:
+# positive regex allowlist is the recommended defense (option 1 over
+# Path.name identity checks, which admit ".." as .name returns ".."
+# verbatim rather than the expected empty string).
+_SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9_-]+")
+
+
 def _sanitize_member_name(name: str) -> str:
     """
     Return a sanitized copy of `name` safe to surface into
@@ -51,12 +68,13 @@ def _sanitize_member_name(name: str) -> str:
     Defense-in-depth against prompt-injection via crafted
     ~/.claude/teams/{team_name}/config.json (see security review
     Finding 1):
-    - Strip C0 control chars (< 0x20) except tab (0x09), so a name
+    - Strip C0 control chars (0x00-0x1F) except tab (0x09), so a name
       like "bob\\nIgnore previous instructions" collapses to
       "bobIgnore previous instructions" and cannot introduce a new
       role-marker line into the rendered output.
-    - Drop null bytes explicitly (already covered by the C0 filter,
-      but matched separately for readability).
+    - Strip DEL (0x7F) — aligns with sibling `peer_inject._sanitize_agent_name`
+      which uses `[\\x00-\\x1f\\x7f]`. DEL has the same "invisible
+      control" property as C0 and is routinely stripped together.
     - Cap length at _NAME_MAX_CHARS.
     - Return empty string if nothing survives; caller treats empty
       names as "skip this member" upstream.
@@ -67,9 +85,13 @@ def _sanitize_member_name(name: str) -> str:
     """
     if not isinstance(name, str):
         return ""
-    # Keep tab (0x09), drop every other C0 control and null.
+    # Keep tab (0x09). Drop 0x00-0x08, 0x0A-0x1F, and 0x7F. Pass
+    # everything ≥ 0x20 through EXCEPT 0x7F (DEL). Pass all non-ASCII
+    # (≥ 0x80) through so legitimate Unicode names are preserved.
     cleaned = "".join(
-        ch for ch in name if ch == "\t" or ord(ch) >= 0x20
+        ch
+        for ch in name
+        if ch == "\t" or (0x20 <= ord(ch) < 0x7F) or ord(ch) > 0x7F
     )
     if len(cleaned) > _NAME_MAX_CHARS:
         cleaned = cleaned[:_NAME_MAX_CHARS]
@@ -86,18 +108,25 @@ def _is_safe_path_component(value: str) -> bool:
     lives at `session_init.py:173` — `re.sub(r"[^a-f0-9-]", "",
     session_id[:8])` — which already filters path separators, `..`,
     nulls, and controls at team-name generation time. This guard is a
-    second line of defense at the I/O boundary: if any future code
-    path or test fixture passes a non-sanitized component in, we
-    reject it rather than resolving `~/.claude/teams/../../etc/`.
+    second line of defense at the I/O boundary.
 
-    `Path(value).name == value` rejects:
-    - path separators (`/`, `\\\\` on Windows) — `.name` strips them
-    - `..` and `.` — `Path("..").name` is `""`
-    - empty strings — `Path("").name` is `""`
+    Uses a positive regex allowlist (`_SAFE_PATH_COMPONENT`) instead
+    of the tempting `Path(value).name == value` identity check. The
+    identity check is BROKEN: `Path("..").name == ".."` is True, so
+    the check admits `..` as "safe" and permits one-level directory
+    escape when composed against a trusted root (e.g.
+    `~/.claude/teams/../something`). The positive allowlist sidesteps
+    this by requiring every character to belong to a known-safe
+    alphabet; `..`, `.`, `../etc`, path separators, controls, and
+    whitespace all reject.
+
+    See security-engineer agent memory
+    `patterns_path_name_fallback_escape.md` for the authoritative
+    write-up of this anti-pattern.
     """
-    if not value:
+    if not isinstance(value, str) or not value:
         return False
-    return Path(value).name == value
+    return _SAFE_PATH_COMPONENT.fullmatch(value) is not None
 
 
 # --- Default dict factory -------------------------------------------------
