@@ -69,6 +69,7 @@ class TestMainEntryPoint:
             "check_unpaused_pr": patch("session_end.check_unpaused_pr"),
             "cleanup_teachback_markers": patch("session_end.cleanup_teachback_markers"),
             "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
+            "_cleanup_old_checkpoints": patch("session_end._cleanup_old_checkpoints"),
         }
         defaults.update(overrides)
         return defaults
@@ -152,7 +153,8 @@ class TestMainEntryPoint:
 
     def test_main_call_ordering(self):
         """main() must call functions in correct order:
-        check_unpaused_pr -> cleanup_teachback_markers -> cleanup_old_sessions.
+        check_unpaused_pr -> cleanup_teachback_markers -> cleanup_old_sessions
+        -> _cleanup_old_checkpoints.
         check_unpaused_pr now runs BEFORE the journal write so its return
         value can be merged into the single session_end event.
         """
@@ -161,9 +163,9 @@ class TestMainEntryPoint:
         call_order = []
 
         def _record(name):
-            def _side_effect(**kw):
+            def _side_effect(*args, **kw):
                 call_order.append(name)
-                return None  # check_unpaused_pr now returns Optional[str]
+                return None  # check_unpaused_pr returns Optional[str]; _cleanup_old_checkpoints is called with no args
             return _side_effect
 
         patches = self._patch_main_deps(
@@ -173,6 +175,8 @@ class TestMainEntryPoint:
                 side_effect=_record("cleanup_teachback_markers")),
             cleanup_old_sessions=patch("session_end.cleanup_old_sessions",
                 side_effect=_record("cleanup_old_sessions")),
+            _cleanup_old_checkpoints=patch("session_end._cleanup_old_checkpoints",
+                side_effect=_record("_cleanup_old_checkpoints")),
         )
         with patch("sys.stdin", io.StringIO("{}")):
             with ExitStack() as stack:
@@ -185,6 +189,7 @@ class TestMainEntryPoint:
             "check_unpaused_pr",
             "cleanup_teachback_markers",
             "cleanup_old_sessions",
+            "_cleanup_old_checkpoints",
         ]
 
     def test_main_emits_single_session_end_event_when_warning(self):
@@ -1256,8 +1261,8 @@ class TestMainIntegrationCleanup:
     """Integration tests for main() exercising cleanup functions with session context.
 
     Verifies that main() correctly chains pact_context.init() -> get_session_dir()
-    -> cleanup_teachback_markers() -> cleanup_old_sessions() using the session
-    context from stdin.
+    -> cleanup_teachback_markers() -> cleanup_old_sessions() ->
+    _cleanup_old_checkpoints() using the session context from stdin.
     """
 
     def test_main_calls_cleanup_teachback_markers(self):
@@ -1276,6 +1281,7 @@ class TestMainIntegrationCleanup:
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_teachback_markers") as mock_cleanup, \
              patch("session_end.cleanup_old_sessions"), \
+             patch("session_end._cleanup_old_checkpoints"), \
              pytest.raises(SystemExit):
             mock_ctx.init = MagicMock()
             from session_end import main
@@ -1302,6 +1308,7 @@ class TestMainIntegrationCleanup:
              patch("session_end.check_unpaused_pr"), \
              patch("session_end.cleanup_teachback_markers"), \
              patch("session_end.cleanup_old_sessions") as mock_cleanup, \
+             patch("session_end._cleanup_old_checkpoints"), \
              pytest.raises(SystemExit):
             mock_ctx.init = MagicMock()
             from session_end import main
@@ -1311,6 +1318,35 @@ class TestMainIntegrationCleanup:
             project_slug="proj",
             current_session_id="test-session",
         )
+
+    def test_main_calls_cleanup_old_checkpoints(self):
+        """main() should call _cleanup_old_checkpoints (pact-refresh TTL sweep).
+
+        Wiring guard: removing the call from session_end.main() must break
+        at least one test. Post-#413, _cleanup_old_checkpoints is the
+        third cleanup step and touches ~/.claude/pact-refresh/.
+        """
+        from unittest.mock import patch, MagicMock
+        import io
+
+        input_data = json.dumps({"session_id": "test-session"})
+
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("session_end.pact_context") as mock_ctx, \
+             patch("session_end.get_project_dir", return_value="/test/proj"), \
+             patch("session_end.get_session_dir", return_value="/tmp/session"), \
+             patch("session_end.get_session_id", return_value="test-session"), \
+             patch("session_end.get_task_list", return_value=[]), \
+             patch("session_end.check_unpaused_pr"), \
+             patch("session_end.cleanup_teachback_markers"), \
+             patch("session_end.cleanup_old_sessions"), \
+             patch("session_end._cleanup_old_checkpoints") as mock_cleanup, \
+             pytest.raises(SystemExit):
+            mock_ctx.init = MagicMock()
+            from session_end import main
+            main()
+
+        mock_cleanup.assert_called_once_with()
 
 
 # =============================================================================

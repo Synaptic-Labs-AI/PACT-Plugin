@@ -20,11 +20,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 
 class TestGetEncodedProjectPath:
-    """Tests for get_encoded_project_path used by compaction_refresh.
+    """Tests for refresh.checkpoint_builder.get_encoded_project_path.
 
-    Note: The function is now shared from checkpoint_builder.py.
-    These tests verify the usage pattern in compaction_refresh where
-    an empty transcript path is passed to trigger the env var fallback.
+    Post-#413: the deprecated precompact_refresh.py hook was the original
+    consumer of this function. compaction_refresh.py no longer calls it
+    (the TaskList-based primary path needs no project-path encoding).
+    These tests verify the env-var-fallback behavior (empty transcript
+    path), which is the only remaining invocation pattern in the codebase.
+    Kept colocated with compaction_refresh tests for historical context;
+    see test_checkpoint_builder.py for the full test suite on this helper.
     """
 
     def test_encodes_project_path_from_env(self):
@@ -32,7 +36,7 @@ class TestGetEncodedProjectPath:
         from refresh.checkpoint_builder import get_encoded_project_path
 
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/Users/test/myproject"}):
-            # compaction_refresh passes empty string to use env fallback
+            # Empty transcript path triggers the env var fallback
             encoded = get_encoded_project_path("")
 
         assert encoded == "-Users-test-myproject"
