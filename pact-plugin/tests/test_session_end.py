@@ -2106,14 +2106,18 @@ class TestCleanupOldTeams:
     def test_fail_closed_on_empty_current_team_name(self, tmp_path):
         """COUNTER-TEST BY REVERT target: empty current_team_name → no-op.
 
-        Load-bearing: the skip predicate IS the only defense layer (teams/
-        has no secondary UUID filter). An empty skip value must NOT reap
+        Load-bearing: the skip predicate IS the only defense layer once the
+        pattern gate admits an entry. An empty skip value must NOT reap
         anything, or the live team dir could be deleted.
+
+        Fixture names MUST pass `_TEAM_NAME_PATTERN = ^pact-[a-f0-9-]+$`
+        so the pattern gate admits them — otherwise the gate masks the
+        fail-closed guard's sensitivity (PR #433 cycle-7 F1 remediation).
         """
         from session_end import cleanup_old_teams
 
-        _make_team_dir(tmp_path, "pact-live", age_days=60)
-        _make_team_dir(tmp_path, "pact-other", age_days=60)
+        _make_team_dir(tmp_path, "pact-abcd1234", age_days=60)
+        _make_team_dir(tmp_path, "pact-deadbeef", age_days=60)
 
         reaped, skipped = cleanup_old_teams(
             current_team_name="",
@@ -2124,8 +2128,8 @@ class TestCleanupOldTeams:
         assert reaped == 0
         assert skipped == 0
         # Both survive — empty skip-name fails closed, not open.
-        assert (tmp_path / "pact-live").exists()
-        assert (tmp_path / "pact-other").exists()
+        assert (tmp_path / "pact-abcd1234").exists()
+        assert (tmp_path / "pact-deadbeef").exists()
 
     def test_handles_missing_base_dir(self, tmp_path):
         """Non-existent base dir → (0, 0) silently, no raise."""
@@ -3246,13 +3250,31 @@ class TestReaperSymlinkHandling:
         cannot see the target itself — only the symlink that points to
         it. Uses `tmp_path.parent / (tmp_path.name + suffix)` so the
         pytest fixture still cleans it up.
+
+        Ages ALL children AND the parent dir to `age_days` old. Both a
+        `*.json` child (load-bearing for the tasks-reaper path, which
+        globs `*.json`) AND a non-json `precious.txt` (for the teams
+        path, which globs `*`) are aged. Aging the children is load-
+        bearing for guard-sensitivity (PR #433 cycle-7 F2 remediation):
+        without it, `_dir_max_child_mtime` sees a fresh child (write_text
+        stamps current time) and the symlink guard's removal is masked —
+        the dir would be preserved for the WRONG reason (fresh child,
+        not guard).
         """
         import os as _os
         import time as _time
         victim = tmp_path.parent / f"{tmp_path.name}-victim-{name}"
         victim.mkdir(exist_ok=True)
-        (victim / "precious.txt").write_text("user data that must survive")
+        precious = victim / "precious.txt"
+        precious.write_text("user data that must survive")
+        # Also drop an aged `*.json` child so the tasks-reaper probe
+        # (glob="*.json") returns the aged mtime rather than falling
+        # back to parent lstat on the symlink (which is fresh).
+        json_child = victim / "payload.json"
+        json_child.write_text("{}")
         old = _time.time() - (age_days * 86400)
+        _os.utime(str(precious), (old, old))
+        _os.utime(str(json_child), (old, old))
         _os.utime(str(victim), (old, old))
         return victim
 
@@ -3268,12 +3290,14 @@ class TestReaperSymlinkHandling:
 
         _make_team_dir(tmp_path, "pact-current", age_days=0)
         # Hex-only name — cycle-4 pattern gate `^pact-[a-f0-9-]+$` rejects
-        # letters outside [a-f] (would-be name "pact-old-real" contains
-        # o/l/r which aren't hex). Use the name shape that generate_team_name
-        # actually produces.
+        # letters outside [a-f]. BOTH the real old dir AND the symlink
+        # name must be hex-valid, otherwise the pattern gate filters them
+        # before either the is_symlink guard or the TTL probe runs —
+        # which would mask the guard's sensitivity (PR #433 cycle-7 F2).
         _make_team_dir(tmp_path, "pact-0dd0eaf1", age_days=40)
         victim = self._aged_target(tmp_path, "teams")
-        link = tmp_path / "pact-ev11dead"
+        # "deadbeef" is all-hex so the pattern gate admits the symlink.
+        link = tmp_path / "pact-deadbeef"
         link.symlink_to(victim)
 
         try:
@@ -3724,6 +3748,68 @@ class TestTeamNameShapeGate:
         assert not target.exists()
 
 
+class TestTeamNameRegexStrictAnchor:
+    """Cycle-7 N2 — `_TEAM_NAME_PATTERN` uses `\\Z` (strict end-of-string).
+
+    Python `re` treats `$` as end-of-string OR immediately before a
+    trailing newline. Without `\\Z`, a crafted team dir name like
+    `pact-deadbeef\\n` would PASS the gate and land in the skip / reap
+    eligibility path.  `\\Z` anchors strictly and rejects trailing
+    newlines. Bounded today because `generate_team_name` never produces
+    such a name, but a same-user attacker or a filesystem tool that
+    creates a dir like this could bypass the invariant.
+
+    POSIX permits `\\n` in filenames. macOS APFS was empirically verified
+    to accept `mkdir("pact-deadbeef\\n")` and round-trip the literal name
+    through `iterdir()`.
+    """
+
+    def test_trailing_newline_name_rejected_by_strict_anchor(self, tmp_path):
+        """Dir named `pact-deadbeef\\n` is PRESERVED by the `\\Z` gate.
+
+        COUNTER-TEST BY REVERT target: switching `\\Z` back to `$` in
+        `_TEAM_NAME_PATTERN` flips this test — the newline-suffixed name
+        matches under `$` and the dir gets reaped. Evidence (documented
+        in HANDOFF):
+          - With `\\Z`: `pact-deadbeef\\n` rejected by gate → preserved.
+          - With `$`:   `pact-deadbeef\\n` matches → dir reaped.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+
+        # Trailing-newline name. POSIX allows; macOS APFS verified.
+        hostile = "pact-deadbeef\n"
+        d = tmp_path / hostile
+        try:
+            d.mkdir()
+        except OSError as e:
+            pytest.skip(
+                f"Filesystem rejects `\\n` in directory names ({e!r}); "
+                f"strict-anchor pin cannot be exercised here"
+            )
+        (d / "config.json").write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(d / "config.json"), (old, old))
+        _os.utime(str(d), (old, old))
+
+        reaped, skipped = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0, (
+            "Trailing-newline name must be REJECTED by `\\Z` strict "
+            "anchor. If reaped == 1, the regex was likely reverted from "
+            "`\\Z` to `$` (which matches end-of-string OR immediately "
+            "before a trailing newline)."
+        )
+        assert d.exists(), "hostile-named dir must survive the pattern gate"
+
+
 class TestTaskDirMtimeLstatPortability:
     """Cycle-4 Test 3 — child.lstat() matches prior stat(follow_symlinks=False).
 
@@ -4052,6 +4138,122 @@ class TestSessionIdAllowlist:
 
         skip_names = mock_tasks.call_args.kwargs["skip_names"]
         assert good_session in skip_names
+
+
+class TestTeamNameAllowlist:
+    """Cycle-7 N3 — `current_team_name` filtered by same regex as
+    task_list_id / session_id at skip-set construction.
+
+    Before cycle-7, team_name entered `skip_names` unvalidated while
+    `task_list_id` (line 744) and `session_id` (line 755) both flowed
+    through `re.fullmatch(r"[A-Za-z0-9_-]+", ...)`. Bounded today by
+    `generate_team_name`'s producer-side filter, but defense-in-depth
+    should not asymmetrically trust one of three channels. Mirrors
+    `TestSessionIdAllowlist` / `TestTaskListIdAllowlistRejection`.
+
+    Note: the teams REAPER still receives the raw `current_team_name`
+    (not `safe_team_name`) — pattern gate inside cleanup_old_teams is
+    the teams-side defense. The allowlist at line 770 only guards the
+    skip_names set passed to cleanup_old_tasks.
+    """
+
+    @pytest.mark.parametrize("hostile_value", [
+        "../etc",           # path traversal
+        "\u2028",           # LINE SEPARATOR (role-marker injection class)
+        "\x00",             # null byte
+        "name with space",  # space (breaks shell/path assumptions)
+        "name\nwith\nnewline",
+        "name;rm -rf /",    # shell metachar
+        "name/with/slash",  # path separator
+    ])
+    def test_hostile_team_name_excluded_from_skip_names(self, hostile_value):
+        """Each hostile current_team_name is filtered from skip_names.
+
+        COUNTER-TEST BY REVERT target: removing the `safe_team_name`
+        allowlist at session_end.py:769-773 (restoring the direct
+        `{current_team_name, task_list_id, safe_session_id}` shape)
+        flips this test — hostile team_names leak into skip_names.
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-B"),
+            patch("session_end.get_team_name", return_value=hostile_value),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        mock_tasks_ref = {}
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks_ref["m"] = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_tasks = mock_tasks_ref["m"]
+        mock_tasks.assert_called_once()
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+
+        assert hostile_value not in skip_names, (
+            f"Hostile current_team_name={hostile_value!r} leaked into "
+            f"skip_names={skip_names!r}. Cycle-7 allowlist on team_name "
+            f"(session_end.py:769-773) must filter it — mirroring the "
+            f"task_list_id and session_id channels."
+        )
+        # Sanity: the other two skip members still pass through.
+        assert "task-C" in skip_names
+        assert "sess-B" in skip_names
+
+    def test_well_formed_team_name_passes_through(self):
+        """Regression guard: well-formed `pact-xxxxxxxx` team_name still admitted."""
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        good_team = "pact-0001639f"
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-B"),
+            patch("session_end.get_team_name", return_value=good_team),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+        assert good_team in skip_names
 
 
 class TestSentinelFalseReapHardening:

@@ -3721,3 +3721,40 @@ class TestValidateOptionalFieldTypes:
             ok, reason = _validate_event_schema(event)
             assert ok is True, f"reaper_ran={value!r} should pass; got {reason!r}"
             assert reason == "ok"
+
+    def test_validate_rejects_wrong_type_session_end_warning(self):
+        """session_end.warning wrong-type is rejected live (#433 cycle-7 N1).
+
+        COUNTER-TEST BY REVERT target: removing
+        `"session_end": {"warning": str}` from `_OPTIONAL_FIELDS_BY_TYPE`
+        in shared/session_journal.py flips this test to pass-as-OK
+        because `_validate_event_schema` has no declared optional
+        fields for `session_end` and the int value sails through the
+        optional-field loop silently. The active empty-dict entry for
+        session_end in `_REQUIRED_FIELDS_BY_TYPE` combined with the
+        `{"warning": str}` entry here IS the activation mechanism.
+
+        session_end.py:687-688 writes `make_event("session_end",
+        warning=<str>)` when check_unpaused_pr detects an open-but-
+        unpaused PR. Without the schema entry, a future writer could
+        pass a non-string warning (e.g. a dict of findings) and no
+        validator would catch it — downstream audit consumers would
+        blow up on unexpected types.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        bad = make_event("session_end", warning=42)  # wrong type — int, not str
+        ok, reason = _validate_event_schema(bad)
+        assert ok is False
+        assert "warning" in reason
+        assert "must be str" in reason
+        assert "got int" in reason
+
+    def test_validate_accepts_session_end_warning_str(self):
+        """Happy-path partner: well-formed warning string passes (#433 cycle-7 N1)."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        good = make_event("session_end", warning="open-pr-detected: #433")
+        ok, reason = _validate_event_schema(good)
+        assert ok is True, f"valid warning should pass; got {reason!r}"
+        assert reason == "ok"
