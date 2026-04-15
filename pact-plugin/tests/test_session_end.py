@@ -2354,7 +2354,19 @@ class TestCleanupOldTasks:
         assert (tmp_path / "pact-other").exists()
 
     def test_handles_unstatable_children(self, tmp_path):
-        """Child.stat OSError → max-child stays 0.0 → parent-mtime fallback exercised."""
+        """All-child-stat-OSError → sentinel → caller marks skipped, NOT reaped.
+
+        Cycle-5 spec change (PR #433 cycle-5, sentinel hardening): when
+        `_dir_max_child_mtime` saw at least one child but every child's
+        `lstat()` raised OSError, the helper returns `None` rather than
+        falling back to parent mtime. Falling back to parent would
+        false-reap dirs whose age can't actually be observed (permission-
+        regression scenario). The caller treats `None` as "skip this
+        entry, count as skipped."
+
+        Pre-cycle-5 spec asserted `reaped == 1` here (parent-mtime
+        fallback). The new spec asserts `skipped == 1` and `reaped == 0`.
+        """
         from unittest.mock import patch as _patch
         from pathlib import Path as _Path
         from session_end import cleanup_old_tasks
@@ -2362,24 +2374,25 @@ class TestCleanupOldTasks:
         d = _make_task_dir(tmp_path, "pact-quirky", child_ages_days=[5], parent_age_days=40)
         child_path = d / "1.json"
 
-        real_stat = _Path.stat
+        real_lstat = _Path.lstat
 
-        def flaky_stat(self, *args, **kwargs):
+        def flaky_lstat(self, *args, **kwargs):
             if str(self) == str(child_path):
                 raise OSError("transient")
-            return real_stat(self, *args, **kwargs)
+            return real_lstat(self, *args, **kwargs)
 
-        with _patch.object(_Path, "stat", flaky_stat):
-            reaped, _ = cleanup_old_tasks(
+        with _patch.object(_Path, "lstat", flaky_lstat):
+            reaped, skipped = cleanup_old_tasks(
                 skip_names={"pact-current"},
                 tasks_base_dir=str(tmp_path),
                 max_age_days=30,
             )
 
-        # Child stat raised → latest stays 0.0 → fallback to parent mtime
-        # (40 days old) → reaped.
-        assert reaped == 1
-        assert not d.exists()
+        # Child lstat raised → saw_any_child=True + latest=0.0 → sentinel
+        # `None` → caller skipped += 1. Dir survives (no false-reap).
+        assert reaped == 0
+        assert skipped == 1
+        assert d.exists()
 
 
 # =============================================================================
@@ -3760,3 +3773,320 @@ class TestTaskDirMtimeLstatPortability:
             f"(link lstat mtime). If this test fails with a fresh (<1d) "
             f"result, lstat() was reverted to stat() (follow_symlinks=True)."
         )
+
+
+# =============================================================================
+# Cycle-5 defensive-hardening pins — #412 Fix B (cycle-5 contract)
+# =============================================================================
+
+
+class TestTeamsCaseInsensitiveSkip:
+    """Cycle-5 Test 1 — `cleanup_old_teams` skip uses case-insensitive compare.
+
+    `pact_context.get_team_name()` returns a lowercased name and the
+    `generate_team_name` INVARIANT pins lowercase, so byte-exact compare
+    is correct-by-coincidence today. Cycle-5 changed the comparison to
+    `entry.name.lower() == current_team_name.lower()` as belt-and-
+    suspenders against future drift in either producer.
+    """
+
+    def test_mixed_case_team_dir_preserved_when_caller_passes_lowercase(self, tmp_path):
+        """Mixed-case dir on disk + lowercase current_team_name → PRESERVED.
+
+        Construct a team dir whose on-disk name is `pact-AABB1122` (mixed
+        case, all hex-valid). Pass `pact-aabb1122` (lowercase) as
+        current_team_name. Under case-insensitive compare, the dir is
+        SKIPPED (preserved). Under byte-exact compare, the dir would be
+        treated as a sibling and reaped.
+
+        Note: the directory name must still pass `_TEAM_NAME_PATTERN`
+        which is lowercase-only `^pact-[a-f0-9-]+$`. Mixed-case
+        normally wouldn't match — but on case-insensitive filesystems
+        (macOS HFS+/APFS-default), `mkdir("pact-AABB1122")` creates a
+        directory whose `iterdir()` may return either the literal
+        `"pact-AABB1122"` or the canonical lowercased form. We force
+        the test fixture to write a directory whose name preserves
+        case. If iterdir returns lowercase, the pattern gate accepts;
+        if mixed case, the pattern gate rejects regardless of compare.
+        Either way, this test pins the COMPARE semantic; the pattern
+        gate is orthogonal.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        # Use ALL-LOWERCASE on-disk name (so pattern gate accepts) but
+        # pass a different-case current_team_name. The semantic we're
+        # pinning: skip predicate is case-insensitive in the COMPARE
+        # direction (caller-provided value can differ in case).
+        ondisk = "pact-aabb1122"
+        d = tmp_path / ondisk
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(d / "config.json"), (old, old))
+        _os.utime(str(d), (old, old))
+
+        # Pass mixed-case current_team_name. With .lower()==.lower(),
+        # this must skip the on-disk dir.
+        reaped, skipped = cleanup_old_teams(
+            current_team_name="PACT-AABB1122",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0, (
+            "Mixed-case current_team_name must skip lowercase on-disk "
+            "match via .lower() compare. If reaped == 1, the compare "
+            "regressed to byte-exact (==)."
+        )
+        assert d.exists()
+
+
+class TestDirMaxChildMtimeFallbackLstat:
+    """Cycle-5 Test 2 — `_dir_max_child_mtime` parent fallback uses `lstat()`.
+
+    Cycle-5 changed the empty-dir fallback from `entry.stat().st_mtime`
+    to `entry.lstat().st_mtime`. The caller (`cleanup_old_teams`,
+    `cleanup_old_tasks`) already has an outer `is_symlink()` guard, but
+    the helper-in-isolation should not follow symlinks — defensive against
+    future callers that forget the guard. Same pattern as cycle-2's F2 fix.
+    """
+
+    def test_fallback_uses_lstat_not_stat_on_dir_symlink(self, tmp_path):
+        """Empty-dir fallback path: probe a symlink-dir, expect link's own mtime.
+
+        The fallback branch is only reached when the dir has no children
+        matched by the glob (`saw_any_child=False`). Construct an empty
+        dir AND a symlink pointing at a fresh external dir; probe the
+        symlink directly. Under `entry.lstat()`, returns the link's
+        (old) mtime. Under `entry.stat()`, would dereference and return
+        the target's (fresh) mtime.
+
+        Note: this directly probes `_dir_max_child_mtime` rather than
+        going through `cleanup_old_tasks`, because the caller's
+        `is_symlink()` guard would short-circuit the symlink before the
+        helper runs in normal flow. We're pinning the helper's defense-
+        in-isolation behavior.
+        """
+        import os as _os
+        import time as _time
+        from session_end import _dir_max_child_mtime
+
+        # Fresh external target dir
+        target = tmp_path / "external-fresh-dir"
+        target.mkdir()
+        _os.utime(str(target), (_time.time(), _time.time()))
+
+        # Symlink with OLD lstat mtime pointing at fresh target
+        link = tmp_path / "old-symlink-dir"
+        link.symlink_to(target)
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(link), (old, old), follow_symlinks=False)
+
+        # Probe the symlink with default glob (no children match → fallback).
+        result = _dir_max_child_mtime(link, glob="*.json")
+
+        assert result is not None, (
+            "Empty-dir fallback should return a float, not sentinel"
+        )
+        age_days = (_time.time() - result) / 86400
+        assert age_days > 30, (
+            f"_dir_max_child_mtime fallback returned {age_days:.1f}d old — "
+            f"expected >30d (link lstat). If returned ~0d (target stat), "
+            f"the fallback was reverted from entry.lstat() to entry.stat()."
+        )
+
+
+class TestSessionIdAllowlist:
+    """Cycle-5 Test 3 — `current_session_id` filtered by same regex as task_list_id.
+
+    `task_list_id` flows through `re.fullmatch(r"[A-Za-z0-9_-]+", ...)`
+    before insertion into skip_names. Cycle-5 applies the same allowlist
+    to `current_session_id` for trust symmetry — without it, a hostile
+    session_id (e.g. set via env-var injection on bare Claude Code)
+    could land in skip_names and shield malicious entries from reaping.
+    Mirrors `TestTaskListIdAllowlistRejection` shape.
+    """
+
+    @pytest.mark.parametrize("hostile_value", [
+        "../etc",           # path traversal
+        "\u2028",           # LINE SEPARATOR (role-marker injection class)
+        "\x00",             # null byte
+        "bad space",        # space (breaks shell/path assumptions)
+        "name\nwith\nnewline",
+        "name;rm -rf /",    # shell metachar
+        "name/with/slash",  # path separator
+    ])
+    def test_hostile_session_id_excluded_from_skip_names(self, hostile_value):
+        """Each hostile current_session_id must be filtered out of skip_names.
+
+        Invokes main() with a hostile session_id. Asserts skip_names
+        passed to cleanup_old_tasks does NOT contain the hostile value.
+        Other skip members (team_name, task_list_id) must still pass.
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value=hostile_value),
+            patch("session_end.get_team_name", return_value="team-A"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        mock_tasks_ref = {}
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks_ref["m"] = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_tasks = mock_tasks_ref["m"]
+        mock_tasks.assert_called_once()
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+
+        assert hostile_value not in skip_names, (
+            f"Hostile current_session_id={hostile_value!r} leaked into "
+            f"skip_names={skip_names!r}. Cycle-5 allowlist on session_id "
+            f"must filter it (mirroring task_list_id treatment)."
+        )
+        # Sanity: the other two skip members still pass through.
+        assert "team-A" in skip_names
+        assert "task-C" in skip_names
+
+    def test_well_formed_session_id_passes_through(self):
+        """Regression guard: well-formed UUID-shaped session_id still admitted."""
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        good_session = "5ddd5636-d408-4892-aaad-7c4eed80765d"
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": "task-C"}, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value=good_session),
+            patch("session_end.get_team_name", return_value="team-A"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+        assert good_session in skip_names
+
+
+class TestSentinelFalseReapHardening:
+    """Cycle-5 Test 4 (LOAD-BEARING) — sentinel from `_dir_max_child_mtime`
+    causes caller to skip, NOT false-reap.
+
+    Architect M1 / Backend L5 hardening: under a permission regression
+    where every child stat raises, the OLD helper fell back to parent
+    mtime — meaning a permission-anomaly dir whose parent happens to be
+    aged would be REAPED on stale-but-unobserved age. Cycle-5 returns
+    `None` sentinel in this case; caller treats as `skipped`.
+
+    This is the most consequential cycle-5 invariant — counter-test-by-
+    revert is required.
+    """
+
+    def test_sentinel_returned_when_all_child_stats_fail(self, tmp_path):
+        """Total probe failure → `_dir_max_child_mtime` returns None.
+
+        Construct a dir with one child; mock `Path.lstat` to raise
+        OSError on that child. The helper should return `None` because
+        `saw_any_child=True` but `latest` stays 0.0.
+        """
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        from session_end import _dir_max_child_mtime
+
+        d = tmp_path / "pact-probetarget"
+        d.mkdir()
+        child = d / "1.json"
+        child.write_text("{}")
+
+        real_lstat = _Path.lstat
+
+        def flaky_lstat(self, *args, **kwargs):
+            if str(self) == str(child):
+                raise OSError("permission denied")
+            return real_lstat(self, *args, **kwargs)
+
+        with _patch.object(_Path, "lstat", flaky_lstat):
+            result = _dir_max_child_mtime(d, glob="*.json")
+
+        assert result is None, (
+            f"Expected sentinel None, got {result!r}. saw_any_child=True "
+            f"but every child.lstat() raised → must return sentinel, NOT "
+            f"fall back to parent mtime (false-reap risk)."
+        )
+
+    def test_caller_skips_on_sentinel_no_false_reap(self, tmp_path):
+        """`cleanup_old_tasks` increments skipped (not reaped) on sentinel.
+
+        Same scenario as above wrapped in the caller. Pre-cycle-5 the
+        caller used parent-mtime fallback (40d) → reaped. Post-cycle-5
+        the caller honors the sentinel → skipped == 1, reaped == 0.
+        """
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        from session_end import cleanup_old_tasks
+
+        d = _make_task_dir(
+            tmp_path, "pact-probetarget",
+            child_ages_days=[5], parent_age_days=40,
+        )
+        child = d / "1.json"
+
+        real_lstat = _Path.lstat
+
+        def flaky_lstat(self, *args, **kwargs):
+            if str(self) == str(child):
+                raise OSError("permission denied")
+            return real_lstat(self, *args, **kwargs)
+
+        with _patch.object(_Path, "lstat", flaky_lstat):
+            reaped, skipped = cleanup_old_tasks(
+                skip_names={"pact-current"},
+                tasks_base_dir=str(tmp_path),
+                max_age_days=30,
+            )
+
+        assert reaped == 0, (
+            "Caller must NOT reap on sentinel. If reaped == 1, the "
+            "sentinel-handling guard in cleanup_old_tasks (`if mtime is "
+            "None: skipped += 1; continue`) was removed or short-circuited."
+        )
+        assert skipped == 1
+        assert d.exists()
