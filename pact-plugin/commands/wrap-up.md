@@ -18,7 +18,7 @@ TaskUpdate(taskId, owner="secretary")
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
 
-> **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 3) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
+> **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 7) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
 
 ## 2. Documentation Sync
 
@@ -107,5 +107,5 @@ Audit and optionally clean up Task state:
 Use `AskUserQuestion` with these exact options:
 - **"Yes, continue"** (description: "Keep team alive, ready for next task") → On selection: Report "Ready for next task."
 - **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
-- **"No, end session"** (description: "End session — platform reaps teammates, 30-day TTL handles team/task cleanup (recommended)") → On selection: Report "Session complete. Teammate processes will be terminated when this session ends. Team and task directories (`~/.claude/teams/`, `~/.claude/tasks/`) are reaped automatically after 30 days by TTL cleanup (PR #433)."
-- **"End session (graceful)"** (description: "Explicit shutdown + TeamDelete — for immediate zero-residue cleanup or pathological states") → On selection: Shut down remaining teammates — send `shutdown_request` individually to each active teammate **by name** (do NOT broadcast structured messages via `to: "*"` — broadcasts only support plain text). Wait for each response. Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
+- **"No, end session"** (description: "Natural cleanup — platform reaps processes, 30-day TTL cleans directories (recommended)") → On selection: Report "Session complete. Teammate processes will be terminated when this session ends. Team and task directories (`~/.claude/teams/`, `~/.claude/tasks/`) are reaped automatically after 30 days by TTL cleanup (PR #433)."
+- **"End session (graceful)"** (description: "Explicit shutdown + TeamDelete — for immediate cleanup or recovery from interrupted sessions") → On selection: Shut down remaining teammates — send `shutdown_request` individually to each active teammate **by name** (do NOT broadcast structured messages via `to: "*"` — broadcasts only support plain text). Wait for each response. Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
