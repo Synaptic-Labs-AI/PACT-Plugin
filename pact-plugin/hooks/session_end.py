@@ -332,7 +332,7 @@ def cleanup_old_sessions(
         pass
 
 
-def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float:
+def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
     """
     Return the max mtime across children of `entry` matching `glob`.
 
@@ -351,29 +351,41 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float:
     would false-reap on parent-dir mtime. Max-child mtime is the tight
     upper bound on "when was anything under this dir last touched."
 
-    Falls back to `entry.stat().st_mtime` when `latest` stays 0.0 after
-    the child scan. That covers two cases: (a) the intended one — no
-    matching children exist, so a truly empty stale dir still ages out
-    rather than being pinned alive forever; and (b) the edge case where
-    children exist but every `child.lstat()` raised OSError (e.g. a
-    permission-anomaly where every child is unreadable). In case (b)
-    the fallback mis-ages the dir as if it were empty. This is accepted
-    as a graceful degradation — the alternative (raise on partial-read
-    failure) would bubble into the caller's best-effort reaper path.
+    Return values (cycle-5 refinement):
+    - `float`: either a successful max-child mtime, OR the parent's
+      `lstat().st_mtime` when the dir is legitimately empty (no children
+      matched the glob).
+    - `None` sentinel: "could not determine age." Two triggers:
+      (a) outer `entry.glob()` raised OSError AND parent `lstat()` also
+      raised — we can't enumerate OR fall back; OR
+      (b) at least one child was observed but EVERY `child.lstat()`
+      raised — distinguishable from empty-dir because we saw children.
+      Callers MUST treat `None` as "skip this entry, count as skipped"
+      rather than proceeding to an age calculation that would collapse
+      "can't observe" into "use parent mtime" (a false-reap risk under
+      permission regressions). The empty-dir case keeps the old semantic
+      (fall back to parent mtime so stale empty dirs still age out).
 
-    Fail-open: never raises on glob/child-stat failure. If even the
-    parent stat fails, re-raises OSError to the caller's per-entry
-    try/except.
+    Fail-open: never raises. Returns a valid mtime or `None` in every
+    branch. The parent-stat fallback uses `lstat()` (symlink-own
+    semantics) for defense-in-isolation against callers that might
+    forget an `is_symlink` guard — cycle-2 F2 pattern.
 
     Args:
         entry: Directory to probe.
         glob: Glob pattern selecting which children to consult. Default
             `"*.json"` matches the tasks-reaper convention; teams reaper
             passes `"*"` to walk all children (config.json + subdirs).
+
+    Returns:
+        Max child mtime, or parent mtime on empty-dir, or `None` sentinel
+        when age cannot be determined (see above).
     """
     latest = 0.0
+    saw_any_child = False
     try:
         for child in entry.glob(glob):
+            saw_any_child = True
             try:
                 # lstat() uses symlink-own semantics (no dereference). A
                 # symlink child (attacker-planted `tasks/{real-dir}/x.json`
@@ -387,18 +399,39 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float:
                 continue
     except OSError:
         pass
-    if latest == 0.0:
-        return entry.stat().st_mtime
-    return latest
+    if latest > 0.0:
+        return latest
+    # latest == 0.0 here. Two distinct scenarios:
+    # - saw_any_child=False: legitimately empty (or outer glob raised
+    #   before yielding). Fall back to parent mtime so stale empties age
+    #   out — the intended empty-dir semantic.
+    # - saw_any_child=True: we saw children but every child.lstat()
+    #   raised. Collapsing this into "use parent mtime" would lose the
+    #   signal that we CAN'T observe the dir. Return sentinel so the
+    #   caller skips instead of false-reaping under a permission skew.
+    if saw_any_child:
+        return None
+    try:
+        # lstat (not stat) — cycle-5 defensive-in-isolation: the caller
+        # already filters symlinks via is_symlink before calling us, but
+        # using lstat here makes the helper safe even when called in
+        # isolation (e.g. from future consumers that forget the guard).
+        return entry.lstat().st_mtime
+    except OSError:
+        # Can neither observe children nor the parent — sentinel.
+        return None
 
 
-def _task_dir_mtime(entry: Path) -> float:
+def _task_dir_mtime(entry: Path) -> float | None:
     """
     Thin back-compat wrapper over `_dir_max_child_mtime(entry, "*.json")`.
 
     Preserved so existing callers and tests that reference the old name
     keep working without a rename sweep. New call sites should use
     `_dir_max_child_mtime` directly with an explicit glob.
+
+    Cycle-5: return type is now `float | None` — wrapper passes through
+    the sentinel. Callers MUST handle `None`.
     """
     return _dir_max_child_mtime(entry, glob="*.json")
 
@@ -475,12 +508,26 @@ def cleanup_old_teams(
             # scope for this reaper.
             if not _TEAM_NAME_PATTERN.match(entry.name):
                 continue
-            if entry.name == current_team_name:
+            # Case-insensitive skip (cycle-5 defensive): pact_context's
+            # `get_team_name()` lowercases its return value and the
+            # generate_team_name INVARIANT pins lowercase, so byte-exact
+            # compare is correct-by-coincidence today. `.lower()` on both
+            # sides tolerates future drift in either producer without a
+            # silent reap of the current session's dir.
+            if entry.name.lower() == current_team_name.lower():
                 continue
             try:
-                age_days = (
-                    time.time() - _dir_max_child_mtime(entry, glob="*")
-                ) / 86400
+                mtime = _dir_max_child_mtime(entry, glob="*")
+                # Cycle-5 sentinel check: `None` means the helper couldn't
+                # determine the dir's effective age (all child stats
+                # raised, or glob + parent lstat both raised). Treat as
+                # "cannot observe" → skipped; do NOT proceed to the age
+                # calculation (which would TypeError on None anyway, but
+                # an explicit guard makes the invariant self-documenting).
+                if mtime is None:
+                    skipped += 1
+                    continue
+                age_days = (time.time() - mtime) / 86400
                 if age_days > max_age_days:
                     shutil.rmtree(entry, ignore_errors=True)
                     reaped += 1
@@ -546,7 +593,14 @@ def cleanup_old_tasks(
             if entry.name in skip_names:
                 continue
             try:
-                age_days = (time.time() - _task_dir_mtime(entry)) / 86400
+                mtime = _task_dir_mtime(entry)
+                # Cycle-5 sentinel check: `None` means the helper couldn't
+                # determine the dir's effective age. Skip rather than
+                # false-reap under a permission regression.
+                if mtime is None:
+                    skipped += 1
+                    continue
+                age_days = (time.time() - mtime) / 86400
                 if age_days > max_age_days:
                     shutil.rmtree(entry, ignore_errors=True)
                     reaped += 1
@@ -679,10 +733,23 @@ def main():
         task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", "")
         if task_list_id and not re.fullmatch(r"[A-Za-z0-9_-]+", task_list_id):
             task_list_id = ""
+        # Cycle-5 symmetry: session_id flows through the SAME allowlist
+        # as task_list_id. Platform-sourced session_ids are UUIDs today,
+        # but the trust boundary (SessionStart stdin JSON) is identical
+        # to CLAUDE_CODE_TASK_LIST_ID's (env var) — defense-in-depth
+        # should not asymmetrically trust one channel. A crafted
+        # session_id with unicode line terminators or path separators
+        # could otherwise leak into the skip-set; the allowlist rejects
+        # by construction. Discard-on-fail semantics match task_list_id.
+        safe_session_id = current_session_id
+        if safe_session_id and not re.fullmatch(
+            r"[A-Za-z0-9_-]+", safe_session_id
+        ):
+            safe_session_id = ""
         # Empty-string members are pruned by discard("") below, so we
-        # do not pre-filter team_name/session_id here — a missing skip
-        # key is the common case (e.g. bare Claude Code with no team).
-        skip_names = {current_team_name, task_list_id, current_session_id}
+        # do not pre-filter team_name here — a missing skip key is the
+        # common case (e.g. bare Claude Code with no team).
+        skip_names = {current_team_name, task_list_id, safe_session_id}
         skip_names.discard("")
         if skip_names:
             tasks_r, tasks_s = cleanup_old_tasks(
