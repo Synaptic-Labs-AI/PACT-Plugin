@@ -3842,6 +3842,54 @@ class TestTeamsCaseInsensitiveSkip:
         )
         assert d.exists()
 
+    def test_different_name_does_not_skip_via_case_match(self, tmp_path):
+        """Asymmetric partner (G7) — entry name that is a SUBSTRING of
+        current_team_name must still reap (not skip).
+
+        Defends against a substring-regression: if the compare drifted
+        from `entry.name.lower() == current_team_name.lower()` to
+        `entry.name.lower() in current_team_name.lower()` (or the
+        reverse), a positive pin with unrelated names would NOT flip
+        red — so this fixture deliberately constructs a substring
+        relationship (`pact-abc` is a prefix of `pact-abcd1234`).
+        Under `==`: different strings → reap (correct).
+        Under `in`: "pact-abc" in "pact-abcd1234" → True → skip
+        (regressed — stale sibling survives).
+
+        The on-disk shorter name must pass `_TEAM_NAME_PATTERN`
+        (`^pact-[a-f0-9-]+$`) — "pact-abc" does (a,b,c are hex).
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        # Substring-relationship fixture: on-disk "pact-abc" is a prefix
+        # (and therefore a substring) of current_team_name "pact-abcd1234".
+        # Both pass the pattern gate. Under EQUALITY, different strings
+        # → reap. Under `in`-substring, shorter matches longer → skip
+        # (the regression we're guarding against).
+        ondisk = "pact-abc"
+        d = tmp_path / ondisk
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(d / "config.json"), (old, old))
+        _os.utime(str(d), (old, old))
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-abcd1234",  # contains "pact-abc"
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1, (
+            "Substring-relationship sibling must REAP, not skip. If "
+            "reaped == 0, the compare likely regressed to substring "
+            "semantics (e.g. `entry.name.lower() in current_team_name."
+            "lower()`) rather than equality."
+        )
+        assert not d.exists()
+
 
 class TestDirMaxChildMtimeFallbackLstat:
     """Cycle-5 Test 2 — `_dir_max_child_mtime` parent fallback uses `lstat()`.
@@ -4087,6 +4135,59 @@ class TestSentinelFalseReapHardening:
             "Caller must NOT reap on sentinel. If reaped == 1, the "
             "sentinel-handling guard in cleanup_old_tasks (`if mtime is "
             "None: skipped += 1; continue`) was removed or short-circuited."
+        )
+        assert skipped == 1
+        assert d.exists()
+
+    def test_caller_skips_on_sentinel_no_false_reap_teams_path(self, tmp_path):
+        """G8 — teams-side sentinel guard mirror.
+
+        Mirrors `test_caller_skips_on_sentinel_no_false_reap` but via
+        `cleanup_old_teams` rather than `cleanup_old_tasks`. The
+        sentinel-handling guard exists in BOTH reapers (cleanup_old_teams
+        at session_end.py:527-529 and cleanup_old_tasks at 600-602). Test
+        4's original caller-integration pin only probes the tasks path —
+        a regression that removes ONLY the teams-side guard would not be
+        caught. This pin closes that coverage gap.
+
+        Mock `_dir_max_child_mtime` at the module level to force a
+        sentinel return for the target dir; the teams caller must honor
+        it with `skipped += 1`, not false-reap. Team name must pass the
+        pattern gate (hex-only) AND differ from current_team_name.
+        """
+        from unittest.mock import patch as _patch
+        import session_end as _se
+        from session_end import cleanup_old_teams
+
+        # Hex-shaped stale sibling (will be probed once pattern gate + skip
+        # check pass) and a hex-shaped current-team skip value.
+        d = tmp_path / "pact-deadbeef"
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        import os as _os
+        import time as _time
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(d / "config.json"), (old, old))
+        _os.utime(str(d), (old, old))
+
+        real_probe = _se._dir_max_child_mtime
+
+        def sentinel_probe(entry, glob="*.json"):
+            if str(entry) == str(d):
+                return None  # force sentinel for target
+            return real_probe(entry, glob=glob)
+
+        with _patch.object(_se, "_dir_max_child_mtime", sentinel_probe):
+            reaped, skipped = cleanup_old_teams(
+                current_team_name="pact-abcd1234",
+                teams_base_dir=str(tmp_path),
+                max_age_days=30,
+            )
+
+        assert reaped == 0, (
+            "teams caller must NOT reap on sentinel. If reaped == 1, the "
+            "teams-side `if mtime is None: skipped += 1; continue` guard "
+            "(session_end.py:527-529) was removed or short-circuited."
         )
         assert skipped == 1
         assert d.exists()
