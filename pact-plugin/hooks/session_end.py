@@ -188,19 +188,29 @@ def _sweep_teachback_markers(directory: Path) -> None:
         pass
 
 
-# Regex for validating UUID-format directory names (session IDs)
+# Regex for validating UUID-format directory names (session IDs).
+# `\Z` (strict end-of-string) is used instead of `$`: in Python `re`,
+# `$` matches end-of-string OR immediately before a trailing newline,
+# so `deadbeef-dead-beef-dead-beefdeadbeef\n` would pass a `$` anchor
+# and re-enter the skip-set / reaper allowlist as a crafted name.
+# `\Z` rejects trailing newlines and is the stricter anchor.
 _UUID_PATTERN = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z'
 )
 
-# Regex for validating PACT team directory names. Mirrors the INVARIANT
-# documented on generate_team_name in session_init.py — every team dir
-# that PACT creates is "pact-" + lowercase hex (with optional internal
-# hyphens for the random-suffix fallback shape). Non-matching entries in
-# ~/.claude/teams/ belong to other tooling and MUST NOT be reaped by
-# cleanup_old_teams, even if they're stale by mtime. The reaper treats
-# ~/.claude/teams/ as shared space, not PACT-owned space.
-_TEAM_NAME_PATTERN = re.compile(r'^pact-[a-f0-9-]+$')
+# Regex for validating PACT team directory names. Intentionally LOOSER
+# than what `generate_team_name` in session_init.py actually emits —
+# the producer emits `pact-` + `secrets.token_hex(4)` (8 lowercase hex
+# chars, no internal hyphens) or the session-id-prefix fallback
+# (`pact-` + 8 hex chars). This regex accepts any `pact-`-prefixed
+# lowercase-hex-and-hyphen shape so the reaper tolerates future drift
+# in the producer (e.g. a naming scheme that introduces internal
+# hyphens) without silently reaping a live team dir.
+# Non-matching entries in ~/.claude/teams/ belong to other tooling and
+# MUST NOT be reaped by cleanup_old_teams, even if they're stale by
+# mtime. The reaper treats ~/.claude/teams/ as shared space, not
+# PACT-owned space. `\Z` (strict end-of-string) — see _UUID_PATTERN.
+_TEAM_NAME_PATTERN = re.compile(r'^pact-[a-f0-9-]+\Z')
 
 # Default threshold for active (non-paused) session directory cleanup.
 # 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
@@ -746,10 +756,22 @@ def main():
             r"[A-Za-z0-9_-]+", safe_session_id
         ):
             safe_session_id = ""
-        # Empty-string members are pruned by discard("") below, so we
-        # do not pre-filter team_name here — a missing skip key is the
-        # common case (e.g. bare Claude Code with no team).
-        skip_names = {current_team_name, task_list_id, safe_session_id}
+        # Cycle-7 symmetry: team_name flows through the SAME allowlist
+        # as task_list_id and session_id. Bounded today by the
+        # generate_team_name producer-side filter (lowercase-hex-only,
+        # see the INVARIANT comment in session_init.py), but a future
+        # drift in the producer — or a non-PACT writer that ever leaks
+        # a team_name into pact_context — should not be trusted as a
+        # skip key without re-validation. Defense-in-depth should not
+        # asymmetrically trust one of the three channels. Discard-on-
+        # fail semantics match task_list_id/session_id — an empty
+        # skip key is the common case and is pruned by discard("") below.
+        safe_team_name = current_team_name
+        if safe_team_name and not re.fullmatch(
+            r"[A-Za-z0-9_-]+", safe_team_name
+        ):
+            safe_team_name = ""
+        skip_names = {safe_team_name, task_list_id, safe_session_id}
         skip_names.discard("")
         if skip_names:
             tasks_r, tasks_s = cleanup_old_tasks(

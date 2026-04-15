@@ -173,6 +173,15 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # inputs to "unknown" before the journal write; this schema contract
     # catches any future writer that bypasses that path.
     "session_start": {"source": str},
+    # hooks/session_end.py writes session_end with an optional `warning`
+    # string when check_unpaused_pr detects an open PR that was NOT
+    # paused (no memory consolidation). The empty-dict registration in
+    # _REQUIRED_FIELDS_BY_TYPE above ("session_end": {}) is what
+    # ACTIVATES this optional check — _validate_event_schema
+    # short-circuits on unknown event types and would otherwise skip
+    # the optional loop. Symmetric with the cleanup_summary registration
+    # shipped in the same PR (#412 Fix B).
+    "session_end": {"warning": str},
     # hooks/session_end.py writes cleanup_summary after the teams/tasks
     # reaper runs (#412 Fix B). Counts-only payload; no identifying names
     # (audit surface area minimization). `reaper_ran` discriminates
