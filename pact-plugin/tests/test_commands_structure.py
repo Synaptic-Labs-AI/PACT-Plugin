@@ -95,14 +95,14 @@ class TestAskUserQuestionOptions:
     def peer_review_content(self):
         return (COMMANDS_DIR / "peer-review.md").read_text(encoding="utf-8")
 
-    # --- wrap-up.md Step 7 ---
+    # --- wrap-up.md Step 8 ---
 
-    def test_wrapup_has_three_options(self, wrapup_content):
-        """Step 7 session decision has 3 options."""
+    def test_wrapup_has_four_options(self, wrapup_content):
+        """Step 8 session decision has 4 options."""
         # Extract only from the Session Decision section (after "Session Decision")
         session_section = wrapup_content.split("Session Decision")[1]
         labels = _extract_option_labels(session_section)
-        assert len(labels) == 3, f"wrap-up.md session decision should have 3 options, found {len(labels)}: {labels}"
+        assert len(labels) == 4, f"wrap-up.md session decision should have 4 options, found {len(labels)}: {labels}"
 
     def test_wrapup_yes_continue_option(self, wrapup_content):
         assert '"Yes, continue"' in wrapup_content
@@ -112,6 +112,9 @@ class TestAskUserQuestionOptions:
 
     def test_wrapup_no_end_session_option(self, wrapup_content):
         assert '"No, end session"' in wrapup_content
+
+    def test_wrapup_graceful_end_session_option(self, wrapup_content):
+        assert '"End session (graceful)"' in wrapup_content
 
     def test_wrapup_pause_invokes_pause_command(self, wrapup_content):
         """Pause option should invoke /PACT:pause."""

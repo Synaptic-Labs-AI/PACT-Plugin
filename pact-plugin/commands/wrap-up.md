@@ -18,7 +18,7 @@ TaskUpdate(taskId, owner="secretary")
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
 
-> **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 3) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
+> **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 7) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
 
 ## 2. Documentation Sync
 
@@ -52,12 +52,12 @@ entities: ["orchestration_calibration", "{domain}"]
 
 **Skip when**: Session was trivial (single comPACT, no variety assessment performed).
 
-## 5. Journal Drain-Before-Delete
+## 5. Journal Drain-Before-Close
 
-Before deleting the team (step 7), ensure all journal entries have been processed:
+Before ending the session (step 8), ensure all journal entries have been processed:
 
 1. Confirm the secretary has completed the consolidation harvest (step 1). The secretary should confirm via `SendMessage`: "All journal entries processed to pact-memory."
-2. **Only on confirmation**: Proceed to worktree cleanup and team deletion.
+2. **Only on confirmation**: Proceed to worktree cleanup and session decision.
 3. **If secretary cannot confirm**: Warn user — unprocessed journal entries will not be distilled to pact-memory. The journal itself is safe (stored in `~/.claude/pact-sessions/`, not the team directory).
 
 **Journal event**: Write a `session_end` event after confirmation:
@@ -68,7 +68,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_end --session-dir '{session_dir}'
 ```
 
-**Recovery note**: The journal survives `TeamDelete` — it lives in `~/.claude/pact-sessions/{slug}/{session_id}/`, independent of the team directory. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
+**Recovery note**: The journal lives in `~/.claude/pact-sessions/{slug}/{session_id}/`, independent of the team directory — it survives both natural TTL cleanup and explicit `TeamDelete`. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
 
 ## 6. Worktree Cleanup
 
@@ -107,4 +107,5 @@ Audit and optionally clean up Task state:
 Use `AskUserQuestion` with these exact options:
 - **"Yes, continue"** (description: "Keep team alive, ready for next task") → On selection: Report "Ready for next task."
 - **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
-- **"No, end session"** (description: "Shut down teammates and close session") → On selection: Shut down remaining teammates — send `shutdown_request` individually to each active teammate **by name** (do NOT broadcast structured messages via `to: "*"` — broadcasts only support plain text). Wait for each response. Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
+- **"No, end session"** (description: "Natural cleanup — platform reaps processes, 30-day TTL cleans directories (recommended)") → On selection: Report "Session complete. Teammate processes will be terminated when this session ends. Team and task directories (`~/.claude/teams/`, `~/.claude/tasks/`) are reaped automatically after 30 days by TTL cleanup (PR #433)."
+- **"End session (graceful)"** (description: "Explicit shutdown + TeamDelete — for immediate cleanup or recovery from interrupted sessions") → On selection: Shut down remaining teammates — send `shutdown_request` individually to each active teammate **by name** (do NOT broadcast structured messages via `to: "*"` — broadcasts only support plain text). Wait for each response. Delete the team (`TeamDelete`). If `TeamDelete` fails because active members remain, report which teammates are still running and ask the user whether to force shutdown or leave them. Report "Session complete."
