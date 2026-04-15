@@ -57,7 +57,13 @@ _NAME_MAX_CHARS = 200
 # positive regex allowlist is the recommended defense (option 1 over
 # Path.name identity checks, which admit ".." as .name returns ".."
 # verbatim rather than the expected empty string).
-_SAFE_PATH_COMPONENT_RE = re.compile(r"[A-Za-z0-9_-]+")
+SAFE_PATH_COMPONENT_RE = re.compile(r"[A-Za-z0-9_-]+")
+# Back-compat alias for callers that imported the pre-cycle-8 private name.
+# The underscore-prefixed binding remains a module-local alias so existing
+# test imports (`from shared.session_state import _SAFE_PATH_COMPONENT_RE`)
+# and any external consumer that grandfathered in keeps working. New code
+# should import the public name via shared/__init__.py.
+_SAFE_PATH_COMPONENT_RE = SAFE_PATH_COMPONENT_RE
 
 
 # Characters stripped from every string that flows into model-visible
@@ -119,7 +125,7 @@ def _sanitize_member_name(name: str) -> str:
     return cleaned
 
 
-def _is_safe_path_component(value: str) -> bool:
+def is_safe_path_component(value: str) -> bool:
     """
     Return True if `value` is safe to use as a single-segment path
     component.
@@ -131,7 +137,7 @@ def _is_safe_path_component(value: str) -> bool:
     nulls, and controls at team-name generation time. This guard is a
     second line of defense at the I/O boundary.
 
-    Uses a positive regex allowlist (`_SAFE_PATH_COMPONENT_RE`) instead
+    Uses a positive regex allowlist (`SAFE_PATH_COMPONENT_RE`) instead
     of the tempting `Path(value).name == value` identity check. The
     identity check is BROKEN: `Path("..").name == ".."` is True, so
     the check admits `..` as "safe" and permits one-level directory
@@ -147,7 +153,12 @@ def _is_safe_path_component(value: str) -> bool:
     """
     if not isinstance(value, str) or not value:
         return False
-    return _SAFE_PATH_COMPONENT_RE.fullmatch(value) is not None
+    return SAFE_PATH_COMPONENT_RE.fullmatch(value) is not None
+
+
+# Back-compat alias for callers that imported the pre-cycle-8 private
+# name. See the matching `_SAFE_PATH_COMPONENT_RE` alias above.
+_is_safe_path_component = is_safe_path_component
 
 
 # --- Default dict factory -------------------------------------------------
@@ -373,7 +384,7 @@ def _read_team_members(
         capped) before inclusion — defense-in-depth against
         prompt-injection via crafted config. Empty list on any error.
     """
-    if not team_name or not _is_safe_path_component(team_name):
+    if not team_name or not is_safe_path_component(team_name):
         return []
 
     try:
@@ -428,7 +439,7 @@ def _read_task_counts(
     """
     counts = {"completed": 0, "in_progress": 0, "pending": 0, "total": 0}
 
-    if not team_name or not _is_safe_path_component(team_name):
+    if not team_name or not is_safe_path_component(team_name):
         return counts
 
     try:
@@ -479,9 +490,9 @@ def _read_feature_subject_from_disk(
     """
     if not team_name or not feature_id:
         return None
-    if not _is_safe_path_component(team_name):
+    if not is_safe_path_component(team_name):
         return None
-    if not _is_safe_path_component(feature_id):
+    if not is_safe_path_component(feature_id):
         return None
 
     try:

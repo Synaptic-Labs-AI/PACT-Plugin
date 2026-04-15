@@ -184,17 +184,24 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "session_end": {"warning": str},
     # hooks/session_end.py writes cleanup_summary after the teams/tasks
     # reaper runs (#412 Fix B). Counts-only payload; no identifying names
-    # (audit surface area minimization). `reaper_ran` discriminates
-    # "reaper executed and found nothing" (True, 0/0/0/0) from "both
-    # reapers short-circuited at callsite" (False, 0/0/0/0); without it
-    # the two states are indistinguishable in the journal.
+    # (audit surface area minimization). `teams_ran`/`tasks_ran`
+    # discriminate "reaper executed and found nothing" (True, 0/0) from
+    # "reaper short-circuited at callsite" (False, 0/0) per side; without
+    # them the two states are indistinguishable in the journal. Cycle-8
+    # split these from the older single `reaper_ran` bool and the single
+    # `ttl_days` int into per-reaper fields so an auditor can tell WHICH
+    # side short-circuited and which TTL applied on either side
+    # (currently both default to 30 days; split future-proofs against
+    # TTL divergence).
     "cleanup_summary": {
         "teams_reaped": int,
         "teams_skipped": int,
         "tasks_reaped": int,
         "tasks_skipped": int,
-        "ttl_days": int,
-        "reaper_ran": bool,
+        "teams_ttl_days": int,
+        "tasks_ttl_days": int,
+        "teams_ran": bool,
+        "tasks_ran": bool,
     },
 }
 

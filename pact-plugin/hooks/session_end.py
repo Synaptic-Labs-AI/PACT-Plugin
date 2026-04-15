@@ -41,6 +41,7 @@ from shared.session_journal import (
     read_last_event_from,
 )
 
+from shared.session_state import is_safe_path_component
 from shared.task_utils import get_task_list
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
@@ -58,7 +59,6 @@ def get_project_slug() -> str:
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
-    sessions_dir: str | None = None,
 ) -> str | None:
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
@@ -79,7 +79,6 @@ def check_unpaused_pr(
     Args:
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
 
     Returns:
         Warning string if an unpaused PR is detected, otherwise None.
@@ -432,20 +431,6 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
         return None
 
 
-def _task_dir_mtime(entry: Path) -> float | None:
-    """
-    Thin back-compat wrapper over `_dir_max_child_mtime(entry, "*.json")`.
-
-    Preserved so existing callers and tests that reference the old name
-    keep working without a rename sweep. New call sites should use
-    `_dir_max_child_mtime` directly with an explicit glob.
-
-    Cycle-5: return type is now `float | None` — wrapper passes through
-    the sentinel. Callers MUST handle `None`.
-    """
-    return _dir_max_child_mtime(entry, glob="*.json")
-
-
 def cleanup_old_teams(
     current_team_name: str,
     teams_base_dir: str | None = None,
@@ -559,9 +544,10 @@ def cleanup_old_tasks(
 
     Skips every entry whose name is in `skip_names`. Fails closed —
     returns (0, 0) if `skip_names` is empty or contains only blank
-    strings. Per-entry mtime is probed via `_task_dir_mtime` (max-child
-    with parent fallback) because platform writes update individual
-    `{id}.json` files without bumping the parent dir's mtime.
+    strings. Per-entry mtime is probed via
+    `_dir_max_child_mtime(entry, glob="*.json")` because platform writes
+    update individual `{id}.json` files without bumping the parent dir's
+    mtime.
 
     Best-effort: never raises. Swallows OSError per-entry and outer.
 
@@ -603,7 +589,7 @@ def cleanup_old_tasks(
             if entry.name in skip_names:
                 continue
             try:
-                mtime = _task_dir_mtime(entry)
+                mtime = _dir_max_child_mtime(entry, glob="*.json")
                 # Cycle-5 sentinel check: `None` means the helper couldn't
                 # determine the dir's effective age. Skip rather than
                 # false-reap under a permission regression.
@@ -620,6 +606,66 @@ def cleanup_old_tasks(
     except OSError:
         pass
     return reaped, skipped
+
+
+def _assemble_tasks_skip_set(
+    team_name: str,
+    task_list_id: str,
+    session_id: str,
+) -> set[str]:
+    """
+    Build the skip-set for `cleanup_old_tasks` from the three platform-
+    key channels that can address `~/.claude/tasks/{name}/`.
+
+    The three channels:
+    - `team_name` — PACT canonical (from pact_context.get_team_name()).
+      Bounded by the `generate_team_name` producer-side filter, but a
+      non-PACT writer or future producer drift could still leak unsafe
+      values, so the same allowlist applies (cycle-7 symmetry).
+    - `task_list_id` — user-controlled env var `CLAUDE_CODE_TASK_LIST_ID`
+      (platform-sourced). The positive-regex allowlist prevents a
+      crafted value from bypassing the skip-set via unicode line
+      terminators or path separators. Per PR #426 cycle-1 finding
+      (patterns_path_name_fallback_escape) — the allowlist matches
+      real-world task_list_id shapes (hex, uuid, alphanumeric ids)
+      while rejecting dots, slashes, null bytes, and control chars
+      by construction.
+    - `session_id` — bare Claude Code fallback per
+      `task_utils.get_task_list` (platform-sourced via SessionStart
+      stdin). Flows through the SAME allowlist as `task_list_id`
+      (cycle-5 symmetry) — defense-in-depth should not asymmetrically
+      trust one channel.
+
+    Fail-discard on allowlist mismatch: a failing value is silently
+    dropped. The skip-set is ADDITIVE — missing a skip entry means we
+    fall back to the other keys that DID pass, so discarding is
+    strictly safer than trusting an untrusted value as a path key.
+    Empty-string members are pruned by `discard("")`, so the caller
+    does not need to pre-filter empties.
+
+    Extracted from `main()` for direct unit testability — the function
+    takes only primitives and returns a deterministic set, so callers
+    can assert skip-set contents without mocking the session context.
+
+    Args:
+        team_name: Raw team_name from pact_context. May be empty.
+        task_list_id: Raw CLAUDE_CODE_TASK_LIST_ID env var. May be empty.
+        session_id: Raw session_id from pact_context. May be empty.
+
+    Returns:
+        The skip-set, with empty strings and allowlist-failing values
+        removed. Caller treats a non-empty return as "the tasks reaper
+        is safe to run"; empty means "all channels short-circuited or
+        failed — do NOT run the tasks reaper" (fail-closed).
+    """
+    safe_team_name = team_name if is_safe_path_component(team_name) else ""
+    safe_task_list_id = (
+        task_list_id if is_safe_path_component(task_list_id) else ""
+    )
+    safe_session_id = session_id if is_safe_path_component(session_id) else ""
+    skip_names = {safe_team_name, safe_task_list_id, safe_session_id}
+    skip_names.discard("")
+    return skip_names
 
 
 def _cleanup_old_checkpoints(
@@ -656,8 +702,20 @@ def _cleanup_old_checkpoints(
 
     try:
         for checkpoint_file in checkpoint_dir.glob("*.json"):
+            # Skip symlinks (live or dangling). Mirrors cycle-1 hardening
+            # on the three sibling reapers — `is_symlink()` uses lstat
+            # semantics, so it short-circuits before any follow-semantic
+            # probe. Prevents a planted link from driving the TTL oracle
+            # off the target's mtime or from unlinking the link when the
+            # link's own mtime is within TTL but the target's is older.
+            if checkpoint_file.is_symlink():
+                continue
             try:
-                mtime = checkpoint_file.stat().st_mtime
+                # lstat (not stat) — cycle-2 defense: even with the
+                # symlink guard above, lstat is the correct probe for
+                # the link's own mtime if the guard is ever removed or
+                # if a future caller bypasses it. Defense-in-isolation.
+                mtime = checkpoint_file.lstat().st_mtime
                 if mtime < cutoff_time:
                     checkpoint_file.unlink()
                     cleaned += 1
@@ -725,54 +783,16 @@ def main():
             )
             teams_reaper_ran = True
 
-        # Union skip-set guards all three platform-key paths that can
-        # address ~/.claude/tasks/: team_name (PACT canonical),
-        # CLAUDE_CODE_TASK_LIST_ID (platform env var), and session_id
-        # (bare Claude Code fallback per task_utils.get_task_list).
-        # CLAUDE_CODE_TASK_LIST_ID is user-controlled input; apply a
-        # positive-regex allowlist before trusting it as a skip key so
-        # a crafted value cannot bypass the skip-set via unicode line
-        # terminators or path separators. Per PR #426 cycle 1 finding
-        # (patterns_path_name_fallback_escape) — the allowlist matches
-        # real-world task_list_id shapes (hex, uuid, alphanumeric ids)
-        # while rejecting dots, slashes, null bytes, and control chars
-        # by construction. A failing value is silently discarded — the
-        # skip-set is additive (missing a skip entry means we fall back
-        # to the other keys that DID pass), so discarding is strictly
-        # safer than trusting.
-        task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", "")
-        if task_list_id and not re.fullmatch(r"[A-Za-z0-9_-]+", task_list_id):
-            task_list_id = ""
-        # Cycle-5 symmetry: session_id flows through the SAME allowlist
-        # as task_list_id. Platform-sourced session_ids are UUIDs today,
-        # but the trust boundary (SessionStart stdin JSON) is identical
-        # to CLAUDE_CODE_TASK_LIST_ID's (env var) — defense-in-depth
-        # should not asymmetrically trust one channel. A crafted
-        # session_id with unicode line terminators or path separators
-        # could otherwise leak into the skip-set; the allowlist rejects
-        # by construction. Discard-on-fail semantics match task_list_id.
-        safe_session_id = current_session_id
-        if safe_session_id and not re.fullmatch(
-            r"[A-Za-z0-9_-]+", safe_session_id
-        ):
-            safe_session_id = ""
-        # Cycle-7 symmetry: team_name flows through the SAME allowlist
-        # as task_list_id and session_id. Bounded today by the
-        # generate_team_name producer-side filter (lowercase-hex-only,
-        # see the INVARIANT comment in session_init.py), but a future
-        # drift in the producer — or a non-PACT writer that ever leaks
-        # a team_name into pact_context — should not be trusted as a
-        # skip key without re-validation. Defense-in-depth should not
-        # asymmetrically trust one of the three channels. Discard-on-
-        # fail semantics match task_list_id/session_id — an empty
-        # skip key is the common case and is pruned by discard("") below.
-        safe_team_name = current_team_name
-        if safe_team_name and not re.fullmatch(
-            r"[A-Za-z0-9_-]+", safe_team_name
-        ):
-            safe_team_name = ""
-        skip_names = {safe_team_name, task_list_id, safe_session_id}
-        skip_names.discard("")
+        # Assemble skip-set via the module-level helper — see
+        # `_assemble_tasks_skip_set` for the full rationale on the three
+        # platform-key channels and the positive-regex allowlist. The
+        # helper takes only primitives so it's directly unit-testable
+        # without mocking the session context.
+        skip_names = _assemble_tasks_skip_set(
+            team_name=current_team_name,
+            task_list_id=os.environ.get("CLAUDE_CODE_TASK_LIST_ID", ""),
+            session_id=current_session_id or "",
+        )
         if skip_names:
             tasks_r, tasks_s = cleanup_old_tasks(
                 skip_names=skip_names,
@@ -781,10 +801,16 @@ def main():
 
         # Best-effort audit record for the reapers. A journal write
         # failure does not undo the cleanup that already happened.
-        # `reaper_ran` discriminates "reaper executed and found nothing"
-        # (True, 0/0/0/0) from "both reapers short-circuited at
-        # callsite" (False, 0/0/0/0) — otherwise the two states are
-        # indistinguishable in the journal.
+        # `teams_ran`/`tasks_ran` discriminate "reaper executed and
+        # found nothing" (True, 0/0) from "reaper short-circuited at
+        # callsite" (False, 0/0) per side — otherwise the two states
+        # are indistinguishable in the journal. Cycle-8 replaces the
+        # older single `reaper_ran` bool with per-reaper bools so an
+        # auditor can tell WHICH side short-circuited. Likewise
+        # `teams_ttl_days`/`tasks_ttl_days` replace the single
+        # `ttl_days` — currently both default to `_SESSION_MAX_AGE_DAYS`
+        # but the split future-proofs against TTL divergence (e.g. if
+        # the tasks reaper ever gets a dual-TTL like cleanup_old_sessions).
         try:
             append_event(make_event(
                 "cleanup_summary",
@@ -792,8 +818,10 @@ def main():
                 teams_skipped=teams_s,
                 tasks_reaped=tasks_r,
                 tasks_skipped=tasks_s,
-                ttl_days=_SESSION_MAX_AGE_DAYS,
-                reaper_ran=(teams_reaper_ran or tasks_reaper_ran),
+                teams_ttl_days=_SESSION_MAX_AGE_DAYS,
+                tasks_ttl_days=_SESSION_MAX_AGE_DAYS,
+                teams_ran=teams_reaper_ran,
+                tasks_ran=tasks_reaper_ran,
             ))
         except Exception as e:
             print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)
