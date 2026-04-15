@@ -3065,6 +3065,124 @@ class TestTaskListIdAllowlistRejection:
 
 
 # =============================================================================
+# Cycle-3 remediation: F2 inner symlink mtime oracle pin — #412 Fix B
+# =============================================================================
+
+
+class TestTaskDirMtimeInnerSymlink:
+    """Pins `child.stat(follow_symlinks=False)` at session_end.py:358.
+
+    `_task_dir_mtime` iterates each `*.json` child to compute the tight
+    max-mtime used as the dir's reap decision. If `stat()` FOLLOWED
+    symlinks, an attacker who plants `tasks/{real-dir}/x.json` as a
+    symlink to an external file could force the reaper's decision to
+    reflect the TARGET's mtime rather than the LINK's — an oracle leak
+    (probe "is /etc/passwd fresh?") and a potential reap-suppression
+    vector (point at a file that's always "touched" to keep the dir
+    alive past its TTL).
+
+    The `follow_symlinks=False` flag makes `stat()` use lstat semantics
+    so the LINK's own mtime drives the decision, not the target's.
+    These two tests pin that invariant asymmetrically: removing the
+    flag flips both tests to fail (counter-test-by-revert verified).
+    """
+
+    def test_old_link_with_fresh_target_causes_reap(self, tmp_path):
+        """Oracle-suppression scenario: old link, fresh target → dir reaps.
+
+        With `follow_symlinks=False`, probe sees link lstat (old) →
+        max-child is old → dir reaped. Without the flag, probe follows
+        to target (fresh) → max-child is fresh → dir preserved
+        (attacker wins: the planted symlink suppresses reap).
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_tasks
+
+        # External target with FRESH mtime (attacker-chosen probe target).
+        target = tmp_path / "external-target.json"
+        target.write_text("{}")
+        _os.utime(str(target), (_time.time(), _time.time()))
+
+        # tasks subdir with single symlinked `.json` child whose LINK
+        # mtime is OLD (40d). lstat must win.
+        d = tmp_path / "pact-planted"
+        d.mkdir()
+        link = d / "1.json"
+        link.symlink_to(target)
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(link), (old, old), follow_symlinks=False)
+        # Force parent dir mtime old too so fallback wouldn't mask the
+        # intended decision path.
+        _os.utime(str(d), (old, old))
+
+        reaped, _ = cleanup_old_tasks(
+            skip_names={"pact-current"},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        # Link-mtime (40d) > TTL → reap. If target (fresh) were used
+        # instead, this would return 0 and the test would fail.
+        assert reaped == 1, (
+            "Old-link-with-fresh-target scenario must reap — link lstat "
+            "mtime (40d) should win over target stat mtime (fresh). "
+            "If this fails, `follow_symlinks=False` was likely removed "
+            "from session_end.py:358."
+        )
+        assert not d.exists()
+        # Target must survive (rmtree on the parent dir unlinks the
+        # symlink entry but doesn't recurse through it).
+        assert target.exists()
+
+    def test_fresh_link_with_old_target_preserves_dir(self, tmp_path):
+        """Mirror scenario: fresh link, old target → dir preserved.
+
+        With `follow_symlinks=False`, probe sees link lstat (fresh) →
+        max-child is fresh → dir preserved. Without the flag, probe
+        follows to target (old) → max-child is old → dir reaped
+        (legitimate live task set destroyed).
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_tasks
+
+        # External target with OLD mtime.
+        target = tmp_path / "external-old-target.json"
+        target.write_text("{}")
+        old_time = _time.time() - (60 * 86400)
+        _os.utime(str(target), (old_time, old_time))
+
+        # tasks subdir with fresh-link-to-old-target child.
+        d = tmp_path / "pact-live"
+        d.mkdir()
+        link = d / "1.json"
+        link.symlink_to(target)
+        # Link lstat mtime: fresh (now).
+        _os.utime(str(link), (_time.time(), _time.time()), follow_symlinks=False)
+        # Force parent dir mtime old so a regression that lost lstat
+        # semantics couldn't accidentally be masked by a fresh parent.
+        _os.utime(str(d), (old_time, old_time))
+
+        reaped, _ = cleanup_old_tasks(
+            skip_names={"pact-current"},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        # Link-mtime (fresh) < TTL → preserve. If target (old) were
+        # used instead, dir would reap (reaped == 1) and this would fail.
+        assert reaped == 0, (
+            "Fresh-link-with-old-target scenario must preserve — link "
+            "lstat mtime (fresh) should win over target stat mtime (60d). "
+            "If this fails, `follow_symlinks=False` was likely removed "
+            "from session_end.py:358."
+        )
+        assert d.exists()
+        assert target.exists()
+
+
+# =============================================================================
 # Cycle-1 remediation: symlink pinning (②) — #412 Fix B
 # =============================================================================
 
