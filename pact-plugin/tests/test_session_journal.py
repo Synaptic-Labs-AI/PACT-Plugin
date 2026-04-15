@@ -2945,6 +2945,7 @@ class TestValidateEventSchemaPerType:
             "consolidation_completed": True,
         },
         "session_end": {},  # No required fields; baseline-only.
+        "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
     }
 
     def test_samples_mirror_required_fields_dict(self):
@@ -3575,3 +3576,41 @@ class TestValidateOptionalFieldTypes:
         events = read_events("session_start")
         assert len(events) == 1
         assert events[0].get("source") == "startup"
+
+    def test_cleanup_summary_all_five_fields_pass(self):
+        """cleanup_summary happy path — all 5 int fields present with correct types."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "cleanup_summary",
+            teams_reaped=3,
+            teams_skipped=1,
+            tasks_reaped=2,
+            tasks_skipped=0,
+            ttl_days=30,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_cleanup_summary_declared_optional_fields(self):
+        """cleanup_summary's 5 fields are declared in _OPTIONAL_FIELDS_BY_TYPE.
+
+        Pin the schema contract. Note: the validator currently short-
+        circuits on types absent from _REQUIRED_FIELDS_BY_TYPE (see line
+        272-274), so the optional-field loop is unreachable for
+        cleanup_summary; the declaration is forward-looking — a future
+        validator change (or the addition of a required entry, even an
+        empty one) will activate enforcement. Test-engineer flagged this
+        gap to lead during TEST (non-blocking for PR correctness because
+        writers pass int literals).
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("cleanup_summary") == {
+            "teams_reaped": int,
+            "teams_skipped": int,
+            "tasks_reaped": int,
+            "tasks_skipped": int,
+            "ttl_days": int,
+        }

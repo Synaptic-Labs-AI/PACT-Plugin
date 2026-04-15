@@ -144,6 +144,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # nothing (line 316). commands/wrap-up.md CLI also writes session_end
     # with no --data. Baseline v/type/ts validation is the only requirement.
     "session_end": {},
+    # hooks/session_end.py writes cleanup_summary after the teams/tasks
+    # reaper runs (#412 Fix B). No required fields — the event is a counts
+    # audit trail and every field is optional by design. The empty-dict
+    # entry is structurally necessary: _validate_event_schema short-circuits
+    # on unknown types and skips the _OPTIONAL_FIELDS_BY_TYPE loop, so a
+    # type must be registered here to activate optional-field type checks.
+    "cleanup_summary": {},
 }
 
 

@@ -1997,3 +1997,674 @@ class TestCleanupOldCheckpoints:
 
         assert result == 1
         assert not f.exists()
+
+
+# =============================================================================
+# cleanup_old_teams() Tests — #412 Fix B
+# =============================================================================
+
+
+def _make_team_dir(parent, name, age_days=0):
+    """Create a team directory under parent with controlled mtime.
+
+    Writes config.json (typical team fixture) then sets mtime so the parent
+    dir's own stat().st_mtime reflects the intended age — teams/ uses
+    parent-dir mtime (asymmetric with tasks/ which uses max-child mtime).
+    """
+    import os as _os
+    import time as _time
+    d = parent / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.json").write_text("{}")
+    if age_days > 0:
+        old = _time.time() - (age_days * 86400)
+        _os.utime(str(d), (old, old))
+    return d
+
+
+def _make_task_dir(parent, name, child_ages_days=None, parent_age_days=None):
+    """Create a tasks/{name}/ directory with per-child *.json mtimes.
+
+    child_ages_days: list of ages (days) for child .json files; one file
+    per entry (1.json, 2.json, ...). Pass [] for an empty dir.
+    parent_age_days: if set, force parent dir mtime AFTER children are
+    written (writing a child refreshes the parent on Unix).
+    """
+    import os as _os
+    import time as _time
+    d = parent / name
+    d.mkdir(parents=True, exist_ok=True)
+    if child_ages_days:
+        for idx, age in enumerate(child_ages_days, start=1):
+            f = d / f"{idx}.json"
+            f.write_text("{}")
+            if age > 0:
+                old = _time.time() - (age * 86400)
+                _os.utime(str(f), (old, old))
+    if parent_age_days is not None:
+        old = _time.time() - (parent_age_days * 86400)
+        _os.utime(str(d), (old, old))
+    return d
+
+
+class TestCleanupOldTeams:
+    """Tests for session_end.cleanup_old_teams() — #412 Fix B."""
+
+    def test_reaps_old_team_dirs_excluding_current(self, tmp_path):
+        """Old sibling team dirs reap; current team_name entry preserved
+        even when older than TTL."""
+        from session_end import cleanup_old_teams
+
+        current = "pact-abcd1234"
+        _make_team_dir(tmp_path, current, age_days=60)  # old but current
+        _make_team_dir(tmp_path, "pact-deadbeef", age_days=40)  # REAPED
+        _make_team_dir(tmp_path, "43a2f95a-1111-2222-3333-444444444444", age_days=40)  # REAPED
+
+        reaped, skipped = cleanup_old_teams(
+            current_team_name=current,
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 2
+        assert skipped == 0
+        assert (tmp_path / current).exists()
+        assert not (tmp_path / "pact-deadbeef").exists()
+        assert not (tmp_path / "43a2f95a-1111-2222-3333-444444444444").exists()
+
+    def test_preserves_fresh_team_dirs(self, tmp_path):
+        """Mtime under TTL → preserved."""
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+        _make_team_dir(tmp_path, "pact-recent", age_days=5)
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0
+        assert (tmp_path / "pact-recent").exists()
+
+    def test_fail_closed_on_empty_current_team_name(self, tmp_path):
+        """COUNTER-TEST BY REVERT target: empty current_team_name → no-op.
+
+        Load-bearing: the skip predicate IS the only defense layer (teams/
+        has no secondary UUID filter). An empty skip value must NOT reap
+        anything, or the live team dir could be deleted.
+        """
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-live", age_days=60)
+        _make_team_dir(tmp_path, "pact-other", age_days=60)
+
+        reaped, skipped = cleanup_old_teams(
+            current_team_name="",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0
+        assert skipped == 0
+        # Both survive — empty skip-name fails closed, not open.
+        assert (tmp_path / "pact-live").exists()
+        assert (tmp_path / "pact-other").exists()
+
+    def test_handles_missing_base_dir(self, tmp_path):
+        """Non-existent base dir → (0, 0) silently, no raise."""
+        from session_end import cleanup_old_teams
+
+        ghost = tmp_path / "does-not-exist"
+        reaped, skipped = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(ghost),
+        )
+
+        assert (reaped, skipped) == (0, 0)
+
+    def test_skips_non_directory_entries(self, tmp_path):
+        """Stray file at base → no raise, not counted as reaped."""
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+        (tmp_path / "stray-file.txt").write_text("hi")
+
+        reaped, skipped = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0
+        assert skipped == 0
+        assert (tmp_path / "stray-file.txt").exists()
+
+    def test_skips_permission_denied_entries(self, tmp_path):
+        """Per-entry stat OSError → entry counted in skipped, others still processed.
+
+        Mock stat with call-count gating so the initial is_dir() probe
+        (which also stats under the hood and would swallow OSError to
+        False, making the entry invisible) succeeds, and only the explicit
+        stat().st_mtime call inside the inner try raises.
+        """
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+        bad = _make_team_dir(tmp_path, "pact-bad", age_days=40)
+        good = _make_team_dir(tmp_path, "pact-good", age_days=40)
+
+        real_stat = _Path.stat
+        stat_calls_by_path: dict[str, int] = {}
+
+        def flaky_stat(self, *args, **kwargs):
+            p = str(self)
+            stat_calls_by_path[p] = stat_calls_by_path.get(p, 0) + 1
+            # The bad entry: let is_dir() pass (first call) but fail the
+            # explicit age-check stat (second call on the same Path).
+            if p == str(bad) and stat_calls_by_path[p] >= 2:
+                raise OSError("permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        with _patch.object(_Path, "stat", flaky_stat):
+            reaped, skipped = cleanup_old_teams(
+                current_team_name="pact-current",
+                teams_base_dir=str(tmp_path),
+                max_age_days=30,
+            )
+
+        assert skipped == 1
+        assert reaped == 1
+        assert bad.exists()  # skipped due to stat error
+        assert not good.exists()  # reaped normally
+
+    def test_legacy_name_shapes_all_reaped(self, tmp_path):
+        """UUID, adjective-verb-noun, 'default', 'pact-xxx' — all reap when old."""
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+        legacy = [
+            "43a2f95a-1111-2222-3333-444444444444",
+            "breezy-zooming-scroll",
+            "default",
+            "pact-legacy",
+        ]
+        for name in legacy:
+            _make_team_dir(tmp_path, name, age_days=40)
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 4
+        for name in legacy:
+            assert not (tmp_path / name).exists()
+
+
+# =============================================================================
+# cleanup_old_tasks() Tests — #412 Fix B
+# =============================================================================
+
+
+class TestCleanupOldTasks:
+    """Tests for session_end.cleanup_old_tasks() — #412 Fix B."""
+
+    def test_reaps_via_max_child_mtime(self, tmp_path):
+        """Dir with all-old children reaps; dir with one fresh child preserved.
+
+        Pins the asymmetric probe — platform TaskUpdate rewrites child .json
+        without touching parent dir's mtime, so max-child is the tight bound.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_tasks
+
+        # Old dir: force parent mtime fresh but children all old — max-child
+        # must win over parent mtime here.
+        old = _make_task_dir(tmp_path, "pact-old", child_ages_days=[40, 45])
+        # Refresh parent mtime to "now" so test proves children drive decision.
+        _os.utime(str(old), (_time.time(), _time.time()))
+
+        # Mixed dir: one old child + one fresh — max-child is fresh → preserved.
+        mixed = _make_task_dir(tmp_path, "pact-mixed", child_ages_days=[40, 0])
+        # Force old parent mtime to prove children override parent freshness.
+        old_parent = _time.time() - (50 * 86400)
+        _os.utime(str(mixed), (old_parent, old_parent))
+
+        reaped, skipped = cleanup_old_tasks(
+            skip_names={"pact-current"},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1
+        assert skipped == 0
+        assert not (tmp_path / "pact-old").exists()
+        assert (tmp_path / "pact-mixed").exists()
+
+    def test_fallback_to_parent_mtime_on_empty_dir(self, tmp_path):
+        """Empty dir with old parent mtime reaps via fallback."""
+        from session_end import cleanup_old_tasks
+
+        _make_task_dir(tmp_path, "pact-empty", child_ages_days=[], parent_age_days=40)
+
+        reaped, _ = cleanup_old_tasks(
+            skip_names={"pact-current"},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1
+        assert not (tmp_path / "pact-empty").exists()
+
+    def test_skip_union(self, tmp_path):
+        """Three skip-names (team_name, task_list_id, session_id) all preserved."""
+        from session_end import cleanup_old_tasks
+
+        team = "pact-abcd1234"
+        task_list_id = "task-list-xyz"
+        session_id = "98765432-aaaa-bbbb-cccc-dddddddddddd"
+
+        _make_task_dir(tmp_path, team, child_ages_days=[40], parent_age_days=40)
+        _make_task_dir(tmp_path, task_list_id, child_ages_days=[40], parent_age_days=40)
+        _make_task_dir(tmp_path, session_id, child_ages_days=[40], parent_age_days=40)
+        _make_task_dir(tmp_path, "pact-stale", child_ages_days=[40], parent_age_days=40)
+
+        reaped, _ = cleanup_old_tasks(
+            skip_names={team, task_list_id, session_id},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1
+        assert (tmp_path / team).exists()
+        assert (tmp_path / task_list_id).exists()
+        assert (tmp_path / session_id).exists()
+        assert not (tmp_path / "pact-stale").exists()
+
+    def test_fail_closed_on_empty_skip_set(self, tmp_path):
+        """COUNTER-TEST BY REVERT target: empty / all-blank skip_names → no-op.
+
+        Same defense rationale as teams: skip-predicate is the only layer.
+        Empty set AND set of only blanks must both fail closed.
+        """
+        from session_end import cleanup_old_tasks
+
+        _make_task_dir(tmp_path, "pact-live", child_ages_days=[40], parent_age_days=40)
+        _make_task_dir(tmp_path, "pact-other", child_ages_days=[40], parent_age_days=40)
+
+        # Empty set
+        reaped1, _ = cleanup_old_tasks(
+            skip_names=set(),
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+        # All-blank set
+        reaped2, _ = cleanup_old_tasks(
+            skip_names={"", "", ""},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped1 == 0
+        assert reaped2 == 0
+        assert (tmp_path / "pact-live").exists()
+        assert (tmp_path / "pact-other").exists()
+
+    def test_handles_unstatable_children(self, tmp_path):
+        """Child.stat OSError → max-child stays 0.0 → parent-mtime fallback exercised."""
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        from session_end import cleanup_old_tasks
+
+        d = _make_task_dir(tmp_path, "pact-quirky", child_ages_days=[5], parent_age_days=40)
+        child_path = d / "1.json"
+
+        real_stat = _Path.stat
+
+        def flaky_stat(self, *args, **kwargs):
+            if str(self) == str(child_path):
+                raise OSError("transient")
+            return real_stat(self, *args, **kwargs)
+
+        with _patch.object(_Path, "stat", flaky_stat):
+            reaped, _ = cleanup_old_tasks(
+                skip_names={"pact-current"},
+                tasks_base_dir=str(tmp_path),
+                max_age_days=30,
+            )
+
+        # Child stat raised → latest stays 0.0 → fallback to parent mtime
+        # (40 days old) → reaped.
+        assert reaped == 1
+        assert not d.exists()
+
+
+# =============================================================================
+# cleanup_summary journal event — #412 Fix B
+# =============================================================================
+
+
+class TestCleanupSummaryEvent:
+    """main()-level integration: cleanup_summary journal event shape & emission."""
+
+    def _run_main_with_reapers(self, *, team_return, env_task_list_id=""):
+        """Helper: run main() with real reapers patched to return (r, s) tuples.
+
+        Returns list of append_event call args for inspection.
+        """
+        from unittest.mock import patch, MagicMock
+        from contextlib import ExitStack
+        import io as _io
+
+        captured = []
+
+        def record(event):
+            captured.append(event)
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": env_task_list_id}, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-id"),
+            patch("session_end.get_team_name", return_value=team_return),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(3, 1)),
+            patch("session_end.cleanup_old_tasks", return_value=(2, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event", side_effect=record),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+        return captured
+
+    def test_cleanup_summary_event_shape_when_reaper_runs(self):
+        """main() emits cleanup_summary with all 5 fields populated from reaper returns."""
+        events = self._run_main_with_reapers(team_return="pact-current")
+
+        summaries = [e for e in events if e["type"] == "cleanup_summary"]
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s["teams_reaped"] == 3
+        assert s["teams_skipped"] == 1
+        assert s["tasks_reaped"] == 2
+        assert s["tasks_skipped"] == 0
+        assert s["ttl_days"] == 30
+
+    def test_cleanup_summary_emitted_even_when_counts_zero(self):
+        """Audit-trail invariant: event still written when all counts are 0."""
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        captured = []
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-id"),
+            patch("session_end.get_team_name", return_value="pact-current"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event", side_effect=lambda e: captured.append(e)),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        summaries = [e for e in captured if e["type"] == "cleanup_summary"]
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s["teams_reaped"] == 0
+        assert s["teams_skipped"] == 0
+        assert s["tasks_reaped"] == 0
+        assert s["tasks_skipped"] == 0
+        assert s["ttl_days"] == 30
+
+
+# =============================================================================
+# main() wiring for reapers — #412 Fix B
+# =============================================================================
+
+
+class TestMainReaperWiring:
+    """main()-level wiring guards for the new reapers."""
+
+    def _base_patches(self, *, team_return="pact-current", session_id="sess-id", env=None):
+        from unittest.mock import patch
+        import io as _io
+        env = env or {}
+        return [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", env, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value=session_id),
+            patch("session_end.get_team_name", return_value=team_return),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+
+    def test_main_skips_team_reaper_on_empty_team_name(self):
+        """Callsite short-circuit: empty team_name → cleanup_old_teams NOT invoked.
+
+        Belt-and-suspenders layer around the internal guard; this test
+        pins the short-circuit specifically (the internal guard already
+        returns (0,0) but we must not even call it when we know better).
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in self._base_patches(team_return=""):
+                stack.enter_context(p)
+            mock_teams = stack.enter_context(
+                patch("session_end.cleanup_old_teams", return_value=(0, 0))
+            )
+            mock_tasks = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_teams.assert_not_called()
+        # tasks reaper still runs because session_id alone is a valid skip member
+        mock_tasks.assert_called_once()
+
+    def test_main_assembles_union_skip_set(self):
+        """Env CLAUDE_CODE_TASK_LIST_ID, team_name, session_id all in skip_names."""
+        from unittest.mock import patch
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in self._base_patches(
+                team_return="team-A",
+                session_id="sess-B",
+                env={"CLAUDE_CODE_TASK_LIST_ID": "task-C"},
+            ):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("session_end.cleanup_old_teams", return_value=(0, 0))
+            )
+            mock_tasks = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_tasks.assert_called_once()
+        call = mock_tasks.call_args
+        assert call.kwargs["skip_names"] == {"team-A", "task-C", "sess-B"}
+
+    def test_main_cleanup_summary_outer_tryexcept_absorbs_append_failure(self):
+        """Journal write for cleanup_summary failing must not propagate.
+
+        Regression guard for the outer try/except around append_event in
+        main() — reaper success is independent of journal write success.
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        call_count = {"n": 0}
+
+        def flaky_append(event):
+            call_count["n"] += 1
+            if event["type"] == "cleanup_summary":
+                raise RuntimeError("journal full")
+            # session_end event ok
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-id"),
+            patch("session_end.get_team_name", return_value="pact-current"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event", side_effect=flaky_append),
+        ]
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in patches]
+            mock_chk = mocks[-2]  # _cleanup_old_checkpoints
+            from session_end import main
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        assert exc.value.code == 0  # fire-and-forget
+        # Checkpoint cleanup still ran despite cleanup_summary journal failure.
+        mock_chk.assert_called_once()
+
+
+# =============================================================================
+# Reaper outer-try regression — #412 Fix B
+# =============================================================================
+
+
+class TestReaperOuterTryExcept:
+    """Outer try/except in each reaper must absorb catastrophic OSError."""
+
+    def test_cleanup_old_teams_iterdir_oserror_absorbed(self, tmp_path):
+        """iterdir() raising OSError at outer level → return current counts, no raise."""
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+
+        real_iterdir = _Path.iterdir
+
+        def flaky_iterdir(self):
+            if str(self) == str(tmp_path):
+                raise OSError("EACCES on base")
+            return real_iterdir(self)
+
+        with _patch.object(_Path, "iterdir", flaky_iterdir):
+            reaped, skipped = cleanup_old_teams(
+                current_team_name="pact-current",
+                teams_base_dir=str(tmp_path),
+                max_age_days=30,
+            )
+
+        assert (reaped, skipped) == (0, 0)
+
+    def test_cleanup_old_tasks_iterdir_oserror_absorbed(self, tmp_path):
+        """cleanup_old_tasks: outer iterdir raise absorbed, returns current counts."""
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        from session_end import cleanup_old_tasks
+
+        real_iterdir = _Path.iterdir
+
+        def flaky_iterdir(self):
+            if str(self) == str(tmp_path):
+                raise OSError("EACCES on base")
+            return real_iterdir(self)
+
+        # base dir must exist for the guard to pass before iterdir is called
+        (tmp_path / "placeholder").mkdir()
+
+        with _patch.object(_Path, "iterdir", flaky_iterdir):
+            reaped, skipped = cleanup_old_tasks(
+                skip_names={"pact-current"},
+                tasks_base_dir=str(tmp_path),
+                max_age_days=30,
+            )
+
+        assert (reaped, skipped) == (0, 0)
+
+
+# =============================================================================
+# Regression guard — cleanup_old_sessions unchanged — #412 Fix B
+# =============================================================================
+
+
+class TestCleanupOldSessionsUnchangedRegression:
+    """Delta guard: adding the new reapers must not alter cleanup_old_sessions.
+
+    Catches accidental edits to the parent reaper while the sibling
+    reapers are being added.
+    """
+
+    def test_parent_reaper_still_reaps_uuid_sibling(self, tmp_path):
+        """Smoke regression: basic UUID reap behavior intact."""
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_sessions
+
+        slug_dir = tmp_path / "proj"
+        current = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        old = "11111111-2222-3333-4444-555555555555"
+        for sid in (current, old):
+            d = slug_dir / sid
+            d.mkdir(parents=True)
+            (d / "ctx.json").write_text("{}")
+        old_time = _time.time() - (40 * 86400)
+        _os.utime(str(slug_dir / old), (old_time, old_time))
+
+        cleanup_old_sessions(
+            project_slug="proj",
+            current_session_id=current,
+            sessions_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert (slug_dir / current).exists()
+        assert not (slug_dir / old).exists()
