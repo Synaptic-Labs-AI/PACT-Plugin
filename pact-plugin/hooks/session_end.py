@@ -19,6 +19,7 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -316,6 +317,151 @@ def cleanup_old_sessions(
         pass
 
 
+def _task_dir_mtime(entry: Path) -> float:
+    """
+    Return the max mtime across all *.json children of a task directory.
+
+    Platform task updates (`TaskUpdate`) rewrite individual `{id}.json`
+    files without bumping the parent directory's mtime, so parent-dir
+    mtime would false-reap an active-but-quiet tasks dir. Max-child mtime
+    is the tight upper bound on "when was this task set last touched."
+
+    Falls back to `entry.stat().st_mtime` when no readable *.json children
+    are present, so a truly empty stale dir still ages out rather than
+    being pinned alive forever.
+
+    Fail-open: never raises. Returns the parent's mtime on glob/stat
+    failure; if even the parent stat fails, re-raises OSError to the
+    caller's per-entry try/except.
+    """
+    latest = 0.0
+    try:
+        for child in entry.glob("*.json"):
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if latest == 0.0:
+        return entry.stat().st_mtime
+    return latest
+
+
+def cleanup_old_teams(
+    current_team_name: str,
+    teams_base_dir: str | None = None,
+    max_age_days: int = _SESSION_MAX_AGE_DAYS,
+) -> tuple[int, int]:
+    """
+    Remove stale team directories under ~/.claude/teams/ (issue #412 Fix B).
+
+    Skips the current session's team directory. Fails closed — returns
+    (0, 0) without reaping anything if `current_team_name` is empty. The
+    skip predicate is the only defense layer (teams/ has no secondary
+    UUID filter like pact-sessions/), so an empty skip value would make
+    every sibling, including the live team, a reap candidate.
+
+    Best-effort: never raises. Swallows OSError per-entry and outer.
+
+    Args:
+        current_team_name: Current session's team_name from
+            pact_context.get_team_name(). MUST be non-empty.
+        teams_base_dir: Override for base directory (testing). Defaults
+            to ~/.claude/teams.
+        max_age_days: TTL in days (default: 30).
+
+    Returns:
+        (reaped, skipped) — count of directories rmtree'd, count of
+        entries skipped due to stat/rmtree failures.
+    """
+    if not current_team_name:
+        return 0, 0
+
+    if teams_base_dir is None:
+        teams_base_dir = str(Path.home() / ".claude" / "teams")
+    base = Path(teams_base_dir)
+    if not base.exists():
+        return 0, 0
+
+    reaped = 0
+    skipped = 0
+    try:
+        for entry in base.iterdir():
+            if not entry.is_dir():
+                continue
+            if entry.name == current_team_name:
+                continue
+            try:
+                age_days = (time.time() - entry.stat().st_mtime) / 86400
+                if age_days > max_age_days:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    reaped += 1
+            except OSError:
+                skipped += 1
+                continue
+    except OSError:
+        pass
+    return reaped, skipped
+
+
+def cleanup_old_tasks(
+    skip_names: set[str],
+    tasks_base_dir: str | None = None,
+    max_age_days: int = _SESSION_MAX_AGE_DAYS,
+) -> tuple[int, int]:
+    """
+    Remove stale task subdirectories under ~/.claude/tasks/ (issue #412 Fix B).
+
+    Skips every entry whose name is in `skip_names`. Fails closed —
+    returns (0, 0) if `skip_names` is empty or contains only blank
+    strings. Per-entry mtime is probed via `_task_dir_mtime` (max-child
+    with parent fallback) because platform writes update individual
+    `{id}.json` files without bumping the parent dir's mtime.
+
+    Best-effort: never raises. Swallows OSError per-entry and outer.
+
+    Args:
+        skip_names: Set of current-session names to preserve. Must
+            contain at least one non-blank entry. Caller assembles
+            {team_name, task_list_id, session_id} filtering empties.
+        tasks_base_dir: Override for base directory (testing). Defaults
+            to ~/.claude/tasks.
+        max_age_days: TTL in days (default: 30).
+
+    Returns:
+        (reaped, skipped) — same semantics as cleanup_old_teams.
+    """
+    if not skip_names or all(not n for n in skip_names):
+        return 0, 0
+
+    if tasks_base_dir is None:
+        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+    base = Path(tasks_base_dir)
+    if not base.exists():
+        return 0, 0
+
+    reaped = 0
+    skipped = 0
+    try:
+        for entry in base.iterdir():
+            if not entry.is_dir():
+                continue
+            if entry.name in skip_names:
+                continue
+            try:
+                age_days = (time.time() - _task_dir_mtime(entry)) / 86400
+                if age_days > max_age_days:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    reaped += 1
+            except OSError:
+                skipped += 1
+                continue
+    except OSError:
+        pass
+    return reaped, skipped
+
+
 def _cleanup_old_checkpoints(
     checkpoint_dir: Path | None = None,
     max_age_days: int = _CHECKPOINT_MAX_AGE_DAYS,
@@ -404,6 +550,43 @@ def main():
             project_slug=project_slug,
             current_session_id=current_session_id,
         )
+
+        # Clean up stale ~/.claude/teams/ and ~/.claude/tasks/ (#412 Fix B).
+        # Callsite short-circuit on empty team_name is the belt-and-suspenders
+        # layer around the internal fail-closed guard.
+        current_team_name = get_team_name()
+        teams_r, teams_s = 0, 0
+        tasks_r, tasks_s = 0, 0
+        if current_team_name:
+            teams_r, teams_s = cleanup_old_teams(
+                current_team_name=current_team_name,
+            )
+
+        # Union skip-set guards all three platform-key paths that can
+        # address ~/.claude/tasks/: team_name (PACT canonical),
+        # CLAUDE_CODE_TASK_LIST_ID (platform env var), and session_id
+        # (bare Claude Code fallback per task_utils.get_task_list).
+        task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", "")
+        skip_names = {current_team_name, task_list_id, current_session_id}
+        skip_names.discard("")
+        if skip_names:
+            tasks_r, tasks_s = cleanup_old_tasks(
+                skip_names=skip_names,
+            )
+
+        # Best-effort audit record for the reapers. A journal write
+        # failure does not undo the cleanup that already happened.
+        try:
+            append_event(make_event(
+                "cleanup_summary",
+                teams_reaped=teams_r,
+                teams_skipped=teams_s,
+                tasks_reaped=tasks_r,
+                tasks_skipped=tasks_s,
+                ttl_days=_SESSION_MAX_AGE_DAYS,
+            ))
+        except Exception as e:
+            print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)
 
         # Clean up stale pact-refresh checkpoint files (7-day TTL).
         # Post-#413, these accumulate only in legacy deployments.

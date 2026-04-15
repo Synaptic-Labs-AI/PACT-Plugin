@@ -69,6 +69,8 @@ class TestMainEntryPoint:
             "check_unpaused_pr": patch("session_end.check_unpaused_pr"),
             "cleanup_teachback_markers": patch("session_end.cleanup_teachback_markers"),
             "cleanup_old_sessions": patch("session_end.cleanup_old_sessions"),
+            "cleanup_old_teams": patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            "cleanup_old_tasks": patch("session_end.cleanup_old_tasks", return_value=(0, 0)),
             "_cleanup_old_checkpoints": patch("session_end._cleanup_old_checkpoints"),
         }
         defaults.update(overrides)
@@ -126,10 +128,12 @@ class TestMainEntryPoint:
                     main()
 
         # append_event should have been called with a session_end event
+        # (main() also emits a cleanup_summary event after the reapers,
+        # so filter by type rather than inspecting the last call.)
         mock_append = mocks["append_event"]
         mock_append.assert_called()
-        event_arg = mock_append.call_args[0][0]
-        assert event_arg["type"] == "session_end"
+        event_types = [c.args[0]["type"] for c in mock_append.call_args_list]
+        assert "session_end" in event_types
 
     def test_main_passes_tasks_to_check_unpaused_pr(self):
         from session_end import main
@@ -168,6 +172,12 @@ class TestMainEntryPoint:
                 return None  # check_unpaused_pr returns Optional[str]; _cleanup_old_checkpoints is called with no args
             return _side_effect
 
+        def _record_tuple(name):
+            def _side_effect(*args, **kw):
+                call_order.append(name)
+                return (0, 0)
+            return _side_effect
+
         patches = self._patch_main_deps(
             check_unpaused_pr=patch("session_end.check_unpaused_pr",
                 side_effect=_record("check_unpaused_pr")),
@@ -175,6 +185,10 @@ class TestMainEntryPoint:
                 side_effect=_record("cleanup_teachback_markers")),
             cleanup_old_sessions=patch("session_end.cleanup_old_sessions",
                 side_effect=_record("cleanup_old_sessions")),
+            cleanup_old_teams=patch("session_end.cleanup_old_teams",
+                side_effect=_record_tuple("cleanup_old_teams")),
+            cleanup_old_tasks=patch("session_end.cleanup_old_tasks",
+                side_effect=_record_tuple("cleanup_old_tasks")),
             _cleanup_old_checkpoints=patch("session_end._cleanup_old_checkpoints",
                 side_effect=_record("_cleanup_old_checkpoints")),
         )
@@ -189,6 +203,8 @@ class TestMainEntryPoint:
             "check_unpaused_pr",
             "cleanup_teachback_markers",
             "cleanup_old_sessions",
+            "cleanup_old_teams",
+            "cleanup_old_tasks",
             "_cleanup_old_checkpoints",
         ]
 
@@ -211,10 +227,13 @@ class TestMainEntryPoint:
         mock_append = mocks["append_event"]
         # Exactly one session_end event — not two (regression test for
         # the old "session_end then session_end+warning" double-write bug).
-        assert mock_append.call_count == 1
-        event_arg = mock_append.call_args[0][0]
-        assert event_arg["type"] == "session_end"
-        assert event_arg.get("warning") == warning_text
+        # Filter by type: main() also emits cleanup_summary after the reapers.
+        session_end_events = [
+            c.args[0] for c in mock_append.call_args_list
+            if c.args[0]["type"] == "session_end"
+        ]
+        assert len(session_end_events) == 1
+        assert session_end_events[0].get("warning") == warning_text
 
     def test_main_emits_single_session_end_event_no_warning(self):
         """When check_unpaused_pr returns None, main() emits exactly ONE
@@ -232,10 +251,13 @@ class TestMainEntryPoint:
                     main()
 
         mock_append = mocks["append_event"]
-        assert mock_append.call_count == 1
-        event_arg = mock_append.call_args[0][0]
-        assert event_arg["type"] == "session_end"
-        assert "warning" not in event_arg
+        # Filter by type: main() also emits cleanup_summary after the reapers.
+        session_end_events = [
+            c.args[0] for c in mock_append.call_args_list
+            if c.args[0]["type"] == "session_end"
+        ]
+        assert len(session_end_events) == 1
+        assert "warning" not in session_end_events[0]
 
     def test_main_continues_cleanup_when_journal_write_fails(self):
         """If append_event raises, main() must still call cleanup functions

@@ -166,6 +166,16 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # inputs to "unknown" before the journal write; this schema contract
     # catches any future writer that bypasses that path.
     "session_start": {"source": str},
+    # hooks/session_end.py writes cleanup_summary after the teams/tasks
+    # reaper runs (#412 Fix B). Counts-only payload; no identifying names
+    # (audit surface area minimization).
+    "cleanup_summary": {
+        "teams_reaped": int,
+        "teams_skipped": int,
+        "tasks_reaped": int,
+        "tasks_skipped": int,
+        "ttl_days": int,
+    },
 }
 
 
