@@ -350,7 +350,12 @@ def _task_dir_mtime(entry: Path) -> float:
     try:
         for child in entry.glob("*.json"):
             try:
-                latest = max(latest, child.stat().st_mtime)
+                # follow_symlinks=False uses lstat semantics. A symlink
+                # child (attacker-planted `tasks/{real-dir}/x.json` →
+                # `/var/log/syslog`) must NOT be allowed to pin the
+                # parent's effective mtime to an arbitrary target; the
+                # link's own mtime is the correct signal.
+                latest = max(latest, child.stat(follow_symlinks=False).st_mtime)
             except OSError:
                 continue
     except OSError:
