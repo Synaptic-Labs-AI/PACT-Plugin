@@ -1998,6 +1998,62 @@ class TestCleanupOldCheckpoints:
         assert result == 1
         assert not f.exists()
 
+    # Cycle-8 Test 1 — symlink guard on the 4th reaper
+    def test_symlink_with_old_target_is_skipped(self, tmp_path: Path):
+        """Symlink whose TARGET is old-mtime is SKIPPED, not unlinked.
+
+        Cycle-8 parity with cycle-1 sibling reapers: `_cleanup_old_checkpoints`
+        now has `if checkpoint_file.is_symlink(): continue` BEFORE the
+        `lstat/unlink` path. Without the guard, a planted symlink whose
+        TARGET has an old mtime would be unlinked by the reaper — either
+        deleting user-planted links (pure destruction since unlink on a
+        symlink never touches the target) OR, if the guard were absent
+        AND the helper naively used `stat()`, deleting based on target-
+        mtime (oracle leak).
+
+        COUNTER-TEST BY REVERT target: removing the `is_symlink` guard
+        flips this test — under the current `lstat()` probe the link's
+        own (fresh) mtime saves it; but if lstat ALSO gets reverted to
+        stat() (cycle-2 belt-and-suspenders), the target's old mtime
+        would drive the unlink. Either regression the guard defends
+        against shows up as test failure via the link-is-unlinked
+        assertion.
+        """
+        import os as _os
+        import time as _time
+        from session_end import _cleanup_old_checkpoints
+
+        # External target with OLD mtime (40d > 7d default TTL).
+        target = tmp_path.parent / f"{tmp_path.name}-ext-target.json"
+        target.write_text(json.dumps({"target": True}))
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(target), (old, old))
+
+        # Symlink planted inside checkpoint_dir, with FRESH link-mtime
+        # so even under lstat the link is within TTL. Guard is what
+        # prevents the unlink irrespective of the TTL math.
+        link = tmp_path / "evil.json"
+        link.symlink_to(target)
+
+        try:
+            result = _cleanup_old_checkpoints(tmp_path, max_age_days=7)
+
+            assert result == 0, (
+                "Symlink must NOT be counted as cleaned. Guard removal "
+                "flips this to 1."
+            )
+            assert link.is_symlink(), (
+                "Symlink itself must survive. If this fails, either the "
+                "`is_symlink` guard was removed OR lstat was reverted to "
+                "stat() (target mtime would then drive unlink)."
+            )
+            assert target.exists(), "Target must survive"
+        finally:
+            if link.is_symlink():
+                link.unlink()
+            if target.exists():
+                target.unlink()
+
 
 # =============================================================================
 # cleanup_old_teams() Tests — #412 Fix B
@@ -2457,7 +2513,9 @@ class TestCleanupSummaryEvent:
         assert s["teams_skipped"] == 1
         assert s["tasks_reaped"] == 2
         assert s["tasks_skipped"] == 0
-        assert s["ttl_days"] == 30
+        # Cycle-8 split: single `ttl_days` replaced by per-reaper fields.
+        assert s["teams_ttl_days"] == 30
+        assert s["tasks_ttl_days"] == 30
 
     def test_cleanup_summary_emitted_even_when_counts_zero(self):
         """Audit-trail invariant: event still written when all counts are 0."""
@@ -2497,7 +2555,90 @@ class TestCleanupSummaryEvent:
         assert s["teams_skipped"] == 0
         assert s["tasks_reaped"] == 0
         assert s["tasks_skipped"] == 0
-        assert s["ttl_days"] == 30
+        # Cycle-8 split: single `ttl_days` replaced by per-reaper fields.
+        assert s["teams_ttl_days"] == 30
+        assert s["tasks_ttl_days"] == 30
+
+
+# =============================================================================
+# _assemble_tasks_skip_set — cycle-8 extracted helper (direct unit test)
+# =============================================================================
+
+
+class TestAssembleTasksSkipSet:
+    """Cycle-8 Test 2 — direct unit test of the module-level helper.
+
+    Extracted from `main()` in cycle-8 (Architect M3). Takes only
+    primitives, returns a deterministic `set[str]` — no session-context
+    mocking needed. Coverage: happy path (all 3 channels pass), one
+    channel rejected by allowlist, all rejected, empty-string inputs
+    pruned.
+
+    No counter-test-by-revert needed: the helper IS the system under
+    test; behavioral contract is the assertion target.
+    """
+
+    def test_happy_path_all_three_channels_pass(self):
+        """All 3 non-empty allowlist-safe inputs populate skip_names."""
+        from session_end import _assemble_tasks_skip_set
+
+        result = _assemble_tasks_skip_set(
+            team_name="pact-0001639f",
+            task_list_id="task-list-abc",
+            session_id="5ddd5636-d408-4892",
+        )
+
+        assert result == {"pact-0001639f", "task-list-abc", "5ddd5636-d408-4892"}
+
+    def test_one_channel_rejected_by_allowlist(self):
+        """Hostile task_list_id is dropped; other channels still populate."""
+        from session_end import _assemble_tasks_skip_set
+
+        result = _assemble_tasks_skip_set(
+            team_name="pact-abcd1234",
+            task_list_id="../etc/passwd",  # fails is_safe_path_component
+            session_id="sess-1",
+        )
+
+        assert "../etc/passwd" not in result
+        assert result == {"pact-abcd1234", "sess-1"}
+
+    def test_all_channels_rejected_yields_empty(self):
+        """All three hostile → empty set (fail-closed at caller)."""
+        from session_end import _assemble_tasks_skip_set
+
+        result = _assemble_tasks_skip_set(
+            team_name="bad name",     # space
+            task_list_id="\u2028",    # LINE SEPARATOR
+            session_id="name\nwith\nnewline",
+        )
+
+        assert result == set()
+
+    def test_empty_string_inputs_are_pruned(self):
+        """Empty-string channels don't leak into skip_names as `""`."""
+        from session_end import _assemble_tasks_skip_set
+
+        result = _assemble_tasks_skip_set(
+            team_name="pact-deadbeef",
+            task_list_id="",
+            session_id="",
+        )
+
+        assert "" not in result
+        assert result == {"pact-deadbeef"}
+
+    def test_all_empty_yields_empty_set(self):
+        """All-empty inputs → empty set."""
+        from session_end import _assemble_tasks_skip_set
+
+        result = _assemble_tasks_skip_set(
+            team_name="",
+            task_list_id="",
+            session_id="",
+        )
+
+        assert result == set()
 
 
 # =============================================================================
@@ -3428,16 +3569,18 @@ class TestReaperSymlinkHandling:
 
 
 # =============================================================================
-# Cycle-1 remediation: reaper_ran bool (⑤) — #412 Fix B M6-gap closure
+# Cycle-1 remediation: teams_ran/tasks_ran bools — #412 Fix B M6-gap closure
 # =============================================================================
 
 
 class TestCleanupSummaryReaperRan:
-    """`reaper_ran` discriminates "ran, found nothing" from "short-circuited."
+    """`teams_ran`/`tasks_ran` discriminate "ran, found nothing" from
+    "short-circuited" per side.
 
-    Without this bool, a (0,0,0,0) counts row is ambiguous: did both
-    reapers run and find nothing, or did both short-circuit at the
-    callsite guard? Four tests pin the truth table.
+    Without these bools, a (0,0,0,0) counts row is ambiguous: did both
+    reapers run and find nothing, or did either side short-circuit at
+    the callsite guard? Cycle-8 splits the single `reaper_ran` bool
+    into per-reaper bools so an auditor can tell WHICH side ran.
     """
 
     def _run_with(self, *, team_return, session_id="sess-id", env=None):
@@ -3477,44 +3620,52 @@ class TestCleanupSummaryReaperRan:
         assert len(summaries) == 1, f"expected 1 cleanup_summary, got {len(summaries)}"
         return summaries[0]
 
-    def test_reaper_ran_true_when_only_teams_called(self):
-        """team_name set, session_id empty, no env → teams runs, tasks short-circuits."""
-        # Empty session_id + empty env → skip_names = {team_name} only,
-        # which is non-empty → tasks reaper DOES run. To isolate
-        # "only teams called" we need skip_names to shrink to empty
-        # after team_name is discarded. That can't happen if team_name
-        # itself is the skip member. So the true "only teams" case
-        # requires a deliberately-absent session_id AND empty env AND
-        # team-only short-circuit on the tasks side — but since
-        # team_name feeds BOTH skip paths, "only teams ran" is not a
-        # reachable state given current callsite wiring. Document and
-        # skip this unreachable row.
-        pytest.skip(
-            "State is unreachable: team_name is in skip_names, so whenever "
-            "team_name is non-empty, skip_names is non-empty, so tasks "
-            "reaper also runs. Documented for completeness."
-        )
+    def test_only_teams_ran_when_team_name_only_skip_channel(self):
+        """team_name set (non-allowlist-safe) → teams runs, tasks short-circuits.
 
-    def test_reaper_ran_true_when_only_tasks_called(self):
+        Cycle-8 un-skips the previously-unreachable "only teams ran"
+        row. With the new `_assemble_tasks_skip_set` helper that runs
+        `is_safe_path_component` on team_name, a deliberately-unsafe
+        team_name drops from skip_names — so skip_names = empty (all
+        three channels rejected) → tasks reaper short-circuits on
+        `if skip_names:`. Meanwhile the teams-reaper callsite check is
+        `if current_team_name:` (truthy-only, no allowlist) so it still
+        runs. This is the reachable "only teams ran" row.
+
+        In practice this requires a team_name that fails the allowlist.
+        Construct with `pact/weird` which has a slash.
+        """
+        ev = self._run_with(
+            team_return="pact/weird",  # fails is_safe_path_component → drops from skip_names
+            session_id="",
+            env={"CLAUDE_CODE_TASK_LIST_ID": ""},
+        )
+        assert ev["teams_ran"] is True
+        assert ev["tasks_ran"] is False
+
+    def test_only_tasks_ran_when_team_name_empty(self):
         """team_name empty, session_id set → teams short-circuits, tasks runs."""
         ev = self._run_with(team_return="", session_id="sess-X")
-        assert ev["reaper_ran"] is True
+        assert ev["teams_ran"] is False
+        assert ev["tasks_ran"] is True
         assert ev["teams_reaped"] == 0
         assert ev["tasks_reaped"] == 0
 
-    def test_reaper_ran_true_when_both_called(self):
+    def test_both_ran_when_both_channels_populated(self):
         """team_name and session_id both set → both reapers run."""
         ev = self._run_with(team_return="pact-current", session_id="sess-X")
-        assert ev["reaper_ran"] is True
+        assert ev["teams_ran"] is True
+        assert ev["tasks_ran"] is True
 
-    def test_reaper_ran_false_when_both_short_circuit(self):
+    def test_neither_ran_when_both_channels_empty(self):
         """team_name empty, session_id empty, env empty → BOTH short-circuit.
 
-        M6-gap closure: distinguishes this row from
-        "ran-and-found-nothing" in the audit journal.
+        M6-gap closure: distinguishes this row from "ran-and-found-
+        nothing" in the audit journal.
         """
         ev = self._run_with(team_return="", session_id="", env={"CLAUDE_CODE_TASK_LIST_ID": ""})
-        assert ev["reaper_ran"] is False
+        assert ev["teams_ran"] is False
+        assert ev["tasks_ran"] is False
         assert ev["teams_reaped"] == 0
         assert ev["teams_skipped"] == 0
         assert ev["tasks_reaped"] == 0
@@ -3827,15 +3978,16 @@ class TestTaskDirMtimeLstatPortability:
     def test_lstat_returns_link_mtime_not_target_mtime(self, tmp_path):
         """Direct probe: _dir_max_child_mtime on a dir with old-link-fresh-target.
 
-        Invokes `_dir_max_child_mtime` directly (via `_task_dir_mtime`
-        back-compat wrapper or the new name) with a crafted symlink
-        child. The probe MUST return the link's lstat mtime (old), not
-        the target's stat mtime (fresh). If `lstat()` were reverted to
-        `stat()`, the returned value would be fresh and this test fails.
+        Invokes `_dir_max_child_mtime` directly (cycle-8 removed the
+        `_task_dir_mtime` back-compat wrapper; callers now use the
+        generalized helper with an explicit glob). The probe MUST return
+        the link's lstat mtime (old), not the target's stat mtime
+        (fresh). If `lstat()` were reverted to `stat()`, the returned
+        value would be fresh and this test fails.
         """
         import os as _os
         import time as _time
-        from session_end import _task_dir_mtime
+        from session_end import _dir_max_child_mtime
 
         # Fresh external target
         target = tmp_path / "external-target.json"
@@ -3850,12 +4002,12 @@ class TestTaskDirMtimeLstatPortability:
         old = _time.time() - (40 * 86400)
         _os.utime(str(link), (old, old), follow_symlinks=False)
 
-        result = _task_dir_mtime(d)
+        result = _dir_max_child_mtime(d, glob="*.json")
 
         # Must be ~40d old (link lstat mtime), NOT fresh (target stat mtime).
         age_days = (_time.time() - result) / 86400
         assert age_days > 30, (
-            f"_task_dir_mtime returned {age_days:.1f}d old — expected >30d "
+            f"_dir_max_child_mtime returned {age_days:.1f}d old — expected >30d "
             f"(link lstat mtime). If this test fails with a fresh (<1d) "
             f"result, lstat() was reverted to stat() (follow_symlinks=True)."
         )
@@ -3975,6 +4127,95 @@ class TestTeamsCaseInsensitiveSkip:
             "lower()`) rather than equality."
         )
         assert not d.exists()
+
+
+class TestTasksByteExactSkip:
+    """Cycle-8 Test 6 — `cleanup_old_tasks` skip uses byte-exact (in)
+    membership, NOT case-insensitive compare.
+
+    Gap identified in PR #433 blind review (MED G1): cycle-5 added
+    `.lower()==.lower()` to teams-reaper skip (TestTeamsCaseInsensitiveSkip
+    pins it). tasks-reaper intentionally uses byte-exact `entry.name in
+    skip_names`. Without a pin on the tasks side, a future reviewer could
+    add `.lower()` "for consistency" and no test would catch the
+    semantic change.
+
+    Asymmetric partner shape: a mixed-case on-disk dir + lowercase
+    skip_names. Under byte-exact, they do NOT match → dir reaps. Under
+    `.lower()` (the regression we're guarding against), they WOULD match
+    → dir spuriously shielded.
+    """
+
+    def test_mixed_case_task_dir_reaps_despite_lowercase_skip_name(self, tmp_path):
+        """On-disk `Pact-AABB1122` is REAPED when skip_names={`pact-aabb1122`}.
+
+        COUNTER-TEST BY REVERT target: adding `.lower()` symmetry to the
+        tasks-side compare (e.g. `entry.name.lower() in
+        {s.lower() for s in skip_names}`) flips this — the mixed-case
+        on-disk dir would be treated as a skip match and preserved.
+        Byte-exact semantic REAPS it (the dir name literally differs
+        byte-for-byte from the skip key).
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_tasks
+
+        # Mixed-case on-disk name. The tasks reaper has no pattern gate
+        # (tasks/ allows arbitrary id shapes — uuid, hex, mixed-case),
+        # so this name is ADMITTED for TTL consideration.
+        ondisk = "Pact-AABB1122"
+        d = tmp_path / ondisk
+        d.mkdir()
+        (d / "1.json").write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(d / "1.json"), (old, old))
+        _os.utime(str(d), (old, old))
+
+        # Lowercase skip_name. Under byte-exact `in`, "Pact-AABB1122" is
+        # NOT in {"pact-aabb1122"} → dir is NOT skipped → reap path.
+        reaped, skipped = cleanup_old_tasks(
+            skip_names={"pact-aabb1122"},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1, (
+            "Mixed-case on-disk name must REAP despite lowercase skip. "
+            "If reaped == 0, the tasks-side skip was likely refactored to "
+            "case-insensitive (e.g. `entry.name.lower() in "
+            "{s.lower() for s in skip_names}`) — the byte-exact semantic "
+            "is LOAD-BEARING (preserves asymmetric-trust model with "
+            "teams-side case-insensitive defense)."
+        )
+        assert not d.exists()
+
+    def test_exact_case_match_still_skips(self, tmp_path):
+        """Asymmetric partner: byte-exact match DOES skip (positive pin).
+
+        Without this, the preservation pin above could pass spuriously
+        if the reaper ignored all dirs. Confirms the exact-match path
+        still shields.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_tasks
+
+        ondisk = "pact-exact-match"
+        d = tmp_path / ondisk
+        d.mkdir()
+        (d / "1.json").write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(d / "1.json"), (old, old))
+        _os.utime(str(d), (old, old))
+
+        reaped, _ = cleanup_old_tasks(
+            skip_names={"pact-exact-match"},
+            tasks_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0
+        assert d.exists()
 
 
 class TestDirMaxChildMtimeFallbackLstat:
