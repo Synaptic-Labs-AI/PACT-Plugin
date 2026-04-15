@@ -167,6 +167,14 @@ def generate_team_name(input_data: dict[str, Any]) -> str:
     Returns:
         Team name string like "pact-0001639f"
     """
+    # INVARIANT: all team directory names MUST be produced by this
+    # function. Output is lowercase ASCII hex ([a-f0-9-]) prefixed with
+    # "pact-" — the session_end reaper's exact-match skip predicate
+    # (cleanup_old_teams) and the union skip-set for cleanup_old_tasks
+    # rely on this shape. A writer that creates ~/.claude/teams/ dirs
+    # with characters outside this charset (uppercase, unicode,
+    # separators) could bypass the skip predicate and be reaped on the
+    # NEXT session_end.
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else ""
     if session_id:

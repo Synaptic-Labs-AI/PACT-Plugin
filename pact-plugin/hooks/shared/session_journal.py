@@ -175,13 +175,17 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "session_start": {"source": str},
     # hooks/session_end.py writes cleanup_summary after the teams/tasks
     # reaper runs (#412 Fix B). Counts-only payload; no identifying names
-    # (audit surface area minimization).
+    # (audit surface area minimization). `reaper_ran` discriminates
+    # "reaper executed and found nothing" (True, 0/0/0/0) from "both
+    # reapers short-circuited at callsite" (False, 0/0/0/0); without it
+    # the two states are indistinguishable in the journal.
     "cleanup_summary": {
         "teams_reaped": int,
         "teams_skipped": int,
         "tasks_reaped": int,
         "tasks_skipped": int,
         "ttl_days": int,
+        "reaper_ran": bool,
     },
 }
 

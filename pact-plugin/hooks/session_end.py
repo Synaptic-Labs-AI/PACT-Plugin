@@ -294,6 +294,12 @@ def cleanup_old_sessions(
 
     try:
         for entry in slug_dir.iterdir():
+            # Skip symlinks (live or dangling) — is_symlink uses lstat
+            # semantics, short-circuiting before is_dir (which follows
+            # symlinks). Prevents a planted link from pinning alive or
+            # leaking mtime information about its target.
+            if entry.is_symlink():
+                continue
             if not entry.is_dir():
                 continue
             if not _UUID_PATTERN.match(entry.name):
@@ -326,9 +332,15 @@ def _task_dir_mtime(entry: Path) -> float:
     mtime would false-reap an active-but-quiet tasks dir. Max-child mtime
     is the tight upper bound on "when was this task set last touched."
 
-    Falls back to `entry.stat().st_mtime` when no readable *.json children
-    are present, so a truly empty stale dir still ages out rather than
-    being pinned alive forever.
+    Falls back to `entry.stat().st_mtime` when `latest` stays 0.0 after
+    the child scan. That covers two cases: (a) the intended one — no
+    `*.json` children exist, so a truly empty stale dir still ages out
+    rather than being pinned alive forever; and (b) the edge case where
+    children exist but every `child.stat()` raised OSError (e.g. a
+    permission-anomaly where every child is unreadable). In case (b)
+    the fallback mis-ages the dir as if it were empty. This is accepted
+    as a graceful degradation — the alternative (raise on partial-read
+    failure) would bubble into the caller's best-effort reaper path.
 
     Fail-open: never raises. Returns the parent's mtime on glob/stat
     failure; if even the parent stat fails, re-raises OSError to the
@@ -372,8 +384,12 @@ def cleanup_old_teams(
         max_age_days: TTL in days (default: 30).
 
     Returns:
-        (reaped, skipped) — count of directories rmtree'd, count of
-        entries skipped due to stat/rmtree failures.
+        (reaped, skipped) — `reaped` counts directories the TTL predicate
+        selected and passed to `shutil.rmtree(..., ignore_errors=True)`;
+        because `ignore_errors=True` swallows permission/EBUSY failures,
+        `reaped` is attempted-deletions, NOT verified-deletions. `skipped`
+        counts entries where stat/rmtree raised OSError before the rmtree
+        dispatch (i.e. the TTL probe itself failed).
     """
     if not current_team_name:
         return 0, 0
@@ -388,6 +404,12 @@ def cleanup_old_teams(
     skipped = 0
     try:
         for entry in base.iterdir():
+            # Skip symlinks (live or dangling) — is_symlink uses lstat
+            # semantics, short-circuiting before is_dir (which follows
+            # symlinks). Prevents a planted link from pinning alive or
+            # leaking mtime information about its target.
+            if entry.is_symlink():
+                continue
             if not entry.is_dir():
                 continue
             if entry.name == current_team_name:
@@ -430,7 +452,10 @@ def cleanup_old_tasks(
         max_age_days: TTL in days (default: 30).
 
     Returns:
-        (reaped, skipped) — same semantics as cleanup_old_teams.
+        (reaped, skipped) — same semantics as cleanup_old_teams: `reaped`
+        is attempted-deletions (rmtree called with ignore_errors=True, so
+        failures are silent), `skipped` is entries where the TTL probe or
+        rmtree dispatch itself raised OSError.
     """
     if not skip_names or all(not n for n in skip_names):
         return 0, 0
@@ -445,6 +470,12 @@ def cleanup_old_tasks(
     skipped = 0
     try:
         for entry in base.iterdir():
+            # Skip symlinks (live or dangling) — is_symlink uses lstat
+            # semantics, short-circuiting before is_dir (which follows
+            # symlinks). Prevents a planted link from pinning alive or
+            # leaking mtime information about its target.
+            if entry.is_symlink():
+                continue
             if not entry.is_dir():
                 continue
             if entry.name in skip_names:
@@ -557,25 +588,49 @@ def main():
         current_team_name = get_team_name()
         teams_r, teams_s = 0, 0
         tasks_r, tasks_s = 0, 0
+        teams_reaper_ran = False
+        tasks_reaper_ran = False
         if current_team_name:
             teams_r, teams_s = cleanup_old_teams(
                 current_team_name=current_team_name,
             )
+            teams_reaper_ran = True
 
         # Union skip-set guards all three platform-key paths that can
         # address ~/.claude/tasks/: team_name (PACT canonical),
         # CLAUDE_CODE_TASK_LIST_ID (platform env var), and session_id
         # (bare Claude Code fallback per task_utils.get_task_list).
+        # CLAUDE_CODE_TASK_LIST_ID is user-controlled input; apply a
+        # positive-regex allowlist before trusting it as a skip key so
+        # a crafted value cannot bypass the skip-set via unicode line
+        # terminators or path separators. Per PR #426 cycle 1 finding
+        # (patterns_path_name_fallback_escape) — the allowlist matches
+        # real-world task_list_id shapes (hex, uuid, alphanumeric ids)
+        # while rejecting dots, slashes, null bytes, and control chars
+        # by construction. A failing value is silently discarded — the
+        # skip-set is additive (missing a skip entry means we fall back
+        # to the other keys that DID pass), so discarding is strictly
+        # safer than trusting.
         task_list_id = os.environ.get("CLAUDE_CODE_TASK_LIST_ID", "")
+        if task_list_id and not re.fullmatch(r"[A-Za-z0-9_-]+", task_list_id):
+            task_list_id = ""
+        # Empty-string members are pruned by discard("") below, so we
+        # do not pre-filter team_name/session_id here — a missing skip
+        # key is the common case (e.g. bare Claude Code with no team).
         skip_names = {current_team_name, task_list_id, current_session_id}
         skip_names.discard("")
         if skip_names:
             tasks_r, tasks_s = cleanup_old_tasks(
                 skip_names=skip_names,
             )
+            tasks_reaper_ran = True
 
         # Best-effort audit record for the reapers. A journal write
         # failure does not undo the cleanup that already happened.
+        # `reaper_ran` discriminates "reaper executed and found nothing"
+        # (True, 0/0/0/0) from "both reapers short-circuited at
+        # callsite" (False, 0/0/0/0) — otherwise the two states are
+        # indistinguishable in the journal.
         try:
             append_event(make_event(
                 "cleanup_summary",
@@ -584,6 +639,7 @@ def main():
                 tasks_reaped=tasks_r,
                 tasks_skipped=tasks_s,
                 ttl_days=_SESSION_MAX_AGE_DAYS,
+                reaper_ran=(teams_reaper_ran or tasks_reaper_ran),
             ))
         except Exception as e:
             print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)
