@@ -2945,6 +2945,7 @@ class TestValidateEventSchemaPerType:
             "consolidation_completed": True,
         },
         "session_end": {},  # No required fields; baseline-only.
+        "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
     }
 
     def test_samples_mirror_required_fields_dict(self):
@@ -3575,3 +3576,237 @@ class TestValidateOptionalFieldTypes:
         events = read_events("session_start")
         assert len(events) == 1
         assert events[0].get("source") == "startup"
+
+    def test_cleanup_summary_all_fields_pass(self):
+        """cleanup_summary happy path — all declared fields with correct types.
+
+        Cycle-8: single `ttl_days` split into `teams_ttl_days` /
+        `tasks_ttl_days`; single `reaper_ran` split into `teams_ran` /
+        `tasks_ran`.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "cleanup_summary",
+            teams_reaped=3,
+            teams_skipped=1,
+            tasks_reaped=2,
+            tasks_skipped=0,
+            teams_ttl_days=30,
+            tasks_ttl_days=30,
+            teams_ran=True,
+            tasks_ran=True,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+        assert reason == "ok"
+
+    def test_cleanup_summary_declared_optional_fields(self):
+        """cleanup_summary fields are declared in _OPTIONAL_FIELDS_BY_TYPE.
+
+        Pin the schema contract. Enforcement is ACTIVE: cleanup_summary
+        is registered in _REQUIRED_FIELDS_BY_TYPE with {}, which defeats
+        the unknown-type short-circuit and activates the optional-field
+        loop. Cycle-8 split `ttl_days`/`reaper_ran` into per-reaper
+        fields.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("cleanup_summary") == {
+            "teams_reaped": int,
+            "teams_skipped": int,
+            "tasks_reaped": int,
+            "tasks_skipped": int,
+            "teams_ttl_days": int,
+            "tasks_ttl_days": int,
+            "teams_ran": bool,
+            "tasks_ran": bool,
+        }
+
+    def test_validate_rejects_wrong_type_cleanup_summary(self):
+        """Wrong-type optional field on cleanup_summary is rejected live.
+
+        Load-bearing for the optional-field activation invariant: this
+        test fails if `_REQUIRED_FIELDS_BY_TYPE["cleanup_summary"] = {}`
+        is removed, because the validator's unknown-type short-circuit
+        would then accept the str value and return (True, "ok"). The
+        empty-dict registration IS the activation switch.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        bad_str = make_event(
+            "cleanup_summary",
+            teams_reaped="3",  # wrong type — str, not int
+            teams_skipped=0,
+            tasks_reaped=0,
+            tasks_skipped=0,
+            teams_ttl_days=30,
+            tasks_ttl_days=30,
+        )
+        ok, reason = _validate_event_schema(bad_str)
+        assert ok is False
+        assert "teams_reaped" in reason
+        assert "must be int" in reason
+        assert "got str" in reason
+
+        # Symmetric: bool rejected as int (parity with required-field checks).
+        bad_bool = make_event(
+            "cleanup_summary",
+            teams_reaped=True,
+            teams_skipped=0,
+            tasks_reaped=0,
+            tasks_skipped=0,
+            teams_ttl_days=30,
+            tasks_ttl_days=30,
+        )
+        ok2, reason2 = _validate_event_schema(bad_bool)
+        assert ok2 is False
+        assert "got bool" in reason2
+
+    @pytest.mark.parametrize("field_name", ["teams_ttl_days", "tasks_ttl_days"])
+    @pytest.mark.parametrize("bad_value,expected_got", [
+        ("30", "str"),
+        (True, "bool"),  # bool-as-int trap — must be rejected
+        ([30], "list"),
+    ])
+    def test_validate_rejects_wrong_type_per_reaper_ttl_days(self, field_name, bad_value, expected_got):
+        """Cycle-8 Test 4 — `teams_ttl_days`/`tasks_ttl_days` must each be int.
+
+        COUNTER-TEST BY REVERT target: removing either field from
+        `_OPTIONAL_FIELDS_BY_TYPE["cleanup_summary"]` flips the
+        parametrization case for that field — the validator's
+        optional-field loop silently accepts wrong types for unknown
+        fields.
+
+        Parametrization shape mirrors `test_validate_rejects_wrong_type_
+        per_reaper_ran` (cycle-8 reaper-ran split): both halves of the
+        TTL split get independent coverage so a regression that drops
+        one field's schema entry is caught.
+
+        bool is load-bearing: Python `True == 1`, so an int-typed field
+        must still reject bool values (else `teams_ttl_days=True` would
+        silently pass as "1 day").
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        kwargs = {
+            "teams_reaped": 0,
+            "teams_skipped": 0,
+            "tasks_reaped": 0,
+            "tasks_skipped": 0,
+            "teams_ttl_days": 30,
+            "tasks_ttl_days": 30,
+            field_name: bad_value,  # overrides the good default above
+        }
+        event = make_event("cleanup_summary", **kwargs)
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert field_name in reason
+        assert "must be int" in reason
+        assert f"got {expected_got}" in reason
+
+    @pytest.mark.parametrize("field_name", ["teams_ran", "tasks_ran"])
+    @pytest.mark.parametrize("bad_value,expected_got", [
+        ("yes", "str"),
+        (1, "int"),
+        (0, "int"),
+    ])
+    def test_validate_rejects_wrong_type_per_reaper_ran(self, field_name, bad_value, expected_got):
+        """`teams_ran` and `tasks_ran` must each be bool — reject str, int (both 1 and 0).
+
+        Cycle-8 split the single `reaper_ran` bool into per-reaper bools.
+        This parametrization covers BOTH halves — a regression that flips
+        only one side's declared type (e.g. `teams_ran: int`) would fail
+        exactly the affected parametrization cell.
+
+        int is load-bearing: Python bools ARE ints (True == 1), so
+        without an explicit bool-vs-int check in the validator,
+        `teams_ran=1` would silently pass as "True-ish" and poison
+        downstream audit-log consumers who rely on the strict
+        True/False discriminator.
+
+        Note: value=None is NOT tested as a reject case because the
+        validator's optional-field path explicitly treats None as
+        "field absent" (session_journal.py:324) — consistent with the
+        `continue` semantics for missing optional fields. This is
+        intentional and correct for OPTIONAL fields.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        kwargs = {
+            "teams_reaped": 0,
+            "teams_skipped": 0,
+            "tasks_reaped": 0,
+            "tasks_skipped": 0,
+            "teams_ttl_days": 30,
+            "tasks_ttl_days": 30,
+            field_name: bad_value,
+        }
+        event = make_event("cleanup_summary", **kwargs)
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert field_name in reason
+        assert "must be bool" in reason
+        assert f"got {expected_got}" in reason
+
+    @pytest.mark.parametrize("field_name", ["teams_ran", "tasks_ran"])
+    def test_validate_accepts_per_reaper_ran_happy_path(self, field_name):
+        """`teams_ran`=True/False and `tasks_ran`=True/False all pass.
+
+        Happy-path pin for both bool fields (cycle-8). Pins the positive
+        side so a future refactor that over-tightened the validator
+        (e.g. accepted only True) would fail here.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        for value in (True, False):
+            kwargs = {
+                "teams_reaped": 0,
+                "teams_skipped": 0,
+                "tasks_reaped": 0,
+                "tasks_skipped": 0,
+                "teams_ttl_days": 30,
+                "tasks_ttl_days": 30,
+                field_name: value,
+            }
+            event = make_event("cleanup_summary", **kwargs)
+            ok, reason = _validate_event_schema(event)
+            assert ok is True, f"{field_name}={value!r} should pass; got {reason!r}"
+            assert reason == "ok"
+
+    def test_validate_rejects_wrong_type_session_end_warning(self):
+        """session_end.warning wrong-type is rejected live (#433 cycle-7 N1).
+
+        COUNTER-TEST BY REVERT target: removing
+        `"session_end": {"warning": str}` from `_OPTIONAL_FIELDS_BY_TYPE`
+        in shared/session_journal.py flips this test to pass-as-OK
+        because `_validate_event_schema` has no declared optional
+        fields for `session_end` and the int value sails through the
+        optional-field loop silently. The active empty-dict entry for
+        session_end in `_REQUIRED_FIELDS_BY_TYPE` combined with the
+        `{"warning": str}` entry here IS the activation mechanism.
+
+        session_end.py:687-688 writes `make_event("session_end",
+        warning=<str>)` when check_unpaused_pr detects an open-but-
+        unpaused PR. Without the schema entry, a future writer could
+        pass a non-string warning (e.g. a dict of findings) and no
+        validator would catch it — downstream audit consumers would
+        blow up on unexpected types.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        bad = make_event("session_end", warning=42)  # wrong type — int, not str
+        ok, reason = _validate_event_schema(bad)
+        assert ok is False
+        assert "warning" in reason
+        assert "must be str" in reason
+        assert "got int" in reason
+
+    def test_validate_accepts_session_end_warning_str(self):
+        """Happy-path partner: well-formed warning string passes (#433 cycle-7 N1)."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        good = make_event("session_end", warning="open-pr-detected: #433")
+        ok, reason = _validate_event_schema(good)
+        assert ok is True, f"valid warning should pass; got {reason!r}"
+        assert reason == "ok"

@@ -1400,3 +1400,90 @@ class TestSanitizeMemberName:
     def test_returns_empty_for_all_stripped(self):
         # A name consisting entirely of C0 controls collapses to empty.
         assert _sanitize_member_name("\n\r\x00\x01") == ""
+
+
+# =============================================================================
+# is_safe_path_component — cycle-8 promoted public helper (#412 Fix B)
+# =============================================================================
+# NOTE: the cycle-2 regression class is also named `TestIsSafePathComponent`
+# (line 1242). Python class redefinition in a single module silently
+# clobbers the earlier class — this class's name is disambiguated with a
+# `_Public` suffix so both classes run. Caught during cycle-8 verify-only
+# re-review; without the rename, the cycle-2 path-traversal regression
+# guards (`..`, `.`, `/tmp`, `a/b`, null-byte) were being silently skipped.
+
+
+class TestIsSafePathComponent_Public:
+    """Cycle-8 Test 3 — promoted shared helper, public-API surface.
+
+    Previously `_is_safe_path_component` (private). Cycle-8 promoted to
+    public `is_safe_path_component` + exported via `shared/__init__.py`
+    so session_end.py's three allowlist callsites can DRY them out.
+
+    COUNTER-TEST BY REVERT target: removing the `fullmatch` regex
+    predicate in `is_safe_path_component` (replacing with `return True`)
+    flips the hostile-input tests — all the malicious values would
+    pass through. The regex IS the defense; this test class pins it.
+    """
+
+    @pytest.mark.parametrize("value", [
+        "pact-0001639f",                       # hex-shaped team name
+        "5ddd5636-d408-4892-aaad-7c4eed80765d",  # UUID
+        "task-list-abc_123",                   # alphanumeric with hyphens + underscores
+        "abc",                                 # minimal
+        "a_b-C-D_0",                           # mixed case with underscores/hyphens
+    ])
+    def test_valid_inputs_pass(self, value):
+        """Allowlist-shaped inputs (alphanumeric, `_`, `-`) pass."""
+        from shared.session_state import is_safe_path_component
+
+        assert is_safe_path_component(value) is True
+
+    @pytest.mark.parametrize("value", [
+        "../etc",                  # path traversal
+        "..",                      # parent dir — the class this helper replaces
+        "name with space",         # space
+        "name/with/slash",         # path separator
+        "name;rm -rf /",           # shell metachar
+        "name\nwith\nnewline",     # LF
+        "name\twith\ttab",         # tab (C0 control)
+        "\u2028",                  # LINE SEPARATOR
+        "\u0085",                  # NEL
+        "\x00",                    # null byte
+        "name.ext",                # dot — intentionally rejected to prevent traversal ambiguity
+        "leading-ok\n",            # trailing newline — fullmatch strict-anchors
+    ])
+    def test_hostile_inputs_fail(self, value):
+        """Hostile inputs fail the allowlist."""
+        from shared.session_state import is_safe_path_component
+
+        assert is_safe_path_component(value) is False, (
+            f"Hostile value {value!r} must be rejected by is_safe_path_component"
+        )
+
+    def test_empty_string_fails(self):
+        """Empty string fails (short-circuit before regex)."""
+        from shared.session_state import is_safe_path_component
+
+        assert is_safe_path_component("") is False
+
+    def test_non_string_fails(self):
+        """Non-str inputs fail defensively."""
+        from shared.session_state import is_safe_path_component
+
+        assert is_safe_path_component(None) is False  # type: ignore[arg-type]
+        assert is_safe_path_component(42) is False  # type: ignore[arg-type]
+        assert is_safe_path_component(["x"]) is False  # type: ignore[arg-type]
+
+    def test_exported_from_shared_package(self):
+        """`is_safe_path_component` is reachable via `shared.__init__` export.
+
+        Pins the public API: session_end.py imports via the package
+        root, not via the session_state submodule. Breaking the export
+        would break that DRY refactor.
+        """
+        import shared
+        assert hasattr(shared, "is_safe_path_component")
+        assert hasattr(shared, "SAFE_PATH_COMPONENT_RE")
+        assert shared.is_safe_path_component("pact-0001639f") is True
+        assert shared.is_safe_path_component("../etc") is False

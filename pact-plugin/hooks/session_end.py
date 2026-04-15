@@ -19,6 +19,7 @@ Output: None (SessionEnd hooks cannot inject context)
 """
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -40,6 +41,7 @@ from shared.session_journal import (
     read_last_event_from,
 )
 
+from shared.session_state import is_safe_path_component
 from shared.task_utils import get_task_list
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
@@ -57,7 +59,6 @@ def get_project_slug() -> str:
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
-    sessions_dir: str | None = None,
 ) -> str | None:
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
@@ -78,7 +79,6 @@ def check_unpaused_pr(
     Args:
         tasks: List of task dicts from get_task_list(), or None
         project_slug: Project identifier for the session directory
-        sessions_dir: Override for sessions base directory (for testing)
 
     Returns:
         Warning string if an unpaused PR is detected, otherwise None.
@@ -187,10 +187,29 @@ def _sweep_teachback_markers(directory: Path) -> None:
         pass
 
 
-# Regex for validating UUID-format directory names (session IDs)
+# Regex for validating UUID-format directory names (session IDs).
+# `\Z` (strict end-of-string) is used instead of `$`: in Python `re`,
+# `$` matches end-of-string OR immediately before a trailing newline,
+# so `deadbeef-dead-beef-dead-beefdeadbeef\n` would pass a `$` anchor
+# and re-enter the skip-set / reaper allowlist as a crafted name.
+# `\Z` rejects trailing newlines and is the stricter anchor.
 _UUID_PATTERN = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z'
 )
+
+# Regex for validating PACT team directory names. Intentionally LOOSER
+# than what `generate_team_name` in session_init.py actually emits —
+# the producer emits `pact-` + `secrets.token_hex(4)` (8 lowercase hex
+# chars, no internal hyphens) or the session-id-prefix fallback
+# (`pact-` + 8 hex chars). This regex accepts any `pact-`-prefixed
+# lowercase-hex-and-hyphen shape so the reaper tolerates future drift
+# in the producer (e.g. a naming scheme that introduces internal
+# hyphens) without silently reaping a live team dir.
+# Non-matching entries in ~/.claude/teams/ belong to other tooling and
+# MUST NOT be reaped by cleanup_old_teams, even if they're stale by
+# mtime. The reaper treats ~/.claude/teams/ as shared space, not
+# PACT-owned space. `\Z` (strict end-of-string) — see _UUID_PATTERN.
+_TEAM_NAME_PATTERN = re.compile(r'^pact-[a-f0-9-]+\Z')
 
 # Default threshold for active (non-paused) session directory cleanup.
 # 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
@@ -293,6 +312,12 @@ def cleanup_old_sessions(
 
     try:
         for entry in slug_dir.iterdir():
+            # Skip symlinks (live or dangling) — is_symlink uses lstat
+            # semantics, short-circuiting before is_dir (which follows
+            # symlinks). Prevents a planted link from pinning alive or
+            # leaking mtime information about its target.
+            if entry.is_symlink():
+                continue
             if not entry.is_dir():
                 continue
             if not _UUID_PATTERN.match(entry.name):
@@ -314,6 +339,333 @@ def cleanup_old_sessions(
                 continue
     except OSError:
         pass
+
+
+def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
+    """
+    Return the max mtime across children of `entry` matching `glob`.
+
+    Generalized helper used by both reapers:
+    - tasks reaper passes `glob="*.json"` — platform `TaskUpdate` rewrites
+      individual `{id}.json` files; only *.json entries carry the signal.
+    - teams reaper passes `glob="*"` — the team dir holds config.json
+      AND member subdirectories AND arbitrary future sidecars; any child
+      touch indicates the team is live.
+
+    Why max-child rather than parent-dir stat: POSIX in-place overwrite
+    (e.g. `config.json` rewrite via write-then-rename-or-truncate) does
+    NOT bump the parent directory's mtime — the parent's mtime only
+    changes on create/unlink/rename of its entries. So a team dir whose
+    config.json is rewritten in place but has no member subdirs created
+    would false-reap on parent-dir mtime. Max-child mtime is the tight
+    upper bound on "when was anything under this dir last touched."
+
+    Return values (cycle-5 refinement):
+    - `float`: either a successful max-child mtime, OR the parent's
+      `lstat().st_mtime` when the dir is legitimately empty (no children
+      matched the glob).
+    - `None` sentinel: "could not determine age." Two triggers:
+      (a) outer `entry.glob()` raised OSError AND parent `lstat()` also
+      raised — we can't enumerate OR fall back; OR
+      (b) at least one child was observed but EVERY `child.lstat()`
+      raised — distinguishable from empty-dir because we saw children.
+      Callers MUST treat `None` as "skip this entry, count as skipped"
+      rather than proceeding to an age calculation that would collapse
+      "can't observe" into "use parent mtime" (a false-reap risk under
+      permission regressions). The empty-dir case keeps the old semantic
+      (fall back to parent mtime so stale empty dirs still age out).
+
+    Fail-open: never raises. Returns a valid mtime or `None` in every
+    branch. The parent-stat fallback uses `lstat()` (symlink-own
+    semantics) for defense-in-isolation against callers that might
+    forget an `is_symlink` guard — cycle-2 F2 pattern.
+
+    Args:
+        entry: Directory to probe.
+        glob: Glob pattern selecting which children to consult. Default
+            `"*.json"` matches the tasks-reaper convention; teams reaper
+            passes `"*"` to walk all children (config.json + subdirs).
+
+    Returns:
+        Max child mtime, or parent mtime on empty-dir, or `None` sentinel
+        when age cannot be determined (see above).
+    """
+    latest = 0.0
+    saw_any_child = False
+    try:
+        for child in entry.glob(glob):
+            saw_any_child = True
+            try:
+                # lstat() uses symlink-own semantics (no dereference). A
+                # symlink child (attacker-planted `tasks/{real-dir}/x.json`
+                # → `/var/log/syslog`) must NOT be allowed to pin the
+                # parent's effective mtime to an arbitrary target; the
+                # link's own mtime is the correct signal. lstat is the
+                # portable pre-3.10 form (stat(follow_symlinks=False)
+                # requires Python 3.10+).
+                latest = max(latest, child.lstat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if latest > 0.0:
+        return latest
+    # latest == 0.0 here. Two distinct scenarios:
+    # - saw_any_child=False: legitimately empty (or outer glob raised
+    #   before yielding). Fall back to parent mtime so stale empties age
+    #   out — the intended empty-dir semantic.
+    # - saw_any_child=True: we saw children but every child.lstat()
+    #   raised. Collapsing this into "use parent mtime" would lose the
+    #   signal that we CAN'T observe the dir. Return sentinel so the
+    #   caller skips instead of false-reaping under a permission skew.
+    if saw_any_child:
+        return None
+    try:
+        # lstat (not stat) — cycle-5 defensive-in-isolation: the caller
+        # already filters symlinks via is_symlink before calling us, but
+        # using lstat here makes the helper safe even when called in
+        # isolation (e.g. from future consumers that forget the guard).
+        return entry.lstat().st_mtime
+    except OSError:
+        # Can neither observe children nor the parent — sentinel.
+        return None
+
+
+def cleanup_old_teams(
+    current_team_name: str,
+    teams_base_dir: str | None = None,
+    max_age_days: int = _SESSION_MAX_AGE_DAYS,
+) -> tuple[int, int]:
+    """
+    Remove stale team directories under ~/.claude/teams/ (issue #412 Fix B).
+
+    Three defense layers:
+    1. Name-pattern gate — only directories matching `_TEAM_NAME_PATTERN`
+       (`^pact-[a-f0-9-]+$`) are candidates. This mirrors the INVARIANT
+       documented on `generate_team_name` in session_init.py. Non-PACT
+       writers that create `~/.claude/teams/foo-bar/` are out of scope:
+       `~/.claude/teams/` is shared space, not PACT-owned space.
+    2. Current-team skip — exact-match skip of `current_team_name`.
+    3. Fail-closed on empty `current_team_name` — returns (0, 0) without
+       reaping anything. An empty skip key combined with a permissive
+       name filter would be catastrophic; the guard is belt-and-suspenders
+       against a callsite bug even though layer (1) already filters.
+
+    Age probe walks child mtimes via `_dir_max_child_mtime(entry, glob="*")`.
+    Parent-dir mtime is wrong here: POSIX in-place overwrites (e.g.
+    `config.json` rewritten without rename/unlink) do NOT bump the
+    parent's mtime — only create/unlink/rename of entries does. Walking
+    ALL children ("*") covers both the config.json-rewrite case AND the
+    SubagentStart member-subdir creation case, giving a tight upper
+    bound on "when was this team dir last touched."
+
+    Best-effort: never raises. Swallows OSError per-entry and outer.
+
+    Args:
+        current_team_name: Current session's team_name from
+            pact_context.get_team_name(). MUST be non-empty.
+        teams_base_dir: Override for base directory (testing). Defaults
+            to ~/.claude/teams.
+        max_age_days: TTL in days (default: 30).
+
+    Returns:
+        (reaped, skipped) — `reaped` counts directories the TTL predicate
+        selected and passed to `shutil.rmtree(..., ignore_errors=True)`;
+        because `ignore_errors=True` swallows permission/EBUSY failures,
+        `reaped` is attempted-deletions, NOT verified-deletions. `skipped`
+        counts entries where stat/rmtree raised OSError before the rmtree
+        dispatch (i.e. the TTL probe itself failed).
+    """
+    if not current_team_name:
+        return 0, 0
+
+    if teams_base_dir is None:
+        teams_base_dir = str(Path.home() / ".claude" / "teams")
+    base = Path(teams_base_dir)
+    if not base.exists():
+        return 0, 0
+
+    reaped = 0
+    skipped = 0
+    try:
+        for entry in base.iterdir():
+            # Skip symlinks (live or dangling) — is_symlink uses lstat
+            # semantics, short-circuiting before is_dir (which follows
+            # symlinks). Prevents a planted link from pinning alive or
+            # leaking mtime information about its target.
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir():
+                continue
+            # Name-shape gate: only touch PACT-shaped team dirs. Mirrors
+            # the generate_team_name INVARIANT in session_init.py. Non-
+            # matching entries belong to other tooling and are out of
+            # scope for this reaper.
+            if not _TEAM_NAME_PATTERN.match(entry.name):
+                continue
+            # Case-insensitive skip (cycle-5 defensive): pact_context's
+            # `get_team_name()` lowercases its return value and the
+            # generate_team_name INVARIANT pins lowercase, so byte-exact
+            # compare is correct-by-coincidence today. `.lower()` on both
+            # sides tolerates future drift in either producer without a
+            # silent reap of the current session's dir.
+            if entry.name.lower() == current_team_name.lower():
+                continue
+            try:
+                mtime = _dir_max_child_mtime(entry, glob="*")
+                # Cycle-5 sentinel check: `None` means the helper couldn't
+                # determine the dir's effective age (all child stats
+                # raised, or glob + parent lstat both raised). Treat as
+                # "cannot observe" → skipped; do NOT proceed to the age
+                # calculation (which would TypeError on None anyway, but
+                # an explicit guard makes the invariant self-documenting).
+                if mtime is None:
+                    skipped += 1
+                    continue
+                age_days = (time.time() - mtime) / 86400
+                if age_days > max_age_days:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    reaped += 1
+            except OSError:
+                skipped += 1
+                continue
+    except OSError:
+        pass
+    return reaped, skipped
+
+
+def cleanup_old_tasks(
+    skip_names: set[str],
+    tasks_base_dir: str | None = None,
+    max_age_days: int = _SESSION_MAX_AGE_DAYS,
+) -> tuple[int, int]:
+    """
+    Remove stale task subdirectories under ~/.claude/tasks/ (issue #412 Fix B).
+
+    Skips every entry whose name is in `skip_names`. Fails closed —
+    returns (0, 0) if `skip_names` is empty or contains only blank
+    strings. Per-entry mtime is probed via
+    `_dir_max_child_mtime(entry, glob="*.json")` because platform writes
+    update individual `{id}.json` files without bumping the parent dir's
+    mtime.
+
+    Best-effort: never raises. Swallows OSError per-entry and outer.
+
+    Args:
+        skip_names: Set of current-session names to preserve. Must
+            contain at least one non-blank entry. Caller assembles
+            {team_name, task_list_id, session_id} filtering empties.
+        tasks_base_dir: Override for base directory (testing). Defaults
+            to ~/.claude/tasks.
+        max_age_days: TTL in days (default: 30).
+
+    Returns:
+        (reaped, skipped) — same semantics as cleanup_old_teams: `reaped`
+        is attempted-deletions (rmtree called with ignore_errors=True, so
+        failures are silent), `skipped` is entries where the TTL probe or
+        rmtree dispatch itself raised OSError.
+    """
+    if not skip_names or all(not n for n in skip_names):
+        return 0, 0
+
+    if tasks_base_dir is None:
+        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+    base = Path(tasks_base_dir)
+    if not base.exists():
+        return 0, 0
+
+    reaped = 0
+    skipped = 0
+    try:
+        for entry in base.iterdir():
+            # Skip symlinks (live or dangling) — is_symlink uses lstat
+            # semantics, short-circuiting before is_dir (which follows
+            # symlinks). Prevents a planted link from pinning alive or
+            # leaking mtime information about its target.
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir():
+                continue
+            if entry.name in skip_names:
+                continue
+            try:
+                mtime = _dir_max_child_mtime(entry, glob="*.json")
+                # Cycle-5 sentinel check: `None` means the helper couldn't
+                # determine the dir's effective age. Skip rather than
+                # false-reap under a permission regression.
+                if mtime is None:
+                    skipped += 1
+                    continue
+                age_days = (time.time() - mtime) / 86400
+                if age_days > max_age_days:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    reaped += 1
+            except OSError:
+                skipped += 1
+                continue
+    except OSError:
+        pass
+    return reaped, skipped
+
+
+def _assemble_tasks_skip_set(
+    team_name: str,
+    task_list_id: str,
+    session_id: str,
+) -> set[str]:
+    """
+    Build the skip-set for `cleanup_old_tasks` from the three platform-
+    key channels that can address `~/.claude/tasks/{name}/`.
+
+    The three channels:
+    - `team_name` — PACT canonical (from pact_context.get_team_name()).
+      Bounded by the `generate_team_name` producer-side filter, but a
+      non-PACT writer or future producer drift could still leak unsafe
+      values, so the same allowlist applies (cycle-7 symmetry).
+    - `task_list_id` — user-controlled env var `CLAUDE_CODE_TASK_LIST_ID`
+      (platform-sourced). The positive-regex allowlist prevents a
+      crafted value from bypassing the skip-set via unicode line
+      terminators or path separators. Per PR #426 cycle-1 finding
+      (patterns_path_name_fallback_escape) — the allowlist matches
+      real-world task_list_id shapes (hex, uuid, alphanumeric ids)
+      while rejecting dots, slashes, null bytes, and control chars
+      by construction.
+    - `session_id` — bare Claude Code fallback per
+      `task_utils.get_task_list` (platform-sourced via SessionStart
+      stdin). Flows through the SAME allowlist as `task_list_id`
+      (cycle-5 symmetry) — defense-in-depth should not asymmetrically
+      trust one channel.
+
+    Fail-discard on allowlist mismatch: a failing value is silently
+    dropped. The skip-set is ADDITIVE — missing a skip entry means we
+    fall back to the other keys that DID pass, so discarding is
+    strictly safer than trusting an untrusted value as a path key.
+    Empty-string members are pruned by `discard("")`, so the caller
+    does not need to pre-filter empties.
+
+    Extracted from `main()` for direct unit testability — the function
+    takes only primitives and returns a deterministic set, so callers
+    can assert skip-set contents without mocking the session context.
+
+    Args:
+        team_name: Raw team_name from pact_context. May be empty.
+        task_list_id: Raw CLAUDE_CODE_TASK_LIST_ID env var. May be empty.
+        session_id: Raw session_id from pact_context. May be empty.
+
+    Returns:
+        The skip-set, with empty strings and allowlist-failing values
+        removed. Caller treats a non-empty return as "the tasks reaper
+        is safe to run"; empty means "all channels short-circuited or
+        failed — do NOT run the tasks reaper" (fail-closed).
+    """
+    safe_team_name = team_name if is_safe_path_component(team_name) else ""
+    safe_task_list_id = (
+        task_list_id if is_safe_path_component(task_list_id) else ""
+    )
+    safe_session_id = session_id if is_safe_path_component(session_id) else ""
+    skip_names = {safe_team_name, safe_task_list_id, safe_session_id}
+    skip_names.discard("")
+    return skip_names
 
 
 def _cleanup_old_checkpoints(
@@ -350,8 +702,20 @@ def _cleanup_old_checkpoints(
 
     try:
         for checkpoint_file in checkpoint_dir.glob("*.json"):
+            # Skip symlinks (live or dangling). Mirrors cycle-1 hardening
+            # on the three sibling reapers — `is_symlink()` uses lstat
+            # semantics, so it short-circuits before any follow-semantic
+            # probe. Prevents a planted link from driving the TTL oracle
+            # off the target's mtime or from unlinking the link when the
+            # link's own mtime is within TTL but the target's is older.
+            if checkpoint_file.is_symlink():
+                continue
             try:
-                mtime = checkpoint_file.stat().st_mtime
+                # lstat (not stat) — cycle-2 defense: even with the
+                # symlink guard above, lstat is the correct probe for
+                # the link's own mtime if the guard is ever removed or
+                # if a future caller bypasses it. Defense-in-isolation.
+                mtime = checkpoint_file.lstat().st_mtime
                 if mtime < cutoff_time:
                     checkpoint_file.unlink()
                     cleaned += 1
@@ -404,6 +768,63 @@ def main():
             project_slug=project_slug,
             current_session_id=current_session_id,
         )
+
+        # Clean up stale ~/.claude/teams/ and ~/.claude/tasks/ (#412 Fix B).
+        # Callsite short-circuit on empty team_name is the belt-and-suspenders
+        # layer around the internal fail-closed guard.
+        current_team_name = get_team_name()
+        teams_r, teams_s = 0, 0
+        tasks_r, tasks_s = 0, 0
+        teams_reaper_ran = False
+        tasks_reaper_ran = False
+        if current_team_name:
+            teams_r, teams_s = cleanup_old_teams(
+                current_team_name=current_team_name,
+            )
+            teams_reaper_ran = True
+
+        # Assemble skip-set via the module-level helper — see
+        # `_assemble_tasks_skip_set` for the full rationale on the three
+        # platform-key channels and the positive-regex allowlist. The
+        # helper takes only primitives so it's directly unit-testable
+        # without mocking the session context.
+        skip_names = _assemble_tasks_skip_set(
+            team_name=current_team_name,
+            task_list_id=os.environ.get("CLAUDE_CODE_TASK_LIST_ID", ""),
+            session_id=current_session_id or "",
+        )
+        if skip_names:
+            tasks_r, tasks_s = cleanup_old_tasks(
+                skip_names=skip_names,
+            )
+            tasks_reaper_ran = True
+
+        # Best-effort audit record for the reapers. A journal write
+        # failure does not undo the cleanup that already happened.
+        # `teams_ran`/`tasks_ran` discriminate "reaper executed and
+        # found nothing" (True, 0/0) from "reaper short-circuited at
+        # callsite" (False, 0/0) per side — otherwise the two states
+        # are indistinguishable in the journal. Cycle-8 replaces the
+        # older single `reaper_ran` bool with per-reaper bools so an
+        # auditor can tell WHICH side short-circuited. Likewise
+        # `teams_ttl_days`/`tasks_ttl_days` replace the single
+        # `ttl_days` — currently both default to `_SESSION_MAX_AGE_DAYS`
+        # but the split future-proofs against TTL divergence (e.g. if
+        # the tasks reaper ever gets a dual-TTL like cleanup_old_sessions).
+        try:
+            append_event(make_event(
+                "cleanup_summary",
+                teams_reaped=teams_r,
+                teams_skipped=teams_s,
+                tasks_reaped=tasks_r,
+                tasks_skipped=tasks_s,
+                teams_ttl_days=_SESSION_MAX_AGE_DAYS,
+                tasks_ttl_days=_SESSION_MAX_AGE_DAYS,
+                teams_ran=teams_reaper_ran,
+                tasks_ran=tasks_reaper_ran,
+            ))
+        except Exception as e:
+            print(f"Hook warning (cleanup_summary journal): {e}", file=sys.stderr)
 
         # Clean up stale pact-refresh checkpoint files (7-day TTL).
         # Post-#413, these accumulate only in legacy deployments.

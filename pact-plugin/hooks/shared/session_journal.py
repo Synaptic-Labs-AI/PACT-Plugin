@@ -144,6 +144,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # nothing (line 316). commands/wrap-up.md CLI also writes session_end
     # with no --data. Baseline v/type/ts validation is the only requirement.
     "session_end": {},
+    # hooks/session_end.py writes cleanup_summary after the teams/tasks
+    # reaper runs (#412 Fix B). No required fields — the event is a counts
+    # audit trail and every field is optional by design. The empty-dict
+    # entry is structurally necessary: _validate_event_schema short-circuits
+    # on unknown types and skips the _OPTIONAL_FIELDS_BY_TYPE loop, so a
+    # type must be registered here to activate optional-field type checks.
+    "cleanup_summary": {},
 }
 
 
@@ -166,6 +173,36 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # inputs to "unknown" before the journal write; this schema contract
     # catches any future writer that bypasses that path.
     "session_start": {"source": str},
+    # hooks/session_end.py writes session_end with an optional `warning`
+    # string when check_unpaused_pr detects an open PR that was NOT
+    # paused (no memory consolidation). The empty-dict registration in
+    # _REQUIRED_FIELDS_BY_TYPE above ("session_end": {}) is what
+    # ACTIVATES this optional check — _validate_event_schema
+    # short-circuits on unknown event types and would otherwise skip
+    # the optional loop. Symmetric with the cleanup_summary registration
+    # shipped in the same PR (#412 Fix B).
+    "session_end": {"warning": str},
+    # hooks/session_end.py writes cleanup_summary after the teams/tasks
+    # reaper runs (#412 Fix B). Counts-only payload; no identifying names
+    # (audit surface area minimization). `teams_ran`/`tasks_ran`
+    # discriminate "reaper executed and found nothing" (True, 0/0) from
+    # "reaper short-circuited at callsite" (False, 0/0) per side; without
+    # them the two states are indistinguishable in the journal. Cycle-8
+    # split these from the older single `reaper_ran` bool and the single
+    # `ttl_days` int into per-reaper fields so an auditor can tell WHICH
+    # side short-circuited and which TTL applied on either side
+    # (currently both default to 30 days; split future-proofs against
+    # TTL divergence).
+    "cleanup_summary": {
+        "teams_reaped": int,
+        "teams_skipped": int,
+        "tasks_reaped": int,
+        "tasks_skipped": int,
+        "teams_ttl_days": int,
+        "tasks_ttl_days": int,
+        "teams_ran": bool,
+        "tasks_ran": bool,
+    },
 }
 
 

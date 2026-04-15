@@ -59,6 +59,10 @@ from .merge_guard_common import (
 )
 from .error_output import hook_error_json
 from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
+from .session_state import (
+    SAFE_PATH_COMPONENT_RE,
+    is_safe_path_component,
+)
 
 # Bootstrap gate marker — the session-scoped file whose presence signals that
 # Skill("PACT:bootstrap") has been invoked and the tool gate can self-disable.
@@ -111,6 +115,8 @@ __all__ = [
     "hook_error_json",
     "PACT_AGENTS",
     "SYSTEM_TASK_PREFIXES",
+    "SAFE_PATH_COMPONENT_RE",
+    "is_safe_path_component",
     "BOOTSTRAP_MARKER_NAME",
     "build_session_path",
     "get_pact_context",
