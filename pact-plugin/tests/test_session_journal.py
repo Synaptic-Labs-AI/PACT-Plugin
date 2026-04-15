@@ -3596,14 +3596,13 @@ class TestValidateOptionalFieldTypes:
     def test_cleanup_summary_declared_optional_fields(self):
         """cleanup_summary's 5 fields are declared in _OPTIONAL_FIELDS_BY_TYPE.
 
-        Pin the schema contract. Note: the validator currently short-
-        circuits on types absent from _REQUIRED_FIELDS_BY_TYPE (see line
-        272-274), so the optional-field loop is unreachable for
-        cleanup_summary; the declaration is forward-looking — a future
-        validator change (or the addition of a required entry, even an
-        empty one) will activate enforcement. Test-engineer flagged this
-        gap to lead during TEST (non-blocking for PR correctness because
-        writers pass int literals).
+        Pin the schema contract. Enforcement is ACTIVE: this PR also
+        registers `cleanup_summary: {}` in _REQUIRED_FIELDS_BY_TYPE, which
+        defeats the unknown-type short-circuit in `_validate_event_schema`
+        and causes the optional-field loop to execute on every
+        cleanup_summary event. See
+        `test_validate_rejects_wrong_type_cleanup_summary` below for the
+        live-rejection pin.
         """
         from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
 
@@ -3613,4 +3612,43 @@ class TestValidateOptionalFieldTypes:
             "tasks_reaped": int,
             "tasks_skipped": int,
             "ttl_days": int,
+            "reaper_ran": bool,
         }
+
+    def test_validate_rejects_wrong_type_cleanup_summary(self):
+        """Wrong-type optional field on cleanup_summary is rejected live.
+
+        Load-bearing for the optional-field activation invariant: this
+        test fails if `_REQUIRED_FIELDS_BY_TYPE["cleanup_summary"] = {}`
+        is removed, because the validator's unknown-type short-circuit
+        would then accept the str value and return (True, "ok"). The
+        empty-dict registration IS the activation switch.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        bad_str = make_event(
+            "cleanup_summary",
+            teams_reaped="3",  # wrong type — str, not int
+            teams_skipped=0,
+            tasks_reaped=0,
+            tasks_skipped=0,
+            ttl_days=30,
+        )
+        ok, reason = _validate_event_schema(bad_str)
+        assert ok is False
+        assert "teams_reaped" in reason
+        assert "must be int" in reason
+        assert "got str" in reason
+
+        # Symmetric: bool rejected as int (parity with required-field checks).
+        bad_bool = make_event(
+            "cleanup_summary",
+            teams_reaped=True,
+            teams_skipped=0,
+            tasks_reaped=0,
+            tasks_skipped=0,
+            ttl_days=30,
+        )
+        ok2, reason2 = _validate_event_schema(bad_bool)
+        assert ok2 is False
+        assert "got bool" in reason2
