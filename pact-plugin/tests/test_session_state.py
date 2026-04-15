@@ -1405,10 +1405,16 @@ class TestSanitizeMemberName:
 # =============================================================================
 # is_safe_path_component — cycle-8 promoted public helper (#412 Fix B)
 # =============================================================================
+# NOTE: the cycle-2 regression class is also named `TestIsSafePathComponent`
+# (line 1242). Python class redefinition in a single module silently
+# clobbers the earlier class — this class's name is disambiguated with a
+# `_Public` suffix so both classes run. Caught during cycle-8 verify-only
+# re-review; without the rename, the cycle-2 path-traversal regression
+# guards (`..`, `.`, `/tmp`, `a/b`, null-byte) were being silently skipped.
 
 
-class TestIsSafePathComponent:
-    """Cycle-8 Test 3 — promoted shared helper.
+class TestIsSafePathComponent_Public:
+    """Cycle-8 Test 3 — promoted shared helper, public-API surface.
 
     Previously `_is_safe_path_component` (private). Cycle-8 promoted to
     public `is_safe_path_component` + exported via `shared/__init__.py`
