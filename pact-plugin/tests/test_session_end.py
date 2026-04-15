@@ -2878,6 +2878,193 @@ class TestReaperBehaviorPins:
 
 
 # =============================================================================
+# Cycle-2 remediation: M3 CLAUDE_CODE_TASK_LIST_ID allowlist rejection pin
+# =============================================================================
+
+
+class TestTaskListIdAllowlistRejection:
+    """Pins `re.fullmatch(r"[A-Za-z0-9_-]+", ...)` guard at session_end.py:615.
+
+    The cycle-1 happy-path test (`test_main_assembles_union_skip_set`)
+    covers a well-formed `task-C` passing through to skip_names. But it
+    doesn't cover the REJECTION path — if someone deletes the allowlist
+    line, hostile env values would silently enter skip_names and could
+    shield malicious entries in `~/.claude/tasks/` from reaping.
+
+    This class provides the counter-test pin: each hostile value is
+    asserted NOT to appear in the skip_names passed to cleanup_old_tasks.
+    Counter-test-by-revert confirmed: removing the allowlist line makes
+    these tests fail (hostile values leak into skip_names).
+    """
+
+    @pytest.mark.parametrize("hostile_value", [
+        "../etc",           # path traversal
+        "\u2028",            # LINE SEPARATOR (role-marker injection class)
+        "\x00",              # null byte (also blocked by OS at env layer,
+                             # but allowlist is the in-process defense)
+        "pact abc",          # space (breaks shell/path assumptions)
+        "name\nwith\nnewline",  # newline injection
+        "name;rm -rf /",     # shell metachar
+        "name/with/slash",   # path separator
+    ])
+    def test_hostile_task_list_id_excluded_from_skip_names(self, hostile_value):
+        """Each hostile CLAUDE_CODE_TASK_LIST_ID must be filtered out.
+
+        Invokes main() with a hostile env value. Asserts the skip_names
+        kwarg passed to cleanup_old_tasks does NOT contain the hostile
+        string. The other skip members (team_name, session_id) are
+        fixed non-empty so cleanup_old_tasks always runs.
+
+        Uses `patch("os.environ.get", ...)` rather than
+        `patch.dict("os.environ", ...)` because `os.environ` rejects
+        embedded null bytes at the OS API layer — but the in-process
+        allowlist is the defense-in-depth layer we're pinning here, so
+        we simulate the env read directly.
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+        import os as _os
+
+        real_env_get = _os.environ.get
+
+        def fake_env_get(key, default=None):
+            if key == "CLAUDE_CODE_TASK_LIST_ID":
+                return hostile_value
+            return real_env_get(key, default)
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch("session_end.os.environ.get", side_effect=fake_env_get),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-B"),
+            patch("session_end.get_team_name", return_value="team-A"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        mock_tasks_ref = {}
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks_ref["m"] = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_tasks = mock_tasks_ref["m"]
+        mock_tasks.assert_called_once()
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+
+        assert hostile_value not in skip_names, (
+            f"Hostile CLAUDE_CODE_TASK_LIST_ID={hostile_value!r} leaked into "
+            f"skip_names={skip_names!r}. Regex allowlist at "
+            f"session_end.py:615 must be filtering it."
+        )
+        # Sanity: the other two skip members still pass through.
+        assert "team-A" in skip_names
+        assert "sess-B" in skip_names
+
+    def test_empty_task_list_id_short_circuits_before_regex(self):
+        """Empty env value hits `if task_list_id and not re.fullmatch(...)`
+        short-circuit on the first conjunct — regex is NOT called on empty.
+
+        Pins the short-circuit half of the guard alongside the regex half.
+        An empty string is also `not in skip_names` after the discard("")
+        downstream, so this is mainly documentation-of-intent.
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict("os.environ", {"CLAUDE_CODE_TASK_LIST_ID": ""}, clear=False),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-B"),
+            patch("session_end.get_team_name", return_value="team-A"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_tasks.assert_called_once()
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+        # Empty string must be discarded by skip_names.discard("") below
+        # the regex filter, independent of the regex path.
+        assert "" not in skip_names
+        assert skip_names == {"team-A", "sess-B"}
+
+    def test_allowlist_passes_through_valid_task_list_id(self):
+        """Well-formed id still passes the allowlist.
+
+        Regression guard: prevents a future over-tight regex from
+        silently rejecting valid platform-issued ids. The `task-C` shape
+        is identical to the cycle-1 happy-path test but pins the
+        non-rejection branch HERE in the same class for locality.
+        """
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        import io as _io
+
+        patches = [
+            patch("sys.stdin", _io.StringIO("{}")),
+            patch.dict(
+                "os.environ",
+                {"CLAUDE_CODE_TASK_LIST_ID": "task-C_123"},
+                clear=False,
+            ),
+            patch("session_end.pact_context.init"),
+            patch("session_end.get_project_dir", return_value="/t/proj"),
+            patch("session_end.get_session_dir", return_value=""),
+            patch("session_end.get_session_id", return_value="sess-B"),
+            patch("session_end.get_team_name", return_value="team-A"),
+            patch("session_end.get_task_list", return_value=[]),
+            patch("session_end.check_unpaused_pr", return_value=None),
+            patch("session_end.cleanup_teachback_markers"),
+            patch("session_end.cleanup_old_sessions"),
+            patch("session_end.cleanup_old_teams", return_value=(0, 0)),
+            patch("session_end._cleanup_old_checkpoints"),
+            patch("session_end.append_event"),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            mock_tasks = stack.enter_context(
+                patch("session_end.cleanup_old_tasks", return_value=(0, 0))
+            )
+            from session_end import main
+            with pytest.raises(SystemExit):
+                main()
+
+        skip_names = mock_tasks.call_args.kwargs["skip_names"]
+        assert "task-C_123" in skip_names
+
+
+# =============================================================================
 # Cycle-1 remediation: symlink pinning (②) — #412 Fix B
 # =============================================================================
 
