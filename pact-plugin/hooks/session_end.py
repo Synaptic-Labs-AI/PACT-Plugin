@@ -193,6 +193,15 @@ _UUID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 )
 
+# Regex for validating PACT team directory names. Mirrors the INVARIANT
+# documented on generate_team_name in session_init.py — every team dir
+# that PACT creates is "pact-" + lowercase hex (with optional internal
+# hyphens for the random-suffix fallback shape). Non-matching entries in
+# ~/.claude/teams/ belong to other tooling and MUST NOT be reaped by
+# cleanup_old_teams, even if they're stale by mtime. The reaper treats
+# ~/.claude/teams/ as shared space, not PACT-owned space.
+_TEAM_NAME_PATTERN = re.compile(r'^pact-[a-f0-9-]+$')
+
 # Default threshold for active (non-paused) session directory cleanup.
 # 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
 # cross-session recovery value.
@@ -323,39 +332,57 @@ def cleanup_old_sessions(
         pass
 
 
-def _task_dir_mtime(entry: Path) -> float:
+def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float:
     """
-    Return the max mtime across all *.json children of a task directory.
+    Return the max mtime across children of `entry` matching `glob`.
 
-    Platform task updates (`TaskUpdate`) rewrite individual `{id}.json`
-    files without bumping the parent directory's mtime, so parent-dir
-    mtime would false-reap an active-but-quiet tasks dir. Max-child mtime
-    is the tight upper bound on "when was this task set last touched."
+    Generalized helper used by both reapers:
+    - tasks reaper passes `glob="*.json"` — platform `TaskUpdate` rewrites
+      individual `{id}.json` files; only *.json entries carry the signal.
+    - teams reaper passes `glob="*"` — the team dir holds config.json
+      AND member subdirectories AND arbitrary future sidecars; any child
+      touch indicates the team is live.
+
+    Why max-child rather than parent-dir stat: POSIX in-place overwrite
+    (e.g. `config.json` rewrite via write-then-rename-or-truncate) does
+    NOT bump the parent directory's mtime — the parent's mtime only
+    changes on create/unlink/rename of its entries. So a team dir whose
+    config.json is rewritten in place but has no member subdirs created
+    would false-reap on parent-dir mtime. Max-child mtime is the tight
+    upper bound on "when was anything under this dir last touched."
 
     Falls back to `entry.stat().st_mtime` when `latest` stays 0.0 after
     the child scan. That covers two cases: (a) the intended one — no
-    `*.json` children exist, so a truly empty stale dir still ages out
+    matching children exist, so a truly empty stale dir still ages out
     rather than being pinned alive forever; and (b) the edge case where
-    children exist but every `child.stat()` raised OSError (e.g. a
+    children exist but every `child.lstat()` raised OSError (e.g. a
     permission-anomaly where every child is unreadable). In case (b)
     the fallback mis-ages the dir as if it were empty. This is accepted
     as a graceful degradation — the alternative (raise on partial-read
     failure) would bubble into the caller's best-effort reaper path.
 
-    Fail-open: never raises. Returns the parent's mtime on glob/stat
-    failure; if even the parent stat fails, re-raises OSError to the
-    caller's per-entry try/except.
+    Fail-open: never raises on glob/child-stat failure. If even the
+    parent stat fails, re-raises OSError to the caller's per-entry
+    try/except.
+
+    Args:
+        entry: Directory to probe.
+        glob: Glob pattern selecting which children to consult. Default
+            `"*.json"` matches the tasks-reaper convention; teams reaper
+            passes `"*"` to walk all children (config.json + subdirs).
     """
     latest = 0.0
     try:
-        for child in entry.glob("*.json"):
+        for child in entry.glob(glob):
             try:
-                # follow_symlinks=False uses lstat semantics. A symlink
-                # child (attacker-planted `tasks/{real-dir}/x.json` →
-                # `/var/log/syslog`) must NOT be allowed to pin the
+                # lstat() uses symlink-own semantics (no dereference). A
+                # symlink child (attacker-planted `tasks/{real-dir}/x.json`
+                # → `/var/log/syslog`) must NOT be allowed to pin the
                 # parent's effective mtime to an arbitrary target; the
-                # link's own mtime is the correct signal.
-                latest = max(latest, child.stat(follow_symlinks=False).st_mtime)
+                # link's own mtime is the correct signal. lstat is the
+                # portable pre-3.10 form (stat(follow_symlinks=False)
+                # requires Python 3.10+).
+                latest = max(latest, child.lstat().st_mtime)
             except OSError:
                 continue
     except OSError:
@@ -363,6 +390,17 @@ def _task_dir_mtime(entry: Path) -> float:
     if latest == 0.0:
         return entry.stat().st_mtime
     return latest
+
+
+def _task_dir_mtime(entry: Path) -> float:
+    """
+    Thin back-compat wrapper over `_dir_max_child_mtime(entry, "*.json")`.
+
+    Preserved so existing callers and tests that reference the old name
+    keep working without a rename sweep. New call sites should use
+    `_dir_max_child_mtime` directly with an explicit glob.
+    """
+    return _dir_max_child_mtime(entry, glob="*.json")
 
 
 def cleanup_old_teams(
@@ -373,11 +411,25 @@ def cleanup_old_teams(
     """
     Remove stale team directories under ~/.claude/teams/ (issue #412 Fix B).
 
-    Skips the current session's team directory. Fails closed — returns
-    (0, 0) without reaping anything if `current_team_name` is empty. The
-    skip predicate is the only defense layer (teams/ has no secondary
-    UUID filter like pact-sessions/), so an empty skip value would make
-    every sibling, including the live team, a reap candidate.
+    Three defense layers:
+    1. Name-pattern gate — only directories matching `_TEAM_NAME_PATTERN`
+       (`^pact-[a-f0-9-]+$`) are candidates. This mirrors the INVARIANT
+       documented on `generate_team_name` in session_init.py. Non-PACT
+       writers that create `~/.claude/teams/foo-bar/` are out of scope:
+       `~/.claude/teams/` is shared space, not PACT-owned space.
+    2. Current-team skip — exact-match skip of `current_team_name`.
+    3. Fail-closed on empty `current_team_name` — returns (0, 0) without
+       reaping anything. An empty skip key combined with a permissive
+       name filter would be catastrophic; the guard is belt-and-suspenders
+       against a callsite bug even though layer (1) already filters.
+
+    Age probe walks child mtimes via `_dir_max_child_mtime(entry, glob="*")`.
+    Parent-dir mtime is wrong here: POSIX in-place overwrites (e.g.
+    `config.json` rewritten without rename/unlink) do NOT bump the
+    parent's mtime — only create/unlink/rename of entries does. Walking
+    ALL children ("*") covers both the config.json-rewrite case AND the
+    SubagentStart member-subdir creation case, giving a tight upper
+    bound on "when was this team dir last touched."
 
     Best-effort: never raises. Swallows OSError per-entry and outer.
 
@@ -417,10 +469,18 @@ def cleanup_old_teams(
                 continue
             if not entry.is_dir():
                 continue
+            # Name-shape gate: only touch PACT-shaped team dirs. Mirrors
+            # the generate_team_name INVARIANT in session_init.py. Non-
+            # matching entries belong to other tooling and are out of
+            # scope for this reaper.
+            if not _TEAM_NAME_PATTERN.match(entry.name):
+                continue
             if entry.name == current_team_name:
                 continue
             try:
-                age_days = (time.time() - entry.stat().st_mtime) / 86400
+                age_days = (
+                    time.time() - _dir_max_child_mtime(entry, glob="*")
+                ) / 86400
                 if age_days > max_age_days:
                     shutil.rmtree(entry, ignore_errors=True)
                     reaped += 1
