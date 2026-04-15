@@ -3652,3 +3652,72 @@ class TestValidateOptionalFieldTypes:
         ok2, reason2 = _validate_event_schema(bad_bool)
         assert ok2 is False
         assert "got bool" in reason2
+
+    @pytest.mark.parametrize("bad_value,expected_got", [
+        ("yes", "str"),
+        (1, "int"),
+        (0, "int"),
+    ])
+    def test_validate_rejects_wrong_type_reaper_ran(self, bad_value, expected_got):
+        """reaper_ran must be bool — reject str, int (both 1 and 0).
+
+        Closes the type-symmetry gap flagged as G1 in the blind test
+        review: `test_validate_rejects_wrong_type_cleanup_summary`
+        above only pinned teams_reaped (int field) rejection paths,
+        leaving the bool field reaper_ran's schema contract unpinned.
+        Without this test, a future refactor could flip reaper_ran's
+        declared type from bool to int in _OPTIONAL_FIELDS_BY_TYPE and
+        no existing test would catch the loosened semantics.
+
+        int is specifically load-bearing: Python bools ARE ints
+        (True == 1), so without an explicit bool-vs-int check in the
+        validator, `reaper_ran=1` would silently pass as "True-ish"
+        and poison downstream audit-log consumers who rely on the
+        strict True/False discriminator.
+
+        Note: reaper_ran=None is NOT tested as a reject case because
+        the validator's optional-field path explicitly treats None as
+        "field absent" (session_journal.py:324) — consistent with the
+        `continue` semantics for missing optional fields. This is
+        intentional and correct for OPTIONAL fields.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "cleanup_summary",
+            teams_reaped=0,
+            teams_skipped=0,
+            tasks_reaped=0,
+            tasks_skipped=0,
+            ttl_days=30,
+            reaper_ran=bad_value,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert "reaper_ran" in reason
+        assert "must be bool" in reason
+        assert f"got {expected_got}" in reason
+
+    def test_validate_accepts_reaper_ran_happy_path(self):
+        """reaper_ran=True and reaper_ran=False both pass validation.
+
+        Happy-path pin for the bool field. Asymmetric counterpart to
+        test_validate_rejects_wrong_type_reaper_ran — pins the positive
+        side of the contract so a future refactor that over-tightened
+        the validator (e.g. accepted only True) would fail here.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        for value in (True, False):
+            event = make_event(
+                "cleanup_summary",
+                teams_reaped=0,
+                teams_skipped=0,
+                tasks_reaped=0,
+                tasks_skipped=0,
+                ttl_days=30,
+                reaper_ran=value,
+            )
+            ok, reason = _validate_event_schema(event)
+            assert ok is True, f"reaper_ran={value!r} should pass; got {reason!r}"
+            assert reason == "ok"

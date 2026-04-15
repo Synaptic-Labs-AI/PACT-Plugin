@@ -2007,17 +2007,25 @@ class TestCleanupOldCheckpoints:
 def _make_team_dir(parent, name, age_days=0):
     """Create a team directory under parent with controlled mtime.
 
-    Writes config.json (typical team fixture) then sets mtime so the parent
-    dir's own stat().st_mtime reflects the intended age — teams/ uses
-    parent-dir mtime (asymmetric with tasks/ which uses max-child mtime).
+    Writes config.json (typical team fixture) and sets mtime on BOTH the
+    config.json child AND the parent dir to `age_days` old. The teams
+    reaper now uses max-child-mtime via `_dir_max_child_mtime(glob="*")`
+    (cycle-4 fix for POSIX in-place-overwrite semantics: parent-dir
+    mtime is NOT bumped when config.json is rewritten in place, only on
+    create/unlink/rename). Honestly aging the child makes the fixture
+    model the new reaper's actual probe. Parent-dir mtime is kept aged
+    too as belt-and-suspenders — if a future reaper reverts to parent
+    probe, tests still represent the intended age.
     """
     import os as _os
     import time as _time
     d = parent / name
     d.mkdir(parents=True, exist_ok=True)
-    (d / "config.json").write_text("{}")
+    cfg = d / "config.json"
+    cfg.write_text("{}")
     if age_days > 0:
         old = _time.time() - (age_days * 86400)
+        _os.utime(str(cfg), (old, old))
         _os.utime(str(d), (old, old))
     return d
 
@@ -2051,14 +2059,18 @@ class TestCleanupOldTeams:
     """Tests for session_end.cleanup_old_teams() — #412 Fix B."""
 
     def test_reaps_old_team_dirs_excluding_current(self, tmp_path):
-        """Old sibling team dirs reap; current team_name entry preserved
-        even when older than TTL."""
+        """Old PACT-shaped sibling team dirs reap; current team_name entry
+        preserved even when older than TTL; non-PACT-shaped names
+        preserved by `_TEAM_NAME_PATTERN` gate (cycle-4 defense layer)."""
         from session_end import cleanup_old_teams
 
         current = "pact-abcd1234"
         _make_team_dir(tmp_path, current, age_days=60)  # old but current
-        _make_team_dir(tmp_path, "pact-deadbeef", age_days=40)  # REAPED
-        _make_team_dir(tmp_path, "43a2f95a-1111-2222-3333-444444444444", age_days=40)  # REAPED
+        _make_team_dir(tmp_path, "pact-deadbeef", age_days=40)  # REAPED (PACT-shaped)
+        # UUID-shaped name: cycle-4 `_TEAM_NAME_PATTERN = ^pact-[a-f0-9-]+$`
+        # rejects this even when old. Pre-cycle-4 this was reaped; the new
+        # defense layer treats ~/.claude/teams/ as shared space.
+        _make_team_dir(tmp_path, "43a2f95a-1111-2222-3333-444444444444", age_days=40)
 
         reaped, skipped = cleanup_old_teams(
             current_team_name=current,
@@ -2066,11 +2078,14 @@ class TestCleanupOldTeams:
             max_age_days=30,
         )
 
-        assert reaped == 2
+        assert reaped == 1, "only the PACT-shaped old dir should reap"
         assert skipped == 0
         assert (tmp_path / current).exists()
         assert not (tmp_path / "pact-deadbeef").exists()
-        assert not (tmp_path / "43a2f95a-1111-2222-3333-444444444444").exists()
+        # Non-PACT-shaped UUID dir is preserved by the pattern gate even
+        # though its mtime is older than TTL. Preservation is the *point*
+        # of the gate: teams/ is shared space, not PACT-owned space.
+        assert (tmp_path / "43a2f95a-1111-2222-3333-444444444444").exists()
 
     def test_preserves_fresh_team_dirs(self, tmp_path):
         """Mtime under TTL → preserved."""
@@ -2142,40 +2157,34 @@ class TestCleanupOldTeams:
         assert (tmp_path / "stray-file.txt").exists()
 
     def test_skips_permission_denied_entries(self, tmp_path):
-        """Per-entry stat OSError → entry counted in skipped, others still processed.
+        """Per-entry TTL-probe OSError → entry counted in `skipped`, others
+        still processed.
 
-        Mock stat with call-count gating so earlier probes (is_symlink,
-        is_dir — each of which stats under the hood and would swallow
-        OSError to False, making the entry invisible) succeed, and only
-        the explicit stat().st_mtime call inside the inner try raises.
-
-        Call count pre-probe: is_symlink → 1 stat, is_dir → 1 stat, age
-        probe → 1 stat. So gating on >= 3 lets the first two probes
-        through and the third (explicit age stat) raises.
+        Cycle-4 rework: the age probe is no longer `entry.stat().st_mtime`
+        — it's `_dir_max_child_mtime(entry, glob="*")` which walks
+        children. Directly mock `_dir_max_child_mtime` to raise OSError
+        for the `bad` entry only. This tests the same invariant (inner
+        try/except around TTL probe → skipped++) more directly than the
+        previous stat-call-count mock.
         """
         from unittest.mock import patch as _patch
-        from pathlib import Path as _Path
         from session_end import cleanup_old_teams
+        import session_end as _se
 
         _make_team_dir(tmp_path, "pact-current", age_days=0)
-        bad = _make_team_dir(tmp_path, "pact-bad", age_days=40)
-        good = _make_team_dir(tmp_path, "pact-good", age_days=40)
+        # Hex-only names (cycle-4 pattern gate `^pact-[a-f0-9-]+$`).
+        # "pact-bad"/"pact-good" would fail the gate (g not in [a-f]).
+        bad = _make_team_dir(tmp_path, "pact-badd1111", age_days=40)
+        good = _make_team_dir(tmp_path, "pact-cafe2222", age_days=40)
 
-        real_stat = _Path.stat
-        stat_calls_by_path: dict[str, int] = {}
+        real_probe = _se._dir_max_child_mtime
 
-        def flaky_stat(self, *args, **kwargs):
-            p = str(self)
-            stat_calls_by_path[p] = stat_calls_by_path.get(p, 0) + 1
-            # The bad entry: let is_symlink() + is_dir() pass (calls 1+2)
-            # but fail the explicit age-check stat (call 3+ on the same
-            # Path). The +1 for is_symlink is added by the cycle-1 fix
-            # that skips symlinks BEFORE is_dir.
-            if p == str(bad) and stat_calls_by_path[p] >= 3:
+        def flaky_probe(entry, glob="*.json"):
+            if str(entry) == str(bad):
                 raise OSError("permission denied")
-            return real_stat(self, *args, **kwargs)
+            return real_probe(entry, glob=glob)
 
-        with _patch.object(_Path, "stat", flaky_stat):
+        with _patch.object(_se, "_dir_max_child_mtime", flaky_probe):
             reaped, skipped = cleanup_old_teams(
                 current_team_name="pact-current",
                 teams_base_dir=str(tmp_path),
@@ -2184,32 +2193,54 @@ class TestCleanupOldTeams:
 
         assert skipped == 1
         assert reaped == 1
-        assert bad.exists()  # skipped due to stat error
+        assert bad.exists()  # skipped due to TTL-probe error
         assert not good.exists()  # reaped normally
 
-    def test_legacy_name_shapes_all_reaped(self, tmp_path):
-        """UUID, adjective-verb-noun, 'default', 'pact-xxx' — all reap when old."""
+    def test_legacy_name_shapes_preserved_by_pattern_gate(self, tmp_path):
+        """Non-PACT-shaped names (UUID, adjective-verb-noun, 'default',
+        non-hex 'pact-legacy') are preserved by `_TEAM_NAME_PATTERN`
+        (cycle-4). `~/.claude/teams/` is shared space; the reaper only
+        touches names matching `^pact-[a-f0-9-]+$` (the INVARIANT shape
+        produced by session_init.generate_team_name).
+
+        Pre-cycle-4 spec: all 4 of these reaped (no pattern gate).
+        Post-cycle-4 spec: none reap — the gate is the blast-radius
+        contract declaring "this reaper only touches PACT-shaped dirs,
+        anything else belongs to someone else."
+        """
         from session_end import cleanup_old_teams
 
         _make_team_dir(tmp_path, "pact-current", age_days=0)
-        legacy = [
+        # All four names fail `^pact-[a-f0-9-]+$`: UUID has separators but
+        # also doesn't start with "pact-"; "breezy-zooming-scroll" lacks
+        # the prefix; "default" lacks the prefix; "pact-legacy" starts
+        # correctly but contains l/g/y which are non-hex.
+        non_pact = [
             "43a2f95a-1111-2222-3333-444444444444",
             "breezy-zooming-scroll",
             "default",
             "pact-legacy",
         ]
-        for name in legacy:
+        for name in non_pact:
             _make_team_dir(tmp_path, name, age_days=40)
 
-        reaped, _ = cleanup_old_teams(
+        reaped, skipped = cleanup_old_teams(
             current_team_name="pact-current",
             teams_base_dir=str(tmp_path),
             max_age_days=30,
         )
 
-        assert reaped == 4
-        for name in legacy:
-            assert not (tmp_path / name).exists()
+        assert reaped == 0, "pattern gate must reject all non-PACT names"
+        assert skipped == 0, (
+            "pattern gate `continue`s before the inner try/except, so "
+            "skipped must stay 0 (skipped only increments on TTL-probe "
+            "OSError)"
+        )
+        for name in non_pact:
+            assert (tmp_path / name).exists(), (
+                f"{name!r} must be preserved by pattern gate even though "
+                f"mtime > TTL"
+            )
 
 
 # =============================================================================
@@ -3223,9 +3254,13 @@ class TestReaperSymlinkHandling:
         from session_end import cleanup_old_teams
 
         _make_team_dir(tmp_path, "pact-current", age_days=0)
-        _make_team_dir(tmp_path, "pact-old-real", age_days=40)
+        # Hex-only name — cycle-4 pattern gate `^pact-[a-f0-9-]+$` rejects
+        # letters outside [a-f] (would-be name "pact-old-real" contains
+        # o/l/r which aren't hex). Use the name shape that generate_team_name
+        # actually produces.
+        _make_team_dir(tmp_path, "pact-0dd0eaf1", age_days=40)
         victim = self._aged_target(tmp_path, "teams")
-        link = tmp_path / "pact-evil-link"
+        link = tmp_path / "pact-ev11dead"
         link.symlink_to(victim)
 
         try:
@@ -3241,7 +3276,7 @@ class TestReaperSymlinkHandling:
             assert link.is_symlink(), "symlink itself must survive (not rmtree'd)"
             assert victim.exists(), "target must survive"
             assert (victim / "precious.txt").exists(), "target contents must survive"
-            assert not (tmp_path / "pact-old-real").exists(), "real old dir reaped"
+            assert not (tmp_path / "pact-0dd0eaf1").exists(), "real old dir reaped"
         finally:
             import shutil as _shutil
             if link.is_symlink():
@@ -3447,3 +3482,281 @@ class TestCleanupSummaryReaperRan:
         assert ev["teams_skipped"] == 0
         assert ev["tasks_reaped"] == 0
         assert ev["tasks_skipped"] == 0
+
+
+# =============================================================================
+# Cycle-4 remediation: teams child-mtime + name-shape gate pins — #412 Fix B
+# =============================================================================
+
+
+def _touch_child(child_path, age_days):
+    """Set mtime on a file (or symlink via lstat) to `age_days` ago."""
+    import os as _os
+    import time as _time
+    old = _time.time() - (age_days * 86400)
+    _os.utime(str(child_path), (old, old))
+
+
+class TestTeamsChildMtimeProbe:
+    """Cycle-4 Test 1 — teams reaper walks child mtimes, not parent mtime.
+
+    Post-cycle-4, cleanup_old_teams invokes `_dir_max_child_mtime(entry,
+    glob="*")`. This pins the invariant that a fresh child inside an
+    old-parent team dir preserves the dir (because the child-walk
+    dominates the parent's mtime).
+
+    Why load-bearing: POSIX in-place overwrite of `config.json` does NOT
+    bump the parent dir's mtime. A reaper that read parent-dir mtime
+    alone would false-reap live teams whose config.json was recently
+    rewritten without rename/unlink. Max-child-mtime is the tight upper
+    bound.
+    """
+
+    def test_fresh_child_preserves_old_parent_team_dir(self, tmp_path):
+        """Old parent mtime + fresh child → dir PRESERVED (child walk wins).
+
+        Construction mirrors the platform shape: parent dir mtime 40d old
+        (simulates a team dir that hasn't had members added/removed
+        recently), but `config.json` inside is fresh (simulates a recent
+        in-place rewrite). The reaper must read the child and preserve.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        current = "pact-current"
+        _make_team_dir(tmp_path, current, age_days=0)
+
+        # Stale-parent-but-fresh-child team dir.
+        # Name must match _TEAM_NAME_PATTERN=^pact-[a-f0-9-]+$ (hex only).
+        target = tmp_path / "pact-abcd1234"
+        target.mkdir()
+        config = target / "config.json"
+        config.write_text('{"members": []}')
+        # Force fresh child (just in case utime defaults differ).
+        _os.utime(str(config), (_time.time(), _time.time()))
+        # Force aged parent dir mtime AFTER the child write.
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(target), (old, old))
+
+        reaped, skipped = cleanup_old_teams(
+            current_team_name=current,
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert skipped == 0
+        assert reaped == 0, (
+            "Fresh child inside aged-parent team dir must PRESERVE the dir. "
+            "If this test shows reaped == 1, the reaper is probing parent "
+            "mtime instead of max-child mtime — likely regression of "
+            "_dir_max_child_mtime back to direct entry.stat()."
+        )
+        assert target.exists()
+
+    def test_aged_child_in_old_parent_still_reaps(self, tmp_path):
+        """Aged parent + aged child → dir REAPED (both signals agree).
+
+        Asymmetric partner of the preservation pin. Without this test,
+        the preservation pin could pass spuriously (e.g. if the reaper
+        silently short-circuits all teams). This confirms the reap path
+        still fires when the child signal agrees with the parent signal.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+        target = tmp_path / "pact-dead"
+        target.mkdir()
+        config = target / "config.json"
+        config.write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(config), (old, old))
+        _os.utime(str(target), (old, old))
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1
+        assert not target.exists()
+
+    def test_fresh_member_subdir_preserves_team_dir(self, tmp_path):
+        """Fresh SubagentStart member subdir inside aged team dir → PRESERVED.
+
+        Pins the `glob="*"` (not `glob="*.json"`) choice at the teams
+        call site. A team dir whose only fresh artifact is a subdir
+        (not a *.json) must still preserve — SubagentStart creates
+        member-named subdirs, and those touches are the signal of a
+        live team under the new child-walk semantics.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        # Name must match _TEAM_NAME_PATTERN=^pact-[a-f0-9-]+$ (hex only).
+        _make_team_dir(tmp_path, "pact-aaaa", age_days=0)
+        target = tmp_path / "pact-bbbb-cccc"
+        target.mkdir()
+        # Aged config.json
+        config = target / "config.json"
+        config.write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(config), (old, old))
+        # FRESH member subdir (SubagentStart shape).
+        member = target / "member-engineer"
+        member.mkdir()
+        _os.utime(str(member), (_time.time(), _time.time()))
+        # Aged parent dir mtime.
+        _os.utime(str(target), (old, old))
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0, (
+            "Fresh member subdir must preserve the team — the teams reaper "
+            "must pass glob='*' (not glob='*.json') to _dir_max_child_mtime. "
+            "If this test shows reaped == 1, the teams call-site is "
+            "passing the wrong glob or reverted to entry.stat()."
+        )
+        assert target.exists()
+
+
+class TestTeamNameShapeGate:
+    """Cycle-4 Test 2 — _TEAM_NAME_PATTERN gate preserves non-PACT dirs.
+
+    Post-cycle-4, `cleanup_old_teams` filters entries through
+    `_TEAM_NAME_PATTERN = r"^pact-[a-f0-9-]+$"` before considering them
+    for age-check. This treats `~/.claude/teams/` as shared space —
+    non-PACT tooling that creates team dirs under that path is protected
+    from reaping.
+    """
+
+    def test_non_pact_name_preserved_even_when_old(self, tmp_path):
+        """Old `foo-bar/` and `pact-XYZ/` (uppercase) dirs PRESERVED.
+
+        The gate rejects on the POSITIVE allowlist: only `^pact-[a-f0-9-]+$`
+        passes. Uppercase hex, leading-capital names, and missing prefix
+        all filtered out. Load-bearing: without the gate, a third-party
+        tool's ~/.claude/teams/myapp/ would be reaped.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+
+        non_pact_names = [
+            "foo-bar",                    # no pact- prefix
+            "pact-UPPERCASE",              # uppercase (non-hex)
+            "PACT-lowerhex",               # uppercase prefix
+            "myapp",                       # bare name
+            "pact",                        # prefix-without-hyphen
+            "pact_underscore",             # underscore, not hyphen
+        ]
+        for name in non_pact_names:
+            d = tmp_path / name
+            d.mkdir()
+            (d / "config.json").write_text("{}")
+            old = _time.time() - (40 * 86400)
+            _os.utime(str(d / "config.json"), (old, old))
+            _os.utime(str(d), (old, old))
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 0, (
+            f"Non-PACT-shaped team dirs must be preserved by the "
+            f"_TEAM_NAME_PATTERN gate. If this shows reaped > 0, the "
+            f"gate was likely removed or loosened."
+        )
+        for name in non_pact_names:
+            assert (tmp_path / name).exists(), f"{name} should survive"
+
+    def test_pact_shaped_name_still_reaps_when_old(self, tmp_path):
+        """Asymmetric partner: well-formed pact-xxx name DOES reap when aged.
+
+        Without this, the pattern-gate preservation pin could pass
+        spuriously if the reaper short-circuited all teams. This confirms
+        the gate is PERMISSIVE for valid names.
+        """
+        import os as _os
+        import time as _time
+        from session_end import cleanup_old_teams
+
+        _make_team_dir(tmp_path, "pact-current", age_days=0)
+        target = tmp_path / "pact-deadbeef"
+        target.mkdir()
+        (target / "config.json").write_text("{}")
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(target / "config.json"), (old, old))
+        _os.utime(str(target), (old, old))
+
+        reaped, _ = cleanup_old_teams(
+            current_team_name="pact-current",
+            teams_base_dir=str(tmp_path),
+            max_age_days=30,
+        )
+
+        assert reaped == 1
+        assert not target.exists()
+
+
+class TestTaskDirMtimeLstatPortability:
+    """Cycle-4 Test 3 — child.lstat() matches prior stat(follow_symlinks=False).
+
+    Cycle-4 changed `child.stat(follow_symlinks=False)` to `child.lstat()`
+    for Python pre-3.10 portability. Semantics are identical: both
+    return the link's own mtime without dereferencing. This pin confirms
+    the lstat form preserves the oracle-suppression defense.
+
+    Existing TestTaskDirMtimeInnerSymlink (cycle-3) already pins the
+    defense behaviorally — if those tests still pass after the cycle-4
+    rename, the contract holds. This class adds ONE symmetric test
+    directly against the generalized helper to pin the lstat call-form.
+    """
+
+    def test_lstat_returns_link_mtime_not_target_mtime(self, tmp_path):
+        """Direct probe: _dir_max_child_mtime on a dir with old-link-fresh-target.
+
+        Invokes `_dir_max_child_mtime` directly (via `_task_dir_mtime`
+        back-compat wrapper or the new name) with a crafted symlink
+        child. The probe MUST return the link's lstat mtime (old), not
+        the target's stat mtime (fresh). If `lstat()` were reverted to
+        `stat()`, the returned value would be fresh and this test fails.
+        """
+        import os as _os
+        import time as _time
+        from session_end import _task_dir_mtime
+
+        # Fresh external target
+        target = tmp_path / "external-target.json"
+        target.write_text("{}")
+        _os.utime(str(target), (_time.time(), _time.time()))
+
+        # tasks dir with OLD symlink-child pointing to FRESH target
+        d = tmp_path / "pact-probe"
+        d.mkdir()
+        link = d / "1.json"
+        link.symlink_to(target)
+        old = _time.time() - (40 * 86400)
+        _os.utime(str(link), (old, old), follow_symlinks=False)
+
+        result = _task_dir_mtime(d)
+
+        # Must be ~40d old (link lstat mtime), NOT fresh (target stat mtime).
+        age_days = (_time.time() - result) / 86400
+        assert age_days > 30, (
+            f"_task_dir_mtime returned {age_days:.1f}d old — expected >30d "
+            f"(link lstat mtime). If this test fails with a fresh (<1d) "
+            f"result, lstat() was reverted to stat() (follow_symlinks=True)."
+        )
