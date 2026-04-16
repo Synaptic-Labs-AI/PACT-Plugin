@@ -1,5 +1,8 @@
 # PACT Orchestrator — Core Operating Instructions
 
+> This file contains the full orchestrator operating instructions. The orchestrator
+> loads this via explicit Read at bootstrap; auto-reloads after compaction.
+
 ---
 
 ## S5 POLICY (Governance Layer)
