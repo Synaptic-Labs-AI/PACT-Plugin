@@ -522,17 +522,18 @@ class TestTeachbackMicroSkillExtraction:
 class TestBootstrapCommand:
     """Tests for the /PACT:bootstrap slash command.
 
-    The bootstrap command replaces the earlier CLAUDE.md sidecar mechanism.
-    When the orchestrator invokes it, Claude Code eagerly resolves the
-    @${CLAUDE_PLUGIN_ROOT}/protocols/... references inside the command body
-    and loads the 8 critical protocols into the lead's context.
+    The bootstrap command is a compact stub (~89 lines) that instructs
+    the orchestrator to Read 9 protocol files via explicit
+    `{plugin_root}/protocols/...` Read instructions. The full orchestrator
+    content lives in pact-orchestrator-core.md (loaded via Read).
 
     Contract:
       - The command file exists at pact-plugin/commands/bootstrap.md
       - It has YAML frontmatter with a `description` field
-      - It contains @${CLAUDE_PLUGIN_ROOT}/protocols/ references for all
-        8 critical protocols (algedonic, s5-policy, variety, workflows,
-        state-recovery, s4-checkpoints, s4-tension, communication-charter)
+      - It contains `{plugin_root}/protocols/` Read instructions for all
+        9 mandatory protocols (orchestrator-core, algedonic, s5-policy,
+        variety, workflows, state-recovery, s4-checkpoints, s4-tension,
+        communication-charter)
       - Every referenced protocol file exists on disk
       - The command is registered in .claude-plugin/plugin.json `commands`
     """
@@ -542,18 +543,19 @@ class TestBootstrapCommand:
     PROTOCOLS_DIR = PLUGIN_ROOT / "protocols"
     PLUGIN_JSON_PATH = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 
-    # The 8 critical protocols that must be eagerly loaded by the bootstrap
-    # command. Adding/removing a protocol from this set requires a matching
+    # The 9 mandatory protocols that bootstrap.md instructs the orchestrator
+    # to Read. Adding/removing a protocol from this set requires a matching
     # change to commands/bootstrap.md and is intentionally visible here.
-    CRITICAL_PROTOCOLS = (
-        "algedonic",
+    MANDATORY_PROTOCOLS = (
+        "pact-orchestrator-core",
         "pact-s5-policy",
-        "pact-variety",
-        "pact-workflows",
-        "pact-state-recovery",
         "pact-s4-checkpoints",
         "pact-s4-tension",
+        "pact-variety",
+        "pact-workflows",
         "pact-communication-charter",
+        "pact-state-recovery",
+        "algedonic",
     )
 
     def test_bootstrap_file_exists(self):
@@ -582,70 +584,64 @@ class TestBootstrapCommand:
             "bootstrap.md frontmatter 'description' must be non-empty"
         )
 
-    def test_bootstrap_references_all_critical_protocols(self):
-        """bootstrap.md must contain @${CLAUDE_PLUGIN_ROOT}/protocols/<name>.md
-        references for all 8 critical protocols.
+    def test_bootstrap_references_all_mandatory_protocols(self):
+        """bootstrap.md must contain `{plugin_root}/protocols/<name>.md`
+        Read instructions for all 9 mandatory protocols.
 
-        Claude Code resolves these @-references at command invocation time,
-        loading each referenced file into the orchestrator's context. This
-        replaces the sidecar file-write mechanism the tests used to cover.
+        The orchestrator resolves {plugin_root} from session context and
+        issues explicit Read calls for each file. This replaced the earlier
+        @-ref eager-load mechanism for compaction durability (#414 R3).
         """
         text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
         missing = []
-        for protocol in self.CRITICAL_PROTOCOLS:
-            # Match both leading "@" (eager load) and the canonical env-var
-            # path fragment. We require the specific form the command body
-            # uses so a stray mention in prose doesn't accidentally satisfy
-            # the contract.
-            expected = f"@${{CLAUDE_PLUGIN_ROOT}}/protocols/{protocol}.md"
+        for protocol in self.MANDATORY_PROTOCOLS:
+            expected = f"{{plugin_root}}/protocols/{protocol}.md"
             if expected not in text:
                 missing.append(expected)
         assert not missing, (
-            f"bootstrap.md is missing eager-load references for: {missing}. "
-            f"Each of the 8 critical protocols must be referenced via "
-            f"@${{CLAUDE_PLUGIN_ROOT}}/protocols/<name>.md so Claude Code "
-            f"loads them at command invocation."
+            f"bootstrap.md is missing Read instructions for: {missing}. "
+            f"Each of the 9 mandatory protocols must be referenced via "
+            f"{{plugin_root}}/protocols/<name>.md so the orchestrator "
+            f"loads them at bootstrap."
         )
 
-    def test_bootstrap_has_exactly_eight_protocol_references(self):
-        """bootstrap.md must contain EXACTLY 8 @${CLAUDE_PLUGIN_ROOT}/protocols/
-        references — one per critical protocol, no duplicates, no extras.
+    def test_bootstrap_has_exactly_nine_protocol_references(self):
+        """bootstrap.md must contain EXACTLY 9 `{plugin_root}/protocols/`
+        Read instructions — one per mandatory protocol, no duplicates.
 
-        The presence check above confirms each of the 8 is mentioned at least
+        The presence check above confirms each of the 9 is mentioned at least
         once. This cardinality check catches the inverse failure mode: a
-        stray duplicate, an accidentally-added 9th protocol reference, or a
-        copy/paste that doubles an existing reference. Eager-load cost scales
-        with reference count, so the 8-reference budget is deliberate.
+        stray duplicate, an accidentally-added 10th reference, or a
+        copy/paste that doubles an existing reference.
         """
         import re
         text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        # Count every @${CLAUDE_PLUGIN_ROOT}/protocols/<anything>.md occurrence.
-        # Uses a non-greedy match on the filename segment so each reference is
-        # counted exactly once regardless of surrounding punctuation.
+        # Count every `{plugin_root}/protocols/<anything>.md` occurrence in
+        # the numbered list. Uses the backtick-wrapped pattern that appears
+        # in bootstrap.md's Read instruction list.
         pattern = re.compile(
-            r"@\$\{CLAUDE_PLUGIN_ROOT\}/protocols/[A-Za-z0-9_.\-]+\.md"
+            r"`\{plugin_root\}/protocols/[A-Za-z0-9_.\-]+\.md`"
         )
         matches = pattern.findall(text)
-        assert len(matches) == len(self.CRITICAL_PROTOCOLS), (
+        assert len(matches) == len(self.MANDATORY_PROTOCOLS), (
             f"bootstrap.md must contain exactly "
-            f"{len(self.CRITICAL_PROTOCOLS)} @${{CLAUDE_PLUGIN_ROOT}}/protocols/ "
-            f"references (one per critical protocol). "
+            f"{len(self.MANDATORY_PROTOCOLS)} {{plugin_root}}/protocols/ "
+            f"Read instructions (one per mandatory protocol). "
             f"Found {len(matches)}: {matches}"
         )
 
     def test_bootstrap_referenced_protocol_files_exist(self):
         """Every protocol referenced in bootstrap.md must exist on disk.
 
-        A broken @-reference would cause a silent load failure at runtime —
-        the orchestrator would proceed without the protocol, defeating the
-        eager-load guarantee.
+        A missing file would cause a Read failure at runtime — the
+        orchestrator would proceed without the protocol content.
         """
-        for protocol in self.CRITICAL_PROTOCOLS:
+        for protocol in self.MANDATORY_PROTOCOLS:
             path = self.PROTOCOLS_DIR / f"{protocol}.md"
             assert path.exists(), (
                 f"Protocol file missing: {path}. "
                 f"bootstrap.md references it via "
-                f"@${{CLAUDE_PLUGIN_ROOT}}/protocols/{protocol}.md but the "
+                f"{{plugin_root}}/protocols/{protocol}.md but the "
                 f"file does not exist in the plugin protocols/ directory."
             )
 
@@ -675,6 +671,26 @@ class TestBootstrapCommand:
         assert bootstrap_registered, (
             f"bootstrap.md is not registered in plugin.json commands list. "
             f"Found commands: {commands}"
+        )
+
+    def test_mandatory_protocols_consistent_with_restructure_tests(self):
+        """MANDATORY_PROTOCOLS here must encode the same set as
+        MANDATORY_PROTOCOL_FILES in test_bootstrap_restructure.py.
+
+        The two constants differ in format (stems vs full filenames) but
+        must agree on which protocols are mandatory. This cross-file
+        consistency test catches silent drift between the two lists.
+        """
+        from test_bootstrap_restructure import MANDATORY_PROTOCOL_FILES
+
+        stems_here = set(self.MANDATORY_PROTOCOLS)
+        stems_there = {f.removesuffix(".md") for f in MANDATORY_PROTOCOL_FILES}
+        assert stems_here == stems_there, (
+            f"Protocol list drift between test files.\n"
+            f"  test_agents_structure MANDATORY_PROTOCOLS: "
+            f"{sorted(stems_here)}\n"
+            f"  test_bootstrap_restructure MANDATORY_PROTOCOL_FILES "
+            f"(stems): {sorted(stems_there)}"
         )
 
 
@@ -1286,18 +1302,21 @@ class TestBootstrapGuardRemoved:
 
 class TestDispatchTemplatePrelude:
     """Spec Section 8 requirement: the Agent Teams Dispatch template in
-    bootstrap.md must embed the teammate bootstrap prelude inside the
-    `prompt=` parameter.
+    pact-orchestrator-core.md must embed the teammate bootstrap prelude
+    inside the `prompt=` parameter.
 
     This is load-bearing because the dispatch template is what the lead
     reads when spawning a specialist — if the template is missing the
     `PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
     call, spawned teammates will not self-bootstrap and will lack the
     team-protocol / teachback / algedonic context.
+
+    Note: the dispatch template moved from bootstrap.md to
+    pact-orchestrator-core.md in #414 R3 (bootstrap restructure).
     """
 
-    BOOTSTRAP_PATH = (
-        Path(__file__).parent.parent / "commands" / "bootstrap.md"
+    CORE_PATH = (
+        Path(__file__).parent.parent / "protocols" / "pact-orchestrator-core.md"
     )
 
     def _dispatch_region(self, text: str) -> str:
@@ -1323,17 +1342,17 @@ class TestDispatchTemplatePrelude:
         actual name, which is what the routing block searches for and
         what appears in the spawned teammate's context.
         """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        text = self.CORE_PATH.read_text(encoding="utf-8")
         region = self._dispatch_region(text)
         assert region, (
-            "bootstrap.md missing the Agent Teams Dispatch MANDATORY "
-            "callout anchor."
+            "pact-orchestrator-core.md missing the Agent Teams Dispatch "
+            "MANDATORY callout anchor."
         )
         assert "PACT ROLE: teammate ({name})" in region, (
-            "Agent Teams Dispatch template in bootstrap.md must contain "
-            "literal `PACT ROLE: teammate ({name})` (with the exact "
-            "placeholder form) so the lead substitutes the teammate's "
-            "name at dispatch time. Spec Section 6.6."
+            "Agent Teams Dispatch template in pact-orchestrator-core.md "
+            "must contain literal `PACT ROLE: teammate ({name})` (with "
+            "the exact placeholder form) so the lead substitutes the "
+            "teammate's name at dispatch time. Spec Section 6.6."
         )
 
     def test_dispatch_template_contains_teammate_bootstrap_skill_call(self):
@@ -1341,17 +1360,17 @@ class TestDispatchTemplatePrelude:
         appears with backslash-escaped quotes inside the outer prompt="..."
         literal. Match the on-disk escaped form.
         """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        text = self.CORE_PATH.read_text(encoding="utf-8")
         region = self._dispatch_region(text)
         assert region, (
-            "bootstrap.md missing the Agent Teams Dispatch MANDATORY "
-            "callout anchor."
+            "pact-orchestrator-core.md missing the Agent Teams Dispatch "
+            "MANDATORY callout anchor."
         )
         assert 'Skill(\\"PACT:teammate-bootstrap\\")' in region, (
-            "Agent Teams Dispatch template in bootstrap.md must invoke "
-            "`Skill(\\\"PACT:teammate-bootstrap\\\")` inside the prompt= "
-            "parameter (escaped because the call is nested inside the "
-            "outer Python prompt string literal). Spec Section 8."
+            "Agent Teams Dispatch template in pact-orchestrator-core.md "
+            "must invoke `Skill(\\\"PACT:teammate-bootstrap\\\")` inside "
+            "the prompt= parameter (escaped because the call is nested "
+            "inside the outer Python prompt string literal). Spec Section 8."
         )
 
     def test_dispatch_template_prelude_inside_prompt_parameter(self):
@@ -1363,11 +1382,11 @@ class TestDispatchTemplatePrelude:
         The Skill call appears with backslash-escaped quotes because
         it is nested inside the outer Python prompt= string literal.
         """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        text = self.CORE_PATH.read_text(encoding="utf-8")
         region = self._dispatch_region(text)
         assert "prompt=" in region, (
-            "Agent Teams Dispatch template in bootstrap.md must expose "
-            "a `prompt=` parameter near the MANDATORY callout."
+            "Agent Teams Dispatch template in pact-orchestrator-core.md "
+            "must expose a `prompt=` parameter near the MANDATORY callout."
         )
         # Find the prompt= substring and walk forward to locate both
         # markers within the same prompt literal.
@@ -1375,13 +1394,14 @@ class TestDispatchTemplatePrelude:
         prompt_tail = region[prompt_idx:]
         assert "PACT ROLE: teammate (" in prompt_tail, (
             "`PACT ROLE: teammate (` must appear inside the dispatch "
-            "prompt= parameter, not merely elsewhere in bootstrap.md."
+            "prompt= parameter, not merely elsewhere in "
+            "pact-orchestrator-core.md."
         )
         assert 'Skill(\\"PACT:teammate-bootstrap\\")' in prompt_tail, (
             "`Skill(\\\"PACT:teammate-bootstrap\\\")` must appear inside "
             "the dispatch prompt= parameter (escaped form — nested inside "
             "the outer Python prompt string literal), not merely elsewhere "
-            "in bootstrap.md."
+            "in pact-orchestrator-core.md."
         )
 
     def test_dispatch_template_contains_recovery_after_compaction_language(self):
@@ -1396,9 +1416,9 @@ class TestDispatchTemplatePrelude:
           - "compacted" — the trigger condition
           - "re-invoke" — the recovery action
         Both must appear inside the prompt= parameter, not just
-        elsewhere in bootstrap.md.
+        elsewhere in pact-orchestrator-core.md.
         """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        text = self.CORE_PATH.read_text(encoding="utf-8")
         region = self._dispatch_region(text)
         prompt_idx = region.find("prompt=")
         assert prompt_idx != -1, (
@@ -1406,14 +1426,14 @@ class TestDispatchTemplatePrelude:
         )
         prompt_tail = region[prompt_idx:]
         assert "compacted" in prompt_tail, (
-            "Dispatch template in bootstrap.md is missing the "
-            "compaction-trigger language ('compacted'). Spec Section 6.6 "
-            "requires the template to tell spawned teammates what to do "
-            "if their context is compacted."
+            "Dispatch template in pact-orchestrator-core.md is missing "
+            "the compaction-trigger language ('compacted'). Spec Section "
+            "6.6 requires the template to tell spawned teammates what to "
+            "do if their context is compacted."
         )
         assert "re-invoke" in prompt_tail, (
-            "Dispatch template in bootstrap.md is missing the recovery "
-            "action language ('re-invoke'). Spec Section 6.6 requires "
-            "the template to tell spawned teammates to re-invoke the "
-            "bootstrap skill after compaction."
+            "Dispatch template in pact-orchestrator-core.md is missing "
+            "the recovery action language ('re-invoke'). Spec Section 6.6 "
+            "requires the template to tell spawned teammates to re-invoke "
+            "the bootstrap skill after compaction."
         )
