@@ -101,14 +101,20 @@ class TestProtocolFileIntegrity:
             f"  constant:     {list(MANDATORY_PROTOCOL_FILES)}"
         )
 
-    def test_core_file_within_bounds(self, core_lines):
-        """Core file should be ~500 lines, staying under 600 (truncation risk)."""
-        count = len(core_lines)
+    @pytest.mark.parametrize("filename", MANDATORY_PROTOCOL_FILES)
+    def test_protocol_file_within_bounds(self, filename):
+        """Every mandatory protocol file must stay under 600 lines (truncation risk)."""
+        path = PROTOCOLS_DIR / filename
+        lines = path.read_text(encoding="utf-8").splitlines()
+        count = len(lines)
         assert count < 600, (
-            f"pact-orchestrator-core.md is {count} lines — exceeds 600-line "
+            f"{filename} is {count} lines — exceeds 600-line "
             f"safety boundary (truncation risk)"
         )
-        # Also verify it has substantial content (not accidentally gutted)
+
+    def test_core_file_has_substantial_content(self, core_lines):
+        """Core file must have substantial content (not accidentally gutted)."""
+        count = len(core_lines)
         assert count > 200, (
             f"pact-orchestrator-core.md is only {count} lines — expected ~500 "
             f"(possible content loss during migration)"

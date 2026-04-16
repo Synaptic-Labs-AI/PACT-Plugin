@@ -673,6 +673,26 @@ class TestBootstrapCommand:
             f"Found commands: {commands}"
         )
 
+    def test_mandatory_protocols_consistent_with_restructure_tests(self):
+        """MANDATORY_PROTOCOLS here must encode the same set as
+        MANDATORY_PROTOCOL_FILES in test_bootstrap_restructure.py.
+
+        The two constants differ in format (stems vs full filenames) but
+        must agree on which protocols are mandatory. This cross-file
+        consistency test catches silent drift between the two lists.
+        """
+        from test_bootstrap_restructure import MANDATORY_PROTOCOL_FILES
+
+        stems_here = set(self.MANDATORY_PROTOCOLS)
+        stems_there = {f.removesuffix(".md") for f in MANDATORY_PROTOCOL_FILES}
+        assert stems_here == stems_there, (
+            f"Protocol list drift between test files.\n"
+            f"  test_agents_structure MANDATORY_PROTOCOLS: "
+            f"{sorted(stems_here)}\n"
+            f"  test_bootstrap_restructure MANDATORY_PROTOCOL_FILES "
+            f"(stems): {sorted(stems_there)}"
+        )
+
 
 class TestAgentFirstActionPrelude:
     """Every agent must lead its body with the canonical FIRST ACTION
