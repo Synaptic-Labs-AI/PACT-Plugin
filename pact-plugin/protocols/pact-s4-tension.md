@@ -28,7 +28,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does [bootstrap.md](../commands/bootstrap.md) favor speed or quality for this project?
+   - Does [pact-orchestrator-core.md](pact-orchestrator-core.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 
