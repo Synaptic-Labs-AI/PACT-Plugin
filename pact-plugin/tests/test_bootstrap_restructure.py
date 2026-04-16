@@ -89,6 +89,18 @@ class TestProtocolFileIntegrity:
         """Cardinality pin: the plan specifies exactly 9 mandatory protocol files."""
         assert len(MANDATORY_PROTOCOL_FILES) == 9
 
+    def test_read_filenames_match_constant(self, bootstrap_text):
+        """Read instruction filenames in bootstrap.md must match MANDATORY_PROTOCOL_FILES."""
+        read_pattern = re.compile(
+            r"\d+\.\s+`\{plugin_root\}/protocols/([\w-]+\.md)`"
+        )
+        read_filenames = read_pattern.findall(bootstrap_text)
+        assert read_filenames == MANDATORY_PROTOCOL_FILES, (
+            f"Read instruction filenames don't match MANDATORY_PROTOCOL_FILES.\n"
+            f"  bootstrap.md: {read_filenames}\n"
+            f"  constant:     {list(MANDATORY_PROTOCOL_FILES)}"
+        )
+
     def test_core_file_within_bounds(self, core_lines):
         """Core file should be ~500 lines, staying under 600 (truncation risk)."""
         count = len(core_lines)
@@ -251,7 +263,7 @@ class TestContentCompleteness:
             "algedonic.md",
         ]
         found = sum(1 for f in supplementary if f in core_text)
-        assert found >= 3, (
+        assert found == len(supplementary), (
             f"Only {found} of {len(supplementary)} supplementary protocol "
             f"forward references found in core file — expected contextual anchors"
         )
