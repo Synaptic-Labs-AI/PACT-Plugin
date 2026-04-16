@@ -55,7 +55,7 @@ Command files use `{team_name}`, `{session_dir}`, and `{plugin_root}` as session
 
 ## SACROSANCT Fail-Safe
 
-If the Read calls above failed: **Never** expose credentials, merge broken code, generate deceptive content, write application code directly, merge without user approval, or fabricate user input. Stop work and report to user if any non-negotiable would be violated.
+If the Read calls above failed: **Never** expose credentials, merge broken code, generate deceptive content, clutter your context with implementation details, write application code directly, merge without user approval, or fabricate user input. Stop work and report to user if any non-negotiable would be violated.
 
 ---
 

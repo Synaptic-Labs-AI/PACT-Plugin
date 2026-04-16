@@ -229,6 +229,10 @@ class TestContentCompleteness:
         "GUIDELINES",
         "Always Be Delegating",
         "PACT AGENT ORCHESTRATION",
+        "Agent Teams Dispatch",
+        "Recovery Protocol",
+        "Context Economy",
+        "Memory Management",
     ])
     def test_major_section_present_in_core(self, core_text, heading):
         """Each key section heading must exist in pact-orchestrator-core.md."""
@@ -254,18 +258,28 @@ class TestContentCompleteness:
         assert "delegate" in core_text.lower()
 
     def test_inline_summary_anchors_in_core(self, core_text):
-        """Core file should have forward references to supplementary protocols."""
-        # Check for references to at least some supplementary protocol files
-        supplementary = [
-            "pact-s5-policy.md",
-            "pact-variety.md",
-            "pact-workflows.md",
-            "algedonic.md",
-        ]
-        found = sum(1 for f in supplementary if f in core_text)
-        assert found == len(supplementary), (
-            f"Only {found} of {len(supplementary)} supplementary protocol "
-            f"forward references found in core file — expected contextual anchors"
+        """Core file should have forward references to all supplementary protocols."""
+        # All protocols except the core file itself must be referenced
+        supplementary = MANDATORY_PROTOCOL_FILES[1:]
+        missing = [f for f in supplementary if f not in core_text]
+        assert not missing, (
+            f"pact-orchestrator-core.md is missing forward references to: "
+            f"{missing}. All 8 supplementary protocols must be referenced "
+            f"as contextual anchors."
+        )
+
+    def test_s5_policy_context_row_present(self):
+        """pact-s5-policy.md must contain the Context row added in this PR."""
+        text = (PROTOCOLS_DIR / "pact-s5-policy.md").read_text(encoding="utf-8")
+        assert "**Context**" in text, (
+            "pact-s5-policy.md missing **Context** row in SACROSANCT table"
+        )
+
+    def test_state_recovery_durability_section(self):
+        """pact-state-recovery.md must contain the Content Durability section."""
+        text = (PROTOCOLS_DIR / "pact-state-recovery.md").read_text(encoding="utf-8")
+        assert "Content Durability" in text, (
+            "pact-state-recovery.md missing 'Content Durability' heading"
         )
 
     def test_bootstrap_stub_retains_mission(self, bootstrap_text):
@@ -280,6 +294,10 @@ class TestContentCompleteness:
     def test_bootstrap_stub_retains_sacrosanct_failsafe(self, bootstrap_text):
         """Bootstrap stub should retain inline SACROSANCT fail-safe summary."""
         assert "SACROSANCT" in bootstrap_text
+
+    def test_bootstrap_stub_retains_session_placeholders(self, bootstrap_text):
+        """Bootstrap stub should retain Session Placeholder Variables section."""
+        assert "Session Placeholder Variables" in bootstrap_text
 
     def test_bootstrap_stub_retains_final_mandate(self, bootstrap_text):
         """Bootstrap stub should retain FINAL MANDATE section inline."""
