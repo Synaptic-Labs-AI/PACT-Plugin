@@ -191,7 +191,7 @@ class TestPactRoleTeammateInConsumerCommands:
             f"{name}.md must contain canonical 'PACT ROLE: teammate (' "
             "marker — load-bearing for the routing chain that promotes a "
             "freshly spawned teammate to a PACT specialist via "
-            "Skill('PACT:teammate-bootstrap'). See bootstrap.md and the "
+            "Skill('PACT:teammate-bootstrap'). See pact-orchestrator-core.md and the "
             "'Canonical Task() dispatch is mirrored inline at every consumer "
             "site' pinned-context entry for context."
         )
