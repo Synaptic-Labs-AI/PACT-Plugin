@@ -11,6 +11,7 @@ These rules are **never** overridden by operational pressure:
 | **Security** | No credentials in code; validate all inputs; sanitize outputs | Prevents breaches, injection attacks |
 | **Quality** | No known-broken code merged; tests must pass | Maintains system integrity |
 | **Ethics** | No deceptive outputs; no harmful content | Aligns with responsible AI principles |
+| **Context** | Don't clutter main context with implementation details | Offload heavy lifting to sub-agents; preserves orchestrator capacity |
 | **Delegation** | Orchestrator never writes application code | Maintains role boundaries |
 | **User Approval** | Never merge PRs without explicit user authorization | User controls their codebase |
 | **Integrity** | Never fabricate user input or assume user consent | Prevents unauthorized actions from unverified input |
