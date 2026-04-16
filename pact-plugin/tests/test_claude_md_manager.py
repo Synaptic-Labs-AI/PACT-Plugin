@@ -1925,16 +1925,17 @@ class TestMarkerConsistency:
 
     HOOKS_DIR = Path(__file__).parent.parent / "hooks"
     SESSION_INIT_PATH = HOOKS_DIR / "session_init.py"
-    BOOTSTRAP_MD_PATH = (
-        Path(__file__).parent.parent / "commands" / "bootstrap.md"
+    CORE_PATH = (
+        Path(__file__).parent.parent / "protocols" / "pact-orchestrator-core.md"
     )
 
     ORCHESTRATOR_MARKER = "PACT ROLE: orchestrator"
     TEAMMATE_MARKER_PREFIX = "PACT ROLE: teammate ("
 
     @staticmethod
-    def _bootstrap_md_dispatch_region(text: str) -> str:
-        """Slice the Agent Teams Dispatch callout region out of bootstrap.md.
+    def _core_dispatch_region(text: str) -> str:
+        """Slice the Agent Teams Dispatch callout region out of
+        pact-orchestrator-core.md.
 
         Mirrors TestDispatchTemplatePrelude._dispatch_region in
         test_agents_structure.py — same `MANDATORY` anchor, same ~80-line
@@ -2029,12 +2030,12 @@ class TestMarkerConsistency:
             f"block search pattern drift."
         )
 
-    def test_bootstrap_md_dispatch_template_emits_teammate_marker(self):
-        """The Agent Teams Dispatch template in bootstrap.md is the FOURTH
-        production emission site for the teammate marker (alongside
-        session_init.py _team_create/_team_reuse and peer_inject.py
-        _BOOTSTRAP_PRELUDE_TEMPLATE — though session_init emits the
-        orchestrator marker, not the teammate marker).
+    def test_core_dispatch_template_emits_teammate_marker(self):
+        """The Agent Teams Dispatch template in pact-orchestrator-core.md
+        is the FOURTH production emission site for the teammate marker
+        (alongside session_init.py _team_create/_team_reuse and
+        peer_inject.py _BOOTSTRAP_PRELUDE_TEMPLATE — though session_init
+        emits the orchestrator marker, not the teammate marker).
 
         The dispatch template is how the lead spawns specialists as
         teammates: the `prompt=` parameter of the `Task(...)` call embeds
@@ -2049,20 +2050,24 @@ class TestMarkerConsistency:
         This test adds a coarser cross-file-invariant check inside the
         TestMarkerConsistency class so the fourth emission site is
         visible in the same place as the other three.
+
+        Note: the dispatch template moved from bootstrap.md to
+        pact-orchestrator-core.md in #414 R3 (bootstrap restructure).
         """
-        text = self.BOOTSTRAP_MD_PATH.read_text(encoding="utf-8")
-        region = self._bootstrap_md_dispatch_region(text)
+        text = self.CORE_PATH.read_text(encoding="utf-8")
+        region = self._core_dispatch_region(text)
         assert region, (
-            "bootstrap.md missing the Agent Teams Dispatch `MANDATORY` "
-            "callout anchor — cannot locate dispatch template region."
+            "pact-orchestrator-core.md missing the Agent Teams Dispatch "
+            "`MANDATORY` callout anchor — cannot locate dispatch template "
+            "region."
         )
         assert self.TEAMMATE_MARKER_PREFIX in region, (
-            f"bootstrap.md Agent Teams Dispatch template must contain "
-            f"`{self.TEAMMATE_MARKER_PREFIX}` inside the dispatch region "
-            f"so teammates spawned via the dispatch pattern receive the "
-            f"marker the routing block searches for. Routing-block "
-            f"search pattern drift — spawned teammates will not "
-            f"self-bootstrap."
+            f"pact-orchestrator-core.md Agent Teams Dispatch template "
+            f"must contain `{self.TEAMMATE_MARKER_PREFIX}` inside the "
+            f"dispatch region so teammates spawned via the dispatch "
+            f"pattern receive the marker the routing block searches for. "
+            f"Routing-block search pattern drift — spawned teammates "
+            f"will not self-bootstrap."
         )
 
     def test_marker_consistency_end_to_end(self):
@@ -2077,17 +2082,17 @@ class TestMarkerConsistency:
         The (b) case matters because the PACT routing architecture is
         multi-layer: the lead session path (session_init), the spawned
         teammate path via hook injection (peer_inject), and the spawned
-        teammate path via dispatch template (bootstrap.md) are all
-        independently load-bearing. A silent drop in any one of them
-        breaks a specific code path without the unit tests on the other
-        paths noticing — which is exactly the kind of drift this
+        teammate path via dispatch template (pact-orchestrator-core.md)
+        are all independently load-bearing. A silent drop in any one of
+        them breaks a specific code path without the unit tests on the
+        other paths noticing — which is exactly the kind of drift this
         tripwire exists to catch.
 
         Note that session_init emits the ORCHESTRATOR marker (to lead
-        sessions), while peer_inject and bootstrap.md emit the TEAMMATE
-        marker prefix (to spawned teammates). That split is intentional
-        — the routing block uses each marker to dispatch to a different
-        bootstrap skill.
+        sessions), while peer_inject and pact-orchestrator-core.md emit
+        the TEAMMATE marker prefix (to spawned teammates). That split is
+        intentional — the routing block uses each marker to dispatch to
+        a different bootstrap skill.
         """
         from shared.claude_md_manager import PACT_ROUTING_BLOCK
         from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
@@ -2096,13 +2101,12 @@ class TestMarkerConsistency:
         rendered_prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(
             agent_name="sample-agent"
         )
-        bootstrap_md_text = self.BOOTSTRAP_MD_PATH.read_text(encoding="utf-8")
-        bootstrap_md_dispatch_region = self._bootstrap_md_dispatch_region(
-            bootstrap_md_text
-        )
-        assert bootstrap_md_dispatch_region, (
-            "bootstrap.md missing the Agent Teams Dispatch `MANDATORY` "
-            "callout anchor — cannot locate dispatch template region."
+        core_text = self.CORE_PATH.read_text(encoding="utf-8")
+        core_dispatch_region = self._core_dispatch_region(core_text)
+        assert core_dispatch_region, (
+            "pact-orchestrator-core.md missing the Agent Teams Dispatch "
+            "`MANDATORY` callout anchor — cannot locate dispatch template "
+            "region."
         )
 
         # For each marker the routing block searches for, verify EVERY
@@ -2114,7 +2118,7 @@ class TestMarkerConsistency:
             ],
             self.TEAMMATE_MARKER_PREFIX: [
                 ("peer_inject.py (_BOOTSTRAP_PRELUDE_TEMPLATE)", rendered_prelude),
-                ("bootstrap.md (Agent Teams Dispatch template)", bootstrap_md_dispatch_region),
+                ("pact-orchestrator-core.md (Agent Teams Dispatch template)", core_dispatch_region),
             ],
         }
 
