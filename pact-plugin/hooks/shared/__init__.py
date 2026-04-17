@@ -15,6 +15,7 @@ This package provides shared utilities for hooks:
 - session_resume: Session info, snapshot restore, resumption context
 - merge_guard_common: Shared constants and cleanup for merge guard hooks
 - error_output: Standardized JSON error output for hook exception handlers
+- gh_helpers: Shared gh CLI wrappers (fail-open by construction)
 """
 
 from .task_utils import (
@@ -58,6 +59,7 @@ from .merge_guard_common import (
     cleanup_consumed_tokens,
 )
 from .error_output import hook_error_json
+from .gh_helpers import check_pr_state
 from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
 from .session_state import (
     SAFE_PATH_COMPONENT_RE,
@@ -113,6 +115,7 @@ __all__ = [
     "TOKEN_PREFIX",
     "cleanup_consumed_tokens",
     "hook_error_json",
+    "check_pr_state",
     "PACT_AGENTS",
     "SYSTEM_TASK_PREFIXES",
     "SAFE_PATH_COMPONENT_RE",

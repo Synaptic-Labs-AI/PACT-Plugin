@@ -51,6 +51,17 @@ def check_pr_state(pr_number: int | str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip().upper()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        subprocess.CalledProcessError,
+        OSError,
+    ):
+        # CalledProcessError is unreachable under the current call form
+        # (check=False + explicit returncode==0 gate above), but listing it
+        # here is defense-in-isolation: a future change to check=True or a
+        # relocated subprocess call that invokes .check_returncode() would
+        # raise CalledProcessError, and the fail-open contract requires
+        # returning "" rather than propagating. Review cycle-1 L2 hardening.
         pass
     return ""
