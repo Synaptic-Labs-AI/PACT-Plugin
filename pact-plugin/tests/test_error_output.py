@@ -741,47 +741,48 @@ class TestPrecompactStateReminderErrorOutput:
         assert "boom" in captured.err
 
 
-class TestPostcompactVerifyErrorOutput:
-    """postcompact_verify.py exception handler produces JSON on stdout.
+class TestPostcompactArchiveErrorOutput:
+    """postcompact_archive.py exception handler produces JSON on stdout.
 
     Post-#444: build_verification_message was deleted. The outer try/except
     in main() now wraps write_compact_summary (the only external call
     remaining on the happy path), so tests patch that function instead.
+    Post-PR-#447: module renamed from postcompact_verify to postcompact_archive.
     """
 
     def test_exception_outputs_json_with_system_message(self, capsys):
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         input_data = json.dumps({
             "compact_summary": "test summary",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("postcompact_verify.write_compact_summary",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        _assert_error_json(captured.out, "postcompact_verify")
+        _assert_error_json(captured.out, "postcompact_archive")
 
     def test_exception_preserves_stderr(self, capsys):
         """stderr should contain the hook name and the specific error message."""
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         input_data = json.dumps({
             "compact_summary": "test summary",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("postcompact_verify.write_compact_summary",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
                 main()
 
         captured = capsys.readouterr()
-        assert "postcompact_verify" in captured.err
+        assert "postcompact_archive" in captured.err
         assert "boom" in captured.err
 
 

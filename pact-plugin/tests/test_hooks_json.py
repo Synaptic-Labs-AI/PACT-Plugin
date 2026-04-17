@@ -50,7 +50,7 @@ MUST_BE_SYNC = {
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
     "auditor_reminder.py",  # Injects auditor dispatch reminder into context
     "precompact_state_reminder.py",  # Emits state snapshot before compaction
-    "postcompact_verify.py",  # Verifies compaction preserved critical context
+    "postcompact_archive.py",  # Archives compact_summary to disk for session_init + secretary
 }
 
 # Hooks that SHOULD be async (non-blocking, fire-and-forget)

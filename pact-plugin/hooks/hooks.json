@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/postcompact_verify.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/postcompact_archive.py\""
           }
         ]
       }

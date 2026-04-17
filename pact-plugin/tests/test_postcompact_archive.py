@@ -1,5 +1,5 @@
 """
-Tests for hooks/postcompact_verify.py — PostCompact hook that writes the
+Tests for hooks/postcompact_archive.py — PostCompact hook that writes the
 compact summary to disk for the secretary.
 
 Per #444 Tertiary, this hook no longer emits systemMessage — the previous
@@ -30,7 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
-HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "postcompact_verify.py")
+HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "postcompact_archive.py")
 
 
 def run_hook(stdin_data: str | None = None) -> subprocess.CompletedProcess:
@@ -53,7 +53,7 @@ class TestWriteCompactSummary:
     """Test compact summary file writing."""
 
     def test_writes_file(self, tmp_path):
-        from postcompact_verify import write_compact_summary
+        from postcompact_archive import write_compact_summary
         result = write_compact_summary("Test summary", str(tmp_path))
         assert result is True
         path = tmp_path / "compact-summary.txt"
@@ -61,28 +61,28 @@ class TestWriteCompactSummary:
         assert path.read_text(encoding="utf-8") == "Test summary"
 
     def test_creates_parent_dirs(self, tmp_path):
-        from postcompact_verify import write_compact_summary
+        from postcompact_archive import write_compact_summary
         deep_dir = str(tmp_path / "a" / "b" / "c")
         result = write_compact_summary("content", deep_dir)
         assert result is True
         assert (Path(deep_dir) / "compact-summary.txt").exists()
 
     def test_secure_permissions(self, tmp_path):
-        from postcompact_verify import write_compact_summary
+        from postcompact_archive import write_compact_summary
         write_compact_summary("secure content", str(tmp_path))
         path = tmp_path / "compact-summary.txt"
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == 0o600
 
     def test_overwrites_existing_file(self, tmp_path):
-        from postcompact_verify import write_compact_summary
+        from postcompact_archive import write_compact_summary
         write_compact_summary("first", str(tmp_path))
         write_compact_summary("second", str(tmp_path))
         path = tmp_path / "compact-summary.txt"
         assert path.read_text(encoding="utf-8") == "second"
 
     def test_returns_false_on_error(self, tmp_path):
-        from postcompact_verify import write_compact_summary
+        from postcompact_archive import write_compact_summary
         # Point at a file path where parent can't be created
         fake_file = tmp_path / "blocker"
         fake_file.write_text("x", encoding="utf-8")
@@ -90,7 +90,7 @@ class TestWriteCompactSummary:
         assert result is False
 
     def test_empty_summary_writes_empty_file(self, tmp_path):
-        from postcompact_verify import write_compact_summary
+        from postcompact_archive import write_compact_summary
         write_compact_summary("", str(tmp_path))
         path = tmp_path / "compact-summary.txt"
         assert path.read_text(encoding="utf-8") == ""
@@ -182,8 +182,8 @@ class TestConstants:
         assert "pact-sessions" in str(COMPACT_SUMMARY_PATH)
 
     def test_postcompact_uses_shared_path(self):
-        """Verify postcompact_verify imports COMPACT_SUMMARY_PATH from shared."""
-        from postcompact_verify import _get_summary_path
+        """Verify postcompact_archive imports COMPACT_SUMMARY_PATH from shared."""
+        from postcompact_archive import _get_summary_path
         from shared.constants import COMPACT_SUMMARY_PATH
         # Default path (no override) should match the shared constant
         assert _get_summary_path() == COMPACT_SUMMARY_PATH
@@ -205,11 +205,11 @@ class TestPostcompactOuterExceptionHandler:
 
     def test_exits_zero_on_unexpected_error(self):
         """main() must exit 0 even when write_compact_summary raises."""
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         stdin_data = json.dumps({"compact_summary": "test"})
         with patch("sys.stdin", StringIO(stdin_data)), \
-             patch("postcompact_verify.write_compact_summary",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -217,26 +217,26 @@ class TestPostcompactOuterExceptionHandler:
 
     def test_stderr_contains_error_info(self, capsys):
         """Error details must appear on stderr for logging."""
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         stdin_data = json.dumps({"compact_summary": "test"})
         with patch("sys.stdin", StringIO(stdin_data)), \
-             patch("postcompact_verify.write_compact_summary",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit):
                 main()
 
         captured = capsys.readouterr()
-        assert "postcompact_verify" in captured.err
+        assert "postcompact_archive" in captured.err
         assert "test error" in captured.err
 
     def test_stdout_contains_hook_error_json(self, capsys):
         """Stdout must contain structured JSON from hook_error_json."""
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         stdin_data = json.dumps({"compact_summary": "test"})
         with patch("sys.stdin", StringIO(stdin_data)), \
-             patch("postcompact_verify.write_compact_summary",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit):
                 main()
@@ -245,5 +245,5 @@ class TestPostcompactOuterExceptionHandler:
         output = json.loads(captured.out.strip())
         assert "systemMessage" in output
         assert "PACT hook warning" in output["systemMessage"]
-        assert "postcompact_verify" in output["systemMessage"]
+        assert "postcompact_archive" in output["systemMessage"]
         assert "test error" in output["systemMessage"]

@@ -93,7 +93,7 @@ per the empirical investigation at `docs/investigations/2026-04-16-bootstrap-com
 
 **#444 redesign**: The bootstrap re-invocation directive lives at Tier 0
 (`session_init.py` additionalContext), not at Tier 2 (Read/@-ref) or in a
-separate `postcompact_verify.py` systemMessage. Hook-emitted directives
+separate `postcompact_archive.py` systemMessage. Hook-emitted directives
 survive every compaction by construction; Read/@-ref-based durability is
 structurally inadequate for the full protocol surface (~1,581 lines of
 content vs. ~1,000-line aggregate Tier 2 budget).

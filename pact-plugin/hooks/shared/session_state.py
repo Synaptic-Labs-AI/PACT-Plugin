@@ -2,7 +2,7 @@
 Location: pact-plugin/hooks/shared/session_state.py
 Summary: Single-session state summarizer for PACT compaction hooks.
          Replaces the cross-session task_scanner.py (#411 root cause).
-Used by: precompact_state_reminder.py, postcompact_verify.py
+Used by: precompact_state_reminder.py
 
 Produces a 10-key state dict that is a superset of the legacy
 analyze_task_state (8 keys) + scan_team_members (2 keys) outputs. Every

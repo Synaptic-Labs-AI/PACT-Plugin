@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Location: pact-plugin/hooks/postcompact_verify.py
-Summary: PostCompact hook that writes the compact summary to disk for the
-         secretary. Per #444 Tertiary, it no longer emits systemMessage —
-         the previous "critical context preserved" message was a reassurance
-         surface that could suppress orchestrator self-check.
+Location: pact-plugin/hooks/postcompact_archive.py
+Summary: PostCompact hook that archives the compact_summary to disk so
+         session_init (on the subsequent SessionStart:compact event) and
+         the secretary (on post-compaction briefing) can read it.
+         Renamed from postcompact_verify.py in PR #447 cleanup — #444
+         Tertiary deleted the verification logic, leaving only the
+         archival responsibility.
 Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
 2. Writes the compact_summary to the canonical COMPACT_SUMMARY_PATH
-   (the secretary reads this during post-compaction briefing)
 3. Emits suppressOutput to avoid false "hook error" UI display on clean exits
 
 This is a non-blocking side effect (always exits 0), not a gate.
@@ -93,9 +94,9 @@ def main():
     except Exception as e:
         # Fail open — never block post-compaction
         print(
-            f"Hook warning (postcompact_verify): {e}", file=sys.stderr
+            f"Hook warning (postcompact_archive): {e}", file=sys.stderr
         )
-        print(hook_error_json("postcompact_verify", e))
+        print(hook_error_json("postcompact_archive", e))
         sys.exit(0)
 
 
