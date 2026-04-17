@@ -38,6 +38,7 @@ AC#3 true-positive preservation:
 12. Legacy pause-covers-review path still works with no session_consolidated event
 """
 
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -45,6 +46,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+
+# Absolute path to session_journal.py for subprocess-level bash tests. Computed
+# here so the bash-template tests (TestPauseBashConditionalEmission,
+# TestUnsubstitutedPlaceholderFailureMode) do not need to re-derive it.
+_PACT_PLUGIN_DIR = Path(__file__).parent.parent
+_SESSION_JOURNAL_PY = str(_PACT_PLUGIN_DIR / "hooks" / "shared" / "session_journal.py")
 
 
 # ---------------------------------------------------------------------------
@@ -613,3 +620,107 @@ class TestPreExistingJournalCompat:
         warning = check_unpaused_pr(tasks=None, project_slug="test-project")
 
         assert warning is None
+
+
+# ---------------------------------------------------------------------------
+# Review cycle-1 L1: pause.md shell-guarded conditional emission
+# ---------------------------------------------------------------------------
+
+
+def _run_pause_bash(session_dir, *, true_or_false):
+    """Execute the pause.md step-5 bash template against a tmp session_dir.
+
+    Substitutes the shell-guard's {true_or_false} with the literal string
+    argument so the conditional's `[ '<value>' = 'true' ]` gate takes the
+    path under test. All other placeholders get safe test values so the
+    session_paused write succeeds regardless of the guard branch.
+
+    Returns the subprocess CompletedProcess so callers can assert on
+    returncode, stdout, and stderr. The bash envelope mirrors pause.md's
+    `set -e` + ERR trap exactly — if either write fails, this raises via
+    the trap's `exit $rc` and the caller sees returncode != 0.
+    """
+    template = f"""set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
+if [ '{true_or_false}' = 'true' ]; then
+  python3 "{_SESSION_JOURNAL_PY}" write \\
+    --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+{{"pass": 2, "task_count": 7, "memories_saved": 3}}
+JSON
+fi
+python3 "{_SESSION_JOURNAL_PY}" write \\
+  --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
+{{"pr_number": 123, "pr_url": "https://github.com/org/repo/pull/123", "branch": "feat/test", "worktree_path": "/tmp/wt", "consolidation_completed": {true_or_false}, "team_name": "pact-test"}}
+JSON
+"""
+    return subprocess.run(
+        ["bash", "-c", template],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+class TestPauseBashConditionalEmission:
+    """Pin the pause.md shell-guard at the bash-execution layer.
+
+    Review cycle-1 L1 hardening: before this fix, pause.md's prose said
+    the orchestrator MUST skip the session_consolidated write when
+    consolidation did not run, but the bash heredoc emitted
+    unconditionally. If the orchestrator copy-pasted the block verbatim
+    ignoring the prose, a false-positive session_consolidated signal
+    could suppress genuine warnings in a later session.
+
+    These tests execute the real bash template with both branches of
+    the guard and assert that the session_consolidated event is emitted
+    ONLY when {true_or_false} = 'true'.
+    """
+
+    def test_guard_true_emits_both_events(self, tmp_path):
+        """{true_or_false}='true' → both session_consolidated AND session_paused written."""
+        session_dir = str(tmp_path)
+
+        result = _run_pause_bash(session_dir, true_or_false="true")
+
+        assert result.returncode == 0, (
+            f"bash template failed under true branch: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert journal.exists(), "journal file must exist after writes"
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        types = [line.split('"type":"', 1)[1].split('"', 1)[0] for line in lines if line.strip()]
+        assert "session_consolidated" in types, (
+            f"true branch MUST emit session_consolidated. Got types: {types}"
+        )
+        assert "session_paused" in types, (
+            f"true branch MUST emit session_paused. Got types: {types}"
+        )
+
+    def test_guard_false_emits_only_session_paused(self, tmp_path):
+        """{true_or_false}='false' → session_consolidated SKIPPED, session_paused still written.
+
+        Regression pin for review cycle-1 L1: removing the shell guard
+        (restoring the unconditional write) causes this test to fail
+        because session_consolidated would appear in the journal.
+        """
+        session_dir = str(tmp_path)
+
+        result = _run_pause_bash(session_dir, true_or_false="false")
+
+        assert result.returncode == 0, (
+            f"bash template failed under false branch: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert journal.exists(), "session_paused write must create the journal"
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        types = [line.split('"type":"', 1)[1].split('"', 1)[0] for line in lines if line.strip()]
+        assert "session_consolidated" not in types, (
+            f"false branch MUST NOT emit session_consolidated. Got types: {types}"
+        )
+        assert "session_paused" in types, (
+            f"false branch MUST still emit session_paused. Got types: {types}"
+        )

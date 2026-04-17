@@ -59,16 +59,21 @@ Report task summary without deleting any tasks:
 
 Persist session state as a `session_paused` event in the session journal. The event contains PR number, branch, worktree path, and consolidation status — detected by `session_init.py` on resume. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full recovery protocol.
 
-When consolidation ran successfully (step 3 completed), ALSO emit a `session_consolidated` event BEFORE the `session_paused` write. This is the signal consumed by `check_unpaused_pr` in `session_end.py` so the SessionEnd hook can recognize consolidation-ran sessions uniformly whether they went through wrap-up or pause (#453 Fix B). The orchestrator MUST skip the `session_consolidated` write when `{true_or_false}: false` (consolidation did not actually run) — emitting it in that case would defeat the signal.
+When consolidation ran successfully (step 3 completed), ALSO emit a `session_consolidated` event BEFORE the `session_paused` write. This is the signal consumed by `check_unpaused_pr` in `session_end.py` so the SessionEnd hook can recognize consolidation-ran sessions uniformly whether they went through wrap-up or pause (#453 Fix B). The bash template below is **shell-guarded** — the `session_consolidated` write is wrapped in `if [ '{true_or_false}' = 'true' ]; then ... fi`, so emitting it when consolidation did not run is mechanically prevented even under copy-paste. The orchestrator MUST pass the literal string `true` or `false` for `{true_or_false}` (matching `session_paused`'s `consolidation_completed` field type).
 
 ```bash
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 # Only emit session_consolidated when consolidation actually ran in step 3.
-python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+# Shell-guarded so the prose contract is enforced mechanically — the
+# session_consolidated signal cannot be falsely emitted when consolidation
+# did not run (#453 Fix B — Review cycle-1 L1 hardening).
+if [ '{true_or_false}' = 'true' ]; then
+  python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+    --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
+fi
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}
