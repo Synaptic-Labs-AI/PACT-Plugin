@@ -151,6 +151,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # on unknown types and skips the _OPTIONAL_FIELDS_BY_TYPE loop, so a
     # type must be registered here to activate optional-field type checks.
     "cleanup_summary": {},
+    # commands/wrap-up.md + pause.md write session_consolidated after the
+    # secretary's memory-consolidation Pass 2 completes (#453 Fix B). No
+    # required fields — the event's mere existence is the detector signal
+    # consumed by session_end.check_unpaused_pr. Empty-dict registration
+    # activates the _OPTIONAL_FIELDS_BY_TYPE enforcement below (same pattern
+    # as session_end and cleanup_summary).
+    "session_consolidated": {},
 }
 
 
@@ -202,6 +209,18 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "tasks_ttl_days": int,
         "teams_ran": bool,
         "tasks_ran": bool,
+    },
+    # commands/wrap-up.md + pause.md write session_consolidated after the
+    # secretary's consolidation Pass 2 completes (#453 Fix B). The existence
+    # of the event is the signal consumed by session_end.check_unpaused_pr;
+    # these fields are audit trail for session_resume summaries and future
+    # observability. `pass` distinguishes which consolidation pass ran
+    # (1 or 2); the two count fields are advisory and may be 0 when the
+    # secretary cannot produce exact numbers.
+    "session_consolidated": {
+        "pass": int,
+        "task_count": int,
+        "memories_saved": int,
     },
 }
 

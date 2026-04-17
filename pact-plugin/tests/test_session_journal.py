@@ -2946,6 +2946,7 @@ class TestValidateEventSchemaPerType:
         },
         "session_end": {},  # No required fields; baseline-only.
         "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
+        "session_consolidated": {},  # No required fields; optional-only (#453 Fix B).
     }
 
     def test_samples_mirror_required_fields_dict(self):
@@ -3809,4 +3810,101 @@ class TestValidateOptionalFieldTypes:
         good = make_event("session_end", warning="open-pr-detected: #433")
         ok, reason = _validate_event_schema(good)
         assert ok is True, f"valid warning should pass; got {reason!r}"
+        assert reason == "ok"
+
+    # ---------------------------------------------------------------------
+    # session_consolidated schema activation + optional-field tests (#453)
+    # ---------------------------------------------------------------------
+
+    def test_session_consolidated_schema_activated(self):
+        """session_consolidated registered with {} in _REQUIRED_FIELDS_BY_TYPE.
+
+        Empty-dict registration in the required-fields dict is the
+        activation switch for the optional-field enforcement loop.
+        Without this entry, `_validate_event_schema` short-circuits on
+        "unknown type" before reaching the optional-field checks and
+        every wrong-typed payload would silently pass.
+        """
+        from shared.session_journal import _REQUIRED_FIELDS_BY_TYPE
+
+        assert _REQUIRED_FIELDS_BY_TYPE.get("session_consolidated") == {}
+
+    def test_session_consolidated_declared_optional_fields(self):
+        """session_consolidated optional fields pinned in _OPTIONAL_FIELDS_BY_TYPE.
+
+        Pins the three audit-trail fields (pass, task_count, memories_saved)
+        so a regression that drops any of them is caught at test time.
+        """
+        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("session_consolidated") == {
+            "pass": int,
+            "task_count": int,
+            "memories_saved": int,
+        }
+
+    def test_session_consolidated_absent_fields_pass(self):
+        """Event with no optional fields validates (all fields optional).
+
+        The event's mere EXISTENCE is the detector signal; payload is
+        advisory. This test pins that an empty-payload event is a valid
+        write — orchestrators that cannot produce counts must still be
+        able to emit the signal.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("session_consolidated")
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, f"empty session_consolidated should pass; got {reason!r}"
+        assert reason == "ok"
+
+    @pytest.mark.parametrize("field_name", ["pass", "task_count", "memories_saved"])
+    def test_session_consolidated_int_field_happy_path(self, field_name):
+        """Each optional int field accepts a plain int value."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("session_consolidated", **{field_name: 2})
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, f"{field_name}=2 should pass; got {reason!r}"
+        assert reason == "ok"
+
+    @pytest.mark.parametrize("field_name", ["pass", "task_count", "memories_saved"])
+    def test_session_consolidated_int_field_rejects_bool(self, field_name):
+        """bool is rejected as int for each optional field.
+
+        Python bool subclasses int (True == 1), so without the explicit
+        bool-in-int guard in the validator a writer could pass `pass=True`
+        and silently poison downstream audit consumers.
+        """
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("session_consolidated", **{field_name: True})
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert field_name in reason
+        assert "must be int" in reason
+        assert "got bool" in reason
+
+    @pytest.mark.parametrize("field_name", ["pass", "task_count", "memories_saved"])
+    def test_session_consolidated_int_field_rejects_str(self, field_name):
+        """str is rejected as int for each optional field."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event("session_consolidated", **{field_name: "2"})
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert field_name in reason
+        assert "must be int" in reason
+        assert "got str" in reason
+
+    def test_session_consolidated_all_fields_happy_path(self):
+        """Full payload with all three optional fields validates."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        event = make_event(
+            "session_consolidated",
+            **{"pass": 2, "task_count": 7, "memories_saved": 3},
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, f"full payload should pass; got {reason!r}"
         assert reason == "ok"
