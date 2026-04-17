@@ -967,6 +967,114 @@ class TestCheckUnpausedPr:
         assert warning is None
         mock_check.assert_not_called()
 
+    # ========================================================================
+    # #453 T19-T21 — fail-open at the real subprocess boundary
+    #
+    # Unlike the tests above (which patch session_end.check_pr_state directly
+    # with a "" return value to simulate the fail-open sentinel), these tests
+    # patch shared.gh_helpers.subprocess.run to raise each canonical error
+    # type and let the REAL gh_helpers.check_pr_state code convert the
+    # exception into the empty-string sentinel. This pins the full
+    # plumbing path: subprocess raises → gh_helpers catches → returns
+    # "" → session_end falls through to warn.
+    # ========================================================================
+
+    def test_live_pr_check_gh_missing_warns(self):
+        """T19: gh not installed (FileNotFoundError) → empty sentinel → warn.
+
+        Override the autouse check_pr_state fixture with the REAL
+        implementation so FileNotFoundError raised from subprocess.run
+        actually flows through gh_helpers.check_pr_state's except clause.
+        """
+        from session_end import check_unpaused_pr
+        from shared.gh_helpers import check_pr_state as real_check_pr_state
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [
+                    {"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}
+                ]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", real_check_pr_state), \
+             patch(
+                 "shared.gh_helpers.subprocess.run",
+                 side_effect=FileNotFoundError("gh not found"),
+             ):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #42" in warning
+
+    def test_live_pr_check_gh_timeout_warns(self):
+        """T20: gh times out → empty sentinel → warn.
+
+        Plumbing pin: subprocess.TimeoutExpired raised inside the 5-second
+        cap must be caught by gh_helpers' except tuple and surfaced as ""
+        so the detector falls through to the conservative warning.
+        """
+        import subprocess
+        from session_end import check_unpaused_pr
+        from shared.gh_helpers import check_pr_state as real_check_pr_state
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [
+                    {"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}
+                ]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", real_check_pr_state), \
+             patch(
+                 "shared.gh_helpers.subprocess.run",
+                 side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5),
+             ):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #42" in warning
+
+    def test_live_pr_check_gh_oserror_warns(self):
+        """T21: gh raises OSError (permission denied, ENOMEM, etc.) → warn.
+
+        Plumbing pin: the OSError branch of gh_helpers' except tuple
+        converts unexpected OS errors to the "" sentinel without
+        propagating. Regression guard against a change that shrinks
+        the caught exception list (e.g. dropping OSError would let
+        permission-denied exceptions crash the SessionEnd hook).
+        """
+        from session_end import check_unpaused_pr
+        from shared.gh_helpers import check_pr_state as real_check_pr_state
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [
+                    {"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}
+                ]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", real_check_pr_state), \
+             patch(
+                 "shared.gh_helpers.subprocess.run",
+                 side_effect=OSError("permission denied"),
+             ):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #42" in warning
+
 
 # =============================================================================
 # cleanup_teachback_markers() Tests
