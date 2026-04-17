@@ -4265,3 +4265,111 @@ class TestSessionInitCompactBranchExceptions:
                 main()
 
         assert exc_info.value.code == 0
+
+
+class TestSessionInitDirectiveAcrossAllSources:
+    """The 4-sentence #444 directive must appear verbatim on EVERY source.
+
+    TestTeamCreateStringFreshSession covers startup; TestTeamReuseStringResumedSession
+    covers resume; TestBuildSafetyNetContext covers the fail-open path. This class
+    closes the remaining gap by asserting the verbatim 4 sentences on the two
+    context-reset sources (compact, clear) that inherit the directive via
+    _team_reuse but never had an explicit verbatim check.
+    """
+
+    def _run(self, monkeypatch, tmp_path, source):
+        """Minimal driver for a compact/clear run with team_exists=True."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": source,
+        })
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(stdout.getvalue())
+        return output["hookSpecificOutput"]["additionalContext"]
+
+    def test_compact_source_contains_all_four_directive_sentences(
+        self, monkeypatch, tmp_path
+    ):
+        """source=compact must carry the full 4-sentence #444 directive verbatim.
+        Guards against silent paraphrase in the compact branch's _team_reuse
+        reuse — substring-only checks elsewhere could miss a truncated emission.
+        """
+        additional = self._run(monkeypatch, tmp_path, "compact")
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
+
+    def test_clear_source_contains_all_four_directive_sentences(
+        self, monkeypatch, tmp_path
+    ):
+        """source=clear must also carry the full 4-sentence #444 directive.
+        Same rationale as compact — the clear branch composes _team_reuse with
+        CONTEXT CLEARED guidance, and a truncation there would silently weaken
+        the bootstrap gate for every /clear invocation."""
+        additional = self._run(monkeypatch, tmp_path, "clear")
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
+
+    def test_directive_precedes_checkpoint_on_compact_with_tasks(
+        self, monkeypatch, tmp_path, pact_context
+    ):
+        """Structural-order invariant from architect §2: when the checkpoint
+        block is appended on compact, the 4-sentence directive must appear
+        BEFORE the [POST-COMPACTION CHECKPOINT] header in the joined
+        additionalContext. Guards against a future refactor that accidentally
+        flips insert/append order or emits them in different context_parts
+        elements on the wrong side.
+        """
+        session_id = "aabb1122-0000-0000-0000-000000000000"
+        pact_context(session_id=session_id)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+        tasks_dir.mkdir(parents=True)
+        feature = {
+            "id": "f-order",
+            "subject": "Order invariant feature",
+            "status": "in_progress",
+        }
+        (tasks_dir / "f-order.json").write_text(json.dumps(feature))
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        directive_idx = additional.find(
+            'Invoke Skill("PACT:bootstrap") immediately'
+        )
+        checkpoint_idx = additional.find('[POST-COMPACTION CHECKPOINT]')
+        assert directive_idx != -1, "directive sentence 1 must appear"
+        assert checkpoint_idx != -1, "checkpoint block must appear"
+        assert directive_idx < checkpoint_idx, (
+            f"directive (idx={directive_idx}) must precede checkpoint "
+            f"(idx={checkpoint_idx}) in additionalContext"
+        )
