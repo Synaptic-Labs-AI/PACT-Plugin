@@ -282,8 +282,9 @@ class TestTeamResumeDetection:
         # additionalContext is " | ".join(context_parts), so team instruction
         # should be at the start. Post #366 Phase 1 the prelude leads with the
         # PACT ROLE marker to anchor role detection for the lead session.
+        # Post #444 the directive is the unconditional 4-sentence form.
         assert additional.startswith("PACT ROLE: orchestrator")
-        assert "Your FIRST action must be" in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
 
 
 class TestSourceAwareness:
@@ -389,17 +390,29 @@ class TestSourceAwareness:
     # --- Path 3: compact + team exists (post-compaction recovery) ---
 
     def test_compact_team_exists_recovery(self, monkeypatch, tmp_path):
-        """compact + team exists: should emit POST-COMPACTION recovery instructions."""
+        """compact + team exists: should emit post-bootstrap recovery instructions.
+
+        Post #444: the Primary-layer directive subsumes the "recover state"
+        prefix. The concrete task-resumption bullets (compact-summary, TaskList,
+        secretary re-engage) stay, prefixed by 'After bootstrap, recover
+        session state:'. The Secondary checkpoint block only fires when
+        in_progress tasks exist — get_task_list is patched to None here, so
+        no [POST-COMPACTION CHECKPOINT] block is expected.
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="compact", team_exists=True
         )
 
         assert "existing — resumed session" in additional
         assert "Do not call TeamCreate" in additional
-        assert "POST-COMPACTION" in additional
+        assert "After bootstrap, recover session state:" in additional
         assert "compact-summary.txt" in additional
         assert "TaskList" in additional
         assert "secretary" in additional
+        # Unconditional 4-sentence directive is emitted at index 0 of context_parts.
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+        # Checkpoint block not fired (get_task_list returns None in helper).
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
 
     def test_compact_skips_symlinks(self, monkeypatch, tmp_path):
         """compact should skip symlink setup (already done)."""
@@ -2911,7 +2924,7 @@ def _run_session_init_for_path(
 
 
 class TestTeamCreateStringFreshSession:
-    """The fresh-session team-create string must follow the new prelude format."""
+    """The fresh-session team-create string must follow the #444 4-sentence prelude."""
 
     def test_starts_with_pact_role_marker(self, monkeypatch, tmp_path):
         additional, _, _ = _run_session_init_for_path(
@@ -2919,11 +2932,17 @@ class TestTeamCreateStringFreshSession:
         )
         assert additional.startswith("PACT ROLE: orchestrator")
 
-    def test_contains_first_action_skill_call(self, monkeypatch, tmp_path):
+    def test_contains_all_four_directive_sentences(self, monkeypatch, tmp_path):
+        """All 4 sentences of the #444 unconditional directive must appear verbatim.
+        Each sentence guards a distinct failure mode — missing any one weakens the
+        bootstrap re-invocation gate."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
-        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_contains_team_create_directive(self, monkeypatch, tmp_path):
         additional, _, _ = _run_session_init_for_path(
@@ -2939,12 +2958,15 @@ class TestTeamCreateStringFreshSession:
         assert "Do not read files" in additional
         assert "bootstrap and team creation are complete" in additional
 
-    def test_contains_recovery_hint(self, monkeypatch, tmp_path):
-        """Re-invoke after compaction guidance is part of the prelude."""
+    def test_does_not_contain_old_conditional_directive(self, monkeypatch, tmp_path):
+        """The #444 unconditional directive must fully replace the old conditional.
+        The conditional form ('Re-invoke if your context is compacted...') required
+        LLM self-diagnosis, which was the failure mode — verify its removal."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
-        assert "Re-invoke if your context is compacted" in additional
+        assert "Re-invoke if your context is compacted" not in additional
+        assert "Your FIRST action must be" not in additional
 
 
 class TestTeamReuseStringResumedSession:
@@ -2956,11 +2978,25 @@ class TestTeamReuseStringResumedSession:
         )
         assert additional.startswith("PACT ROLE: orchestrator")
 
-    def test_contains_first_action_skill_call(self, monkeypatch, tmp_path):
+    def test_contains_all_four_directive_sentences(self, monkeypatch, tmp_path):
+        """All 4 sentences of the #444 unconditional directive must appear verbatim.
+        Each sentence guards a distinct failure mode — missing any one weakens the
+        bootstrap re-invocation gate."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
-        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
+
+    def test_does_not_contain_old_conditional_directive(self, monkeypatch, tmp_path):
+        """The #444 unconditional directive must fully replace the old conditional form."""
+        additional, _, _ = _run_session_init_for_path(
+            monkeypatch, tmp_path, source="resume", team_exists=True
+        )
+        assert "Re-invoke if your context is compacted" not in additional
+        assert "Your FIRST action must be" not in additional
 
     def test_contains_existing_team_marker(self, monkeypatch, tmp_path):
         additional, _, _ = _run_session_init_for_path(
@@ -3152,12 +3188,17 @@ class TestBuildSafetyNetContext:
         )
 
     def test_none_team_contains_skill_first_action(self):
-        """With team_name=None the string must contain the Skill bootstrap directive."""
+        """With team_name=None the string must contain the #444 4-sentence directive.
+        Safety net MUST carry the same load-bearing directive as the primary path —
+        on the degraded path the risk of bootstrap-skip is higher, not lower."""
         from session_init import _build_safety_net_context
 
         result = _build_safety_net_context(None)
 
-        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in result
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in result
+        assert 'Do this before anything else.' in result
+        assert 'Do not evaluate whether it is needed.' in result
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in result
 
     def test_none_team_mentions_not_generated(self):
         """With team_name=None the message should tell the lead the team is not yet created."""
@@ -3185,12 +3226,17 @@ class TestBuildSafetyNetContext:
         assert "pact-abc123" in result
 
     def test_with_team_contains_skill_first_action(self):
-        """The team-present branch must still contain the Skill bootstrap directive."""
+        """The team-present branch must contain the #444 4-sentence directive.
+        Both branches of the safety net emit the same directive string verbatim —
+        no divergence at the directive layer."""
         from session_init import _build_safety_net_context
 
         result = _build_safety_net_context("pact-abc123")
 
-        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in result
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in result
+        assert 'Do this before anything else.' in result
+        assert 'Do not evaluate whether it is needed.' in result
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in result
 
     def test_with_team_mentions_partial_failure(self):
         """The team-present branch should note that session_init partially failed."""
@@ -3304,8 +3350,8 @@ class TestReadOnlyHomeScenario:
                 "still start with the PACT ROLE marker so the routing block "
                 "consumer identifies the lead's role."
             )
-            assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional, (
-                "FIRST ACTION directive must survive the readonly scenario."
+            assert 'Invoke Skill("PACT:bootstrap") immediately' in additional, (
+                "#444 unconditional directive must survive the readonly scenario."
             )
         finally:
             # Restore write permission so tmp_path cleanup can unlink files.
@@ -3358,7 +3404,7 @@ class TestMainExceptionSafetyNet:
         # of additionalContext (line-anchored for the routing block consumer).
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert additional.startswith("PACT ROLE: orchestrator.")
-        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
         assert "NOT GENERATED" in additional, (
             "Exception fired before team_name was captured — safety net must "
             "fall through to the NOT GENERATED branch."
@@ -3411,7 +3457,7 @@ class TestMainExceptionSafetyNet:
         # Governance delivery chain: PACT ROLE marker must be present at byte 0.
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert additional.startswith("PACT ROLE: orchestrator.")
-        assert 'Your FIRST action must be: Skill("PACT:bootstrap")' in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
 
         # The team name captured before the exception must be in the safety net
         # so the lead can reuse it rather than creating a second team.
@@ -3777,3 +3823,445 @@ class TestSessionStartSourceField:
         assert event.get("worktree") == ""
         # And the new field rides alongside.
         assert event.get("source") == "compact"
+
+
+# =============================================================================
+# #444 Secondary layer: post-compaction checkpoint block migrated from
+# compaction_refresh.py into session_init.py's source="compact" branch.
+# Tests below were ported from tests/test_compaction_refresh.py — that file
+# was deleted in the same change. See docs/architecture/444-post-boundary-bootstrap.md §7.1.
+# =============================================================================
+
+
+@pytest.fixture
+def _compact_tasks_dir(tmp_path, monkeypatch, pact_context):
+    """Create a real ~/.claude/tasks/{session_id}/ under tmp_path and
+    route session_init's Path.home() to tmp_path. Yields the tasks dir
+    so each test can drop task JSON files into it. The session_id
+    matches the stdin session_id used by the migrated tests below.
+    """
+    session_id = "aabb1122-0000-0000-0000-000000000000"
+    tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+    tasks_dir.mkdir(parents=True)
+    pact_context(session_id=session_id)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    return tasks_dir
+
+
+def _run_session_init_compact(
+    monkeypatch, tmp_path, *, team_exists=True, patch_get_task_list=None
+):
+    """Drive session_init.main() with source=compact and return the
+    parsed additionalContext string plus the full output dict.
+
+    By default get_task_list is NOT patched — the test relies on real
+    task_utils reads from the isolated tasks dir (see _compact_tasks_dir).
+    Pass patch_get_task_list=<value> to force a specific return value
+    (e.g., None or a Mock that raises).
+    """
+    from session_init import main
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    if team_exists:
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+    stdin_data = json.dumps({
+        "session_id": "aabb1122-0000-0000-0000-000000000000",
+        "source": "compact",
+    })
+
+    # Minimum viable mock set: the steps that touch real disk / network
+    # / external state, same shape as TestSourceAwareness._run_main_with_source
+    # but with get_task_list REAL (reads from _compact_tasks_dir).
+    patches = [
+        patch("session_init.setup_plugin_symlinks", return_value=None),
+        patch("session_init.remove_stale_kernel_block", return_value=None),
+        patch("session_init.update_pact_routing", return_value=None),
+        patch("session_init.ensure_project_memory_md", return_value=None),
+        patch("session_init.check_pinned_staleness", return_value=None),
+        patch("session_init.update_session_info", return_value=None),
+        patch("session_init.restore_last_session", return_value=None),
+        patch("session_init.check_paused_state", return_value=None),
+        patch("sys.stdin", io.StringIO(stdin_data)),
+    ]
+    if patch_get_task_list is not None:
+        patches.append(
+            patch("session_init.get_task_list", return_value=patch_get_task_list)
+        )
+
+    stdout = io.StringIO()
+    with patch("sys.stdout", stdout):
+        with _nested(*patches):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+    assert exc_info.value.code == 0
+    output = json.loads(stdout.getvalue())
+    additional = output["hookSpecificOutput"]["additionalContext"]
+    return additional, output
+
+
+from contextlib import ExitStack
+
+
+def _nested(*context_managers):
+    """Enter multiple context managers as if via nested `with` — returns
+    an ExitStack-backed wrapper so we don't need deeply nested `with`
+    blocks in the helper above."""
+    stack = ExitStack()
+    for cm in context_managers:
+        stack.enter_context(cm)
+    return stack
+
+
+class TestSessionInitCompactE2E:
+    """E2E coverage for the post-compaction checkpoint block inside
+    session_init's source=compact branch (migrated from
+    TestCompactionRefreshPrimaryPathE2E).
+
+    These tests put real task JSON into a temp ~/.claude/tasks/ dir and
+    assert that session_init.main() renders the correct feature / phase /
+    agent / blocker identities into additionalContext — and never
+    fabricates identities that don't exist on disk.
+    """
+
+    def test_feature_plus_phase_plus_blockers_render_into_additional_context(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Realistic task list + source=compact → checkpoint block contains
+        every identity traced back to on-disk tasks.
+
+        The blocker task uses blockedBy=['f-001'] so find_feature_task
+        correctly picks the feature rather than the blocker.
+        """
+        tasks = [
+            {"id": "f-001", "subject": "Fix regression in payment flow",
+             "status": "in_progress"},
+            {"id": "p-002", "subject": "CODE: payment-regression",
+             "status": "in_progress", "blockedBy": ["f-001"]},
+            {"id": "a-003", "subject": "backend-coder: fix stripe adapter",
+             "status": "in_progress", "blockedBy": ["p-002"]},
+            {"id": "b-004", "subject": "Missing API credentials",
+             "status": "in_progress", "blockedBy": ["f-001"],
+             "metadata": {"type": "blocker", "level": "HALT"}},
+        ]
+        for t in tasks:
+            (_compact_tasks_dir / f"{t['id']}.json").write_text(json.dumps(t))
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        # Primary-layer directive at index 0, checkpoint appended after.
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+        assert "[POST-COMPACTION CHECKPOINT]" in additional
+        assert "Fix regression in payment flow" in additional
+        assert "CODE: payment-regression" in additional
+        assert "backend-coder: fix stripe adapter" in additional
+        assert "Missing API credentials" in additional
+        assert "BLOCKERS DETECTED" in additional
+
+    def test_feature_only_no_phase_emits_feature_without_phantom_phase(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Feature in_progress + no phase: checkpoint must emit 'None
+        detected' for the phase — never invent one."""
+        feature = {"id": "f-only", "subject": "Solo feature",
+                   "status": "in_progress"}
+        (_compact_tasks_dir / "f-only.json").write_text(json.dumps(feature))
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "Solo feature" in additional
+        assert "None detected" in additional
+        # No phase literals may appear out of thin air.
+        assert "CODE:" not in additional
+        assert "ARCHITECT:" not in additional
+        assert "PREPARE:" not in additional
+        assert "TEST:" not in additional
+
+    def test_phase_only_no_feature_emits_identification_fallback(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Phase in_progress + no identifiable feature: honest
+        'Unable to identify feature task' message, never a fabricated
+        feature name."""
+        phase = {"id": "p-orphan", "subject": "CODE: orphan-feature",
+                 "status": "in_progress"}
+        (_compact_tasks_dir / "p-orphan.json").write_text(json.dumps(phase))
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "Unable to identify feature task" in additional
+        assert "CODE: orphan-feature" in additional
+
+    def test_pending_tasks_only_emits_no_checkpoint_block(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Tasks exist but status=pending (not in_progress): checkpoint
+        block is NOT appended — the directive still fires on its own.
+        Contract: 'in_progress' is the only status that triggers a
+        checkpoint."""
+        pending = {"id": "p-pending", "subject": "Pending feature",
+                   "status": "pending"}
+        (_compact_tasks_dir / "p-pending.json").write_text(json.dumps(pending))
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        # Directive still at index 0; but no checkpoint block.
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+
+    def test_mixed_in_progress_and_malformed_renders_checkpoint_skipping_malformed(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Valid in_progress task + malformed JSON co-exist: checkpoint
+        must render from valid, skip malformed, never phantom from it."""
+        valid = {"id": "v-1", "subject": "Valid feature",
+                 "status": "in_progress"}
+        (_compact_tasks_dir / "v-1.json").write_text(json.dumps(valid))
+        (_compact_tasks_dir / "broken.json").write_text("{ not json }")
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "[POST-COMPACTION CHECKPOINT]" in additional
+        assert "Valid feature" in additional
+
+
+class TestSessionInitCompactPhantomWorkflow:
+    """Phantom-workflow regression suite (migrated from
+    test_compaction_refresh.py TestPhantomWorkflowRegression).
+
+    SACROSANCT invariant: session_init's source=compact branch MUST NEVER
+    fabricate workflow identities from sources other than the real on-disk
+    TaskList. No transcript scan, no checkpoint fallback — the checkpoint
+    block is only appended when get_task_list() yields at least one
+    in_progress task.
+    """
+
+    def test_compact_with_no_tasks_dir_emits_no_checkpoint(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """source=compact + ZERO tasks dir on disk → checkpoint block absent,
+        directive still fires (no suppressOutput — session_init always
+        emits additionalContext)."""
+        pact_context(session_id="aabb1122-0000-0000-0000-000000000000")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+        assert "Workflow:" not in additional
+
+    def test_compact_with_empty_tasks_dir_emits_no_checkpoint(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Tasks dir exists but is empty → no checkpoint."""
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+
+    def test_compact_with_only_completed_tasks_emits_no_checkpoint(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Tasks exist but all completed → no in_progress → no checkpoint.
+        Stale completed-task data must not leak into additionalContext."""
+        completed = {"id": "task-old", "subject": "Ancient completed feature",
+                     "status": "completed"}
+        (_compact_tasks_dir / "task-old.json").write_text(json.dumps(completed))
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+        assert "Ancient completed feature" not in additional
+
+    def test_compact_with_malformed_json_files_emits_no_checkpoint(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Malformed JSON task files must not produce phantom state.
+        get_task_list() skips syntactically invalid files via
+        JSONDecodeError; if nothing usable remains, no checkpoint."""
+        (_compact_tasks_dir / "malformed1.json").write_text("{ not json")
+        (_compact_tasks_dir / "malformed2.json").write_text("")
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+        assert "Workflow:" not in additional
+
+    def test_compact_with_null_json_does_not_leak_phantom(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """A task file containing JSON literal 'null' must not leak
+        phantom workflow state, even if downstream processing raises.
+
+        json.loads('null') returns None, which bypasses the JSONDecodeError
+        catch in get_task_list(). Whatever path this takes, the output must
+        NOT contain fabricated workflow / feature / phase identities.
+        """
+        (_compact_tasks_dir / "null.json").write_text("null")
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        # Whatever the output shape, phantom identities must NOT appear.
+        assert "Workflow:" not in additional
+        assert "peer-review" not in additional
+        assert "orchestrate" not in additional
+        assert "comPACT" not in additional
+
+    def test_compact_output_never_mentions_workflow_literal_when_no_tasks(
+        self, tmp_path, monkeypatch, pact_context
+    ):
+        """Byte-level assertion: 'Workflow:' literal never in output on
+        a bare source=compact session. Guards against future refactors
+        that might reintroduce transcript/checkpoint-based fallbacks."""
+        pact_context(session_id="aabb1122-0000-0000-0000-000000000000")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+
+        assert "Workflow:" not in additional
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+        assert "peer-review" not in additional
+        assert "orchestrate" not in additional
+
+    def test_non_compact_source_never_emits_checkpoint_even_with_tasks(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """Non-compact source + real in_progress tasks: checkpoint block
+        is NEVER appended (the append lives inside the source=='compact'
+        branch). Confirms the primary guard holds."""
+        feature = {"id": "f-1", "subject": "Implement X",
+                   "status": "in_progress"}
+        (_compact_tasks_dir / "f-1.json").write_text(json.dumps(feature))
+
+        # Override the default (compact) source in the helper by driving
+        # main() directly with source="startup" — can't reuse
+        # _run_session_init_compact since it hard-codes source.
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "startup",
+        })
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+
+        # No compact-branch CHECKPOINT block should appear for startup source.
+        # (Feature names may appear via session_info / resumption paths — the
+        # load-bearing invariant is that the formatted [POST-COMPACTION
+        # CHECKPOINT] multi-line block is NOT emitted on non-compact sources.)
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+        assert "Prior conversation auto-compacted" not in additional
+
+
+class TestSessionInitCompactBranchExceptions:
+    """Exception-handling tests for the inline get_task_list() call inside
+    session_init's compact branch (migrated/adapted from
+    TestExceptionHandlingPaths).
+
+    The inline call can raise if task_utils hits unexpected state. Outer
+    try/except in main() MUST catch it and fall back to the safety net,
+    which still carries the load-bearing 4-sentence bootstrap directive.
+    """
+
+    def test_get_task_list_exception_falls_back_to_safety_net(
+        self, monkeypatch, tmp_path, pact_context
+    ):
+        """If get_task_list() raises on the compact branch, main()'s outer
+        except block must emit the safety net — still with the directive."""
+        from session_init import main
+
+        pact_context(session_id="aabb1122-0000-0000-0000-000000000000")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "compact",
+        })
+
+        def raising_get_task_list():
+            raise RuntimeError("simulated task_utils failure")
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", side_effect=raising_get_task_list), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Fail-open: exit 0 regardless.
+        assert exc_info.value.code == 0
+        output = json.loads(stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        # Safety net still carries the 4-sentence bootstrap directive.
+        assert additional.startswith("PACT ROLE: orchestrator")
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+
+    def test_main_with_invalid_json_input_never_raises(
+        self, tmp_path, monkeypatch
+    ):
+        """Invalid JSON input on the compact path must not raise —
+        fail-open invariant. Replaces test_compaction_refresh.py's
+        test_main_with_invalid_json_input."""
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO("not json")), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0

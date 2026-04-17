@@ -44,7 +44,14 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 # Import shared Task utilities (DRY - used by multiple hooks)
-from shared.task_utils import get_task_list
+from shared.task_utils import (
+    get_task_list,
+    find_feature_task,
+    find_current_phase,
+    find_active_agents,
+    find_blockers,
+    build_post_compaction_checkpoint,
+)
 
 # Import staleness detection (extracted to staleness.py for maintainability).
 # Underscore aliases (_get_project_claude_md_path, _estimate_tokens) and the
@@ -385,9 +392,10 @@ def _build_safety_net_context(team_name: str | None) -> str:
     """
     prelude = (
         'PACT ROLE: orchestrator.\n\n'
-        'Your FIRST action must be: Skill("PACT:bootstrap"). '
-        'This loads your full operating instructions, governance policy, '
-        'and critical workflow protocols.'
+        'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+        'Do this before anything else. '
+        'Do not evaluate whether it is needed. '
+        'You must invoke Skill("PACT:bootstrap") on every session start.'
     )
     if team_name:
         return (
@@ -745,34 +753,58 @@ def main():
             )
         _team_reuse = (
             f'PACT ROLE: orchestrator.\n\n'
-            f'Your FIRST action must be: Skill("PACT:bootstrap"). This loads your full '
-            f'operating instructions, governance policy, and critical workflow protocols. '
-            f'Re-invoke if your context is compacted and the bootstrap content is no longer present.\n\n'
+            f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+            f'Do this before anything else. '
+            f'Do not evaluate whether it is needed. '
+            f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
             f'Your team is `{team_name}` (existing — resumed session). '
             f'Do not call TeamCreate — the team already exists. '
             f'{_substitutions}'
         )
         _team_create = (
             f'PACT ROLE: orchestrator.\n\n'
-            f'Your FIRST action must be: Skill("PACT:bootstrap"). This loads your full '
-            f'operating instructions, governance policy, and critical workflow protocols. '
-            f'Re-invoke if your context is compacted and the bootstrap content is no longer present.\n\n'
+            f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+            f'Do this before anything else. '
+            f'Do not evaluate whether it is needed. '
+            f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
             f'After bootstrap completes, your next action is: TeamCreate(team_name="{team_name}"). '
             f'Do not read files, explore code, or respond to the user until bootstrap and team creation are complete. '
             f'{_substitutions}'
         )
 
         if source == "compact" and team_exists:
-            # Post-compaction: context window was compacted, guide state recovery
+            # Post-compaction: bootstrap directive (in _team_reuse) subsumes
+            # "recover state" guidance; keep concrete task-resumption bullets
+            # for the orchestrator's next actions after bootstrap.
             context_parts.insert(0, (
                 f'{_team_reuse} '
-                f'POST-COMPACTION: Your context was compacted — recover state: '
+                f'After bootstrap, recover session state: '
                 f'(1) Read {COMPACT_SUMMARY_PATH} for prior context, '
                 f'(2) Run TaskList to find in-progress work, '
                 f'(3) TaskGet on in-progress tasks for details. '
                 f"Re-engage secretary: SendMessage(to='secretary', "
                 f"message='Post-compaction: deliver session briefing with current state.')."
             ))
+            # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
+            # when tasks in_progress. Logic previously lived in
+            # compaction_refresh.py (deleted in same PR). get_task_list() is
+            # called inline here because step 6's `tasks` var is not yet
+            # defined at this point. Fail-open: outer try/except in main()
+            # catches any task_utils errors and falls back to safety net.
+            _compact_tasks = get_task_list()
+            if _compact_tasks:
+                _in_progress = [
+                    t for t in _compact_tasks
+                    if t.get("status") == "in_progress"
+                ]
+                if _in_progress:
+                    _checkpoint_block = build_post_compaction_checkpoint(
+                        feature=find_feature_task(_compact_tasks),
+                        phase=find_current_phase(_compact_tasks),
+                        agents=find_active_agents(_compact_tasks),
+                        blockers=find_blockers(_compact_tasks),
+                    )
+                    context_parts.append(_checkpoint_block)
         elif source == "clear" and team_exists:
             # Context cleared via /clear: no compact-summary, but team and tasks survive
             context_parts.insert(0, (

@@ -1,11 +1,12 @@
 """
 Location: pact-plugin/hooks/refresh/shared_constants.py
 Summary: Shared constants and prose template functions for workflow refresh system.
-Used by: refresh/constants.py and compaction_refresh.py fallback.
+Used by: refresh/constants.py.
 
-This module centralizes step descriptions and prose context templates that are
-used by both the main refresh package and the fallback code in compaction_refresh.py.
-Extracting these to a shared module eliminates code duplication (DRY principle).
+This module centralizes step descriptions and prose context templates for the
+refresh package (retained for historical test suite coverage — see
+test_checkpoint_builder.py). Extracting these to a shared module eliminates
+code duplication (DRY principle).
 """
 
 # === STEP DESCRIPTIONS ===

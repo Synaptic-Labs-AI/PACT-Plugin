@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: compaction_refresh.py, phase_completion.py, session_init.py
+Used by: phase_completion.py, session_init.py
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
@@ -14,6 +14,7 @@ Functions:
     find_current_phase: Find the currently active phase task
     find_active_agents: Find all active agent tasks
     find_blockers: Find blocker/algedonic tasks
+    build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
 """
 
 import json
@@ -185,3 +186,78 @@ def find_blockers(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 blockers.append(task)
 
     return blockers
+
+
+def build_post_compaction_checkpoint(
+    feature: dict[str, Any] | None,
+    phase: dict[str, Any] | None,
+    agents: list[dict[str, Any]],
+    blockers: list[dict[str, Any]],
+) -> str:
+    """Build [POST-COMPACTION CHECKPOINT] message from Task state.
+
+    Generates a concise message describing the workflow state for
+    the orchestrator to resume from.
+
+    Args:
+        feature: Feature task dict or None
+        phase: Current phase task dict or None
+        agents: List of active agent tasks
+        blockers: List of active blocker tasks
+
+    Returns:
+        Formatted refresh message string
+    """
+    lines = ["[POST-COMPACTION CHECKPOINT]"]
+    lines.append("Prior conversation auto-compacted. Resume from Task state below:")
+
+    # Feature context
+    if feature:
+        feature_subject = feature.get("subject", "unknown feature")
+        feature_id = feature.get("id", "")
+        if feature_id:
+            lines.append(f"Feature: {feature_subject} (id: {feature_id})")
+        else:
+            lines.append(f"Feature: {feature_subject}")
+    else:
+        lines.append("Feature: Unable to identify feature task")
+
+    # Phase context
+    if phase:
+        phase_subject = phase.get("subject", "unknown phase")
+        lines.append(f"Current Phase: {phase_subject}")
+    else:
+        lines.append("Current Phase: None detected")
+
+    # Active agents
+    if agents:
+        agent_names = [a.get("subject", "unknown") for a in agents]
+        lines.append(f"Active Agents ({len(agents)}): {', '.join(agent_names)}")
+    else:
+        lines.append("Active Agents: None")
+
+    # Blockers (critical info)
+    if blockers:
+        lines.append("")
+        lines.append("**BLOCKERS DETECTED:**")
+        for blocker in blockers:
+            subj = blocker.get("subject", "unknown blocker")
+            meta = blocker.get("metadata", {})
+            level = meta.get("level", "")
+            if level:
+                lines.append(f"  - {level}: {subj}")
+            else:
+                lines.append(f"  - {subj}")
+
+    # Next step guidance
+    lines.append("")
+    if blockers:
+        lines.append("Next Step: **Address blockers before proceeding.**")
+    elif agents:
+        lines.append("Next Step: Monitor active agents via TaskList, then proceed.")
+    elif phase:
+        lines.append("Next Step: Continue current phase or check agent completion.")
+    else:
+        lines.append("Next Step: **Check TaskList and ask user how to proceed.**")
+
+    return "\n".join(lines)
