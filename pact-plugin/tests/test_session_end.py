@@ -701,6 +701,138 @@ class TestCheckUnpausedPr:
 
         assert warning is None
 
+    # ========================================================================
+    # #453 Fix B — session_consolidated short-circuit tests
+    # ========================================================================
+
+    def test_session_consolidated_short_circuits_warning(self):
+        """session_consolidated present → no warning regardless of PR state.
+
+        Baseline #453 Fix B check: the wrap-up happy path emits
+        session_consolidated and leaves the review_dispatch event in
+        place. Without the short-circuit, the legacy timestamp
+        comparison would warn. With the short-circuit, it returns None.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return [{"type": "session_consolidated", "ts": "2026-01-02T00:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_session_consolidated_short_circuits_even_with_unpaused_pr(self):
+        """Fix B covers the #453 root-cause-#1 scenario: merged-PR wrap-up.
+
+        review_dispatch present, NO session_paused, session_consolidated
+        present → no warning. Without the short-circuit, the fallback
+        PR-detection path would surface a warning for PR #42.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return [{"type": "session_consolidated", "ts": "2026-01-02T00:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_session_consolidated_missing_falls_through_to_legacy_logic(self):
+        """No session_consolidated + legacy pause-covers-review → no warning.
+
+        AC#3 guard: the legacy timestamp-comparison path is preserved
+        for sessions that never consolidated but did pause.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return []
+            if event_type == "session_paused":
+                return [{"type": "session_paused", "pr_number": 42, "ts": "2026-01-02T00:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_session_consolidated_missing_warns_on_true_positive(self):
+        """AC#3 true-positive pin: no consolidation, unpaused PR → warn.
+
+        Regression guard — the Fix B short-circuit must NOT swallow
+        genuine unpaused-PR warnings. Without session_consolidated in
+        the journal, an unpaused open PR must still surface the
+        warning for the user to act on.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return []
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #42" in warning
+
+    def test_session_consolidated_empty_list_falls_through(self):
+        """read_events returning [] for session_consolidated falls through.
+
+        Pins the falsy-check contract: `if read_events(...)` treats an
+        empty list as "not consolidated" and allows the legacy logic
+        to run. A regression that flipped this to `if read_events(...) is not None`
+        would silently break AC#3 true-positive detection.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return []  # Explicit empty list
+            if event_type == "session_paused":
+                return []
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 99, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #99" in warning
+
 
 # =============================================================================
 # cleanup_teachback_markers() Tests

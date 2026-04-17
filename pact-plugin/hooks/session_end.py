@@ -86,6 +86,18 @@ def check_unpaused_pr(
     if not project_slug:
         return None
 
+    # Fix B (#453): structural consolidation signal — short-circuit if
+    # /PACT:wrap-up or /PACT:pause ran Pass 2 memory consolidation in
+    # this session. Placed first because it is the cheapest check
+    # (disk-local journal read already cached by read_events) and
+    # covers the most common false-positive cases (wrap-up on merged
+    # PR, pause with consolidation). Fail-open: read_events returns []
+    # on missing journal / unreadable journal / corrupt entries, which
+    # falls through to the legacy logic below — identical to pre-fix
+    # behavior for sessions that never consolidated.
+    if read_events("session_consolidated"):
+        return None
+
     paused_events = read_events("session_paused")
     review_events = read_events("review_dispatch")
 
