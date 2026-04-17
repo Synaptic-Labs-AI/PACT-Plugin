@@ -724,3 +724,89 @@ class TestPauseBashConditionalEmission:
         assert "session_paused" in types, (
             f"false branch MUST still emit session_paused. Got types: {types}"
         )
+
+
+
+# ---------------------------------------------------------------------------
+# Review cycle-1 Fix 2: unsubstituted-placeholder failure is observable
+# ---------------------------------------------------------------------------
+
+
+class TestUnsubstitutedPlaceholderFailureMode:
+    """Pin that unsubstituted {task_count}/{memories_saved} placeholders
+    in the pause.md / wrap-up.md bash template produce a loud failure
+    (non-zero exit + schema rejection on stderr), NOT a silent success
+    or a successfully-written garbage event.
+
+    Rationale: the orchestrator supplies `{task_count}` and
+    `{memories_saved}` from the secretary's confirmation message. If
+    those substitutions silently fail (e.g. a future refactor that
+    swaps the template engine), the JSON body becomes
+    `{"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}`
+    which is not valid JSON. Under the current session_journal CLI
+    contract, invalid stdin JSON triggers an "invalid --stdin JSON"
+    stderr line and returncode 1 — set -e + ERR trap then aborts the
+    outer bash block.
+
+    These tests bind that observable-failure contract so a future
+    change to the CLI that silently tolerated invalid JSON (e.g. a
+    well-meaning "try to recover" branch) would be caught here.
+    """
+
+    def test_unsubstituted_placeholder_exits_nonzero(self, tmp_path):
+        """Literal `{task_count}` in stdin JSON → session_journal write fails fast."""
+        session_dir = str(tmp_path)
+
+        # Manually construct the heredoc body with UNSUBSTITUTED placeholders
+        # — mirrors what would happen if the orchestrator forgot to render
+        # {task_count} / {memories_saved} before pasting the template.
+        template = f"""set -e
+python3 "{_SESSION_JOURNAL_PY}" write \\
+  --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+{{"pass": 2, "task_count": {{task_count}}, "memories_saved": {{memories_saved}}}}
+JSON
+"""
+        result = subprocess.run(
+            ["bash", "-c", template],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        assert result.returncode != 0, (
+            f"unsubstituted placeholders MUST cause non-zero exit; "
+            f"got returncode=0 with stdout={result.stdout!r}"
+        )
+        assert "invalid" in result.stderr.lower() or "json" in result.stderr.lower(), (
+            f"stderr MUST surface the JSON parse failure; got: {result.stderr!r}"
+        )
+
+    def test_unsubstituted_placeholder_writes_no_event(self, tmp_path):
+        """Unsubstituted placeholders produce ZERO journal events.
+
+        Complementary assertion to the non-zero exit pin: if a future
+        refactor made the CLI silently drop invalid JSON but return 0,
+        the prior test would pass spuriously. This test catches that
+        failure mode by asserting the journal file is never created
+        (the CLI returns before reaching `append_event`'s mkdir).
+        """
+        session_dir = str(tmp_path)
+
+        template = f"""python3 "{_SESSION_JOURNAL_PY}" write \\
+  --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+{{"pass": 2, "task_count": {{task_count}}, "memories_saved": {{memories_saved}}}}
+JSON
+"""
+        subprocess.run(
+            ["bash", "-c", template],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert not journal.exists(), (
+            "unsubstituted-placeholder write MUST NOT create the journal "
+            "file; schema validation or JSON parse must reject before "
+            "reaching the filesystem."
+        )
