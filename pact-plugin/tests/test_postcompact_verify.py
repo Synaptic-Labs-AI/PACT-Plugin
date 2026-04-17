@@ -1,17 +1,23 @@
 """
-Tests for hooks/postcompact_verify.py — PostCompact hook that verifies
-compaction preserved critical context and writes the compact summary to disk.
+Tests for hooks/postcompact_verify.py — PostCompact hook that writes the
+compact summary to disk for the secretary.
+
+Per #444 Tertiary, this hook no longer emits systemMessage — the previous
+"critical context preserved" reassurance surface was removed to avoid
+suppressing orchestrator self-check. The surviving responsibilities are:
+- Write compact_summary to disk for the secretary
+- Emit {"suppressOutput": true} on clean exits (matches the pre-#444
+  compaction_refresh.py output pattern for clean paths)
+- Emit hook_error_json on unexpected failure (unchanged)
 
 Tests cover:
 1. Compact summary file writing (path, permissions, content)
-2. Gap detection (feature ID, phase, agent names)
-3. Verification message composition
-4. Subprocess integration (JSON output, exit code)
-5. Fail-open on malformed input and errors
-6. Outer exception handler (hook_error_json output on unexpected errors)
+2. Subprocess integration (suppressOutput emission, no systemMessage)
+3. Fail-open on malformed input and errors
+4. Outer exception handler (hook_error_json output)
+5. Module constants
 """
 import json
-import os
 import stat
 import subprocess
 import sys
@@ -35,33 +41,6 @@ def run_hook(stdin_data: str | None = None) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=10,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _create_task_file(task_dir: Path, task_id: str, data: dict) -> None:
-    """Write a task JSON file."""
-    task_dir.mkdir(parents=True, exist_ok=True)
-    (task_dir / f"{task_id}.json").write_text(
-        json.dumps(data), encoding="utf-8"
-    )
-
-
-def _create_team_config(
-    teams_dir: Path, team_name: str, members: list[dict], name: str | None = None
-) -> None:
-    """Write a team config.json."""
-    team_dir = teams_dir / team_name
-    team_dir.mkdir(parents=True, exist_ok=True)
-    config = {"members": members}
-    if name is not None:
-        config["name"] = name
-    (team_dir / "config.json").write_text(
-        json.dumps(config), encoding="utf-8"
     )
 
 
@@ -118,177 +97,27 @@ class TestWriteCompactSummary:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: check_summary_gaps
-# ---------------------------------------------------------------------------
-
-
-class TestCheckSummaryGaps:
-    """Test gap detection in compact summaries."""
-
-    def test_no_gaps_when_all_items_present(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Working on task #5 auth feature. Phase: CODE. Agent coder active."
-        expected = {
-            "feature_id": "5",
-            "current_phase": "Phase: CODE",
-            "agent_names": ["coder"],
-        }
-        gaps = check_summary_gaps(summary, expected)
-        assert gaps == []
-
-    def test_missing_feature_id(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Working on auth feature. Phase: CODE."
-        expected = {"feature_id": "42", "current_phase": "Phase: CODE", "agent_names": []}
-        gaps = check_summary_gaps(summary, expected)
-        assert any("42" in g for g in gaps)
-
-    def test_missing_phase(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Working on task #5. Agent coder active."
-        expected = {"feature_id": "5", "current_phase": "Phase: TEST", "agent_names": ["coder"]}
-        gaps = check_summary_gaps(summary, expected)
-        assert any("phase" in g.lower() for g in gaps)
-
-    def test_phase_name_only_match(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Currently in CODE phase with coder."
-        expected = {
-            "feature_id": None,
-            "current_phase": "Phase: CODE",
-            "agent_names": ["coder"],
-        }
-        gaps = check_summary_gaps(summary, expected)
-        # "CODE" is in the summary even without "Phase: CODE" prefix
-        assert not any("phase" in g.lower() for g in gaps)
-
-    def test_missing_agent_names(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Task #5 in Phase: CODE."
-        expected = {
-            "feature_id": "5",
-            "current_phase": "Phase: CODE",
-            "agent_names": ["backend-coder", "test-engineer"],
-        }
-        gaps = check_summary_gaps(summary, expected)
-        assert any("agent" in g.lower() for g in gaps)
-
-    def test_partial_agent_match_no_gap(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Working with backend-coder on task."
-        expected = {
-            "feature_id": None,
-            "current_phase": None,
-            "agent_names": ["backend-coder", "test-engineer"],
-        }
-        gaps = check_summary_gaps(summary, expected)
-        # At least one agent mentioned = no gap
-        assert not any("agent" in g.lower() for g in gaps)
-
-    def test_no_expected_items_no_gaps(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "Some random summary."
-        expected = {
-            "feature_id": None,
-            "current_phase": None,
-            "agent_names": [],
-        }
-        gaps = check_summary_gaps(summary, expected)
-        assert gaps == []
-
-    def test_empty_summary_all_gaps(self):
-        from postcompact_verify import check_summary_gaps
-        expected = {
-            "feature_id": "5",
-            "current_phase": "Phase: CODE",
-            "agent_names": ["coder"],
-        }
-        gaps = check_summary_gaps("", expected)
-        assert len(gaps) == 3
-
-    def test_case_insensitive_agent_match(self):
-        from postcompact_verify import check_summary_gaps
-        summary = "BACKEND-CODER is working."
-        expected = {"feature_id": None, "current_phase": None, "agent_names": ["backend-coder"]}
-        gaps = check_summary_gaps(summary, expected)
-        assert not any("agent" in g.lower() for g in gaps)
-
-
-# ---------------------------------------------------------------------------
-# Unit tests: build_verification_message
-# ---------------------------------------------------------------------------
-
-
-class TestBuildVerificationMessage:
-    """Test verification message composition."""
-
-    def test_no_gaps_message(self, tmp_path):
-        from postcompact_verify import build_verification_message
-        result = build_verification_message(
-            "Some summary",
-            str(tmp_path / "no-tasks"),
-            str(tmp_path / "no-teams"),
-        )
-        assert "preserved" in result.lower()
-
-    def test_gaps_message_includes_items(self, tmp_path, monkeypatch):
-        """Gaps detected when compact_summary misses the journal-identified
-        feature_id. A variety_assessed event names feature_id=42; the
-        summarizer surfaces it; check_summary_gaps flags its absence.
-
-        Exercises the new journal-based code path — build_verification_message
-        takes only tasks/teams base dirs, so session_dir and team_name are
-        threaded in via monkeypatched pact_context."""
-        from shared.session_journal import make_event
-        import shared.pact_context as ctx_module
-        from postcompact_verify import build_verification_message
-
-        tasks_dir = tmp_path / "tasks"
-        session_dir = tmp_path / "session-xyz"
-
-        # Journal event names feature_id=42
-        session_dir.mkdir(parents=True)
-        (session_dir / "session-journal.jsonl").write_text(
-            json.dumps(make_event(
-                "variety_assessed", task_id="42",
-                variety={"score": 7, "level": "MEDIUM"},
-                ts="2026-04-14T00:00:01Z",
-            )) + "\n",
-            encoding="utf-8",
-        )
-
-        _create_task_file(tasks_dir / "pact-t", "42", {
-            "id": "42",
-            "status": "in_progress",
-            "subject": "Build auth",
-        })
-
-        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
-        monkeypatch.setattr(ctx_module, "get_team_name", lambda: "pact-t")
-
-        result = build_verification_message(
-            "Some unrelated summary",
-            str(tasks_dir),
-            str(tmp_path / "no-teams"),
-        )
-        assert "missing" in result.lower()
-        assert "42" in result
-        assert "TaskList" in result
-
-
-# ---------------------------------------------------------------------------
 # Integration tests: subprocess
 # ---------------------------------------------------------------------------
 
 
 class TestPostcompactSubprocess:
-    """Verify hook output via subprocess."""
+    """Verify hook output via subprocess.
 
-    def test_emits_system_message(self):
+    Per #444: output is {"suppressOutput": true} on clean paths. No
+    systemMessage — the previously-emitted "critical context preserved"
+    message was a reassurance surface that could suppress orchestrator
+    self-check.
+    """
+
+    def test_emits_suppress_output_not_system_message(self):
+        """Clean path: subprocess emits {"suppressOutput": true} with
+        no systemMessage key."""
         result = run_hook(json.dumps({"compact_summary": "Test summary"}))
         assert result.returncode == 0
         output = json.loads(result.stdout.strip())
-        assert "systemMessage" in output
+        assert output == {"suppressOutput": True}
+        assert "systemMessage" not in output
 
     def test_exits_zero_with_empty_summary(self):
         result = run_hook(json.dumps({"compact_summary": ""}))
@@ -297,6 +126,14 @@ class TestPostcompactSubprocess:
     def test_exits_zero_with_no_summary_field(self):
         result = run_hook(json.dumps({"other_field": "data"}))
         assert result.returncode == 0
+
+    def test_empty_summary_still_emits_suppress_output(self):
+        """Even when compact_summary is empty, clean path returns
+        {"suppressOutput": true} — no systemMessage."""
+        result = run_hook(json.dumps({"compact_summary": ""}))
+        output = json.loads(result.stdout.strip())
+        assert output == {"suppressOutput": True}
+        assert "systemMessage" not in output
 
 
 # ---------------------------------------------------------------------------
@@ -323,10 +160,12 @@ class TestPostcompactFailOpen:
         result = run_hook("[]")
         assert result.returncode == 0
 
-    def test_malformed_json_still_emits_message(self):
+    def test_malformed_json_still_emits_suppress_output(self):
+        """Malformed stdin still goes through the happy path (empty
+        summary) and emits {"suppressOutput": true}."""
         result = run_hook("not json")
         output = json.loads(result.stdout.strip())
-        assert "systemMessage" in output
+        assert output == {"suppressOutput": True}
 
 
 # ---------------------------------------------------------------------------
@@ -357,15 +196,20 @@ class TestConstants:
 
 class TestPostcompactOuterExceptionHandler:
     """Verify that main() catches unexpected exceptions, exits 0,
-    emits hook_error_json on stdout and error info on stderr."""
+    emits hook_error_json on stdout and error info on stderr.
+
+    Post-#444: the target function for the simulated failure changes
+    from the deleted build_verification_message to write_compact_summary
+    (the only external call remaining in main()'s happy path).
+    """
 
     def test_exits_zero_on_unexpected_error(self):
-        """main() must exit 0 even when build_verification_message raises."""
+        """main() must exit 0 even when write_compact_summary raises."""
         from postcompact_verify import main
 
         stdin_data = json.dumps({"compact_summary": "test"})
         with patch("sys.stdin", StringIO(stdin_data)), \
-             patch("postcompact_verify.build_verification_message",
+             patch("postcompact_verify.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -377,7 +221,7 @@ class TestPostcompactOuterExceptionHandler:
 
         stdin_data = json.dumps({"compact_summary": "test"})
         with patch("sys.stdin", StringIO(stdin_data)), \
-             patch("postcompact_verify.build_verification_message",
+             patch("postcompact_verify.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit):
                 main()
@@ -392,7 +236,7 @@ class TestPostcompactOuterExceptionHandler:
 
         stdin_data = json.dumps({"compact_summary": "test"})
         with patch("sys.stdin", StringIO(stdin_data)), \
-             patch("postcompact_verify.build_verification_message",
+             patch("postcompact_verify.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit):
                 main()

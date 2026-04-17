@@ -1,12 +1,13 @@
 """
 Tests for hooks/precompact_state_reminder.py — PreCompact hook that gathers
-mechanical state from disk and emits custom_instructions (for the compaction
-model) and a systemMessage (brain dump instructions for the orchestrator).
+mechanical state from disk and emits custom_instructions for the compaction
+model. Per #444 Tertiary, the previously-emitted systemMessage channel was
+removed (it fired too late in the compaction flow to be actioned).
 
 Tests cover:
 1. State summary formatting
 2. Custom instructions composition
-3. Full hook output (both fields)
+3. Full hook output (single-field contract)
 4. Subprocess integration (JSON output, exit code)
 5. Fail-open on malformed input, missing dirs, bad JSON files
 6. Outer exception handler (hook_error_json output on unexpected errors)
@@ -225,9 +226,17 @@ class TestExtractVarietyTotal:
 
 
 class TestBuildHookOutput:
-    """Test complete hook output with both fields."""
+    """Test complete hook output.
 
-    def test_has_both_fields(self, tmp_path):
+    Per #444 Tertiary: build_hook_output returns only custom_instructions —
+    no systemMessage. The previously-emitted "Compaction imminent" message
+    fired as part of the compaction event, too late to be actioned before
+    the context cut.
+    """
+
+    def test_contains_only_custom_instructions_key(self, tmp_path):
+        """Output dict must contain custom_instructions and MUST NOT
+        contain systemMessage (the latter was removed in #444)."""
         from precompact_state_reminder import build_hook_output
         tasks_dir = tmp_path / "tasks"
         teams_dir = tmp_path / "teams"
@@ -243,7 +252,8 @@ class TestBuildHookOutput:
 
         result = build_hook_output(str(tasks_dir), str(teams_dir))
         assert "custom_instructions" in result
-        assert "systemMessage" in result
+        assert "systemMessage" not in result
+        assert set(result.keys()) == {"custom_instructions"}
 
     def test_custom_instructions_has_feature(self, tmp_path, monkeypatch):
         """Feature surfaces when a journal event names the feature task
@@ -289,11 +299,9 @@ class TestBuildHookOutput:
         assert "Auth feature" in result["custom_instructions"]
         assert "task #3" in result["custom_instructions"]
 
-    def test_system_message_has_brain_dump(self, tmp_path):
-        from precompact_state_reminder import build_hook_output
-        result = build_hook_output(str(tmp_path), str(tmp_path))
-        assert "TaskCreate" in result["systemMessage"]
-        assert "Pre-compaction state dump" in result["systemMessage"]
+    # test_system_message_has_brain_dump removed in #444:
+    # BRAIN_DUMP_INSTRUCTIONS constant and systemMessage composition were
+    # deleted. custom_instructions remains the only output channel.
 
     def test_empty_dirs_produces_valid_output(self, tmp_path):
         from precompact_state_reminder import build_hook_output
@@ -302,7 +310,7 @@ class TestBuildHookOutput:
             str(tmp_path / "no-teams"),
         )
         assert "custom_instructions" in result
-        assert "systemMessage" in result
+        assert "systemMessage" not in result
         assert "CRITICAL CONTEXT" in result["custom_instructions"]
 
 
@@ -312,35 +320,27 @@ class TestBuildHookOutput:
 
 
 class TestPrecompactSubprocess:
-    """Verify the hook emits expected JSON via subprocess."""
+    """Verify the hook emits expected JSON via subprocess.
 
-    def test_emits_both_fields(self):
+    Per #444: only custom_instructions is emitted. The previously-emitted
+    systemMessage channel was removed — it fired too late to be actioned
+    before the context cut.
+    """
+
+    def test_emits_only_custom_instructions(self):
+        """Subprocess output contains custom_instructions and MUST NOT
+        contain systemMessage."""
         result = run_hook(json.dumps({"transcript_path": "/tmp/test.jsonl"}))
         assert result.returncode == 0
         output = json.loads(result.stdout.strip())
-        assert "systemMessage" in output
         assert "custom_instructions" in output
+        assert "systemMessage" not in output
 
     def test_custom_instructions_has_critical_context(self):
         result = run_hook(json.dumps({}))
         output = json.loads(result.stdout.strip())
         assert "CRITICAL CONTEXT" in output["custom_instructions"]
         assert "Preserve task IDs" in output["custom_instructions"]
-
-    def test_system_message_has_compaction(self):
-        result = run_hook(json.dumps({}))
-        output = json.loads(result.stdout.strip())
-        assert "compaction" in output["systemMessage"].lower()
-
-    def test_system_message_has_task_create(self):
-        result = run_hook(json.dumps({}))
-        output = json.loads(result.stdout.strip())
-        assert "TaskCreate" in output["systemMessage"]
-
-    def test_system_message_has_secretary(self):
-        result = run_hook(json.dumps({}))
-        output = json.loads(result.stdout.strip())
-        assert "secretary" in output["systemMessage"]
 
 
 # ---------------------------------------------------------------------------
@@ -359,11 +359,11 @@ class TestPrecompactFailOpen:
         result = run_hook("not json at all")
         assert result.returncode == 0
 
-    def test_malformed_json_still_emits_output(self):
+    def test_malformed_json_still_emits_custom_instructions(self):
         result = run_hook("not json at all")
         output = json.loads(result.stdout.strip())
-        assert "systemMessage" in output
         assert "custom_instructions" in output
+        assert "systemMessage" not in output
 
     def test_null_input_exits_zero(self):
         result = run_hook("null")
@@ -374,11 +374,15 @@ class TestPrecompactFailOpen:
         assert result.returncode == 0
 
     def test_disk_read_error_fails_open(self, tmp_path):
+        """Unreadable tasks/teams dirs must not raise — build_hook_output
+        degrades gracefully and still emits custom_instructions."""
         from precompact_state_reminder import build_hook_output
         fake_file = tmp_path / "not-a-dir"
         fake_file.write_text("x", encoding="utf-8")
         result = build_hook_output(str(fake_file), str(fake_file))
-        assert "none found" in result["systemMessage"]
+        assert "custom_instructions" in result
+        assert "none found" in result["custom_instructions"]
+        assert "systemMessage" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -386,14 +390,9 @@ class TestPrecompactFailOpen:
 # ---------------------------------------------------------------------------
 
 
-class TestConstants:
-    """Verify module-level constants."""
-
-    def test_brain_dump_instructions(self):
-        from precompact_state_reminder import BRAIN_DUMP_INSTRUCTIONS
-        assert "TaskCreate" in BRAIN_DUMP_INSTRUCTIONS
-        assert "SendMessage" in BRAIN_DUMP_INSTRUCTIONS
-        assert "secretary" in BRAIN_DUMP_INSTRUCTIONS
+# TestConstants class removed in #444:
+# BRAIN_DUMP_INSTRUCTIONS constant was deleted along with the systemMessage
+# composition. No other module-level constants require testing here.
 
 
 # ---------------------------------------------------------------------------

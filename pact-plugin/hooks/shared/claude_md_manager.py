@@ -311,8 +311,6 @@ No line-anchored marker present? Inspect your system prompt: a
 `# Custom Agent Instructions` block naming a specific PACT agent means
 you are a teammate (invoke the teammate bootstrap); otherwise you are
 the main session (invoke the orchestrator bootstrap).
-
-Re-invoke after compaction if the bootstrap content is no longer present.
 <!-- PACT_ROUTING_END -->"""
 
 

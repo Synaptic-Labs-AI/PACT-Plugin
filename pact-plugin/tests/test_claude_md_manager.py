@@ -79,8 +79,6 @@ CANONICAL_PACT_ROUTING_BLOCK = (
     "`# Custom Agent Instructions` block naming a specific PACT agent means\n"
     "you are a teammate (invoke the teammate bootstrap); otherwise you are\n"
     "the main session (invoke the orchestrator bootstrap).\n"
-    "\n"
-    "Re-invoke after compaction if the bootstrap content is no longer present.\n"
     "<!-- PACT_ROUTING_END -->"
 )
 

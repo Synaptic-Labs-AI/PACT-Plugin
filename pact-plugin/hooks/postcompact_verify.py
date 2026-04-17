@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/postcompact_verify.py
-Summary: PostCompact hook that verifies compaction preserved critical context
-         and writes the compact summary to disk for the secretary.
+Summary: PostCompact hook that writes the compact summary to disk for the
+         secretary. Per #444 Tertiary, it no longer emits systemMessage —
+         the previous "critical context preserved" message was a reassurance
+         surface that could suppress orchestrator self-check.
 Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
-2. Reads current session state (via shared.session_state) — hybrid of
-   session journal events and session-scoped disk reads
-3. Checks if the compact_summary mentions key items: feature task ID,
-   current phase, active agents
-4. Writes the compact_summary to the canonical COMPACT_SUMMARY_PATH
+2. Writes the compact_summary to the canonical COMPACT_SUMMARY_PATH
    (the secretary reads this during post-compaction briefing)
-5. Emits systemMessage flagging any gaps
+3. Emits suppressOutput to avoid false "hook error" UI display on clean exits
 
-This is a non-blocking verifier (always exits 0), not a gate.
+This is a non-blocking side effect (always exits 0), not a gate.
 
 Input: JSON from stdin with compact_summary field
-Output: JSON systemMessage on stdout
+Output: JSON suppressOutput on stdout (clean path) or hook_error_json (failure)
 """
 
 import json
@@ -28,7 +26,6 @@ from pathlib import Path
 
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.error_output import hook_error_json
-from shared.session_state import summarize_session_state
 
 
 # ---------------------------------------------------------------------------
@@ -69,96 +66,6 @@ def write_compact_summary(
         return False
 
 
-# ---------------------------------------------------------------------------
-# Gap detection
-# ---------------------------------------------------------------------------
-
-
-def _gather_expected_items(
-    tasks_base_dir: str | None = None,
-    teams_base_dir: str | None = None,
-) -> dict:
-    """
-    Gather key items that should appear in the compact summary.
-
-    Uses shared summarize_session_state() for all session-state fields
-    (journal-sourced feature/phase/variety + session-scoped teammate
-    and task-count snapshots).
-
-    Returns dict with keys: feature_id, feature_subject, current_phase,
-    agent_names, team_names.
-    """
-    state = summarize_session_state(
-        tasks_base_dir=tasks_base_dir,
-        teams_base_dir=teams_base_dir,
-    )
-
-    return {
-        "feature_id": state.get("feature_id"),
-        "feature_subject": state.get("feature_subject"),
-        "current_phase": state.get("current_phase"),
-        "agent_names": state.get("teammates", []),
-        "team_names": state.get("team_names", []),
-    }
-
-
-def check_summary_gaps(
-    summary: str,
-    expected: dict,
-) -> list[str]:
-    """
-    Check if the compact summary mentions expected key items.
-
-    Returns list of gap descriptions (empty if all items found).
-    """
-    gaps = []
-    summary_lower = summary.lower()
-
-    # Check feature task ID
-    feature_id = expected.get("feature_id")
-    if feature_id and feature_id not in summary:
-        gaps.append(f"feature task ID (#{feature_id})")
-
-    # Check current phase
-    phase = expected.get("current_phase")
-    if phase and phase.lower() not in summary_lower:
-        # Also check for just the phase name after "Phase:"
-        phase_name = phase.replace("Phase:", "").strip().lower()
-        if phase_name and phase_name not in summary_lower:
-            gaps.append(f"current phase ({phase})")
-
-    # Check agent names — flag if none of the active agents are mentioned
-    agent_names = expected.get("agent_names", [])
-    if agent_names:
-        mentioned = any(name.lower() in summary_lower for name in agent_names)
-        if not mentioned:
-            gaps.append("active agent names")
-
-    return gaps
-
-
-def build_verification_message(
-    summary: str,
-    tasks_base_dir: str | None = None,
-    teams_base_dir: str | None = None,
-) -> str:
-    """
-    Build the post-compaction verification systemMessage.
-
-    Checks for gaps and returns an appropriate message.
-    """
-    expected = _gather_expected_items(tasks_base_dir, teams_base_dir)
-    gaps = check_summary_gaps(summary, expected)
-
-    if gaps:
-        gap_list = ", ".join(gaps)
-        return (
-            f"Post-compaction: summary may be missing {gap_list}. "
-            f"Verify via TaskList."
-        )
-    return "Post-compaction: critical context preserved in summary."
-
-
 def main():
     try:
         # Read PostCompact input
@@ -172,13 +79,15 @@ def main():
         if isinstance(stdin_data, dict):
             compact_summary = stdin_data.get("compact_summary", "")
 
-        # Write summary to disk for secretary
+        # Write summary to disk for secretary (the only surviving side effect).
+        # Per #444 Tertiary: no systemMessage emission. The previously-emitted
+        # "Post-compaction: critical context preserved" message was reassurance
+        # that could suppress orchestrator self-check (see issue #444 root cause).
         if compact_summary:
             write_compact_summary(compact_summary)
 
-        # Build verification message
-        message = build_verification_message(compact_summary)
-        print(json.dumps({"systemMessage": message}))
+        # Suppress output to avoid false "hook error" UI display on clean exits.
+        print(json.dumps({"suppressOutput": True}))
         sys.exit(0)
 
     except Exception as e:
