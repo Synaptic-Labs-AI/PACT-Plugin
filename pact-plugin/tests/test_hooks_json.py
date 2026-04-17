@@ -50,7 +50,7 @@ MUST_BE_SYNC = {
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
     "auditor_reminder.py",  # Injects auditor dispatch reminder into context
     "precompact_state_reminder.py",  # Emits state snapshot before compaction
-    "postcompact_verify.py",  # Verifies compaction preserved critical context
+    "postcompact_archive.py",  # Archives compact_summary to disk for session_init + secretary
 }
 
 # Hooks that SHOULD be async (non-blocking, fire-and-forget)
@@ -316,3 +316,43 @@ class TestBootstrapGateInvariants:
                         "bootstrap_gate.py must NOT have a matcher — "
                         "it must fire for ALL hookable tools to enforce the gate"
                     )
+
+
+class TestSessionStartCardinality:
+    """Post-#444 SessionStart registration invariant.
+
+    Before #444, SessionStart had two entries: session_init.py and
+    compaction_refresh.py. The Secondary-layer consolidation folded the
+    post-compaction checkpoint logic into session_init.py's source=compact
+    branch and deleted compaction_refresh.py. SessionStart now has exactly
+    one entry. A second entry (accidental restoration OR new hook addition)
+    could interact with session_init's state-reset logic in subtle ways:
+    - Ordering: Claude Code runs SessionStart hooks sequentially; a second
+      hook's stdin consumption could starve session_init or vice versa.
+    - Marker races: bootstrap_marker cleanup in session_init assumes it is
+      the sole writer to additionalContext on source=compact.
+    - Context budget: each hook's additionalContext counts against the
+      same budget; duplicate PACT ROLE markers or overlapping directives
+      would violate the single-source-of-truth invariant.
+    Pin the cardinality so a new hook addition is a conscious decision,
+    not a silent merge.
+    """
+
+    def test_session_start_has_exactly_one_hook(self, hooks_config):
+        """SessionStart must have exactly one entry post-#444
+        (compaction_refresh.py was consolidated into session_init.py).
+        """
+        session_start = hooks_config["hooks"].get("SessionStart", [])
+        assert len(session_start) == 1, (
+            "SessionStart must have exactly one entry post-#444 "
+            "(compaction_refresh.py was consolidated into session_init.py). "
+            "A second entry indicates either accidental restoration or new "
+            "hook addition that may interact with session_init's state-reset "
+            "logic."
+        )
+        assert len(session_start[0]["hooks"]) == 1, (
+            "SessionStart's sole entry must contain exactly one hook command."
+        )
+        assert "session_init.py" in session_start[0]["hooks"][0]["command"], (
+            "SessionStart's sole hook must be session_init.py."
+        )

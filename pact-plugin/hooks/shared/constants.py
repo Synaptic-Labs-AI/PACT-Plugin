@@ -3,7 +3,7 @@ Location: pact-plugin/hooks/shared/constants.py
 Summary: Canonical constants shared across PACT hooks and tests.
 Used by: test_patterns.py (cross-list consistency checks),
          verify-scope-integrity.sh (baseline checks),
-         postcompact_verify.py (COMPACT_SUMMARY_PATH),
+         postcompact_archive.py (COMPACT_SUMMARY_PATH),
          session_init.py (COMPACT_SUMMARY_PATH).
 """
 from pathlib import Path
@@ -27,7 +27,7 @@ PACT_AGENTS = [
     "pact-secretary",
 ]
 
-# Canonical path for the compact summary file written by postcompact_verify
+# Canonical path for the compact summary file written by postcompact_archive
 # and read by session_init (post-compaction recovery) and pact-secretary
 # (session briefing). Single-use: secretary deletes after processing.
 # Also referenced in: pact-plugin/agents/pact-secretary.md (documentation only).

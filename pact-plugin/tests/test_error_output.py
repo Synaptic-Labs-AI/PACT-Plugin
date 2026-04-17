@@ -343,31 +343,12 @@ class TestSessionInitErrorOutput:
         assert len(captured.err) > 0
 
 
-class TestCompactionRefreshErrorOutput:
-    """compaction_refresh.py exception handler produces JSON on stdout."""
-
-    def test_exception_outputs_json_with_system_message(self, capsys):
-        from compaction_refresh import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_error_json(captured.out, "compaction_refresh")
-
-    def test_exception_preserves_stderr(self, capsys):
-        """stderr should contain error info (the hook name may vary in format)."""
-        from compaction_refresh import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit):
-                main()
-
-        captured = capsys.readouterr()
-        # compaction_refresh uses slightly different stderr format
-        assert len(captured.err) > 0
+# TestCompactionRefreshErrorOutput removed in #444: compaction_refresh.py
+# was deleted and its responsibilities folded into session_init.py's
+# source=compact branch. The session_init exception handler is covered
+# by TestSessionInitErrorOutput above (exception_outputs_json_with_system_message,
+# exception_outputs_valid_json_structure, etc.) — its hook_error_json shape
+# is the same.
 
 
 class TestTeammateIdleErrorOutput:
@@ -760,42 +741,48 @@ class TestPrecompactStateReminderErrorOutput:
         assert "boom" in captured.err
 
 
-class TestPostcompactVerifyErrorOutput:
-    """postcompact_verify.py exception handler produces JSON on stdout."""
+class TestPostcompactArchiveErrorOutput:
+    """postcompact_archive.py exception handler produces JSON on stdout.
+
+    Post-#444: build_verification_message was deleted. The outer try/except
+    in main() now wraps write_compact_summary (the only external call
+    remaining on the happy path), so tests patch that function instead.
+    Post-PR-#447: module renamed from postcompact_verify to postcompact_archive.
+    """
 
     def test_exception_outputs_json_with_system_message(self, capsys):
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         input_data = json.dumps({
             "compact_summary": "test summary",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("postcompact_verify.build_verification_message",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("test error")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        _assert_error_json(captured.out, "postcompact_verify")
+        _assert_error_json(captured.out, "postcompact_archive")
 
     def test_exception_preserves_stderr(self, capsys):
         """stderr should contain the hook name and the specific error message."""
-        from postcompact_verify import main
+        from postcompact_archive import main
 
         input_data = json.dumps({
             "compact_summary": "test summary",
         })
 
         with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("postcompact_verify.build_verification_message",
+             patch("postcompact_archive.write_compact_summary",
                    side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
                 main()
 
         captured = capsys.readouterr()
-        assert "postcompact_verify" in captured.err
+        assert "postcompact_archive" in captured.err
         assert "boom" in captured.err
 
 
@@ -834,51 +821,9 @@ def _assert_suppress_output(captured_out: str):
     assert json.loads(captured_out.strip()) == _SUPPRESS_EXPECTED
 
 
-class TestCompactionRefreshSuppressOutput:
-    """compaction_refresh.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
-
-    def test_non_compact_source_suppress(self, capsys):
-        """Non-compact session (most common path) outputs suppressOutput."""
-        from compaction_refresh import main
-
-        input_data = json.dumps({"source": "startup"})
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("pathlib.Path.home", return_value=Path("/tmp/test-suppress")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_tasks_exist_but_none_in_progress_suppress(self, capsys):
-        """Tasks exist but none in_progress outputs suppressOutput."""
-        from compaction_refresh import main
-
-        input_data = json.dumps({"source": "compact"})
-        completed_tasks = [{"id": "1", "subject": "test", "status": "completed"}]
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("compaction_refresh.get_task_list", return_value=completed_tasks):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_error_path_uses_hook_error_json(self, capsys):
-        """Exception path outputs hook_error_json, NOT suppressOutput."""
-        from compaction_refresh import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("boom")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out.strip())
-        assert "systemMessage" in parsed
-        assert "suppressOutput" not in parsed
+# TestCompactionRefreshSuppressOutput removed in #444: compaction_refresh.py
+# was deleted. The "no in-progress tasks → no checkpoint block" invariant is
+# covered by TestSessionInitCompactPhantomWorkflow in test_session_init.py.
 
 
 class TestSessionEndSuppressOutput:

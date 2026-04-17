@@ -80,17 +80,25 @@ The wrap-up command harvests journal events to pact-memory before session close.
 
 ### Content Durability Across Compaction
 
-Claude Code compaction has three durability mechanisms for orchestrator content:
+Claude Code compaction has four durability tiers for orchestrator content:
 
-| Mechanism | What Survives | Durability |
-|-----------|---------------|------------|
-| **Explicit Read calls** | Files loaded via Read tool at bootstrap | **Lossless** — Read tracker auto-re-issues tracked Reads after compaction; `Skills restored` event independently re-processes references above the truncation cut. Two independent restoration paths. |
-| **Inline skill body text** | Content written directly in the skill `.md` file | **Partial** — truncated at a cut boundary (~halfway for large files). Late sections silently dropped. |
-| **CLAUDE.md / additionalContext** | Routing block, session info, pinned context | **Structural** — re-injected on every turn; highest durability. |
+| Tier | Mechanism | Durability |
+|------|-----------|------------|
+| **0 (highest)** | Hook-emitted `additionalContext` / `systemMessage` at SessionStart (or SubagentStart for teammates) | **Architecturally binding** — re-delivered via the platform's hook machinery on every session start; bypasses the Read-tracker budget; bounded only by hook output size (~kilobytes). The right channel for directives and critical instructions that must survive compaction. |
+| **1** | Inline skill body restored via `Skill: <name>` event | **High** — consistent up to ~292 lines. The skill body itself restores via the `Skills restored` event; late sections above that cut silently drop. |
+| **2** | External `@`-refs / `Read()` calls tracked by the Read tracker | **Best-effort** — path-agnostic 5-slot tracker budget × per-file cap in [201, 240) lines; tail-biased selection within available slots; CLAUDE.md and other session Reads compete for the same slots (realistic budget for bootstrap is 3-4 slots). Non-deterministic subset survives. |
+| **3** | Anything else (in-context turns, transient model state) | **None** — accept as lossy. |
 
-**Why bootstrap.md uses explicit Reads**: The orchestrator's full instructions (~525 lines in `pact-orchestrator-core.md` + 8 supplementary protocols) are loaded via explicit Read calls positioned in the first 25 lines of the skill body. This ensures all content survives compaction via the Read tracker, avoiding the position-dependent truncation that affects inline skill body content.
+**#444 redesign**: The bootstrap re-invocation directive lives at Tier 0
+(`session_init.py` additionalContext), not at Tier 2 (Read/@-ref) or in a
+separate `postcompact_archive.py` systemMessage. Hook-emitted directives
+survive every compaction by construction; Read/@-ref-based durability is
+structurally inadequate for the full protocol surface (~1,581 lines of
+content vs. ~1,000-line aggregate Tier 2 budget).
 
-**Verification**: After compaction, all 9 Read targets should appear in `Skills restored` system-reminder events. If any file is missing, the orchestrator still has the SACROSANCT fail-safe summary inline in bootstrap.md.
+**bootstrap.md Read calls remain** — they're Tier 2 content for supplementary
+protocols where best-effort restoration is acceptable. Critical directives
+do not depend on them.
 
 ### Malformed-Stdin Failure Log
 

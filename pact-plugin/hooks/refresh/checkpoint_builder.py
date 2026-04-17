@@ -132,8 +132,9 @@ def get_checkpoint_path(encoded_path: str) -> Path:
     """
     Get the full checkpoint file path for a project.
 
-    Shared utility used by both precompact_refresh.py and compaction_refresh.py
-    to ensure consistent checkpoint file location.
+    Shared utility retained for historical test suite coverage;
+    see test_checkpoint_builder.py. (precompact_refresh.py deleted in #413;
+    compaction_refresh.py deleted in #444.)
 
     Args:
         encoded_path: The encoded project path segment

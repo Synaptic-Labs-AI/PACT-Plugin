@@ -8,7 +8,8 @@ checkpoint files serving as fallback.
 Location: pact-plugin/tests/test_task_integration.py
 
 Core Task utilities are in hooks/shared/task_utils.py.
-build_refresh_from_tasks and main remain in compaction_refresh.py.
+build_post_compaction_checkpoint also lives there (renamed from
+build_refresh_from_tasks in #444).
 """
 
 import json
@@ -605,22 +606,24 @@ class TestFindBlockers:
 
 
 # =============================================================================
-# Tests for build_refresh_from_tasks()
+# Tests for build_post_compaction_checkpoint()
+# (Pre-#444 name: build_refresh_from_tasks, lived in compaction_refresh.py.
+# Function moved to shared/task_utils.py and renamed in #444.)
 # =============================================================================
 
-class TestBuildRefreshFromTasks:
-    """Tests for build_refresh_from_tasks() function."""
+class TestBuildPostCompactionCheckpoint:
+    """Tests for build_post_compaction_checkpoint() function."""
 
     def test_builds_complete_message(self, make_task):
         """Test builds complete refresh message with all components."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         feature = make_task("feat-1", "Implement auth", "in_progress")
         phase = make_task("phase-1", "CODE: auth", "in_progress")
         agents = [make_task("agent-1", "backend-coder: work", "in_progress")]
         blockers = []
 
-        result = build_refresh_from_tasks(feature, phase, agents, blockers)
+        result = build_post_compaction_checkpoint(feature, phase, agents, blockers)
 
         assert "[POST-COMPACTION CHECKPOINT]" in result
         assert "Implement auth" in result
@@ -630,28 +633,28 @@ class TestBuildRefreshFromTasks:
 
     def test_handles_missing_feature(self, make_task):
         """Test handles None feature task gracefully."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         phase = make_task("phase-1", "CODE: work", "in_progress")
         agents = []
 
-        result = build_refresh_from_tasks(None, phase, agents, [])
+        result = build_post_compaction_checkpoint(None, phase, agents, [])
 
         assert "Unable to identify feature task" in result
 
     def test_handles_missing_phase(self, make_task):
         """Test handles None phase task gracefully."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         feature = make_task("feat-1", "Feature", "in_progress")
 
-        result = build_refresh_from_tasks(feature, None, [], [])
+        result = build_post_compaction_checkpoint(feature, None, [], [])
 
         assert "None detected" in result
 
     def test_includes_blocker_information(self, make_task):
         """Test includes blocker details in message."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         feature = make_task("feat-1", "Feature", "in_progress")
         blockers = [
@@ -663,7 +666,7 @@ class TestBuildRefreshFromTasks:
             ),
         ]
 
-        result = build_refresh_from_tasks(feature, None, [], blockers)
+        result = build_post_compaction_checkpoint(feature, None, [], blockers)
 
         assert "**BLOCKERS DETECTED:**" in result
         assert "Missing credentials" in result
@@ -672,7 +675,7 @@ class TestBuildRefreshFromTasks:
 
     def test_formats_multiple_agents(self, make_task):
         """Test formats multiple active agents correctly."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         feature = make_task("feat-1", "Feature", "in_progress")
         agents = [
@@ -680,7 +683,7 @@ class TestBuildRefreshFromTasks:
             make_task("agent-2", "frontend-coder: UI", "in_progress"),
         ]
 
-        result = build_refresh_from_tasks(feature, None, agents, [])
+        result = build_post_compaction_checkpoint(feature, None, agents, [])
 
         assert "Active Agents (2)" in result
         assert "backend-coder: API" in result
@@ -688,17 +691,17 @@ class TestBuildRefreshFromTasks:
 
     def test_includes_feature_id_when_present(self, make_task):
         """Test includes feature task ID in output."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         feature = make_task("feat-123", "My Feature", "in_progress")
 
-        result = build_refresh_from_tasks(feature, None, [], [])
+        result = build_post_compaction_checkpoint(feature, None, [], [])
 
         assert "feat-123" in result
 
     def test_next_step_guidance_priority(self, make_task):
         """Test next step guidance prioritizes blockers over agents over phase."""
-        from compaction_refresh import build_refresh_from_tasks
+        from shared.task_utils import build_post_compaction_checkpoint
 
         feature = make_task("feat-1", "Feature", "in_progress")
         phase = make_task("phase-1", "CODE: work", "in_progress")
@@ -706,19 +709,19 @@ class TestBuildRefreshFromTasks:
         blockers = [make_task("block-1", "Blocker", "pending", metadata={"type": "blocker"})]
 
         # With blockers - should mention addressing blockers
-        result = build_refresh_from_tasks(feature, phase, agents, blockers)
+        result = build_post_compaction_checkpoint(feature, phase, agents, blockers)
         assert "Address blockers" in result
 
         # Without blockers but with agents - should mention monitoring agents
-        result = build_refresh_from_tasks(feature, phase, agents, [])
+        result = build_post_compaction_checkpoint(feature, phase, agents, [])
         assert "Monitor active agents" in result
 
         # Without blockers or agents but with phase - should mention continuing phase
-        result = build_refresh_from_tasks(feature, phase, [], [])
+        result = build_post_compaction_checkpoint(feature, phase, [], [])
         assert "Continue current phase" in result
 
         # With nothing - should ask user
-        result = build_refresh_from_tasks(feature, None, [], [])
+        result = build_post_compaction_checkpoint(feature, None, [], [])
         assert "ask user how to proceed" in result.lower()
 
 
@@ -729,59 +732,13 @@ class TestBuildRefreshFromTasks:
 class TestTaskFirstIntegration:
     """Integration tests for the Task-first code path in main()."""
 
-    def test_main_uses_tasks_when_available(self, mock_tasks_dir, make_task, monkeypatch):
-        """Test main() uses Task system when tasks exist."""
-        import json
-        from io import StringIO
-
-        # Create tasks
-        feature = make_task("task-1", "Implement feature", "in_progress")
-        phase = make_task("task-2", "CODE: feature", "in_progress", blocked_by=["task-1"])
-
-        (mock_tasks_dir / "task-1.json").write_text(json.dumps(feature))
-        (mock_tasks_dir / "task-2.json").write_text(json.dumps(phase))
-
-        # Simulate post-compaction input
-        input_data = json.dumps({"source": "compact"})
-        monkeypatch.setattr("sys.stdin", StringIO(input_data))
-
-        # Capture output
-        output = StringIO()
-        monkeypatch.setattr("sys.stdout", output)
-
-        from compaction_refresh import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-
-        assert exc_info.value.code == 0
-
-        # Verify output contains Task-based refresh message
-        result = json.loads(output.getvalue())
-        refresh_msg = result["hookSpecificOutput"]["additionalContext"]
-        assert "[POST-COMPACTION CHECKPOINT]" in refresh_msg
-        assert "Implement feature" in refresh_msg
-
-    def test_main_skips_when_no_in_progress_tasks(self, mock_tasks_dir, make_task, monkeypatch):
-        """Test main() skips refresh when no tasks are in_progress."""
-        import json
-        from io import StringIO
-
-        # Create only completed tasks
-        task = make_task("task-1", "Completed work", "completed")
-        (mock_tasks_dir / "task-1.json").write_text(json.dumps(task))
-
-        input_data = json.dumps({"source": "compact"})
-        monkeypatch.setattr("sys.stdin", StringIO(input_data))
-
-        output = StringIO()
-        monkeypatch.setattr("sys.stdout", output)
-
-        from compaction_refresh import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-
-        assert exc_info.value.code == 0
-        # Bare exit path: suppressOutput to prevent false "hook error"
-        assert json.loads(output.getvalue().strip()) == {"suppressOutput": True}
+    # Removed in #444: the compaction_refresh.main() entry point was deleted.
+    # Equivalent integration coverage for the session_init.main() source=compact
+    # branch lives in test_session_init.py:
+    #   - TestSessionInitCompactE2E.test_feature_plus_phase_plus_blockers_render_into_additional_context
+    #     (covers the "tasks available → checkpoint block appended" path)
+    #   - TestSessionInitCompactPhantomWorkflow.test_compact_with_only_completed_tasks_emits_no_checkpoint
+    #     (covers the "no in_progress → no checkpoint block" path;
+    #     session_init does NOT emit suppressOutput — it always emits
+    #     additionalContext with the bootstrap directive, just without a
+    #     checkpoint block when no in_progress tasks exist).

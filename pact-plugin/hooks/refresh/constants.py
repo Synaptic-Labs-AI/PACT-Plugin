@@ -8,7 +8,7 @@ keeping regex patterns and workflow definitions in patterns.py while
 extracting tunable numeric values here for maintainability.
 
 STEP_DESCRIPTIONS and PROSE_CONTEXT_TEMPLATES are imported from
-shared_constants.py to eliminate code duplication with compaction_refresh.py.
+shared_constants.py to centralize constants shared by refresh consumers.
 """
 
 # Import shared constants for re-export
