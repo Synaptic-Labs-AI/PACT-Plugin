@@ -66,47 +66,6 @@ def _extract_variety_total(variety: Any) -> int | None:
     return None
 
 
-def _build_state_summary(state: dict) -> str:
-    """
-    Build a human-readable state summary from the 10-key state dict
-    returned by `summarize_session_state`.
-    """
-    lines = []
-
-    # Task counts
-    total = state["total"]
-    if total > 0:
-        lines.append(
-            f"Tasks: {state['completed']} completed, "
-            f"{state['in_progress']} in_progress, "
-            f"{state['pending']} pending "
-            f"(total: {total})"
-        )
-    else:
-        lines.append("Tasks: none found on disk")
-
-    # Feature subject
-    feature = state.get("feature_subject")
-    feature_id = state.get("feature_id")
-    if feature:
-        id_str = f" (task #{feature_id})" if feature_id else ""
-        lines.append(f"Feature: {feature}{id_str}")
-
-    # Current phase
-    phase = state.get("current_phase")
-    if phase:
-        lines.append(f"Current phase: {phase}")
-
-    # Active teammates
-    teammates = state.get("teammates", [])
-    if teammates:
-        lines.append(f"Active teammates: {', '.join(teammates)}")
-    else:
-        lines.append("Active teammates: none found")
-
-    return "\n".join(lines)
-
-
 def build_custom_instructions(state: dict) -> str:
     """
     Build custom_instructions for the compaction model from the 10-key

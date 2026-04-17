@@ -68,63 +68,11 @@ def _create_team_config(
     )
 
 
-# ---------------------------------------------------------------------------
-# Unit tests: _build_state_summary
-# ---------------------------------------------------------------------------
-
-
-class TestBuildStateSummary:
-    """Test state summary formatting."""
-
-    def test_full_summary(self):
-        from precompact_state_reminder import _build_state_summary
-        state = {
-            "completed": 3, "in_progress": 2, "pending": 1, "total": 6,
-            "feature_subject": "Add auth flow", "feature_id": "5",
-            "current_phase": "Phase: CODE", "variety_score": 9,
-            "teammates": ["coder", "tester"], "team_names": ["pact-abc"],
-        }
-        result = _build_state_summary(state)
-        assert "3 completed" in result
-        assert "2 in_progress" in result
-        assert "total: 6" in result
-        assert "Add auth flow" in result
-        assert "task #5" in result
-        assert "Phase: CODE" in result
-        assert "coder, tester" in result
-
-    def test_no_tasks(self):
-        from precompact_state_reminder import _build_state_summary
-        state = {
-            "completed": 0, "in_progress": 0, "pending": 0, "total": 0,
-            "feature_subject": None, "feature_id": None,
-            "current_phase": None, "variety_score": None,
-            "teammates": [], "team_names": [],
-        }
-        result = _build_state_summary(state)
-        assert "none found on disk" in result
-
-    def test_no_feature_omits_feature_line(self):
-        from precompact_state_reminder import _build_state_summary
-        state = {
-            "completed": 1, "in_progress": 0, "pending": 0, "total": 1,
-            "feature_subject": None, "feature_id": None,
-            "current_phase": None, "variety_score": None,
-            "teammates": [], "team_names": [],
-        }
-        result = _build_state_summary(state)
-        assert "Feature:" not in result
-
-    def test_no_phase_omits_phase_line(self):
-        from precompact_state_reminder import _build_state_summary
-        state = {
-            "completed": 0, "in_progress": 0, "pending": 0, "total": 0,
-            "feature_subject": None, "feature_id": None,
-            "current_phase": None, "variety_score": None,
-            "teammates": [], "team_names": [],
-        }
-        result = _build_state_summary(state)
-        assert "Current phase:" not in result
+# TestBuildStateSummary class removed in PR #447 cleanup:
+# _build_state_summary had zero production call sites after #444's Tertiary
+# removed the systemMessage composition that consumed it. The 4 self-coverage
+# tests were only testing a function that nothing else called; function +
+# tests deleted together per user-authorized LOW-1 remediation.
 
 
 # ---------------------------------------------------------------------------
