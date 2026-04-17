@@ -478,7 +478,7 @@ def main():
         is_marker_reset = source == "clear"
 
         # Clean up stale compact-summary from previous sessions.
-        # Only "compact" source needs it (just written by postcompact_verify).
+        # Only "compact" source needs it (just written by postcompact_archive).
         if source != "compact":
             try:
                 COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
@@ -772,6 +772,17 @@ def main():
             f'{_substitutions}'
         )
 
+        # Hoist get_task_list() above the source-branch dispatch so both the
+        # compact-branch checkpoint (below) and step 6 resumption (line ~885)
+        # consume the SAME `tasks` variable. Before hoisting, the two call
+        # sites produced an asymmetric fail-open shape: a raise at the
+        # compact-branch site fell through to _build_safety_net_context
+        # (directive only, no checkpoint); a raise at step 6 left directive +
+        # checkpoint + no-resumption. Single call site means identical
+        # fallback shape on either failure. Outer try/except in main() still
+        # catches any task_utils errors and emits the safety net.
+        tasks = get_task_list()
+
         if source == "compact" and team_exists:
             # Post-compaction: bootstrap directive (in _team_reuse) subsumes
             # "recover state" guidance; keep concrete task-resumption bullets
@@ -787,22 +798,19 @@ def main():
             ))
             # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
             # when tasks in_progress. Logic previously lived in
-            # compaction_refresh.py (deleted in same PR). get_task_list() is
-            # called inline here because step 6's `tasks` var is not yet
-            # defined at this point. Fail-open: outer try/except in main()
-            # catches any task_utils errors and falls back to safety net.
-            _compact_tasks = get_task_list()
-            if _compact_tasks:
+            # compaction_refresh.py (deleted in same PR). Consumes the
+            # hoisted `tasks` variable (single source of truth).
+            if tasks:
                 _in_progress = [
-                    t for t in _compact_tasks
+                    t for t in tasks
                     if t.get("status") == "in_progress"
                 ]
                 if _in_progress:
                     _checkpoint_block = build_post_compaction_checkpoint(
-                        feature=find_feature_task(_compact_tasks),
-                        phase=find_current_phase(_compact_tasks),
-                        agents=find_active_agents(_compact_tasks),
-                        blockers=find_blockers(_compact_tasks),
+                        feature=find_feature_task(tasks),
+                        phase=find_current_phase(tasks),
+                        agents=find_active_agents(tasks),
+                        blockers=find_blockers(tasks),
                     )
                     context_parts.append(_checkpoint_block)
         elif source == "clear" and team_exists:
@@ -881,8 +889,9 @@ def main():
             else:
                 context_parts.append(routing_msg)
 
-        # 6. Check for in_progress Tasks (resumption context via Task integration)
-        tasks = get_task_list()
+        # 6. Check for in_progress Tasks (resumption context via Task
+        # integration). Consumes the hoisted `tasks` variable (single
+        # source of truth; #444 post-boundary dedup).
         if tasks:
             resumption_msg = check_resumption_context(tasks)
             if resumption_msg:

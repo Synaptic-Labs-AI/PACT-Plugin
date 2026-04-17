@@ -475,7 +475,13 @@ class TestSourceAwareness:
     # --- Path 5: anomalous combinations ---
 
     def test_startup_team_exists_anomalous(self, monkeypatch, tmp_path):
-        """startup + team exists: anomalous — should reuse team with note."""
+        """startup + team exists: anomalous — should reuse team with note.
+        Full 4-sentence directive must still fire (removes induction
+        dependency from canonical-path coverage — per review-test-engineer
+        LOW 1, each anomalous path independently verifies the verbatim
+        directive rather than inheriting the guarantee from the shared
+        _team_reuse/_team_create strings).
+        """
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=True
         )
@@ -484,18 +490,32 @@ class TestSourceAwareness:
         assert "Do not call TeamCreate" in additional
         assert "Unexpected" in additional or "Note" in additional
         assert "TaskList" in additional
+        # 4-sentence directive verbatim (all four sentences must be present).
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_resume_no_team_anomalous(self, monkeypatch, tmp_path):
-        """resume + no team: anomalous — should create team with warning."""
+        """resume + no team: anomalous — should create team with warning.
+        Full 4-sentence directive must still fire (LOW 1: independent
+        verification on each anomalous path)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="resume", team_exists=False
         )
 
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
         assert "WARNING" in additional
+        # 4-sentence directive verbatim.
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_compact_no_team_anomalous(self, monkeypatch, tmp_path):
-        """compact + no team: anomalous — should create team with warning."""
+        """compact + no team: anomalous — should create team with warning.
+        Full 4-sentence directive must still fire (LOW 1: independent
+        verification on each anomalous path)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="compact", team_exists=False
         )
@@ -503,15 +523,27 @@ class TestSourceAwareness:
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
         assert "WARNING" in additional
         assert "team not found" in additional.lower()
+        # 4-sentence directive verbatim.
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_clear_no_team_anomalous(self, monkeypatch, tmp_path):
-        """clear + no team: anomalous — should create team with warning."""
+        """clear + no team: anomalous — should create team with warning.
+        Full 4-sentence directive must still fire (LOW 1: independent
+        verification on each anomalous path)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="clear", team_exists=False
         )
 
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
         assert "WARNING" in additional
+        # 4-sentence directive verbatim.
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     # --- Edge cases ---
 
@@ -552,22 +584,36 @@ class TestSourceAwareness:
         assert "CONTEXT CLEARED" not in additional
 
     def test_unknown_source_with_team_is_anomalous(self, monkeypatch, tmp_path):
-        """Unknown source value + team exists: should reuse team with note."""
+        """Unknown source value + team exists: should reuse team with note.
+        Full 4-sentence directive must still fire (LOW 1: independent
+        verification on each anomalous path)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="unknown_value", team_exists=True
         )
 
         assert "existing — resumed session" in additional
         assert "Unexpected" in additional or "Note" in additional
+        # 4-sentence directive verbatim.
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_unknown_source_without_team_creates_with_warning(self, monkeypatch, tmp_path):
-        """Unknown source value + no team: should create team with warning."""
+        """Unknown source value + no team: should create team with warning.
+        Full 4-sentence directive must still fire (LOW 1: independent
+        verification on each anomalous path)."""
         additional, _, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="unknown_value", team_exists=False
         )
 
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
         assert "WARNING" in additional
+        # 4-sentence directive verbatim.
+        assert 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.' in additional
+        assert 'Do this before anything else.' in additional
+        assert 'Do not evaluate whether it is needed.' in additional
+        assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in additional
 
     def test_invalid_source_clamped_to_unknown(self, monkeypatch, tmp_path):
         """An unrecognized source value must be clamped to 'unknown' so it
@@ -4344,13 +4390,31 @@ class TestSessionInitDirectiveAcrossAllSources:
         """Structural-order invariant from architect §2: when the checkpoint
         block is appended on compact, the 4-sentence directive must appear
         BEFORE the [POST-COMPACTION CHECKPOINT] header in the joined
-        additionalContext. Guards against a future refactor that accidentally
-        flips insert/append order or emits them in different context_parts
-        elements on the wrong side.
+        additionalContext.
+
+        Catches BOTH flip modes with two independent assertions:
+          (b) checkpoint.append → checkpoint.insert(0) (checkpoint jumps
+              ahead of directive): caught by directive_idx < checkpoint_idx.
+          (a) directive.insert(0) → directive.append (directive drifts
+              after later .append() calls): caught by stubbing
+              update_pact_routing to emit a sentinel — that step runs in
+              5c, AFTER the compact branch, so a demoted .append() lands
+              the directive behind the routing sentinel.
+
+        This test bypasses the standard _run_session_init_compact helper
+        so it can override update_pact_routing with a real return value
+        instead of None.
         """
+        from session_init import main
+
         session_id = "aabb1122-0000-0000-0000-000000000000"
         pact_context(session_id=session_id)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
 
         tasks_dir = tmp_path / ".claude" / "tasks" / session_id
         tasks_dir.mkdir(parents=True)
@@ -4361,8 +4425,40 @@ class TestSessionInitDirectiveAcrossAllSources:
         }
         (tasks_dir / "f-order.json").write_text(json.dumps(feature))
 
-        additional, _ = _run_session_init_compact(monkeypatch, tmp_path)
+        stdin_data = json.dumps({
+            "session_id": session_id,
+            "source": "compact",
+        })
 
+        # remove_stale_kernel_block fires BEFORE the compact branch
+        # (line ~532 vs line ~775) and context_parts.append()s its
+        # return value on success (line 542). Making it return a sentinel
+        # means context_parts has one element at compact-branch entry.
+        # A correct insert(0, _team_reuse) then pushes the sentinel to
+        # index 1, so directive precedes sentinel in the joined string.
+        # A demoted .append(_team_reuse) leaves sentinel at index 0 and
+        # the directive lands at index 1 — assertion catches the flip.
+        pre_branch_sentinel = "ORDER_SENTINEL_FROM_PRE_BRANCH_STEP"
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block",
+                   return_value=pre_branch_sentinel), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+
+        # Invariant (b): checkpoint does not jump ahead of directive.
         directive_idx = additional.find(
             'Invoke Skill("PACT:bootstrap") immediately'
         )
@@ -4372,4 +4468,21 @@ class TestSessionInitDirectiveAcrossAllSources:
         assert directive_idx < checkpoint_idx, (
             f"directive (idx={directive_idx}) must precede checkpoint "
             f"(idx={checkpoint_idx}) in additionalContext"
+        )
+
+        # Invariant (a): directive precedes the pre-branch sentinel.
+        # remove_stale_kernel_block puts the sentinel into context_parts
+        # via .append() at line ~542, BEFORE the compact branch's
+        # insert(0). A correct insert(0) moves directive to index 0 and
+        # the sentinel stays at index 1, so directive appears first in
+        # the joined string. A demoted .append() leaves sentinel at
+        # index 0 and the directive lands at a later index.
+        sentinel_idx = additional.find(pre_branch_sentinel)
+        assert sentinel_idx != -1, (
+            "test setup broken: pre-branch sentinel must appear"
+        )
+        assert directive_idx < sentinel_idx, (
+            f"directive (idx={directive_idx}) must precede pre-branch "
+            f"sentinel (idx={sentinel_idx}) — if this fails, the compact "
+            f"branch's insert(0) was likely demoted to .append()"
         )
