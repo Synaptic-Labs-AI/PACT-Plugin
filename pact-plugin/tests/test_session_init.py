@@ -46,7 +46,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -4227,6 +4227,68 @@ class TestSessionInitCompactPhantomWorkflow:
         assert "[POST-COMPACTION CHECKPOINT]" not in additional
         assert "Prior conversation auto-compacted" not in additional
 
+    def test_clear_source_with_in_progress_tasks_emits_no_checkpoint(
+        self, _compact_tasks_dir, monkeypatch, tmp_path
+    ):
+        """source=clear + in_progress tasks: checkpoint block MUST NOT be
+        appended. The clear branch in session_init.py (elif source == "clear"
+        and team_exists) has its own insert(0, _team_reuse + CONTEXT CLEARED
+        prose) logic but NO checkpoint append — the architect's §4.3 rationale
+        is that /clear is user-triggered and doesn't suffer the involuntary
+        context loss that compaction does, so the task-resumption concrete
+        bullets in the branch's prose are sufficient.
+
+        Dedicated test for the clear branch because it is the one source with
+        an explicit branch path (not anomalous, not folded into 'else') where
+        the invariant is load-bearing. Complements
+        test_non_compact_source_never_emits_checkpoint_even_with_tasks
+        (startup) to cover both non-compact paths with in_progress data.
+        """
+        feature = {
+            "id": "f-clear",
+            "subject": "Clear-path feature",
+            "status": "in_progress",
+        }
+        (_compact_tasks_dir / "f-clear.json").write_text(json.dumps(feature))
+
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": "aabb1122-0000-0000-0000-000000000000",
+            "source": "clear",
+        })
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+
+        # The clear branch's own prose must appear (positive control: branch fired).
+        assert "CONTEXT CLEARED" in additional
+        # But the checkpoint block must NOT — architect §4.3 invariant.
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional
+        assert "Prior conversation auto-compacted" not in additional
+
 
 class TestSessionInitCompactBranchExceptions:
     """Exception-handling tests for the inline get_task_list() call inside
@@ -4311,6 +4373,150 @@ class TestSessionInitCompactBranchExceptions:
                 main()
 
         assert exc_info.value.code == 0
+
+    @pytest.mark.parametrize("func_name", [
+        "get_task_list",
+        "find_feature_task",
+        "find_current_phase",
+        "find_active_agents",
+        "find_blockers",
+        "build_post_compaction_checkpoint",
+    ])
+    def test_compact_branch_helper_raise_falls_back_to_safety_net(
+        self, monkeypatch, tmp_path, pact_context, func_name
+    ):
+        """Every task_utils helper consumed in the compact-branch checkpoint
+        path must, when it raises, fall through to _build_safety_net_context
+        with no checkpoint block emitted. Without this parametrize, only
+        get_task_list had explicit coverage — the other 5 helpers are called
+        INSIDE `if _in_progress:` and have no internal exception guards, so
+        the outer try/except in main() is the only catch for raises inside
+        find_feature_task/find_current_phase/find_active_agents/find_blockers/
+        build_post_compaction_checkpoint.
+
+        Load-bearing fixture: in_progress tasks on disk so the 5 downstream
+        helpers are actually reached (they sit behind `if tasks` + `if
+        _in_progress`). get_task_list is reached unconditionally.
+        """
+        from session_init import main
+
+        session_id = "aabb1122-0000-0000-0000-000000000000"
+        pact_context(session_id=session_id)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        # Put an in_progress task on disk so the 5 downstream helpers are
+        # actually reached — without it, the `if _in_progress` gate short-
+        # circuits and find_feature_task / find_current_phase / etc. never
+        # fire, making their parametrize cases vacuously pass.
+        tasks_dir = tmp_path / ".claude" / "tasks" / session_id
+        tasks_dir.mkdir(parents=True)
+        (tasks_dir / "f-1.json").write_text(json.dumps({
+            "id": "f-1",
+            "subject": "Feature for helper-raise test",
+            "status": "in_progress",
+        }))
+
+        stdin_data = json.dumps({
+            "session_id": session_id,
+            "source": "compact",
+        })
+
+        def raise_boom(*args, **kwargs):
+            raise RuntimeError(f"boom from {func_name}")
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch(f"session_init.{func_name}", side_effect=raise_boom), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        # Fail-open: exit 0 regardless of which helper raised.
+        assert exc_info.value.code == 0, (
+            f"main() must exit 0 when {func_name} raises (fail-open contract)"
+        )
+        output = json.loads(stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+
+        # Safety-net contract: directive must still fire.
+        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional, (
+            f"4-sentence directive must survive {func_name} raise "
+            f"(safety-net fallback)"
+        )
+        # No partial checkpoint block should leak through.
+        assert "[POST-COMPACTION CHECKPOINT]" not in additional, (
+            f"checkpoint block must not appear when {func_name} raises "
+            f"(outer except discards partial context_parts)"
+        )
+        # systemMessage carries the error for observability.
+        assert "systemMessage" in output, (
+            "safety-net output must include systemMessage with error info"
+        )
+        assert f"boom from {func_name}" in output["systemMessage"]
+
+    def test_get_task_list_called_exactly_once_per_main_invocation(
+        self, monkeypatch, tmp_path, pact_context
+    ):
+        """Hoist invariant: get_task_list() is called exactly ONCE per
+        main() invocation on source=compact. The #444 Cluster 3 refactor
+        hoisted the call above the source-branch dispatch specifically
+        to eliminate a double-call (one at the compact-branch checkpoint
+        site, one at step 6 resumption). A future refactor reintroducing
+        a second call would silently pass all other tests; this test is
+        the cardinality anchor that catches the regression.
+        """
+        from session_init import main
+
+        session_id = "aabb1122-0000-0000-0000-000000000000"
+        pact_context(session_id=session_id)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
+        team_dir.mkdir(parents=True, exist_ok=True)
+        (team_dir / "config.json").write_text('{"members": []}')
+
+        stdin_data = json.dumps({
+            "session_id": session_id,
+            "source": "compact",
+        })
+
+        mock_task_list = MagicMock(return_value=[])
+
+        stdout = io.StringIO()
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", mock_task_list), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", stdout):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        assert mock_task_list.call_count == 1, (
+            f"get_task_list must be called exactly once (hoist invariant); "
+            f"got {mock_task_list.call_count} calls — two or more indicate "
+            f"a regression of #444 post-boundary dedup."
+        )
 
 
 class TestSessionInitDirectiveAcrossAllSources:

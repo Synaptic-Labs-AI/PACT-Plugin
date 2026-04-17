@@ -80,9 +80,7 @@ The wrap-up command harvests journal events to pact-memory before session close.
 
 ### Content Durability Across Compaction
 
-Claude Code compaction has four durability tiers for orchestrator content,
-per the empirical investigation at `docs/investigations/2026-04-16-bootstrap-compaction-durability.md`
-(7 controlled experiments, 2026-04-16):
+Claude Code compaction has four durability tiers for orchestrator content:
 
 | Tier | Mechanism | Durability |
 |------|-----------|------------|

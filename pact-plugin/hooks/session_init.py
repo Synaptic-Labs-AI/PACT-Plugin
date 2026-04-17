@@ -779,8 +779,21 @@ def main():
         # compact-branch site fell through to _build_safety_net_context
         # (directive only, no checkpoint); a raise at step 6 left directive +
         # checkpoint + no-resumption. Single call site means identical
-        # fallback shape on either failure. Outer try/except in main() still
-        # catches any task_utils errors and emits the safety net.
+        # fallback shape on either failure.
+        #
+        # Fail-open layering (defense in depth):
+        #   1. Primary: get_task_list() has its own internal try/except
+        #      (shared/task_utils.py:50-59) that returns None on any
+        #      filesystem or JSON parse error. Callers never see a raise
+        #      from a corrupted tasks dir.
+        #   2. Belt-and-suspenders: main()'s outer try/except catches
+        #      unexpected exceptions in the downstream checkpoint-
+        #      construction helpers (find_feature_task, find_current_phase,
+        #      find_active_agents, find_blockers, build_post_compaction_
+        #      checkpoint) — these do NOT have internal exception guards.
+        #      A raise there drops the whole compact branch and falls
+        #      through to _build_safety_net_context, which still carries
+        #      the 4-sentence directive.
         tasks = get_task_list()
 
         if source == "compact" and team_exists:
