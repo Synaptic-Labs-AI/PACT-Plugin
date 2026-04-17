@@ -298,7 +298,20 @@ class TestCheckUnpausedPr:
     - Falls back to task metadata scanning (safety net for non-journal PRs)
     - Returns the warning string (or None) instead of writing the journal
       directly — the caller emits the single session_end event.
+
+    #453 Fix A defensive-default: each test in this class runs with
+    `session_end.check_pr_state` patched to return "OPEN" so the
+    last-line-of-defense live gh call does NOT shell out to the real
+    `gh pr view` (which would flake against arbitrary PR numbers used
+    in fixtures). Individual tests that exercise the MERGED / CLOSED /
+    fail-open branches patch check_pr_state explicitly with their own
+    return_value (inner patch wins over the fixture).
     """
+
+    @pytest.fixture(autouse=True)
+    def _default_check_pr_state(self):
+        with patch("session_end.check_pr_state", return_value="OPEN"):
+            yield
 
     def _make_task_with_pr_number(self, pr_number):
         """Helper: task with pr_number in metadata."""
@@ -832,6 +845,127 @@ class TestCheckUnpausedPr:
 
         assert warning is not None
         assert "PR #99" in warning
+
+    # ========================================================================
+    # #453 Fix A — live PR-state defense-in-depth tests
+    # ========================================================================
+
+    def test_live_pr_check_merged_short_circuits(self):
+        """gh reports MERGED → no warning (AC#2).
+
+        Catches the case where a PR was merged on the GitHub web UI
+        mid-session and no wrap-up ran. Fix B is empty (no
+        session_consolidated event); Fix A covers the gap via live
+        gh check.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_live_pr_check_closed_short_circuits(self):
+        """gh reports CLOSED → no warning (AC#2 sibling)."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", return_value="CLOSED"):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+
+    def test_live_pr_check_open_still_warns(self):
+        """gh reports OPEN → warning fires (genuine unpaused-PR case).
+
+        Happy-path for the warning: the PR is actually open on GitHub
+        and the session ended without consolidation.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", return_value="OPEN"):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #42" in warning
+
+    def test_live_pr_check_unknown_state_warns(self):
+        """gh returns empty string ("" sentinel) → conservative warn.
+
+        Empty string is the fail-open sentinel (gh missing / timeout /
+        auth expired / OSError). Not in ("MERGED", "CLOSED"), so the
+        function falls through to warn — we cannot distinguish
+        "offline" from "PR actually open" without gh.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", return_value=""):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is not None
+        assert "PR #42" in warning
+
+    def test_live_pr_check_not_called_when_consolidated_short_circuits(self):
+        """AC#4 pin: wrap-up path makes zero gh calls.
+
+        When session_consolidated is present, check_pr_state MUST NOT
+        be invoked — the short-circuit at the top of check_unpaused_pr
+        returns before we even resolve the PR number. Pins the zero-
+        network-calls guarantee for the wrap-up happy path.
+        """
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "session_consolidated":
+                return [{"type": "session_consolidated", "ts": "2026-01-02T00:00:00Z"}]
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state") as mock_check:
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning is None
+        mock_check.assert_not_called()
 
 
 # =============================================================================

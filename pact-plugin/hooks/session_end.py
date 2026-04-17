@@ -32,6 +32,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+from shared.gh_helpers import check_pr_state
 import shared.pact_context as pact_context
 from shared.pact_context import get_project_dir, get_session_dir, get_session_id, get_team_name
 from shared.session_journal import (
@@ -139,6 +140,21 @@ def check_unpaused_pr(
                 break
 
     if not pr_number:
+        return None
+
+    # Fix A (#453): live PR-state check — last-line-of-defense against
+    # merged or closed PRs that neither Fix B nor the pause-vs-review
+    # timestamp comparison caught (e.g., PR merged via GitHub web UI
+    # mid-session with no wrap-up). Invoked only when every cheaper
+    # signal has fallen through, so AC#4 (no network for wrap-up cases)
+    # is preserved structurally by the ordering above.
+    #
+    # Fail-open: check_pr_state returns "" on gh-missing / timeout /
+    # auth-expired / OSError. "" is not in ("MERGED", "CLOSED"), so we
+    # fall through to the warning — the conservative pre-fix behavior
+    # when we cannot distinguish "offline" from "PR actually open."
+    pr_state = check_pr_state(pr_number)
+    if pr_state in ("MERGED", "CLOSED"):
         return None
 
     return (
