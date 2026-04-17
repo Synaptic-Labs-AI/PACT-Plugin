@@ -89,7 +89,7 @@ Claude Code compaction has four durability tiers for orchestrator content:
 | **2** | External `@`-refs / `Read()` calls tracked by the Read tracker | **Best-effort** — path-agnostic 5-slot tracker budget × per-file cap in [201, 240) lines; tail-biased selection within available slots; CLAUDE.md and other session Reads compete for the same slots (realistic budget for bootstrap is 3-4 slots). Non-deterministic subset survives. |
 | **3** | Anything else (in-context turns, transient model state) | **None** — accept as lossy. |
 
-**#444 redesign**: The bootstrap re-invocation directive lives at Tier 0
+The bootstrap re-invocation directive lives at Tier 0
 (`session_init.py` additionalContext), not at Tier 2 (Read/@-ref) or in a
 separate `postcompact_archive.py` systemMessage. Hook-emitted directives
 survive every compaction by construction; Read/@-ref-based durability is
