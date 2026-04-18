@@ -50,7 +50,7 @@ loaded into your context via the `/PACT:teammate-bootstrap` command's
 `@`-ref (which you invoke via your agent body's `# FIRST ACTION` prelude
 on spawn), not via frontmatter auto-loading. Frontmatter `skills:`
 entries populate the lazy skill catalog for discoverability but are not
-eagerly loaded at spawn (empirically verified during #366 phase 1).
+eagerly loaded at spawn (empirically verified).
 
 See `pact-teachback/SKILL.md` for format, rules, and ordering requirements.
 
