@@ -31,6 +31,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 | `session_start` | session_init hook | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` ∈ {`startup`, `resume`, `compact`, `clear`, `unknown`} attributes the event to startup vs auto-compact vs `/clear` vs `/resume` for direct triage (no timing-cluster triangulation needed) |
 | `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
 | `session_paused` | pause command | `pr_number`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
+| `session_consolidated` | wrap-up, pause commands | `pass`, `task_count`, `memories_saved` (all optional int) | Signal that Pass 2 memory consolidation ran this session — consumed by `check_unpaused_pr` so SessionEnd does not warn on consolidated sessions regardless of PR state |
 | `variety_assessed` | orchestrate command | `score`, `dimensions` | Restore variety context |
 | `phase_transition` | orchestrate, comPACT | `phase`, `status` (`started`/`completed`) | Determine current phase |
 | `checkpoint` | orchestrate command | Workflow-specific snapshot | Fast recovery point |
