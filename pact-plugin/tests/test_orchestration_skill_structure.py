@@ -1,12 +1,12 @@
 """
-Tests for #414 R3 — bootstrap.md restructure for compaction durability.
+Tests for #452 — orchestration skill structure (post-relocation from #414 R3).
 
-Validates that the restructured bootstrap.md (stub) and the new
-pact-orchestrator-core.md (wholesale content move) are structurally correct:
-  1. All 9 referenced protocol files exist and are non-empty
+Validates that the bootstrap.md stub and the relocated orchestrator core
+(now at skills/orchestration/SKILL.md) are structurally correct:
+  1. All 9 referenced Read targets exist and are non-empty (1 skill + 8 protocols)
   2. Bootstrap stub has Read instructions early, no @-refs, is ≤100 lines
   3. Bootstrap gate marker write instruction is present and consistent
-  4. Key content sections from old bootstrap exist in core file
+  4. Key content sections from old bootstrap exist in the relocated skill file
 
 Stage 2 empirical compaction verification is OUT OF SCOPE for this file —
 that requires manual fresh-session testing.
@@ -28,12 +28,29 @@ from shared import BOOTSTRAP_MARKER_NAME
 PLUGIN_ROOT = Path(__file__).parent.parent
 COMMANDS_DIR = PLUGIN_ROOT / "commands"
 PROTOCOLS_DIR = PLUGIN_ROOT / "protocols"
+SKILLS_DIR = PLUGIN_ROOT / "skills"
 BOOTSTRAP_MD = COMMANDS_DIR / "bootstrap.md"
-CORE_FILE = PROTOCOLS_DIR / "pact-orchestrator-core.md"
+CORE_FILE = SKILLS_DIR / "orchestration" / "SKILL.md"
 
-# The 9 mandatory Read targets, in the order listed in bootstrap.md
-MANDATORY_PROTOCOL_FILES = [
-    "pact-orchestrator-core.md",
+# The 9 mandatory Read targets, in the order listed in bootstrap.md.
+# Entry 1 is the orchestration skill (under skills/); entries 2-9 are
+# supplementary protocols under protocols/. Paths are relative to plugin root.
+MANDATORY_READ_TARGETS = [
+    "skills/orchestration/SKILL.md",
+    "protocols/pact-s5-policy.md",
+    "protocols/pact-s4-checkpoints.md",
+    "protocols/pact-s4-tension.md",
+    "protocols/pact-variety.md",
+    "protocols/pact-workflows.md",
+    "protocols/pact-communication-charter.md",
+    "protocols/pact-state-recovery.md",
+    "protocols/algedonic.md",
+]
+
+# The 8 supplementary protocols (filenames only). Retained separately for
+# forward-reference tests within the core skill body — the core file cannot
+# forward-reference itself.
+SUPPLEMENTARY_PROTOCOL_FILES = [
     "pact-s5-policy.md",
     "pact-s4-checkpoints.md",
     "pact-s4-tension.md",
@@ -72,52 +89,56 @@ def core_lines(core_text):
 # =============================================================================
 
 class TestProtocolFileIntegrity:
-    """All 9 referenced protocol files exist, are non-empty, and core is bounded."""
+    """All 9 referenced Read targets exist, are non-empty, and core is bounded."""
 
-    @pytest.mark.parametrize("filename", MANDATORY_PROTOCOL_FILES)
-    def test_protocol_file_exists(self, filename):
-        path = PROTOCOLS_DIR / filename
-        assert path.is_file(), f"Missing protocol file: {filename}"
+    @pytest.mark.parametrize("relative_path", MANDATORY_READ_TARGETS)
+    def test_read_target_exists(self, relative_path):
+        path = PLUGIN_ROOT / relative_path
+        assert path.is_file(), f"Missing Read target: {relative_path}"
 
-    @pytest.mark.parametrize("filename", MANDATORY_PROTOCOL_FILES)
-    def test_protocol_file_not_empty(self, filename):
-        path = PROTOCOLS_DIR / filename
+    @pytest.mark.parametrize("relative_path", MANDATORY_READ_TARGETS)
+    def test_read_target_not_empty(self, relative_path):
+        path = PLUGIN_ROOT / relative_path
         content = path.read_text(encoding="utf-8")
-        assert len(content.strip()) > 0, f"Protocol file is empty: {filename}"
+        assert len(content.strip()) > 0, (
+            f"Read target is empty: {relative_path}"
+        )
 
-    def test_exactly_nine_mandatory_files(self):
-        """Cardinality pin: the plan specifies exactly 9 mandatory protocol files."""
-        assert len(MANDATORY_PROTOCOL_FILES) == 9
+    def test_exactly_nine_mandatory_targets(self):
+        """Cardinality pin: bootstrap.md loads exactly 9 files (1 skill + 8 protocols)."""
+        assert len(MANDATORY_READ_TARGETS) == 9
 
-    def test_read_filenames_match_constant(self, bootstrap_text):
-        """Read instruction filenames in bootstrap.md must match MANDATORY_PROTOCOL_FILES."""
+    def test_read_paths_match_constant(self, bootstrap_text):
+        """Read instruction paths in bootstrap.md must match MANDATORY_READ_TARGETS."""
+        # Match either `{plugin_root}/protocols/<file>.md` or
+        # `{plugin_root}/skills/<dir>/<file>.md` — both are accepted forms.
         read_pattern = re.compile(
-            r"\d+\.\s+`\{plugin_root\}/protocols/([\w-]+\.md)`"
+            r"\d+\.\s+`\{plugin_root\}/((?:protocols|skills)/[\w\-/]+\.md)`"
         )
-        read_filenames = read_pattern.findall(bootstrap_text)
-        assert read_filenames == MANDATORY_PROTOCOL_FILES, (
-            f"Read instruction filenames don't match MANDATORY_PROTOCOL_FILES.\n"
-            f"  bootstrap.md: {read_filenames}\n"
-            f"  constant:     {list(MANDATORY_PROTOCOL_FILES)}"
+        read_paths = read_pattern.findall(bootstrap_text)
+        assert read_paths == MANDATORY_READ_TARGETS, (
+            f"Read instruction paths don't match MANDATORY_READ_TARGETS.\n"
+            f"  bootstrap.md: {read_paths}\n"
+            f"  constant:     {list(MANDATORY_READ_TARGETS)}"
         )
 
-    @pytest.mark.parametrize("filename", MANDATORY_PROTOCOL_FILES)
-    def test_protocol_file_within_bounds(self, filename):
-        """Every mandatory protocol file must stay under 600 lines (truncation risk)."""
-        path = PROTOCOLS_DIR / filename
+    @pytest.mark.parametrize("relative_path", MANDATORY_READ_TARGETS)
+    def test_read_target_within_bounds(self, relative_path):
+        """Every mandatory Read target must stay under 600 lines (truncation risk)."""
+        path = PLUGIN_ROOT / relative_path
         lines = path.read_text(encoding="utf-8").splitlines()
         count = len(lines)
         assert count < 600, (
-            f"{filename} is {count} lines — exceeds 600-line "
+            f"{relative_path} is {count} lines — exceeds 600-line "
             f"safety boundary (truncation risk)"
         )
 
     def test_core_file_has_substantial_content(self, core_lines):
-        """Core file must have substantial content (not accidentally gutted)."""
+        """Core skill file must have substantial content (not accidentally gutted)."""
         count = len(core_lines)
         assert count > 200, (
-            f"pact-orchestrator-core.md is only {count} lines — expected ~500 "
-            f"(possible content loss during migration)"
+            f"skills/orchestration/SKILL.md is only {count} lines — "
+            f"expected ~500 (possible content loss during migration)"
         )
 
 
@@ -129,10 +150,10 @@ class TestBootstrapStructure:
     """Bootstrap stub has Read instructions early, no @-refs, and is compact."""
 
     def test_read_instructions_present(self, bootstrap_text):
-        """Bootstrap.md must contain Read instruction references to protocol files."""
-        # Check for the numbered list pattern: "1. `{plugin_root}/protocols/..."
+        """Bootstrap.md must contain Read instruction references to all 9 targets."""
+        # Check for the numbered list pattern across both protocols/ and skills/
         read_pattern = re.compile(
-            r"\d+\.\s+`\{plugin_root\}/protocols/[\w-]+\.md`"
+            r"\d+\.\s+`\{plugin_root\}/(?:protocols|skills)/[\w\-/]+\.md`"
         )
         matches = read_pattern.findall(bootstrap_text)
         assert len(matches) == 9, (
@@ -151,8 +172,8 @@ class TestBootstrapStructure:
     def test_read_instructions_in_first_30_lines(self, bootstrap_lines):
         """Read instructions must appear in the first 30 lines for truncation resilience."""
         first_30 = "\n".join(bootstrap_lines[:30])
-        assert "pact-orchestrator-core.md" in first_30, (
-            "pact-orchestrator-core.md Read instruction not found in first 30 lines"
+        assert "skills/orchestration/SKILL.md" in first_30, (
+            "skills/orchestration/SKILL.md Read instruction not found in first 30 lines"
         )
         assert "algedonic.md" in first_30, (
             "Last protocol file (algedonic.md) not referenced in first 30 lines"
@@ -166,15 +187,16 @@ class TestBootstrapStructure:
         )
 
     def test_core_file_is_first_read_target(self, bootstrap_text):
-        """pact-orchestrator-core.md must be listed as the FIRST Read target."""
-        # Find the numbered list: item 1 should reference the core file
+        """skills/orchestration/SKILL.md must be listed as the FIRST Read target."""
+        # Find the numbered list: item 1 should reference the orchestration skill
         pattern = re.compile(
-            r"1\.\s+`\{plugin_root\}/protocols/([\w-]+\.md)`"
+            r"1\.\s+`\{plugin_root\}/((?:protocols|skills)/[\w\-/]+\.md)`"
         )
         match = pattern.search(bootstrap_text)
         assert match is not None, "No numbered Read instruction #1 found"
-        assert match.group(1) == "pact-orchestrator-core.md", (
-            f"First Read target is '{match.group(1)}', expected 'pact-orchestrator-core.md'"
+        assert match.group(1) == "skills/orchestration/SKILL.md", (
+            f"First Read target is '{match.group(1)}', "
+            f"expected 'skills/orchestration/SKILL.md'"
         )
 
     def test_load_operating_instructions_heading(self, bootstrap_text):
@@ -241,9 +263,9 @@ class TestContentCompleteness:
         "Memory Management",
     ])
     def test_major_section_present_in_core(self, core_text, heading):
-        """Each key section heading must exist in pact-orchestrator-core.md."""
+        """Each key section heading must exist in skills/orchestration/SKILL.md."""
         assert heading in core_text, (
-            f"Section '{heading}' not found in pact-orchestrator-core.md — "
+            f"Section '{heading}' not found in skills/orchestration/SKILL.md — "
             f"possible content loss during migration"
         )
 
@@ -265,11 +287,10 @@ class TestContentCompleteness:
 
     def test_inline_summary_anchors_in_core(self, core_text):
         """Core file should have forward references to all supplementary protocols."""
-        # All protocols except the core file itself must be referenced
-        supplementary = MANDATORY_PROTOCOL_FILES[1:]
-        missing = [f for f in supplementary if f not in core_text]
+        # All 8 supplementary protocols must be referenced as contextual anchors.
+        missing = [f for f in SUPPLEMENTARY_PROTOCOL_FILES if f not in core_text]
         assert not missing, (
-            f"pact-orchestrator-core.md is missing forward references to: "
+            f"skills/orchestration/SKILL.md is missing forward references to: "
             f"{missing}. All 8 supplementary protocols must be referenced "
             f"as contextual anchors."
         )

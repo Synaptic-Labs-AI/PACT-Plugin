@@ -16,7 +16,7 @@ To orchestrate is to delegate. To act alone is to fail. Your context is sacred.
 
 **REQUIRED**: Read ALL of the following protocol files now using the Read tool. Construct absolute paths by resolving `{plugin_root}` from your session context (the `- Plugin root:` line in CLAUDE.md, or the session_init hook value if still visible). These files auto-reload after compaction via the Read tracker.
 
-1. `{plugin_root}/protocols/pact-orchestrator-core.md` — Full orchestrator instructions
+1. `{plugin_root}/skills/orchestration/SKILL.md` — Full orchestrator instructions
 2. `{plugin_root}/protocols/pact-s5-policy.md` — Governance non-negotiables
 3. `{plugin_root}/protocols/pact-s4-checkpoints.md` — Strategic assessment
 4. `{plugin_root}/protocols/pact-s4-tension.md` — S3/S4 conflict resolution
