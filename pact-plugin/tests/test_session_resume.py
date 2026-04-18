@@ -941,7 +941,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+        with mock_patch("shared.gh_helpers.subprocess.run", return_value=mock_result):
             result = _check_pr_state(42)
 
         assert result == "OPEN"
@@ -952,7 +952,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         mock_result = MagicMock(returncode=0, stdout="MERGED\n")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+        with mock_patch("shared.gh_helpers.subprocess.run", return_value=mock_result):
             result = _check_pr_state(77)
 
         assert result == "MERGED"
@@ -963,7 +963,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         mock_result = MagicMock(returncode=0, stdout="CLOSED\n")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+        with mock_patch("shared.gh_helpers.subprocess.run", return_value=mock_result):
             result = _check_pr_state(99)
 
         assert result == "CLOSED"
@@ -974,7 +974,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         mock_result = MagicMock(returncode=0, stdout="open\n")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+        with mock_patch("shared.gh_helpers.subprocess.run", return_value=mock_result):
             result = _check_pr_state(42)
 
         assert result == "OPEN"
@@ -985,7 +985,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         with mock_patch(
-            "shared.session_resume.subprocess.run",
+            "shared.gh_helpers.subprocess.run",
             side_effect=FileNotFoundError("gh not found"),
         ):
             result = _check_pr_state(42)
@@ -999,7 +999,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         with mock_patch(
-            "shared.session_resume.subprocess.run",
+            "shared.gh_helpers.subprocess.run",
             side_effect=sp.TimeoutExpired(cmd="gh", timeout=5),
         ):
             result = _check_pr_state(42)
@@ -1012,7 +1012,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         with mock_patch(
-            "shared.session_resume.subprocess.run",
+            "shared.gh_helpers.subprocess.run",
             side_effect=OSError("permission denied"),
         ):
             result = _check_pr_state(42)
@@ -1025,7 +1025,7 @@ class TestCheckPrState:
         from shared.session_resume import _check_pr_state
 
         mock_result = MagicMock(returncode=1, stdout="")
-        with mock_patch("shared.session_resume.subprocess.run", return_value=mock_result):
+        with mock_patch("shared.gh_helpers.subprocess.run", return_value=mock_result):
             result = _check_pr_state(42)
 
         assert result == ""
@@ -1037,7 +1037,7 @@ class TestCheckPrState:
 
         mock_result = MagicMock(returncode=0, stdout="OPEN\n")
         with mock_patch(
-            "shared.session_resume.subprocess.run", return_value=mock_result
+            "shared.gh_helpers.subprocess.run", return_value=mock_result
         ) as mock_sub:
             result = _check_pr_state("42")
 

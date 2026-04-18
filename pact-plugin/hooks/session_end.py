@@ -159,7 +159,7 @@ def check_unpaused_pr(
 
     return (
         f"Session ended without memory consolidation. "
-        f"PR #{pr_number} is open but pause-mode was not run. "
+        f"PR #{pr_number} may still be open but pause-mode was not run. "
         f"Run /PACT:pause or /PACT:wrap-up in next session."
     )
 
