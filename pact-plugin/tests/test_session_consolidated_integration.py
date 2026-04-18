@@ -630,24 +630,40 @@ class TestPreExistingJournalCompat:
 def _run_pause_bash(session_dir, *, true_or_false):
     """Execute the pause.md step-5 bash template against a tmp session_dir.
 
-    Substitutes the shell-guard's {true_or_false} with the literal string
-    argument so the conditional's `[ '<value>' = 'true' ]` gate takes the
-    path under test. All other placeholders get safe test values so the
-    session_paused write succeeds regardless of the guard branch.
+    Substitutes the shell-clamp's {true_or_false} with the literal string
+    argument so the case/esac validator takes the path under test (`true`
+    emits, `false` is a no-op, anything else fails fast). All other
+    placeholders get safe test values so the session_paused write
+    succeeds regardless of which valid branch was taken.
+
+    Note: the session_paused write uses the string 'true' or 'false' for
+    `consolidation_completed` only under the two valid branches — when
+    the validator hits the `*` branch it exits 1 before the write, so
+    any non-JSON-parseable value in {true_or_false} would not reach the
+    session_paused write. Tests that pass an invalid value therefore
+    observe the clamp's fail-fast exit, not a session_paused schema
+    error.
 
     Returns the subprocess CompletedProcess so callers can assert on
     returncode, stdout, and stderr. The bash envelope mirrors pause.md's
-    `set -e` + ERR trap exactly — if either write fails, this raises via
-    the trap's `exit $rc` and the caller sees returncode != 0.
+    `set -e` + ERR trap exactly.
     """
     template = f"""set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
-if [ '{true_or_false}' = 'true' ]; then
-  python3 "{_SESSION_JOURNAL_PY}" write \\
-    --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+case '{true_or_false}' in
+  true)
+    python3 "{_SESSION_JOURNAL_PY}" write \\
+      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {{"pass": 2, "task_count": 7, "memories_saved": 3}}
 JSON
-fi
+    ;;
+  false)
+    ;;
+  *)
+    echo "[pause.md] invalid {{true_or_false}} flag: '{true_or_false}' (expected literal 'true' or 'false')" >&2
+    exit 1
+    ;;
+esac
 python3 "{_SESSION_JOURNAL_PY}" write \\
   --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
 {{"pr_number": 123, "pr_url": "https://github.com/org/repo/pull/123", "branch": "feat/test", "worktree_path": "/tmp/wt", "consolidation_completed": {true_or_false}, "team_name": "pact-test"}}
@@ -662,18 +678,21 @@ JSON
 
 
 class TestPauseBashConditionalEmission:
-    """Pin the pause.md shell-guard at the bash-execution layer.
+    """Pin the pause.md shell-clamp at the bash-execution layer.
 
-    Review cycle-1 L1 hardening: before this fix, pause.md's prose said
-    the orchestrator MUST skip the session_consolidated write when
-    consolidation did not run, but the bash heredoc emitted
-    unconditionally. If the orchestrator copy-pasted the block verbatim
-    ignoring the prose, a false-positive session_consolidated signal
-    could suppress genuine warnings in a later session.
+    Review cycle-1 L1 hardened the emission via `if ... then ... fi`;
+    cycle-2 M2 tightens that into a three-branch `case/esac` validator
+    that additionally fails fast when {true_or_false} is not literally
+    `true` or `false`. Before the clamp, prose alone bound the
+    contract; an orchestrator copy-pasting the template with an
+    accidental typo (e.g. `True`, `TRUE`, `yes`, an empty placeholder)
+    would silently take the no-op branch and drop the
+    session_consolidated signal without warning.
 
-    These tests execute the real bash template with both branches of
-    the guard and assert that the session_consolidated event is emitted
-    ONLY when {true_or_false} = 'true'.
+    These tests execute the real bash template with each of the three
+    branches and assert (a) the intended journal events land on the
+    valid branches, (b) the invalid branch fails fast with a stderr
+    message, non-zero exit, and no journal writes.
     """
 
     def test_guard_true_emits_both_events(self, tmp_path):
@@ -701,7 +720,7 @@ class TestPauseBashConditionalEmission:
     def test_guard_false_emits_only_session_paused(self, tmp_path):
         """{true_or_false}='false' → session_consolidated SKIPPED, session_paused still written.
 
-        Regression pin for review cycle-1 L1: removing the shell guard
+        Regression pin for review cycle-1 L1: removing the shell-clamp
         (restoring the unconditional write) causes this test to fail
         because session_consolidated would appear in the journal.
         """
@@ -723,6 +742,51 @@ class TestPauseBashConditionalEmission:
         )
         assert "session_paused" in types, (
             f"false branch MUST still emit session_paused. Got types: {types}"
+        )
+
+    def test_guard_invalid_value_fails_fast(self, tmp_path):
+        """{true_or_false}='True' → case `*` branch exits 1 with stderr message; no writes.
+
+        Review cycle-2 M2 regression pin: reverting the clamp to the
+        two-branch `if/then/fi` form would silently take the implicit
+        no-op fall-through on any non-`true` value — including typos
+        the orchestrator is most likely to make (`True`, `TRUE`,
+        unsubstituted literal `{true_or_false}`, empty string). The
+        clamp MUST surface that as a loud failure so the template-
+        substitution bug is caught on the spot, not buried in a later
+        SessionEnd false-positive.
+
+        Asserts:
+        - returncode != 0 (case `*` branch runs `exit 1`)
+        - stderr contains `invalid` and identifies the offending value
+        - journal file is NOT created (clamp fires BEFORE session_paused
+          write, so the clamp's failure also cancels the paused write
+          via set -e)
+        """
+        session_dir = str(tmp_path)
+
+        # Representative invalid value: capitalized 'True', the most
+        # common orchestrator typo since Python booleans serialize that
+        # way but bash true/false are lowercase.
+        result = _run_pause_bash(session_dir, true_or_false="True")
+
+        assert result.returncode != 0, (
+            f"invalid flag MUST fail fast; got returncode=0 with "
+            f"stdout={result.stdout!r}"
+        )
+        assert "invalid" in result.stderr.lower(), (
+            f"stderr MUST identify the failure class; got: {result.stderr!r}"
+        )
+        assert "True" in result.stderr, (
+            f"stderr MUST echo the offending value for the operator's "
+            f"debug trail; got: {result.stderr!r}"
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert not journal.exists(), (
+            "invalid flag MUST NOT produce a journal file — the clamp "
+            "fires before session_paused write, and set -e prevents the "
+            "paused write from running after the clamp's exit 1."
         )
 
 
