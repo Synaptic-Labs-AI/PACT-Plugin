@@ -38,6 +38,7 @@ AC#3 true-positive preservation:
 12. Legacy pause-covers-review path still works with no session_consolidated event
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1023,4 +1024,93 @@ JSON
             "unsubstituted-placeholder write MUST NOT create the journal "
             "file; schema validation or JSON parse must reject before "
             "reaching the filesystem."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Review cycle-3 Fix 4: drift pin between pause.md source and test helper
+# ---------------------------------------------------------------------------
+
+
+class TestPauseBashTemplateShapeDriftGuard:
+    """Pin the case/esac shape of pause.md's step-5 bash block against silent drift.
+
+    The behavioral tests above (TestPauseBashConditionalEmission) execute a
+    template the test helper assembles in Python — if a future refactor
+    moved pause.md away from the case/esac shape (e.g. back to if/then/fi
+    or to a different validator) without updating _run_pause_bash, those
+    tests would keep passing against the stale helper while production
+    actually behaved differently. This test reads pause.md from disk at
+    test time and asserts the three-branch shape is still present, so
+    the drift surfaces loudly instead of silently.
+
+    Review cycle-3 Fix 4 — test-layer pin for the cycle-2 M2 clamp's
+    structural invariant.
+    """
+
+    def test_pause_md_step_5_is_case_esac_three_branch(self):
+        """pause.md step-5 bash block MUST use case/esac with the three branches.
+
+        Extracts the first bash-fenced block under the `### 5.` heading
+        of pause.md, then asserts:
+        - `case '{true_or_false}' in` opens the validator
+        - `true)` branch label present (emission case)
+        - `false)` branch label present (no-op case)
+        - `*)` branch label present (fail-fast case)
+        - `exit 1` present (clamp surfaces non-zero on invalid)
+        - `esac` closes the validator
+
+        The regex targets the bash fence after the step-5 heading, not
+        the whole file, so other bash examples (if any are added
+        elsewhere) can't mask a regression.
+        """
+        pause_md = Path(__file__).parent.parent / "commands" / "pause.md"
+        content = pause_md.read_text(encoding="utf-8")
+
+        # Slice from the step-5 heading to either the step-6 heading or
+        # the end of file — whichever comes first. Bounding the search
+        # prevents a future unrelated bash block elsewhere in pause.md
+        # from spuriously satisfying the assertions.
+        step_5_match = re.search(
+            r"^###\s*5\.\s+Write\s+Paused\s+State.*?(?=^###\s*6\.|\Z)",
+            content,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert step_5_match is not None, (
+            "pause.md must have a `### 5. Write Paused State ...` heading; "
+            "could not locate it. Drift guard cannot find the scope."
+        )
+        step_5 = step_5_match.group(0)
+
+        # Grab the first bash fence inside step 5.
+        fence_match = re.search(r"```bash\n(.*?)\n```", step_5, re.DOTALL)
+        assert fence_match is not None, (
+            "pause.md step 5 must contain a ```bash ... ``` fenced block; "
+            "could not locate it. The drain template moved or was removed."
+        )
+        bash_block = fence_match.group(1)
+
+        # Structural assertions — each is its own assert for clear
+        # failure attribution rather than one compound check.
+        assert "case '{true_or_false}' in" in bash_block, (
+            f"pause.md step 5 bash block MUST open the validator with "
+            f"`case '{{true_or_false}}' in`. Got:\n{bash_block}"
+        )
+        assert re.search(r"^\s*true\)", bash_block, re.MULTILINE), (
+            f"pause.md step 5 MUST have a `true)` branch. Got:\n{bash_block}"
+        )
+        assert re.search(r"^\s*false\)", bash_block, re.MULTILINE), (
+            f"pause.md step 5 MUST have a `false)` branch. Got:\n{bash_block}"
+        )
+        assert re.search(r"^\s*\*\)", bash_block, re.MULTILINE), (
+            f"pause.md step 5 MUST have a `*)` fail-fast branch. "
+            f"Got:\n{bash_block}"
+        )
+        assert "exit 1" in bash_block, (
+            f"pause.md step 5 `*)` branch MUST surface non-zero via "
+            f"`exit 1`. Got:\n{bash_block}"
+        )
+        assert re.search(r"^\s*esac\b", bash_block, re.MULTILINE), (
+            f"pause.md step 5 validator MUST close with `esac`. "
+            f"Got:\n{bash_block}"
         )
