@@ -18,6 +18,8 @@ TaskUpdate(taskId, owner="secretary")
 
 This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the primary mechanism; this consolidation is recommended — skip only for trivial sessions (single comPACT, no variety assessment performed).
 
+> **Track whether this ran**: step 5's journal template requires a `{consolidation_ran}` flag — pass the literal string `true` when the secretary confirms Pass 2 completed, or `false` when you skipped consolidation per the trivial-session rule above. The flag drives the shell-clamped `session_consolidated` emission in step 5.
+
 > **Why this runs first**: Memory consolidation reads task HANDOFFs via `TaskGet`. Task audit (step 7) may delete completed tasks. Running consolidation first ensures HANDOFF data is available.
 
 ## 2. Documentation Sync
@@ -60,19 +62,34 @@ Before ending the session (step 8), ensure all journal entries have been process
 2. **Only on confirmation**: Proceed to worktree cleanup and session decision.
 3. **If secretary cannot confirm**: Warn user — unprocessed journal entries will not be distilled to pact-memory. The journal itself is safe (stored in `~/.claude/pact-sessions/`, not the team directory).
 
-**Journal events**: Write a `session_end` event after confirmation, then emit an unconditional `session_consolidated` event so the SessionEnd detector (`check_unpaused_pr`) can recognize this session as consolidated regardless of whether the wrap-up took the "PR merged / no PR" branch or the "PR still open" branch:
+**Journal events**: Write a `session_end` event after confirmation, then emit a `session_consolidated` event (when step 1 actually ran) so the SessionEnd detector (`check_unpaused_pr`) can recognize this session as consolidated regardless of whether the wrap-up took the "PR merged / no PR" branch or the "PR still open" branch. The bash template below is **shell-clamped** via a three-branch `case` statement — `true` emits, `false` is a no-op, and anything else (empty string, `True`, `TRUE`, a stray integer, an accidental unsubstituted placeholder) fails fast with a stderr message and non-zero exit. The orchestrator MUST pass the literal string `true` or `false` for `{consolidation_ran}`; any other value is treated as a template-substitution bug, not a caller convention.
+
 ```bash
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_end --session-dir '{session_dir}'
-python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+# Emit session_consolidated only when consolidation actually ran in step 1.
+# Shell-clamped via case/esac (mirrors pause.md step 5) so the prose
+# contract is enforced mechanically and an invalid flag value fails
+# fast rather than silently taking the false branch.
+case '{consolidation_ran}' in
+  true)
+    python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
+    ;;
+  false)
+    ;;  # intentional no-op — step 1 was skipped per the trivial-session rule
+  *)
+    echo "[wrap-up.md] invalid {consolidation_ran} flag: '{consolidation_ran}' (expected literal 'true' or 'false')" >&2
+    exit 1
+    ;;
+esac
 ```
 
-The `session_consolidated` write is unconditional — it fires regardless of whether step 6 takes the "PR still open" branch (which ALSO writes `session_paused`) or the "PR merged / no PR" branch (which previously wrote nothing and caused the false-positive warning). `{task_count}` and `{memories_saved}` come from the secretary's consolidation summary (step 1); when the secretary cannot produce exact counts, emit the event with `0` for either field rather than skipping the write — the event's EXISTENCE is the detector signal and the payload is advisory audit trail.
+The `session_consolidated` write fires under the `true` branch regardless of whether step 6 takes the "PR still open" branch (which ALSO writes `session_paused`) or the "PR merged / no PR" branch (which previously wrote nothing and caused the false-positive warning). `{task_count}` and `{memories_saved}` come from the secretary's consolidation summary (step 1); when the secretary cannot produce exact counts, emit the event with `0` for either field rather than skipping the write — the event's EXISTENCE is the detector signal and the payload is advisory audit trail.
 
 **Recovery note**: The journal lives in `~/.claude/pact-sessions/{slug}/{session_id}/`, independent of the team directory — it survives both natural TTL cleanup and explicit `TeamDelete`. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
 

@@ -790,6 +790,156 @@ class TestPauseBashConditionalEmission:
         )
 
 
+# ---------------------------------------------------------------------------
+# Review cycle-3 L1: wrap-up.md shell-clamp mirrors pause.md
+# ---------------------------------------------------------------------------
+
+
+def _run_wrap_up_bash(session_dir, *, consolidation_ran):
+    """Execute the wrap-up.md step-5 bash template against a tmp session_dir.
+
+    Substitutes the shell-clamp's {consolidation_ran} with the literal
+    string argument so the case/esac validator takes the path under test
+    (`true` emits, `false` is a no-op, anything else fails fast). The
+    session_end write is unconditional in wrap-up.md (unlike pause.md
+    which writes session_paused unconditionally); both command files
+    share the same shell-envelope pattern.
+
+    Returns the subprocess CompletedProcess so callers can assert on
+    returncode, stdout, and stderr. Mirrors _run_pause_bash's structure
+    for symmetric coverage.
+    """
+    template = f"""set -e
+trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
+python3 "{_SESSION_JOURNAL_PY}" write \\
+  --type session_end --session-dir '{session_dir}'
+case '{consolidation_ran}' in
+  true)
+    python3 "{_SESSION_JOURNAL_PY}" write \\
+      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
+{{"pass": 2, "task_count": 7, "memories_saved": 3}}
+JSON
+    ;;
+  false)
+    ;;
+  *)
+    echo "[wrap-up.md] invalid {{consolidation_ran}} flag: '{consolidation_ran}' (expected literal 'true' or 'false')" >&2
+    exit 1
+    ;;
+esac
+"""
+    return subprocess.run(
+        ["bash", "-c", template],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+class TestWrapUpBashConditionalEmission:
+    """Pin the wrap-up.md shell-clamp at the bash-execution layer.
+
+    Review cycle-3 L1: wrap-up.md was previously emitting
+    session_consolidated unconditionally on the assumption that
+    /PACT:wrap-up had just run Pass 2. But step 1's prose explicitly
+    permits skipping consolidation for trivial sessions, so the
+    unconditional emission could surface a false-positive consolidated
+    signal on skip. Mirroring pause.md's cycle-2 clamp closes that gap.
+
+    Three-branch case/esac validator: `true` emits, `false` is a no-op,
+    anything else (typo, empty string, capitalized `True`) fails fast
+    with a stderr message echoing the offending value and non-zero exit.
+    """
+
+    def test_consolidation_true_emits_both_events(self, tmp_path):
+        """{consolidation_ran}='true' → session_end AND session_consolidated written."""
+        session_dir = str(tmp_path)
+
+        result = _run_wrap_up_bash(session_dir, consolidation_ran="true")
+
+        assert result.returncode == 0, (
+            f"bash template failed under true branch: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert journal.exists(), "journal file must exist after writes"
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        types = [line.split('"type":"', 1)[1].split('"', 1)[0] for line in lines if line.strip()]
+        assert "session_end" in types, (
+            f"true branch MUST emit session_end. Got types: {types}"
+        )
+        assert "session_consolidated" in types, (
+            f"true branch MUST emit session_consolidated. Got types: {types}"
+        )
+
+    def test_consolidation_false_emits_only_session_end(self, tmp_path):
+        """{consolidation_ran}='false' → session_end written, session_consolidated SKIPPED.
+
+        Regression pin for L1: before the clamp, wrap-up unconditionally
+        emitted session_consolidated even when step 1 was skipped per
+        the trivial-session rule. Reverting the clamp (removing the
+        case/esac validator) would surface that false-positive signal
+        here.
+        """
+        session_dir = str(tmp_path)
+
+        result = _run_wrap_up_bash(session_dir, consolidation_ran="false")
+
+        assert result.returncode == 0, (
+            f"bash template failed under false branch: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert journal.exists(), "session_end write must create the journal"
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        types = [line.split('"type":"', 1)[1].split('"', 1)[0] for line in lines if line.strip()]
+        assert "session_end" in types, (
+            f"false branch MUST still emit session_end. Got types: {types}"
+        )
+        assert "session_consolidated" not in types, (
+            f"false branch MUST NOT emit session_consolidated. Got types: {types}"
+        )
+
+    def test_consolidation_invalid_value_fails_fast(self, tmp_path):
+        """{consolidation_ran}='True' → case `*` branch exits 1 with stderr; session_end already written.
+
+        Mirrors the pause.md invalid-value pin. One asymmetry: wrap-up.md
+        writes session_end BEFORE the case/esac clamp (it's unconditional
+        and pairs with the SessionEnd hook's own write), so under the
+        invalid branch the journal DOES exist (with just session_end)
+        rather than being absent — the clamp fires after the session_end
+        write. The key pins are (a) clamp's stderr identifies the
+        offending value, (b) session_consolidated is NOT present.
+        """
+        session_dir = str(tmp_path)
+
+        result = _run_wrap_up_bash(session_dir, consolidation_ran="True")
+
+        assert result.returncode != 0, (
+            f"invalid flag MUST fail fast; got returncode=0 with "
+            f"stdout={result.stdout!r}"
+        )
+        assert "invalid" in result.stderr.lower(), (
+            f"stderr MUST identify the failure class; got: {result.stderr!r}"
+        )
+        assert "True" in result.stderr, (
+            f"stderr MUST echo the offending value; got: {result.stderr!r}"
+        )
+
+        journal = tmp_path / "session-journal.jsonl"
+        assert journal.exists(), (
+            "session_end write precedes the clamp in wrap-up.md, so the "
+            "journal file should exist with just that event after the "
+            "clamp fires."
+        )
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        types = [line.split('"type":"', 1)[1].split('"', 1)[0] for line in lines if line.strip()]
+        assert "session_consolidated" not in types, (
+            f"invalid branch MUST NOT emit session_consolidated. Got types: {types}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Review cycle-1 Fix 2: unsubstituted-placeholder failure is observable
