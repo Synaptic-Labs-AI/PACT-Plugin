@@ -3871,12 +3871,7 @@ class TestSessionStartSourceField:
         assert event.get("source") == "compact"
 
 
-# =============================================================================
-# #444 Secondary layer: post-compaction checkpoint block migrated from
-# compaction_refresh.py into session_init.py's source="compact" branch.
-# Tests below were ported from tests/test_compaction_refresh.py — that file
-# was deleted in the same change. See docs/architecture/444-post-boundary-bootstrap.md §7.1.
-# =============================================================================
+# Post-compaction checkpoint tests
 
 
 @pytest.fixture

@@ -14,7 +14,6 @@ Manages:
 
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -646,19 +645,14 @@ def _check_journal_paused_state(session_dir: str) -> str | None:
 
 def _check_pr_state(pr_number: int | str) -> str:
     """
-    Check PR state via gh CLI. Returns uppercase state string or empty on error.
+    Check PR state via ``gh pr view``. Returns uppercase state or empty on error.
 
-    Fail-open: returns "" if gh is unavailable, network fails, or timeout.
+    Thin wrapper around ``shared.gh_helpers.check_pr_state`` — kept as a
+    module-local function (not a bare re-export) so existing test patches
+    of ``shared.session_resume._check_pr_state`` continue to work without
+    modification (#453: relocated the implementation, preserved the call
+    surface).
     """
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", "state", "--jq", ".state"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip().upper()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
-    return ""
+    from shared import check_pr_state
+
+    return check_pr_state(pr_number)

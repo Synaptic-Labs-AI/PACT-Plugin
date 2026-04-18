@@ -32,6 +32,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+from shared import check_pr_state
 import shared.pact_context as pact_context
 from shared.pact_context import get_project_dir, get_session_dir, get_session_id, get_team_name
 from shared.session_journal import (
@@ -86,6 +87,18 @@ def check_unpaused_pr(
     if not project_slug:
         return None
 
+    # Fix B (#453): structural consolidation signal — short-circuit if
+    # /PACT:wrap-up or /PACT:pause ran Pass 2 memory consolidation in
+    # this session. Placed first because it is the cheapest check
+    # (disk-local journal read already cached by read_events) and
+    # covers the most common false-positive cases (wrap-up on merged
+    # PR, pause with consolidation). Fail-open: read_events returns []
+    # on missing journal / unreadable journal / corrupt entries, which
+    # falls through to the legacy logic below — identical to pre-fix
+    # behavior for sessions that never consolidated.
+    if read_events("session_consolidated"):
+        return None
+
     paused_events = read_events("session_paused")
     review_events = read_events("review_dispatch")
 
@@ -129,9 +142,24 @@ def check_unpaused_pr(
     if not pr_number:
         return None
 
+    # Fix A (#453): live PR-state check — last-line-of-defense against
+    # merged or closed PRs that neither Fix B nor the pause-vs-review
+    # timestamp comparison caught (e.g., PR merged via GitHub web UI
+    # mid-session with no wrap-up). Invoked only when every cheaper
+    # signal has fallen through, so AC#4 (no network for wrap-up cases)
+    # is preserved structurally by the ordering above.
+    #
+    # Fail-open: check_pr_state returns "" on gh-missing / timeout /
+    # auth-expired / OSError. "" is not in ("MERGED", "CLOSED"), so we
+    # fall through to the warning — the conservative pre-fix behavior
+    # when we cannot distinguish "offline" from "PR actually open."
+    pr_state = check_pr_state(pr_number)
+    if pr_state in ("MERGED", "CLOSED"):
+        return None
+
     return (
         f"Session ended without memory consolidation. "
-        f"PR #{pr_number} is open but pause-mode was not run. "
+        f"PR #{pr_number} may still be open but pause-mode was not run. "
         f"Run /PACT:pause or /PACT:wrap-up in next session."
     )
 

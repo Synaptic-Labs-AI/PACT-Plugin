@@ -302,10 +302,10 @@ from a list), pass `replace=True`:
 memory.update("abc123", {"lessons_learned": ["Only lesson that matters"]}, replace=True)
 ```
 
-> ⚠️ Before this behavior existed (pre-#374), partial list updates silently
-> clobbered the entire column. If you see code that reads → merges in Python →
-> writes back, it's obsolete — delete the read/merge scaffolding and pass just
-> the new items directly to `update()`.
+> ⚠️ Previously, partial list updates silently clobbered the entire column.
+> If you see code that reads → merges in Python → writes back, it's obsolete
+> — delete the read/merge scaffolding and pass just the new items directly to
+> `update()`.
 
 ## Anti-Patterns to Avoid
 

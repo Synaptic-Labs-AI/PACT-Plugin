@@ -31,6 +31,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 | `session_start` | session_init hook | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` ∈ {`startup`, `resume`, `compact`, `clear`, `unknown`} attributes the event to startup vs auto-compact vs `/clear` vs `/resume` for direct triage (no timing-cluster triangulation needed) |
 | `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
 | `session_paused` | pause command | `pr_number`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
+| `session_consolidated` | wrap-up, pause commands | `pass`, `task_count`, `memories_saved` (all optional int) | Signal that Pass 2 memory consolidation ran this session — consumed by `check_unpaused_pr` so SessionEnd does not warn on consolidated sessions regardless of PR state |
 | `variety_assessed` | orchestrate command | `score`, `dimensions` | Restore variety context |
 | `phase_transition` | orchestrate, comPACT | `phase`, `status` (`started`/`completed`) | Determine current phase |
 | `checkpoint` | orchestrate command | Workflow-specific snapshot | Fast recovery point |
@@ -89,7 +90,7 @@ Claude Code compaction has four durability tiers for orchestrator content:
 | **2** | External `@`-refs / `Read()` calls tracked by the Read tracker | **Best-effort** — path-agnostic 5-slot tracker budget × per-file cap in [201, 240) lines; tail-biased selection within available slots; CLAUDE.md and other session Reads compete for the same slots (realistic budget for bootstrap is 3-4 slots). Non-deterministic subset survives. |
 | **3** | Anything else (in-context turns, transient model state) | **None** — accept as lossy. |
 
-**#444 redesign**: The bootstrap re-invocation directive lives at Tier 0
+The bootstrap re-invocation directive lives at Tier 0
 (`session_init.py` additionalContext), not at Tier 2 (Read/@-ref) or in a
 separate `postcompact_archive.py` systemMessage. Hook-emitted directives
 survive every compaction by construction; Read/@-ref-based durability is
