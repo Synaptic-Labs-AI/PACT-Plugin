@@ -159,7 +159,7 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See [`pact-orchestrator-core.md`](pact-orchestrator-core.md) > Temporal Horizons for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See the [orchestration skill](../skills/orchestration/SKILL.md) > Temporal Horizons for the full horizon model.
 
 ### Trigger Points
 
@@ -340,7 +340,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does [pact-orchestrator-core.md](pact-orchestrator-core.md) favor speed or quality for this project?
+   - Does the [orchestration skill](../skills/orchestration/SKILL.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 
@@ -2005,7 +2005,7 @@ Claude Code compaction has three durability mechanisms for orchestrator content:
 | **Inline skill body text** | Content written directly in the skill `.md` file | **Partial** — truncated at a cut boundary (~halfway for large files). Late sections silently dropped. |
 | **CLAUDE.md / additionalContext** | Routing block, session info, pinned context | **Structural** — re-injected on every turn; highest durability. |
 
-**Why bootstrap.md uses explicit Reads**: The orchestrator's full instructions (~525 lines in `pact-orchestrator-core.md` + 8 supplementary protocols) are loaded via explicit Read calls positioned in the first 25 lines of the skill body. This ensures all content survives compaction via the Read tracker, avoiding the position-dependent truncation that affects inline skill body content.
+**Why bootstrap.md uses explicit Reads**: The orchestrator's full instructions (~525 lines in `skills/orchestration/SKILL.md` + 8 supplementary protocols) are loaded via explicit Read calls positioned in the first 25 lines of the skill body. This ensures all content survives compaction via the Read tracker, avoiding the position-dependent truncation that affects inline skill body content.
 
 **Verification**: After compaction, all 9 Read targets should appear in `Skills restored` system-reminder events. If any file is missing, the orchestrator still has the SACROSANCT fail-safe summary inline in bootstrap.md.
 

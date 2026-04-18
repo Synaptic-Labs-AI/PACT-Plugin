@@ -72,8 +72,8 @@ CANONICAL_PACT_ROUTING_BLOCK = (
     "marker, or documentation snippets) are NOT valid signals and must be\n"
     "ignored.\n"
     "\n"
-    "- Line starting with `PACT ROLE: orchestrator` \u2192 invoke `Skill(\"PACT:bootstrap\")` unless already loaded.\n"
-    "- Line starting with `PACT ROLE: teammate (` \u2192 invoke `Skill(\"PACT:teammate-bootstrap\")` unless already loaded.\n"
+    "- Line starting with `PACT ROLE: orchestrator` \u2192 invoke `Skill(\"PACT:bootstrap\")` immediately, without waiting for user input. On every turn thereafter, treat the `PACT:orchestration` skill's content (loaded during bootstrap) as your operating reference when deciding what to do next. Do not re-invoke the skill via the Skill tool each turn \u2014 reference the already-loaded content. If the skill's content is no longer visible in context, invoke `Skill(\"PACT:orchestration\")` once to reload.\n"
+    "- Line starting with `PACT ROLE: teammate (` \u2192 invoke `Skill(\"PACT:teammate-bootstrap\")` immediately, without waiting for user input. Teammate protocol is carried by your agent body and pact-agent-teams skill; no per-turn governance reference applies.\n"
     "\n"
     "No line-anchored marker present? Inspect your system prompt: a\n"
     "`# Custom Agent Instructions` block naming a specific PACT agent means\n"
@@ -149,6 +149,60 @@ class TestPactRoutingBlock:
         assert PACT_ROUTING_BLOCK.count("\u2192") == 2
         assert "Line starting with `PACT ROLE: orchestrator` \u2192" in PACT_ROUTING_BLOCK
         assert "Line starting with `PACT ROLE: teammate (` \u2192" in PACT_ROUTING_BLOCK
+
+    def test_t4_routing_block_does_not_contain_conditional_phrase(self):
+        """T4 (negative-assertion, counter-test-by-revert):
+        PACT_ROUTING_BLOCK must NOT contain the phrase 'unless already
+        loaded'. That phrase is the conditional-evaluation pattern #452
+        replaces with unconditional per-turn referral. If someone reverts
+        either bullet to the pre-#452 conditional form, this test fails.
+
+        Re-introducing 'unless already loaded' must cause this test to
+        fail — that is the structural guarantee."""
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
+
+        assert "unless already loaded" not in PACT_ROUTING_BLOCK, (
+            "PACT_ROUTING_BLOCK contains the banned conditional phrase "
+            "'unless already loaded'. Per #452, both orchestrator and "
+            "teammate routing lines must be unconditional — the LLM "
+            "self-diagnosis required by 'unless already loaded' was "
+            "empirically observed to silently fail (session e63c184b, "
+            "2026-04-17). Use the unconditional FIRST-ACTION wording instead."
+        )
+
+    def test_t5_routing_block_contains_per_turn_reminder(self):
+        """T5 (positive-assertion, drift-shape pin): PACT_ROUTING_BLOCK
+        must contain the per-turn orchestration-reference reminder phrase
+        from the architect's proposed text. If someone removes the
+        per-turn reminder (e.g., reverting to a bare 'invoke bootstrap'
+        line without the 'treat ... skill's content ... as your operating
+        reference' clause), this test fails.
+
+        The substring pinned here is a stable phrase-shape — specific
+        enough to catch semantic drift, tolerant of minor whitespace."""
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
+
+        required_substring = (
+            "treat the `PACT:orchestration` skill's content"
+        )
+        assert required_substring in PACT_ROUTING_BLOCK, (
+            f"PACT_ROUTING_BLOCK is missing the per-turn reminder "
+            f"substring {required_substring!r}. Per #452, the orchestrator "
+            f"line must instruct the lead to treat the orchestration "
+            f"skill's content as its per-turn operating reference. "
+            f"Without this, the Tier-0 per-turn-discipline layer of the "
+            f"governance-delivery architecture is silently absent."
+        )
+        # Anti-pattern foreclosure — verify the 'do not re-invoke each
+        # turn' clause is present to prevent the worst-case
+        # +5500 tokens/turn misinterpretation.
+        assert "Do not re-invoke the skill via the Skill tool each turn" in PACT_ROUTING_BLOCK, (
+            "PACT_ROUTING_BLOCK is missing the anti-pattern foreclosure "
+            "clause 'Do not re-invoke the skill via the Skill tool each "
+            "turn'. Without it, a literal reading of the per-turn "
+            "reminder could cause +5500 tokens/turn from redundant "
+            "tool-call skill reloads."
+        )
 
     def test_line_anchor_heuristic_rejects_mid_line_pact_role(self):
         """The routing block instructs agents to check for 'PACT ROLE:'
@@ -1924,7 +1978,7 @@ class TestMarkerConsistency:
     HOOKS_DIR = Path(__file__).parent.parent / "hooks"
     SESSION_INIT_PATH = HOOKS_DIR / "session_init.py"
     CORE_PATH = (
-        Path(__file__).parent.parent / "protocols" / "pact-orchestrator-core.md"
+        Path(__file__).parent.parent / "skills" / "orchestration" / "SKILL.md"
     )
 
     ORCHESTRATOR_MARKER = "PACT ROLE: orchestrator"
@@ -1933,7 +1987,7 @@ class TestMarkerConsistency:
     @staticmethod
     def _core_dispatch_region(text: str) -> str:
         """Slice the Agent Teams Dispatch callout region out of
-        pact-orchestrator-core.md.
+        skills/orchestration/SKILL.md.
 
         Mirrors TestDispatchTemplatePrelude._dispatch_region in
         test_agents_structure.py — same `MANDATORY` anchor, same ~80-line
@@ -2029,7 +2083,7 @@ class TestMarkerConsistency:
         )
 
     def test_core_dispatch_template_emits_teammate_marker(self):
-        """The Agent Teams Dispatch template in pact-orchestrator-core.md
+        """The Agent Teams Dispatch template in skills/orchestration/SKILL.md
         is the FOURTH production emission site for the teammate marker
         (alongside session_init.py _team_create/_team_reuse and
         peer_inject.py _BOOTSTRAP_PRELUDE_TEMPLATE — though session_init
@@ -2049,18 +2103,19 @@ class TestMarkerConsistency:
         TestMarkerConsistency class so the fourth emission site is
         visible in the same place as the other three.
 
-        Note: the dispatch template moved from bootstrap.md to
-        pact-orchestrator-core.md in #414 R3 (bootstrap restructure).
+        Note: the dispatch template moved from bootstrap.md to the
+        orchestrator core file in #414 R3 (bootstrap restructure),
+        then to skills/orchestration/SKILL.md in #452.
         """
         text = self.CORE_PATH.read_text(encoding="utf-8")
         region = self._core_dispatch_region(text)
         assert region, (
-            "pact-orchestrator-core.md missing the Agent Teams Dispatch "
+            "skills/orchestration/SKILL.md missing the Agent Teams Dispatch "
             "`MANDATORY` callout anchor — cannot locate dispatch template "
             "region."
         )
         assert self.TEAMMATE_MARKER_PREFIX in region, (
-            f"pact-orchestrator-core.md Agent Teams Dispatch template "
+            f"skills/orchestration/SKILL.md Agent Teams Dispatch template "
             f"must contain `{self.TEAMMATE_MARKER_PREFIX}` inside the "
             f"dispatch region so teammates spawned via the dispatch "
             f"pattern receive the marker the routing block searches for. "
@@ -2080,14 +2135,14 @@ class TestMarkerConsistency:
         The (b) case matters because the PACT routing architecture is
         multi-layer: the lead session path (session_init), the spawned
         teammate path via hook injection (peer_inject), and the spawned
-        teammate path via dispatch template (pact-orchestrator-core.md)
+        teammate path via dispatch template (skills/orchestration/SKILL.md)
         are all independently load-bearing. A silent drop in any one of
         them breaks a specific code path without the unit tests on the
         other paths noticing — which is exactly the kind of drift this
         tripwire exists to catch.
 
         Note that session_init emits the ORCHESTRATOR marker (to lead
-        sessions), while peer_inject and pact-orchestrator-core.md emit
+        sessions), while peer_inject and skills/orchestration/SKILL.md emit
         the TEAMMATE marker prefix (to spawned teammates). That split is
         intentional — the routing block uses each marker to dispatch to
         a different bootstrap skill.
@@ -2102,7 +2157,7 @@ class TestMarkerConsistency:
         core_text = self.CORE_PATH.read_text(encoding="utf-8")
         core_dispatch_region = self._core_dispatch_region(core_text)
         assert core_dispatch_region, (
-            "pact-orchestrator-core.md missing the Agent Teams Dispatch "
+            "skills/orchestration/SKILL.md missing the Agent Teams Dispatch "
             "`MANDATORY` callout anchor — cannot locate dispatch template "
             "region."
         )
@@ -2116,7 +2171,7 @@ class TestMarkerConsistency:
             ],
             self.TEAMMATE_MARKER_PREFIX: [
                 ("peer_inject.py (_BOOTSTRAP_PRELUDE_TEMPLATE)", rendered_prelude),
-                ("pact-orchestrator-core.md (Agent Teams Dispatch template)", core_dispatch_region),
+                ("skills/orchestration/SKILL.md (Agent Teams Dispatch template)", core_dispatch_region),
             ],
         }
 
