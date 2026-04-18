@@ -162,3 +162,66 @@ class TestCustomStartFlowsCrossReference:
             "pact-secretary.md missing 'After Session Briefing' section "
             "referenced by SKILL.md custom start flows note"
         )
+
+
+class TestDeadReferencesToMovedOrchestratorCore:
+    """L9 (T13): Dead-reference guard for #452 file relocation.
+
+    The #452 refactor moved pact-orchestrator-core.md from
+    pact-plugin/protocols/ to pact-plugin/skills/orchestration/SKILL.md.
+    No live text under pact-plugin/ (commands, protocols, agents, skills,
+    tests, hooks, templates, reference) may reference the old path
+    'pact-orchestrator-core' — such a reference is either a missed-update
+    from #452 or a forked copy of the content (both of which silently
+    break the dual-purpose SSOT invariant).
+
+    Counter-test-by-revert: reinstate a reference to
+    'pact-orchestrator-core' anywhere under pact-plugin/ — this test
+    fails, catching the drift before merge.
+    """
+
+    PLUGIN_ROOT = Path(__file__).parent.parent
+    SEARCH_SUBDIRS = (
+        "commands",
+        "protocols",
+        "agents",
+        "skills",
+        "hooks",
+        "tests",
+        "templates",
+        "reference",
+    )
+    BANNED_SUBSTRING = "pact-orchestrator-core"
+    # Self-exclusion: this file must reference the banned substring to
+    # define the guard. Listing it here keeps the exclusion explicit.
+    SELF_EXCLUDED_FILES = frozenset({"tests/test_cross_references.py"})
+
+    def test_no_live_references_to_old_orchestrator_core_path(self):
+        """Scan every .py / .md / .json file under pact-plugin/'s live
+        directories for the banned substring. Zero hits expected post-#452."""
+        hits = []
+        for subdir in self.SEARCH_SUBDIRS:
+            root = self.PLUGIN_ROOT / subdir
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.suffix not in (".py", ".md", ".json"):
+                    continue
+                rel = path.relative_to(self.PLUGIN_ROOT)
+                if str(rel) in self.SELF_EXCLUDED_FILES:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if self.BANNED_SUBSTRING in text:
+                    hits.append(str(rel))
+        assert not hits, (
+            f"Found {len(hits)} file(s) still referencing the banned "
+            f"substring {self.BANNED_SUBSTRING!r} (pre-#452 path). "
+            f"These are either missed-update sites from #452 or forked "
+            f"copies of the moved content; both break the dual-purpose "
+            f"SSOT invariant for the orchestration skill. Hits: {hits}"
+        )
