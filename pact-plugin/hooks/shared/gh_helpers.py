@@ -4,10 +4,13 @@ Summary: Shared gh CLI wrappers for PACT hooks. Fail-open by construction.
 Used by: shared.session_resume (resume decisions), hooks.session_end (#453
          consolidation-detection defense-in-depth).
 
-Fail-open contract: every wrapper returns a safe sentinel on any error
-(gh missing, auth expired, network timeout, unknown state, unexpected
-OS error). Callers MUST treat the sentinel as "unknown — fall through
-to existing logic," never as "gh said no."
+Fail-open contract: every wrapper returns a safe sentinel on any
+raisable exception (gh missing, auth expired, network timeout,
+unknown state, OSError, decoding failure, memory pressure, or any
+future exception class). Callers MUST treat the sentinel as
+"unknown — fall through to existing logic," never as "gh said no."
+`KeyboardInterrupt` and `SystemExit` are deliberately NOT caught so
+Ctrl-C and explicit exits still work.
 
 Rationale: gh is an external dependency that can be absent, unauthenticated,
 or unreachable at any time. Hooks must not break the user's session when
@@ -25,10 +28,13 @@ def check_pr_state(pr_number: int | str) -> str:
     Check PR state via ``gh pr view``. Returns uppercase state string or
     empty string on any error.
 
-    Fail-open: returns "" if gh is missing, network times out, auth is
-    expired, or the PR is not found. A 5-second subprocess timeout caps
-    wall-clock latency so a slow or hung gh call cannot delay hook
-    termination.
+    Fail-open: returns "" on ANY exception — gh missing, network
+    timeout, auth expired, PR not found, OSError, decoding failure,
+    memory pressure, or unanticipated future exception classes. A
+    5-second subprocess timeout caps wall-clock latency so a slow or
+    hung gh call cannot delay hook termination. `KeyboardInterrupt`
+    and `SystemExit` intentionally propagate so user-initiated cancel
+    and explicit exits still work.
 
     Possible non-empty returns (GitHub API canonical values, uppercased):
     - "OPEN"   — PR is open
@@ -51,17 +57,17 @@ def check_pr_state(pr_number: int | str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip().upper()
-    except (
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-        subprocess.CalledProcessError,
-        OSError,
-    ):
-        # CalledProcessError is unreachable under the current call form
-        # (check=False + explicit returncode==0 gate above), but listing it
-        # here is defense-in-isolation: a future change to check=True or a
-        # relocated subprocess call that invokes .check_returncode() would
-        # raise CalledProcessError, and the fail-open contract requires
-        # returning "" rather than propagating. Review cycle-1 L2 hardening.
+    except Exception:
+        # Catch-all fail-open. The fail-open invariant is SACROSANCT for
+        # this hook helper — any raisable error (gh missing, timeout,
+        # auth failure, OSError, UnicodeDecodeError on non-UTF-8 stdout,
+        # MemoryError under resource pressure, or a future exception
+        # class we have not anticipated) must surface as the "" sentinel
+        # rather than propagate into session_end / session_resume. An
+        # explicit tuple would drift as new failure modes emerge;
+        # `Exception` covers every non-BaseException raise in one place.
+        # KeyboardInterrupt and SystemExit intentionally still propagate
+        # — neither is a gh failure, and swallowing them would break
+        # Ctrl-C on the hot path.
         pass
     return ""

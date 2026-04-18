@@ -158,6 +158,95 @@ class TestCheckPrStateGhHelpersFailOpen:
         with patch("shared.gh_helpers.subprocess.run", return_value=mock_result):
             assert check_pr_state(42) == ""
 
+    # ------------------------------------------------------------------
+    # Review cycle-2 M1: except widened to Exception — cover
+    # non-subprocess-family exceptions that the prior explicit tuple
+    # would have let propagate.
+    # ------------------------------------------------------------------
+
+    def test_returns_empty_on_unicode_decode_error(self):
+        """UnicodeDecodeError (non-UTF-8 gh stdout) → "".
+
+        With text=True, subprocess.run decodes stdout under the platform
+        locale; a non-UTF-8 sequence from a corrupted gh binary or
+        unusual locale could raise UnicodeDecodeError. The fail-open
+        contract requires surfacing "" rather than propagating.
+        """
+        from shared.gh_helpers import check_pr_state
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "bad byte"),
+        ):
+            assert check_pr_state(42) == ""
+
+    def test_returns_empty_on_value_error(self):
+        """ValueError (unexpected argv/kwargs mismatch) → "".
+
+        Covers any downstream ValueError raised from inside subprocess
+        (e.g. an argv element becoming non-str after a future refactor,
+        or a library upgrade tightening input validation). Broad but
+        realistic — the fail-open wrapper must not propagate.
+        """
+        from shared.gh_helpers import check_pr_state
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=ValueError("unexpected argv element"),
+        ):
+            assert check_pr_state(42) == ""
+
+    def test_returns_empty_on_memory_error(self):
+        """MemoryError (resource pressure inside subprocess.run) → "".
+
+        Catching MemoryError is the reason the widened `except Exception`
+        matters: the prior explicit tuple would have let MemoryError
+        escape into session_end, where the hook's outer try/except would
+        still swallow it but with a coarser scope. This test pins the
+        close-to-source fail-open for the hot path.
+        """
+        from shared.gh_helpers import check_pr_state
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=MemoryError("out of memory"),
+        ):
+            assert check_pr_state(42) == ""
+
+    def test_keyboard_interrupt_still_propagates(self):
+        """KeyboardInterrupt (Ctrl-C) MUST propagate, not be swallowed.
+
+        Pin that `except Exception:` does NOT catch BaseException
+        subclasses KeyboardInterrupt / SystemExit. Swallowing these
+        would break user-initiated cancel on the hook hot path — a
+        session_end hook that refuses to die on Ctrl-C is worse than
+        one that errors. Regression guard against a future widen to
+        `except BaseException:`.
+        """
+        from shared.gh_helpers import check_pr_state
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=KeyboardInterrupt(),
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                check_pr_state(42)
+
+    def test_system_exit_still_propagates(self):
+        """SystemExit (explicit sys.exit) MUST propagate, not be swallowed.
+
+        Companion to the KeyboardInterrupt pin — SystemExit is also a
+        BaseException subclass and must not be caught by Exception.
+        """
+        from shared.gh_helpers import check_pr_state
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=SystemExit(1),
+        ):
+            with pytest.raises(SystemExit):
+                check_pr_state(42)
+
 
 # ---------------------------------------------------------------------------
 # check_pr_state() -- input coercion + subprocess contract
