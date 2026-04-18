@@ -168,7 +168,7 @@ replace on update.
   `{"entities": [{"description": "…"}]}` — the field is `notes`, not `description`)
   raise `ValueError`.
 
-This fixes issue #374 where partial-list updates silently clobbered the entire column.
+This prevents partial-list updates from silently clobbering the entire column.
 
 ### Examples
 
