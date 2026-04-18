@@ -654,6 +654,6 @@ def _check_pr_state(pr_number: int | str) -> str:
     modification (#453: relocated the implementation, preserved the call
     surface).
     """
-    from shared.gh_helpers import check_pr_state
+    from shared import check_pr_state
 
     return check_pr_state(pr_number)

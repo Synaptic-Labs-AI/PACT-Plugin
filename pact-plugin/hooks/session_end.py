@@ -32,7 +32,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
-from shared.gh_helpers import check_pr_state
+from shared import check_pr_state
 import shared.pact_context as pact_context
 from shared.pact_context import get_project_dir, get_session_dir, get_session_id, get_team_name
 from shared.session_journal import (

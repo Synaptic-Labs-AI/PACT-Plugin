@@ -299,17 +299,23 @@ class TestSessionResumeAliasBackcompat:
     """
 
     def test_session_resume_check_pr_state_delegates_to_gh_helpers(self):
-        """When session_resume._check_pr_state is called, gh_helpers.check_pr_state runs.
+        """When session_resume._check_pr_state is called, the shared re-export runs.
 
-        Patching shared.gh_helpers.check_pr_state to a sentinel value and
-        invoking session_resume._check_pr_state MUST return the sentinel.
-        Confirms the wrapper is a true delegation, not a duplicate
-        implementation.
+        Patching shared.check_pr_state (the re-exported public API symbol)
+        to a sentinel value and invoking session_resume._check_pr_state
+        MUST return the sentinel. Confirms the wrapper is a true delegation
+        through the shared package surface, not a duplicate implementation.
+
+        Post-cycle-2 M3: session_resume._check_pr_state imports from
+        `shared` (the re-export), not `shared.gh_helpers` directly, so
+        the correct patch target is the shared-package binding. Patching
+        at shared.gh_helpers would miss because the re-export copies the
+        reference at __init__ import time.
         """
         from shared import session_resume
 
         with patch(
-            "shared.gh_helpers.check_pr_state", return_value="SENTINEL"
+            "shared.check_pr_state", return_value="SENTINEL"
         ) as mock_gh:
             result = session_resume._check_pr_state(42)
 
