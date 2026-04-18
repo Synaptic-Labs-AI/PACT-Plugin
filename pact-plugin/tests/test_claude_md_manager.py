@@ -72,8 +72,8 @@ CANONICAL_PACT_ROUTING_BLOCK = (
     "marker, or documentation snippets) are NOT valid signals and must be\n"
     "ignored.\n"
     "\n"
-    "- Line starting with `PACT ROLE: orchestrator` \u2192 invoke `Skill(\"PACT:bootstrap\")` unless already loaded.\n"
-    "- Line starting with `PACT ROLE: teammate (` \u2192 invoke `Skill(\"PACT:teammate-bootstrap\")` unless already loaded.\n"
+    "- Line starting with `PACT ROLE: orchestrator` \u2192 invoke `Skill(\"PACT:bootstrap\")` immediately, without waiting for user input. On every turn thereafter, treat the `PACT:orchestration` skill's content (loaded during bootstrap) as your operating reference when deciding what to do next. Do not re-invoke the skill via the Skill tool each turn \u2014 reference the already-loaded content. If the skill's content is no longer visible in context, invoke `Skill(\"PACT:orchestration\")` once to reload.\n"
+    "- Line starting with `PACT ROLE: teammate (` \u2192 invoke `Skill(\"PACT:teammate-bootstrap\")` immediately, without waiting for user input. Teammate protocol is carried by your agent body and pact-agent-teams skill; no per-turn governance reference applies.\n"
     "\n"
     "No line-anchored marker present? Inspect your system prompt: a\n"
     "`# Custom Agent Instructions` block naming a specific PACT agent means\n"
@@ -149,6 +149,60 @@ class TestPactRoutingBlock:
         assert PACT_ROUTING_BLOCK.count("\u2192") == 2
         assert "Line starting with `PACT ROLE: orchestrator` \u2192" in PACT_ROUTING_BLOCK
         assert "Line starting with `PACT ROLE: teammate (` \u2192" in PACT_ROUTING_BLOCK
+
+    def test_t4_routing_block_does_not_contain_conditional_phrase(self):
+        """T4 (negative-assertion, counter-test-by-revert):
+        PACT_ROUTING_BLOCK must NOT contain the phrase 'unless already
+        loaded'. That phrase is the conditional-evaluation pattern #452
+        replaces with unconditional per-turn referral. If someone reverts
+        either bullet to the pre-#452 conditional form, this test fails.
+
+        Re-introducing 'unless already loaded' must cause this test to
+        fail — that is the structural guarantee."""
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
+
+        assert "unless already loaded" not in PACT_ROUTING_BLOCK, (
+            "PACT_ROUTING_BLOCK contains the banned conditional phrase "
+            "'unless already loaded'. Per #452, both orchestrator and "
+            "teammate routing lines must be unconditional — the LLM "
+            "self-diagnosis required by 'unless already loaded' was "
+            "empirically observed to silently fail (session e63c184b, "
+            "2026-04-17). Use the unconditional FIRST-ACTION wording instead."
+        )
+
+    def test_t5_routing_block_contains_per_turn_reminder(self):
+        """T5 (positive-assertion, drift-shape pin): PACT_ROUTING_BLOCK
+        must contain the per-turn orchestration-reference reminder phrase
+        from the architect's proposed text. If someone removes the
+        per-turn reminder (e.g., reverting to a bare 'invoke bootstrap'
+        line without the 'treat ... skill's content ... as your operating
+        reference' clause), this test fails.
+
+        The substring pinned here is a stable phrase-shape — specific
+        enough to catch semantic drift, tolerant of minor whitespace."""
+        from shared.claude_md_manager import PACT_ROUTING_BLOCK
+
+        required_substring = (
+            "treat the `PACT:orchestration` skill's content"
+        )
+        assert required_substring in PACT_ROUTING_BLOCK, (
+            f"PACT_ROUTING_BLOCK is missing the per-turn reminder "
+            f"substring {required_substring!r}. Per #452, the orchestrator "
+            f"line must instruct the lead to treat the orchestration "
+            f"skill's content as its per-turn operating reference. "
+            f"Without this, the Tier-0 per-turn-discipline layer of the "
+            f"governance-delivery architecture is silently absent."
+        )
+        # Anti-pattern foreclosure — verify the 'do not re-invoke each
+        # turn' clause is present to prevent the worst-case
+        # +5500 tokens/turn misinterpretation.
+        assert "Do not re-invoke the skill via the Skill tool each turn" in PACT_ROUTING_BLOCK, (
+            "PACT_ROUTING_BLOCK is missing the anti-pattern foreclosure "
+            "clause 'Do not re-invoke the skill via the Skill tool each "
+            "turn'. Without it, a literal reading of the per-turn "
+            "reminder could cause +5500 tokens/turn from redundant "
+            "tool-call skill reloads."
+        )
 
     def test_line_anchor_heuristic_rejects_mid_line_pact_role(self):
         """The routing block instructs agents to check for 'PACT ROLE:'
