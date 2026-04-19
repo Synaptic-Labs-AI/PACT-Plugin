@@ -182,42 +182,57 @@ class TestDeadReferencesToMovedOrchestratorCore:
 
     PLUGIN_ROOT = Path(__file__).parent.parent
     SEARCH_SUBDIRS = (
-        "commands",
-        "protocols",
         "agents",
-        "skills",
+        "commands",
         "hooks",
-        "tests",
-        "templates",
+        "protocols",
         "reference",
+        "skills",
+        "telegram",
+        "templates",
+        "tests",
     )
+    SCANNED_SUFFIXES = (".py", ".md", ".json", ".txt", ".yml", ".yaml", ".toml")
     BANNED_SUBSTRING = "pact-orchestrator-core"
     # Self-exclusion: this file must reference the banned substring to
     # define the guard. Listing it here keeps the exclusion explicit.
     SELF_EXCLUDED_FILES = frozenset({"tests/test_cross_references.py"})
 
     def test_no_live_references_to_old_orchestrator_core_path(self):
-        """Scan every .py / .md / .json file under pact-plugin/'s live
-        directories for the banned substring. Zero hits expected post-#452."""
+        """Scan every .py/.md/.json/.txt/.yml/.yaml/.toml file under
+        pact-plugin/'s live subdirectories AND top-level plugin files
+        for the banned substring. Zero hits expected post-#452."""
         hits = []
+
+        def _scan(path: Path) -> None:
+            if not path.is_file():
+                return
+            if path.suffix not in self.SCANNED_SUFFIXES:
+                return
+            rel = path.relative_to(self.PLUGIN_ROOT)
+            if str(rel) in self.SELF_EXCLUDED_FILES:
+                return
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return
+            if self.BANNED_SUBSTRING in text:
+                hits.append(str(rel))
+
+        # Pass 1: subdirectory walk (agents/, commands/, hooks/, etc.).
         for subdir in self.SEARCH_SUBDIRS:
             root = self.PLUGIN_ROOT / subdir
             if not root.exists():
                 continue
             for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                if path.suffix not in (".py", ".md", ".json"):
-                    continue
-                rel = path.relative_to(self.PLUGIN_ROOT)
-                if str(rel) in self.SELF_EXCLUDED_FILES:
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                if self.BANNED_SUBSTRING in text:
-                    hits.append(str(rel))
+                _scan(path)
+
+        # Pass 2: top-level plugin files (README.md, pyrightconfig.json,
+        # LICENSE-adjacent files, etc.) — files directly under PLUGIN_ROOT
+        # that aren't in any SEARCH_SUBDIRS entry.
+        for path in self.PLUGIN_ROOT.iterdir():
+            _scan(path)
+
         assert not hits, (
             f"Found {len(hits)} file(s) still referencing the banned "
             f"substring {self.BANNED_SUBSTRING!r} (pre-#452 path). "
