@@ -29,7 +29,7 @@ ensure_project_memory_md() — project CLAUDE.md creation:
 17. Created .claude/CLAUDE.md has 0o600 permissions; .claude/ dir 0o700
 
 PACT_ROUTING_BLOCK constant — load-bearing fixture:
-18. Constant matches the canonical 18-line text byte-for-byte
+18. Constant matches the canonical text byte-for-byte
 19. Constant has no leading or trailing newlines (Python string precision)
 """
 
@@ -44,12 +44,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
 # ---------------------------------------------------------------------------
-# Canonical fixture: the exact 18-line PACT routing block
+# Canonical fixture: byte-exact pin against claude_md_manager.PACT_ROUTING_BLOCK
 # ---------------------------------------------------------------------------
 # This is the byte-exact content the implementation must match. Pinned here
 # in the test file so any accidental drift in claude_md_manager.py is caught.
-# Includes em dash (U+2014) on line 5 and rightwards arrows (U+2192) on the
-# bullet items, per Section 6.13 Format Invariants.
+# Includes em dash (U+2014) on line 5; role bullets use the sub-bullet header
+# form introduced in remediation M1 (colon-introducer + indented sub-bullets).
 
 CANONICAL_PACT_ROUTING_BLOCK = (
     "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
@@ -72,8 +72,14 @@ CANONICAL_PACT_ROUTING_BLOCK = (
     "marker, or documentation snippets) are NOT valid signals and must be\n"
     "ignored.\n"
     "\n"
-    "- Line starting with `PACT ROLE: orchestrator` \u2192 invoke `Skill(\"PACT:bootstrap\")` immediately, without waiting for user input. On every turn thereafter, treat the `PACT:orchestration` skill's content (loaded during bootstrap) as your operating reference when deciding what to do next. Do not re-invoke the skill via the Skill tool each turn \u2014 reference the already-loaded content. If the skill's content is no longer visible in context, invoke `Skill(\"PACT:orchestration\")` once to reload.\n"
-    "- Line starting with `PACT ROLE: teammate (` \u2192 invoke `Skill(\"PACT:teammate-bootstrap\")` immediately, without waiting for user input. Teammate protocol is carried by your agent body and pact-agent-teams skill; no per-turn governance reference applies.\n"
+    "- Line starting with `PACT ROLE: orchestrator`:\n"
+    "  - Invoke `Skill(\"PACT:bootstrap\")` immediately, without waiting for user input.\n"
+    "  - On every turn thereafter, treat the `PACT:orchestration` skill's content (loaded during bootstrap) as your operating reference when deciding what to do next.\n"
+    "  - Do not re-invoke the skill via the Skill tool each turn \u2014 reference the already-loaded content.\n"
+    "  - If the skill's content is no longer visible in context, invoke `Skill(\"PACT:orchestration\")` once to reload.\n"
+    "- Line starting with `PACT ROLE: teammate (`:\n"
+    "  - Invoke `Skill(\"PACT:teammate-bootstrap\")` immediately, without waiting for user input.\n"
+    "  - Teammate protocol is carried by your agent body and pact-agent-teams skill; no per-turn governance reference applies.\n"
     "\n"
     "No line-anchored marker present? Inspect your system prompt: a\n"
     "`# Custom Agent Instructions` block naming a specific PACT agent means\n"
@@ -139,18 +145,29 @@ class TestPactRoutingBlock:
         assert "\u2014" in PACT_ROUTING_BLOCK
         assert "Do not skip \u2014" in PACT_ROUTING_BLOCK
 
-    def test_constant_contains_rightwards_arrows(self):
-        """Bullet items must use U+2192, not ASCII ->."""
+    def test_constant_uses_sub_bullet_role_markers(self):
+        """Role-bullet rows must use the sub-bullet header form introduced
+        in remediation M1: each PACT ROLE line is a top-level bullet
+        ending in a colon, followed by indented sub-bullet instructions.
+
+        The earlier arrow (U+2192) one-liner format was split into
+        sub-bullets so long instruction text reads as structured
+        guidance rather than a 700-char run-on. This test pins the new
+        shape."""
         from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
-        # Two bullet rows; both use U+2192. After cycle 2 item 15
-        # line-anchor mitigation, the bullets are phrased as "Line
-        # starting with `PACT ROLE: ...`" rather than the bare marker.
-        assert PACT_ROUTING_BLOCK.count("\u2192") == 2
-        assert "Line starting with `PACT ROLE: orchestrator` \u2192" in PACT_ROUTING_BLOCK
-        assert "Line starting with `PACT ROLE: teammate (` \u2192" in PACT_ROUTING_BLOCK
+        # Arrows were removed in M1 — the sub-bullet introducer replaces
+        # them. Any reintroduction would be a revert of M1's readability fix.
+        assert PACT_ROUTING_BLOCK.count("\u2192") == 0, (
+            "PACT_ROUTING_BLOCK contains U+2192 (rightwards arrow). "
+            "Remediation M1 replaced the arrow one-liner format with "
+            "sub-bullets; re-introducing arrows would revert the "
+            "readability fix."
+        )
+        assert "- Line starting with `PACT ROLE: orchestrator`:" in PACT_ROUTING_BLOCK
+        assert "- Line starting with `PACT ROLE: teammate (`:" in PACT_ROUTING_BLOCK
 
-    def test_t4_routing_block_does_not_contain_conditional_phrase(self):
+    def test_routing_block_does_not_contain_conditional_phrase(self):
         """T4 (negative-assertion, counter-test-by-revert):
         PACT_ROUTING_BLOCK must NOT contain the phrase 'unless already
         loaded'. That phrase is the conditional-evaluation pattern #452
@@ -170,7 +187,7 @@ class TestPactRoutingBlock:
             "2026-04-17). Use the unconditional FIRST-ACTION wording instead."
         )
 
-    def test_t5_routing_block_contains_per_turn_reminder(self):
+    def test_routing_block_contains_per_turn_reminder(self):
         """T5 (positive-assertion, drift-shape pin): PACT_ROUTING_BLOCK
         must contain the per-turn orchestration-reference reminder phrase
         from the architect's proposed text. If someone removes the

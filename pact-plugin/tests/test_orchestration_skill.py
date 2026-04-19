@@ -40,7 +40,7 @@ class TestDualPurposeInvariants:
     have zero content divergence tolerance — any drift is a dead-on-arrival
     contract violation."""
 
-    def test_t6_bootstrap_first_read_target_path(self):
+    def test_bootstrap_first_read_target_path(self):
         """Bootstrap.md's first numbered Read target must be the
         orchestration skill file (by path)."""
         text = BOOTSTRAP_MD.read_text(encoding="utf-8")
@@ -60,7 +60,7 @@ class TestDualPurposeInvariants:
             f"path for orchestration content."
         )
 
-    def test_t7_skill_file_readable_and_substantial(self):
+    def test_skill_file_readable_and_substantial(self):
         """T7 (byte-diff form): the skill body file must exist and contain
         substantial content. Because bootstrap.md's first Read target and
         the Skill tool both resolve to the SAME on-disk path
@@ -87,7 +87,7 @@ class TestSkillAutoDiscovery:
     """T8: The orchestration skill must be auto-discoverable through the
     plugin.json directory-reference skill schema (`"skills": "./skills/"`)."""
 
-    def test_t8_plugin_json_uses_directory_schema(self):
+    def test_plugin_json_uses_directory_schema(self):
         """plugin.json's skills field must be the directory-reference form
         (a string ending in 'skills/' or 'skills'), not a per-skill list.
         This is what allows adding skills/orchestration/SKILL.md to take
@@ -107,7 +107,7 @@ class TestSkillAutoDiscovery:
             f"Auto-discovery scans this directory for SKILL.md files."
         )
 
-    def test_t8_orchestration_skill_under_skills_dir(self):
+    def test_orchestration_skill_under_skills_dir(self):
         """The orchestration SKILL.md must live under the directory
         referenced by plugin.json's 'skills' field, so auto-discovery
         finds it."""
@@ -131,7 +131,7 @@ class TestSkillAutoDiscovery:
             f"'orchestration' (invoked as Skill('PACT:orchestration'))."
         )
 
-    def test_t8_frontmatter_name_matches_directory(self):
+    def test_frontmatter_name_matches_directory(self):
         """Per SKILL.md frontmatter convention (see other skills), the
         frontmatter 'name' field must match the directory name so the
         plugin's skill catalog registers the skill under the expected
@@ -162,7 +162,7 @@ class TestSkillEndToEnd:
     as a documented placeholder so the test suite records the coverage
     gap the manual runbook fills."""
 
-    def test_t9_skill_invocation_returns_body(self):
+    def test_skill_invocation_returns_body(self):
         pass  # pragma: no cover
 
 
@@ -181,7 +181,7 @@ class TestFrontmatterRoleScoping:
         "Agent Team lead",
     )
 
-    def test_t15_frontmatter_has_description(self):
+    def test_frontmatter_has_description(self):
         text = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
         fm = parse_frontmatter(text)
         assert fm is not None, (
@@ -195,7 +195,7 @@ class TestFrontmatterRoleScoping:
         )
 
     @pytest.mark.parametrize("required", REQUIRED_SUBSTRINGS)
-    def test_t15_description_contains_role_scoping_vocabulary(self, required):
+    def test_description_contains_role_scoping_vocabulary(self, required):
         """Drift-shape pin: description must contain role-scoping
         vocabulary that discourages surfacing to teammates."""
         text = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
