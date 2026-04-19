@@ -729,7 +729,7 @@ class TestAgentFirstActionPrelude:
     # frontmatter closing `---`. The blank line after the prelude block is
     # part of the canonical content (separates prelude from agent identity).
     CANONICAL_PRELUDE = (
-        "# FIRST ACTION\n"
+        "# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)\n"
         "\n"
         "Before any other work — including reading files, claiming tasks, "
         "or responding\n"
@@ -773,7 +773,7 @@ class TestAgentFirstActionPrelude:
                 body = text[end:]
             else:
                 body = text
-            first_action_idx = body.find("# FIRST ACTION")
+            first_action_idx = body.find("# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)")
             assert first_action_idx >= 0
             # Find first H1 in body
             lines = body.split("\n")
@@ -782,9 +782,9 @@ class TestAgentFirstActionPrelude:
                 if line.startswith("# ") and not line.startswith("## "):
                     first_h1_line = line
                     break
-            assert first_h1_line == "# FIRST ACTION", (
+            assert first_h1_line == "# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)", (
                 f"{f.name}: first H1 in body is {first_h1_line!r}, expected "
-                f"'# FIRST ACTION'. The bootstrap invocation must precede "
+                f"'# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)'. The bootstrap invocation must precede "
                 f"all other top-level sections."
             )
 
