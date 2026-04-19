@@ -161,7 +161,19 @@ Frontmatter Requirements
 Field	Required	Constraints
 name	Yes	Lowercase, hyphens allowed, max 64 chars
 description	Yes	Max 1024 chars, must include WHAT and WHEN
-⚠️ Critical: The description field is the primary triggering mechanism. Include both what the skill does AND specific triggers/contexts for when to use it. The body is only loaded after triggering—putting "When to Use" sections in the body is ineffective.
+when_to_use	No	Free-form text; appends to description for trigger context. Counts toward the 1,536-char combined (description + when_to_use) cap. Use for additional trigger shape (role scoping, task shapes) that doesn't fit cleanly in description.
+argument-hint	No	Autocomplete hint for expected arguments (shown in the / menu).
+disable-model-invocation	No	Boolean. If true, Claude will not auto-load the skill via description-based triggering; it remains available via explicit Skill() invocation.
+user-invocable	No	Boolean (default true). If false, the skill is hidden from the user-facing `/` menu; model invocation still works.
+allowed-tools	No	List of tools Claude can use without a permission prompt while the skill is active.
+model	No	Model override while the skill is active (e.g. "claude-haiku-4-5").
+effort	No	Reasoning effort tier: `low` / `medium` / `high` / `xhigh` / `max`.
+context	No	Context-scoping policy. Set to `fork` to run the skill in an isolated subagent context (pairs with `agent`).
+agent	No	Subagent type to dispatch the skill through when `context: fork` is set.
+hooks	No	Hook configurations scoped to the skill's lifecycle (e.g. pre/post skill-invocation).
+paths	No	Glob patterns that gate auto-activation by current file paths.
+shell	No	`bash` (default) or `powershell` — shell used when the skill executes shell commands.
+⚠️ Critical: The description field is the primary triggering mechanism. Include both what the skill does AND specific triggers/contexts for when to use it. The body is only loaded after triggering—putting "When to Use" sections in the body is ineffective. If the trigger surface exceeds the 1024-char description cap, add a when_to_use field—it is appended to description for triggering and counts toward the combined 1,536-char cap.
 
 Bundled Resources
 Bundling additional content in Claude Code Skills

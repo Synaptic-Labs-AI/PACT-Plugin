@@ -17,6 +17,7 @@ from helpers import parse_frontmatter
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 EXPECTED_SKILLS = {
+    "orchestration",
     "pact-agent-teams",
     "pact-architecture-patterns",
     "pact-teachback",

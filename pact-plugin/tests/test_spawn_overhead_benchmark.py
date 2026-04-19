@@ -78,7 +78,7 @@ class TestSpawnOverheadRegression:
           - peer_inject.get_peer_context() output (additionalContext —
             the routing prelude + peer list + teachback reminder)
           - The agent body file (pact-backend-coder.md as a
-            representative — all agents share the same FIRST ACTION
+            representative — all agents share the same YOUR FIRST ACTION
             prelude and similar body envelope)
 
         Not measured (by design): lazy-loaded content reachable only

@@ -37,7 +37,7 @@ skills:
   - pact-handoff-harvest
 ---
 
-# FIRST ACTION
+# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)
 
 Before any other work — including reading files, claiming tasks, or responding
 to your dispatch prompt — invoke `Skill("PACT:teammate-bootstrap")`. This loads

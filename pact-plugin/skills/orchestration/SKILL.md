@@ -1,3 +1,18 @@
+---
+name: orchestration
+description: |
+  PACT orchestrator operating instructions: S5 governance, context economy,
+  delegation discipline, agent dispatch, and workflow engagement. Referenced
+  each turn by the Agent Team lead as operating reference; not invoked per
+  turn. For orchestrator role only — teammates use their agent body and
+  pact-agent-teams skill instead.
+when_to_use: |
+  Use when operating as the PACT Orchestrator (Agent Team lead): making
+  delegation decisions, selecting workflows, enforcing governance,
+  resolving specialist conflicts, applying phase principles, or dispatching
+  specialists.
+---
+
 # PACT Orchestrator — Core Operating Instructions
 
 > This file contains the full orchestrator operating instructions. The orchestrator
@@ -388,9 +403,9 @@ When delegating a task, these specialist agents are available to execute PACT ph
 **Dispatch pattern**:
 1. `TaskCreate(subject, description)` — create the tracking task with full mission
 2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="PACT ROLE: teammate ({name}).\n\nYour FIRST ACTION before any other work: invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
+3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
 
-> ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Task()` is interpolated verbatim into the `PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. The `peer_inject.py` hook also sanitizes agent names defensively by stripping `\n`, `\r`, and `)` characters as a second line of defense, but the orchestrator should produce conforming names directly. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names that will be sanitized: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
+> ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Task()` is interpolated verbatim into the `YOUR PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. The `peer_inject.py` hook also sanitizes agent names defensively by stripping `\n`, `\r`, and `)` characters as a second line of defense, but the orchestrator should produce conforming names directly. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names that will be sanitized: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
 
 #### Reuse vs. Spawn Decision
 

@@ -153,12 +153,104 @@ class TestCustomStartFlowsCrossReference:
         )
 
     def test_custom_start_flows_references_secretary(self, skill_content):
-        assert "secretary" in skill_content.lower() and "Custom start flows" in skill_content, (
-            "Custom start flows note must reference the secretary as an example"
+        lines = skill_content.splitlines()
+        anchor_idx = next(
+            (i for i, line in enumerate(lines) if "Custom start flows" in line),
+            None,
+        )
+        assert anchor_idx is not None, (
+            "SKILL.md missing 'Custom start flows' line"
+        )
+        window_start = max(0, anchor_idx - 5)
+        window_end = min(len(lines), anchor_idx + 6)
+        window = "\n".join(lines[window_start:window_end]).lower()
+        assert "secretary" in window, (
+            "Custom start flows note must reference the secretary as an example "
+            "within \u00b15 lines of the anchor; a global substring check is not "
+            "sufficient because unrelated mentions elsewhere in the file would "
+            "silently satisfy it."
         )
 
     def test_secretary_has_after_briefing_section(self, secretary_content):
         assert "After Session Briefing" in secretary_content, (
             "pact-secretary.md missing 'After Session Briefing' section "
             "referenced by SKILL.md custom start flows note"
+        )
+
+
+class TestDeadReferencesToMovedOrchestratorCore:
+    """L9 (T13): Dead-reference guard for #452 file relocation.
+
+    The #452 refactor moved pact-orchestrator-core.md from
+    pact-plugin/protocols/ to pact-plugin/skills/orchestration/SKILL.md.
+    No live text under pact-plugin/ (commands, protocols, agents, skills,
+    tests, hooks, templates, reference) may reference the old path
+    'pact-orchestrator-core' — such a reference is either a missed-update
+    from #452 or a forked copy of the content (both of which silently
+    break the dual-purpose SSOT invariant).
+
+    Counter-test-by-revert: reinstate a reference to
+    'pact-orchestrator-core' anywhere under pact-plugin/ — this test
+    fails, catching the drift before merge.
+    """
+
+    PLUGIN_ROOT = Path(__file__).parent.parent
+    SEARCH_SUBDIRS = (
+        "agents",
+        "commands",
+        "hooks",
+        "protocols",
+        "reference",
+        "skills",
+        "telegram",
+        "templates",
+        "tests",
+    )
+    SCANNED_SUFFIXES = (".py", ".md", ".json", ".txt", ".yml", ".yaml", ".toml")
+    BANNED_SUBSTRING = "pact-orchestrator-core"
+    # Self-exclusion: this file must reference the banned substring to
+    # define the guard. Listing it here keeps the exclusion explicit.
+    SELF_EXCLUDED_FILES = frozenset({"tests/test_cross_references.py"})
+
+    def test_no_live_references_to_old_orchestrator_core_path(self):
+        """Scan every .py/.md/.json/.txt/.yml/.yaml/.toml file under
+        pact-plugin/'s live subdirectories AND top-level plugin files
+        for the banned substring. Zero hits expected post-#452."""
+        hits = []
+
+        def _scan(path: Path) -> None:
+            if not path.is_file():
+                return
+            if path.suffix not in self.SCANNED_SUFFIXES:
+                return
+            rel = path.relative_to(self.PLUGIN_ROOT)
+            if str(rel) in self.SELF_EXCLUDED_FILES:
+                return
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return
+            if self.BANNED_SUBSTRING in text:
+                hits.append(str(rel))
+
+        # Pass 1: subdirectory walk (agents/, commands/, hooks/, etc.).
+        for subdir in self.SEARCH_SUBDIRS:
+            root = self.PLUGIN_ROOT / subdir
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                _scan(path)
+
+        # Pass 2: top-level plugin files (README.md, pyrightconfig.json,
+        # LICENSE-adjacent files, etc.) — files directly under PLUGIN_ROOT
+        # that aren't in any SEARCH_SUBDIRS entry.
+        for path in self.PLUGIN_ROOT.iterdir():
+            _scan(path)
+
+        assert not hits, (
+            f"Found {len(hits)} file(s) still referencing the banned "
+            f"substring {self.BANNED_SUBSTRING!r} (pre-#452 path). "
+            f"These are either missed-update sites from #452 or forked "
+            f"copies of the moved content; both break the dual-purpose "
+            f"SSOT invariant for the orchestration skill. Hits: {hits}"
         )

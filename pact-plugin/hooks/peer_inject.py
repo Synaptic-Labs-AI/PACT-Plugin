@@ -34,8 +34,8 @@ _TEACHBACK_REMINDER = (
 
 
 _BOOTSTRAP_PRELUDE_TEMPLATE = (
-    "PACT ROLE: teammate ({agent_name}).\n\n"
-    "FIRST ACTION: Before any other work, invoke Skill(\"PACT:teammate-bootstrap\"). "
+    "YOUR PACT ROLE: teammate ({agent_name}).\n\n"
+    "YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). "
     "This loads the team communication protocol, teachback standards, memory retrieval, "
     "and algedonic reference. If your context is later compacted and the bootstrap content "
     "is no longer present, re-invoke the skill before continuing implementation.\n\n"
@@ -47,9 +47,9 @@ def _sanitize_agent_name(agent_name: str) -> str:
     PACT ROLE marker format.
 
     SECURITY (cycle 2 minor item 12): the prelude template interpolates
-    agent_name into `PACT ROLE: teammate ({agent_name}).` Without
+    agent_name into `YOUR PACT ROLE: teammate ({agent_name}).` Without
     sanitization, an agent_name containing a newline could inject a
-    second `PACT ROLE: orchestrator` line into additionalContext,
+    second `YOUR PACT ROLE: orchestrator` line into additionalContext,
     causing a teammate to self-identify as the orchestrator under the
     routing block's substring check.
 
@@ -92,7 +92,7 @@ def get_peer_context(
     """
     Build peer context string for a newly spawned agent.
 
-    Prepends a bootstrap prelude (PACT ROLE marker + FIRST ACTION skill
+    Prepends a bootstrap prelude (PACT ROLE marker + YOUR FIRST ACTION skill
     invocation instruction) and appends a teachback timing reminder
     after the peer list. The PACT ROLE marker is the stable substring
     used by lead routing logic; empty agent_name falls back to "unknown".
