@@ -458,7 +458,7 @@ class TestBootstrapPrelude:
     def test_template_contains_first_action_skill_call(self):
         from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
 
-        assert "***YOU MUST DO THIS IMMEDIATELY***:" in _BOOTSTRAP_PRELUDE_TEMPLATE
+        assert "YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY):" in _BOOTSTRAP_PRELUDE_TEMPLATE
         assert 'Skill("PACT:teammate-bootstrap")' in _BOOTSTRAP_PRELUDE_TEMPLATE
 
     def test_template_contains_recovery_hint(self):
