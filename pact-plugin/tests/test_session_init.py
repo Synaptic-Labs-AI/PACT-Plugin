@@ -3209,7 +3209,7 @@ class TestHappyPathOutputInvariant:
 #
 # PR #390 replaces the persistent ~/.claude/CLAUDE.md kernel with a lazy-loaded
 # bootstrap skill. The session_init hook is now the PRIMARY delivery channel
-# for the PACT ROLE marker + Skill("PACT:bootstrap") FIRST ACTION directive.
+# for the PACT ROLE marker + Skill("PACT:bootstrap") YOUR FIRST ACTION directive.
 #
 # If session_init.main() throws BEFORE it has built the team_create/team_reuse
 # block, the lead would previously get only {"systemMessage": "..."} back and

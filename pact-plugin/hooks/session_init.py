@@ -372,7 +372,7 @@ def _build_safety_net_context(team_name: str | None) -> str:
 
     The returned string MUST start with "YOUR PACT ROLE: orchestrator." at byte 0
     (line-anchored) so the routing-block consumer check recognizes it, and
-    must include the `Skill("PACT:bootstrap")` FIRST ACTION instruction so
+    must include the `Skill("PACT:bootstrap")` YOUR FIRST ACTION instruction so
     the lead still loads its operating instructions, governance policy, and
     workflow protocols even when main() failed before building the normal
     team-reuse/team-create string.

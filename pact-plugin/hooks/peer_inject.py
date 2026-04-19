@@ -92,7 +92,7 @@ def get_peer_context(
     """
     Build peer context string for a newly spawned agent.
 
-    Prepends a bootstrap prelude (PACT ROLE marker + FIRST ACTION skill
+    Prepends a bootstrap prelude (PACT ROLE marker + YOUR FIRST ACTION skill
     invocation instruction) and appends a teachback timing reminder
     after the peer list. The PACT ROLE marker is the stable substring
     used by lead routing logic; empty agent_name falls back to "unknown".

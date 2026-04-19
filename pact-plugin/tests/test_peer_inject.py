@@ -445,7 +445,7 @@ class TestMainEntryPoint:
 class TestBootstrapPrelude:
     """The _BOOTSTRAP_PRELUDE_TEMPLATE is the load-bearing teammate prelude.
 
-    It must contain the PACT ROLE marker, the FIRST ACTION skill invocation,
+    It must contain the PACT ROLE marker, the YOUR FIRST ACTION skill invocation,
     and the compaction-recovery hint. Drift in any of these breaks role
     detection in spawned teammates.
     """

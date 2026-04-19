@@ -113,7 +113,7 @@ class TestLazyLoadedAgentTeams:
 
     Post-#366, `pact-agent-teams` is back in agent frontmatter (eager-loaded
     at spawn) because the AGENT TEAMS PROTOCOL pointer block was removed —
-    every agent's FIRST ACTION is `Skill("PACT:teammate-bootstrap")` which
+    every agent's YOUR FIRST ACTION is `Skill("PACT:teammate-bootstrap")` which
     delivers the team protocol via @-references in the command body.
 
     Per-agent skill counts vary by domain: the n8n agent carries 10 skills
@@ -704,7 +704,7 @@ class TestBootstrapCommand:
 
 
 class TestAgentFirstActionPrelude:
-    """Every agent must lead its body with the canonical FIRST ACTION
+    """Every agent must lead its body with the canonical YOUR FIRST ACTION
     prelude that invokes `Skill("PACT:teammate-bootstrap")` before any
     other work.
 
@@ -724,7 +724,7 @@ class TestAgentFirstActionPrelude:
     that was previously checked permissively.
     """
 
-    # Canonical FIRST ACTION prelude per spec Section 6.7. Must appear
+    # Canonical YOUR FIRST ACTION prelude per spec Section 6.7. Must appear
     # verbatim at the top of every agent body, immediately after the
     # frontmatter closing `---`. The blank line after the prelude block is
     # part of the canonical content (separates prelude from agent identity).
@@ -745,7 +745,7 @@ class TestAgentFirstActionPrelude:
     )
 
     def test_first_action_prelude_byte_exact(self, agent_files):
-        """Every agent body must contain the canonical FIRST ACTION prelude
+        """Every agent body must contain the canonical YOUR FIRST ACTION prelude
         verbatim. Closes items 2 and 7 from cycle 1 minor item review.
 
         This single byte-exact assertion supersedes the previous 3 tests
@@ -757,14 +757,14 @@ class TestAgentFirstActionPrelude:
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
             assert self.CANONICAL_PRELUDE in text, (
-                f"{f.name}: FIRST ACTION prelude does not match canonical "
+                f"{f.name}: YOUR FIRST ACTION prelude does not match canonical "
                 f"Section 6.7 fixture verbatim. Either restore the canonical "
                 f"text in the agent body, or update CANONICAL_PRELUDE in "
                 f"TestAgentFirstActionPrelude to match the new fixture."
             )
 
     def test_first_action_precedes_other_headings(self, agent_files):
-        """The FIRST ACTION section must come before any other H1 in the body."""
+        """The YOUR FIRST ACTION section must come before any other H1 in the body."""
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
             # Strip frontmatter
@@ -793,7 +793,7 @@ class TestAgentFrontmatterSkills:
     """Every agent's frontmatter must eager-load the team protocol skills.
 
     Post-#366 the team protocol is delivered via frontmatter (eager) PLUS
-    the teammate-bootstrap command (loaded via FIRST ACTION). This test
+    the teammate-bootstrap command (loaded via YOUR FIRST ACTION). This test
     pins the frontmatter contract: pact-agent-teams AND pact-teachback must
     both be present in skills:.
 
@@ -1174,7 +1174,7 @@ class TestTeammateBootstrapCommand:
 class TestTeammateBootstrapRegisteredInPluginJson:
     """The teammate-bootstrap command must be registered in plugin.json so
     Claude Code exposes it as a slash command. Without registration the
-    FIRST ACTION invocation in every agent would silently fail."""
+    YOUR FIRST ACTION invocation in every agent would silently fail."""
 
     PLUGIN_JSON_PATH = (
         Path(__file__).parent.parent / ".claude-plugin" / "plugin.json"
