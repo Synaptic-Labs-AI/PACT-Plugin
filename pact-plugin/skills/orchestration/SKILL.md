@@ -11,12 +11,9 @@ when_to_use: |
   delegation decisions, selecting workflows, enforcing governance,
   resolving specialist conflicts, applying phase principles, or dispatching
   specialists.
-user-invocable: false
 ---
 
 # PACT Orchestrator — Core Operating Instructions
-
-> **Self-reload**: If you are the PACT orchestrator and this content is no longer visible in your context, invoke `Skill("PACT:orchestration")` once to reload.
 
 > This file contains the full orchestrator operating instructions. The orchestrator
 > loads this via explicit Read at bootstrap; auto-reloads after compaction.

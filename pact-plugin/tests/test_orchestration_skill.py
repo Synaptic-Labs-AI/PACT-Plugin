@@ -207,3 +207,26 @@ class TestFrontmatterRoleScoping:
             f"role-scoping vocabulary risks surfacing the skill to "
             f"teammate specialists that should use pact-agent-teams instead."
         )
+
+    def test_frontmatter_declares_when_to_use(self):
+        """Drift-shape pin (round-3 L1): the frontmatter must declare a
+        `when_to_use` field. Per Anthropic's skill-frontmatter spec, this
+        optional field appends to the description and provides additional
+        trigger context for Claude Code's skill-surfacing heuristic.
+        Dropping this field silently narrows the surfacing-trigger surface
+        and weakens role-aware discovery for the orchestrator skill."""
+        text = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
+        fm = parse_frontmatter(text)
+        assert fm is not None, (
+            "skills/orchestration/SKILL.md missing frontmatter"
+        )
+        assert "when_to_use" in fm, (
+            "skills/orchestration/SKILL.md frontmatter missing 'when_to_use' "
+            "field. Per Anthropic's skill-frontmatter spec, when_to_use "
+            "appends to description for surfacing triggers; its absence "
+            "silently narrows the trigger surface and weakens role-aware "
+            "discovery."
+        )
+        assert fm["when_to_use"].strip(), (
+            "skills/orchestration/SKILL.md frontmatter 'when_to_use' is empty"
+        )

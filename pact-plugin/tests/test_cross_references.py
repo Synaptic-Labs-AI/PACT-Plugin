@@ -153,8 +153,22 @@ class TestCustomStartFlowsCrossReference:
         )
 
     def test_custom_start_flows_references_secretary(self, skill_content):
-        assert "secretary" in skill_content.lower() and "Custom start flows" in skill_content, (
-            "Custom start flows note must reference the secretary as an example"
+        lines = skill_content.splitlines()
+        anchor_idx = next(
+            (i for i, line in enumerate(lines) if "Custom start flows" in line),
+            None,
+        )
+        assert anchor_idx is not None, (
+            "SKILL.md missing 'Custom start flows' line"
+        )
+        window_start = max(0, anchor_idx - 5)
+        window_end = min(len(lines), anchor_idx + 6)
+        window = "\n".join(lines[window_start:window_end]).lower()
+        assert "secretary" in window, (
+            "Custom start flows note must reference the secretary as an example "
+            "within \u00b15 lines of the anchor; a global substring check is not "
+            "sufficient because unrelated mentions elsewhere in the file would "
+            "silently satisfy it."
         )
 
     def test_secretary_has_after_briefing_section(self, secretary_content):

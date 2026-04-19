@@ -161,7 +161,19 @@ Frontmatter Requirements
 Field	Required	Constraints
 name	Yes	Lowercase, hyphens allowed, max 64 chars
 description	Yes	Max 1024 chars, must include WHAT and WHEN
-⚠️ Critical: The description field is the primary triggering mechanism. Include both what the skill does AND specific triggers/contexts for when to use it. The body is only loaded after triggering—putting "When to Use" sections in the body is ineffective.
+when_to_use	No	Free-form text; appends to description for surfacing triggers. Use for additional trigger context (role scoping, task shapes) that doesn't fit the description's WHAT+WHEN structure.
+argument-hint	No	One-line hint shown to users invoking the skill (e.g., "5m /foo" for loop). Ignored for model-invocable skills.
+disable-model-invocation	No	Boolean. If true, the skill is not surfaced via description-based model invocation; still available via explicit Skill() call and user invocation.
+user-invocable	No	Boolean (default true). If false, users cannot invoke the skill via /skill-name; model invocation still works.
+allowed-tools	No	List of tool names the skill may use; restricts the skill's tool surface below the session's grant.
+model	No	Override model for this skill (e.g., "claude-haiku-4-5").
+effort	No	Reasoning effort tier ("low" / "medium" / "high"); steers the model's thinking budget for this skill's execution.
+context	No	Context-window policy for this skill (e.g., "1m" for 1M context).
+agent	No	Name of a dedicated subagent to dispatch this skill through (integrates with Agent Teams).
+hooks	No	Hook configurations scoped to this skill's execution.
+paths	No	Glob patterns that gate skill availability by current file paths.
+shell	No	Shell command / wrapper script to run the skill body through.
+⚠️ Critical: The description field is the primary triggering mechanism. Include both what the skill does AND specific triggers/contexts for when to use it. The body is only loaded after triggering—putting "When to Use" sections in the body is ineffective. If you need more trigger surface than the 1024-char description allows, add a when_to_use field—it appends to description for surfacing but doesn't count against the description cap.
 
 Bundled Resources
 Bundling additional content in Claude Code Skills
