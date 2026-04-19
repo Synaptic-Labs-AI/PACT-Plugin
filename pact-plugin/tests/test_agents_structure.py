@@ -1316,7 +1316,7 @@ class TestDispatchTemplatePrelude:
 
     This is load-bearing because the dispatch template is what the lead
     reads when spawning a specialist — if the template is missing the
-    `PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
+    `YOUR PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
     call, spawned teammates will not self-bootstrap and will lack the
     team-protocol / teachback / algedonic context.
 
@@ -1346,7 +1346,7 @@ class TestDispatchTemplatePrelude:
 
     def test_dispatch_template_contains_pact_role_teammate(self):
         """Spec Section 6.6 / Section 8: the dispatch template must
-        contain the literal placeholder form `PACT ROLE: teammate ({name})`
+        contain the literal placeholder form `YOUR PACT ROLE: teammate ({name})`
         — not just the prefix. The `{name}` placeholder is load-bearing
         because at dispatch time the lead substitutes the teammate's
         actual name, which is what the routing block searches for and
@@ -1358,9 +1358,9 @@ class TestDispatchTemplatePrelude:
             "skills/orchestration/SKILL.md missing the Agent Teams Dispatch "
             "MANDATORY callout anchor."
         )
-        assert "PACT ROLE: teammate ({name})" in region, (
+        assert "YOUR PACT ROLE: teammate ({name})" in region, (
             "Agent Teams Dispatch template in skills/orchestration/SKILL.md "
-            "must contain literal `PACT ROLE: teammate ({name})` (with "
+            "must contain literal `YOUR PACT ROLE: teammate ({name})` (with "
             "the exact placeholder form) so the lead substitutes the "
             "teammate's name at dispatch time. Spec Section 6.6."
         )
@@ -1402,8 +1402,8 @@ class TestDispatchTemplatePrelude:
         # markers within the same prompt literal.
         prompt_idx = region.find("prompt=")
         prompt_tail = region[prompt_idx:]
-        assert "PACT ROLE: teammate (" in prompt_tail, (
-            "`PACT ROLE: teammate (` must appear inside the dispatch "
+        assert "YOUR PACT ROLE: teammate (" in prompt_tail, (
+            "`YOUR PACT ROLE: teammate (` must appear inside the dispatch "
             "prompt= parameter, not merely elsewhere in "
             "skills/orchestration/SKILL.md."
         )

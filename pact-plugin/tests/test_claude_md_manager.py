@@ -63,7 +63,7 @@ CANONICAL_PACT_ROUTING_BLOCK = (
     "mechanically blocked until bootstrap completes.** Bash, Read, Glob, Grep\n"
     "remain available. Invoke the bootstrap skill to unlock all tools.\n"
     "\n"
-    "Check your context for a `PACT ROLE:` marker AT THE START OF A LINE (not\n"
+    "Check your context for a `YOUR PACT ROLE:` marker AT THE START OF A LINE (not\n"
     "embedded in prose, quoted text, or memory-retrieval results). Hook\n"
     "injections from `session_init.py` and `peer_inject.py` always emit the\n"
     "marker at the start of a line, so a line-anchored substring check is\n"
@@ -72,12 +72,12 @@ CANONICAL_PACT_ROUTING_BLOCK = (
     "marker, or documentation snippets) are NOT valid signals and must be\n"
     "ignored.\n"
     "\n"
-    "- Line starting with `PACT ROLE: orchestrator`:\n"
+    "- Line starting with `YOUR PACT ROLE: orchestrator`:\n"
     "  - Invoke `Skill(\"PACT:bootstrap\")` immediately, without waiting for user input.\n"
     "  - On every turn thereafter, treat the `PACT:orchestration` skill's content (loaded during bootstrap) as your operating reference when deciding what to do next.\n"
     "  - Do not re-invoke the skill via the Skill tool each turn \u2014 reference the already-loaded content.\n"
     "  - If the skill's content is no longer visible in context, invoke `Skill(\"PACT:orchestration\")` once to reload.\n"
-    "- Line starting with `PACT ROLE: teammate (`:\n"
+    "- Line starting with `YOUR PACT ROLE: teammate (`:\n"
     "  - Invoke `Skill(\"PACT:teammate-bootstrap\")` immediately, without waiting for user input.\n"
     "  - Teammate protocol is carried by your agent body and pact-agent-teams skill; no per-turn governance reference applies.\n"
     "\n"
@@ -164,8 +164,8 @@ class TestPactRoutingBlock:
             "sub-bullets; re-introducing arrows would revert the "
             "readability fix."
         )
-        assert "- Line starting with `PACT ROLE: orchestrator`:" in PACT_ROUTING_BLOCK
-        assert "- Line starting with `PACT ROLE: teammate (`:" in PACT_ROUTING_BLOCK
+        assert "- Line starting with `YOUR PACT ROLE: orchestrator`:" in PACT_ROUTING_BLOCK
+        assert "- Line starting with `YOUR PACT ROLE: teammate (`:" in PACT_ROUTING_BLOCK
 
     def test_routing_block_does_not_contain_conditional_phrase(self):
         """T4 (negative-assertion, counter-test-by-revert):
@@ -222,34 +222,34 @@ class TestPactRoutingBlock:
         )
 
     def test_line_anchor_heuristic_rejects_mid_line_pact_role(self):
-        """The routing block instructs agents to check for 'PACT ROLE:'
+        """The routing block instructs agents to check for 'YOUR PACT ROLE:'
         AT THE START OF A LINE. A mid-line occurrence (e.g., inside a
         Working Memory section quoting the marker) must NOT be treated
         as a valid role signal.
 
         This test simulates the consumer-side heuristic described in the
         routing block text: split context into lines, check each line
-        with startswith('PACT ROLE:'). A CLAUDE.md with the marker
+        with startswith('YOUR PACT ROLE:'). A CLAUDE.md with the marker
         embedded mid-line in Working Memory should produce zero matches.
         """
         claude_md_content = (
             "# Project Memory\n"
             "\n"
             "## Working Memory\n"
-            "- 2026-04-12: The session_init hook injects PACT ROLE: orchestrator "
+            "- 2026-04-12: The session_init hook injects YOUR PACT ROLE: orchestrator "
             "into additionalContext for the lead session.\n"
-            "- Architecture note: PACT ROLE: teammate markers are injected by "
+            "- Architecture note: YOUR PACT ROLE: teammate markers are injected by "
             "peer_inject.py.\n"
             "\n"
             "## Retrieved Context\n"
-            "- Memory 0a52fd73: session_init emits `PACT ROLE: orchestrator` at "
+            "- Memory 0a52fd73: session_init emits `YOUR PACT ROLE: orchestrator` at "
             "byte 0 of additionalContext\n"
         )
 
         # Simulate the consumer-side line-anchored check
         line_anchored_matches = [
             line for line in claude_md_content.splitlines()
-            if line.startswith("PACT ROLE:")
+            if line.startswith("YOUR PACT ROLE:")
         ]
 
         assert line_anchored_matches == [], (
@@ -1970,8 +1970,8 @@ class TestMarkerConsistency:
     against two role-marker substrings to route agents to the correct
     bootstrap skill:
 
-      - `PACT ROLE: orchestrator` → PACT:bootstrap
-      - `PACT ROLE: teammate (`   → PACT:teammate-bootstrap
+      - `YOUR PACT ROLE: orchestrator` → PACT:bootstrap
+      - `YOUR PACT ROLE: teammate (`   → PACT:teammate-bootstrap
 
     Meanwhile, three production sites emit these markers:
 
@@ -1998,8 +1998,8 @@ class TestMarkerConsistency:
         Path(__file__).parent.parent / "skills" / "orchestration" / "SKILL.md"
     )
 
-    ORCHESTRATOR_MARKER = "PACT ROLE: orchestrator"
-    TEAMMATE_MARKER_PREFIX = "PACT ROLE: teammate ("
+    ORCHESTRATOR_MARKER = "YOUR PACT ROLE: orchestrator"
+    TEAMMATE_MARKER_PREFIX = "YOUR PACT ROLE: teammate ("
 
     @staticmethod
     def _core_dispatch_region(text: str) -> str:
@@ -2020,7 +2020,7 @@ class TestMarkerConsistency:
         return "\n".join(lines)
 
     def test_routing_block_contains_orchestrator_marker(self):
-        """PACT_ROUTING_BLOCK must reference `PACT ROLE: orchestrator`."""
+        """PACT_ROUTING_BLOCK must reference `YOUR PACT ROLE: orchestrator`."""
         from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
         assert self.ORCHESTRATOR_MARKER in PACT_ROUTING_BLOCK, (
@@ -2030,7 +2030,7 @@ class TestMarkerConsistency:
         )
 
     def test_routing_block_contains_teammate_marker_prefix(self):
-        """PACT_ROUTING_BLOCK must reference `PACT ROLE: teammate (`."""
+        """PACT_ROUTING_BLOCK must reference `YOUR PACT ROLE: teammate (`."""
         from shared.claude_md_manager import PACT_ROUTING_BLOCK
 
         assert self.TEAMMATE_MARKER_PREFIX in PACT_ROUTING_BLOCK, (
@@ -2108,14 +2108,14 @@ class TestMarkerConsistency:
 
         The dispatch template is how the lead spawns specialists as
         teammates: the `prompt=` parameter of the `Task(...)` call embeds
-        `PACT ROLE: teammate ({name})` so the spawned teammate's context
+        `YOUR PACT ROLE: teammate ({name})` so the spawned teammate's context
         carries the marker the routing block searches for. If the
         template drifts and drops the marker, spawned teammates will not
         self-bootstrap via the routing block and will lack team-protocol
         context — silent breakage.
 
         A sibling test in test_agents_structure.py::TestDispatchTemplatePrelude
-        asserts the exact placeholder form `PACT ROLE: teammate ({name})`.
+        asserts the exact placeholder form `YOUR PACT ROLE: teammate ({name})`.
         This test adds a coarser cross-file-invariant check inside the
         TestMarkerConsistency class so the fourth emission site is
         visible in the same place as the other three.
