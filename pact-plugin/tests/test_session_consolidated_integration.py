@@ -127,7 +127,7 @@ class TestSessionConsolidatedRegression:
     tests reproduce the event sequence with real journal writes.
     """
 
-    def test_t23_wrap_up_after_pr_merged_mid_session(self, session_dir):
+    def test_wrap_up_after_pr_merged_mid_session(self, session_dir):
         """T23 canonical regression: wrap-up after PR merged → no warning.
 
         Event sequence matches session 9097e100's wrap-up run:
@@ -154,7 +154,7 @@ class TestSessionConsolidatedRegression:
             f"Got: {warning!r}"
         )
 
-    def test_t23_pause_with_consolidation(self, session_dir):
+    def test_pause_with_consolidation(self, session_dir):
         """Pause-path symmetry: /PACT:pause with consolidation → no warning.
 
         Pins that Fix B covers the pause path as well as the wrap-up
@@ -184,7 +184,7 @@ class TestSessionConsolidatedRegression:
 
         assert warning is None
 
-    def test_t23_multiple_wrap_up_runs_in_one_session(self, session_dir):
+    def test_multiple_wrap_up_runs_in_one_session(self, session_dir):
         """Multiple session_consolidated events (N-run wrap-up) → no warning.
 
         A session that ran /PACT:wrap-up more than once (e.g. user
