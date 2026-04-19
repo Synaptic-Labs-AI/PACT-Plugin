@@ -1,18 +1,17 @@
 ---
 name: orchestration
 description: |
-  PACT orchestrator operating instructions for the Agent Team lead only.
-  S5 governance (non-negotiables, policy checkpoints), context economy,
-  delegation discipline, agent dispatch, and workflow engagement.
-  Load-bearing for orchestrator role; teammate specialists use their
-  dedicated agent body and pact-agent-teams skill instead. Referenced
-  each turn by the orchestrator as its operating reference (not invoked
-  per turn).
-  Use when: operating as the PACT Orchestrator (Agent Team lead);
-  making delegation decisions; selecting workflows; enforcing
-  governance; resolving specialist conflicts; applying phase principles.
-  Triggers on: orchestration, delegation, specialist dispatch, workflow
-  selection, governance, PACT phases, team lead, specialist agents.
+  PACT orchestrator operating instructions: S5 governance, context economy,
+  delegation discipline, agent dispatch, and workflow engagement. Referenced
+  each turn by the Agent Team lead as operating reference; not invoked per
+  turn. For orchestrator role only — teammates use their agent body and
+  pact-agent-teams skill instead.
+when_to_use: |
+  Use when operating as the PACT Orchestrator (Agent Team lead): making
+  delegation decisions, selecting workflows, enforcing governance,
+  resolving specialist conflicts, applying phase principles, or dispatching
+  specialists.
+user-invocable: false
 ---
 
 # PACT Orchestrator — Core Operating Instructions
