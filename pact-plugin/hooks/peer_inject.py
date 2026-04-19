@@ -35,7 +35,7 @@ _TEACHBACK_REMINDER = (
 
 _BOOTSTRAP_PRELUDE_TEMPLATE = (
     "YOUR PACT ROLE: teammate ({agent_name}).\n\n"
-    "FIRST ACTION: Before any other work, invoke Skill(\"PACT:teammate-bootstrap\"). "
+    "***YOU MUST DO THIS IMMEDIATELY***: invoke Skill(\"PACT:teammate-bootstrap\"). "
     "This loads the team communication protocol, teachback standards, memory retrieval, "
     "and algedonic reference. If your context is later compacted and the bootstrap content "
     "is no longer present, re-invoke the skill before continuing implementation.\n\n"
