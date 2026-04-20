@@ -639,6 +639,28 @@ class TestCarveOutResetBehavior:
             guard.main()
         assert exc.value.code == 0
 
+    def test_unsafe_team_name_short_circuits(self, monkeypatch, capsys):
+        """Cycle 2 M2: unsafe team_name (path-traversal or control
+        chars) must short-circuit before the sidecar path is built.
+        Counter-test: reverting the is_safe_path_component guard
+        would let Path(~/.claude/teams/<unsafe>) descend outside the
+        team scope."""
+        monkeypatch.setattr(guard, "append_event", lambda *a, **kw: None)
+        monkeypatch.setattr(guard, "make_event", lambda *a, **kw: {"type": "fake"})
+        monkeypatch.setattr(guard, "get_task_list", lambda: [])
+
+        for unsafe in ("../escape", "team/with/slash", "team\x00", "team name"):
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+                {"teammate_name": "coder-1", "team_name": unsafe}
+            )))
+            with pytest.raises(SystemExit) as exc:
+                guard.main()
+            assert exc.value.code == 0, (
+                f"Cycle 2 M2 flip: unsafe team_name {unsafe!r} must "
+                "return (None, {}) via is_safe_path_component guard. "
+                "Reverting the guard would permit path traversal."
+            )
+
     def test_non_dict_metadata_reset(self, monkeypatch, capsys, tmp_path):
         """Covers line 273 — when metadata is a non-dict, we coerce to
         empty and fall into carve-out paths which reset."""

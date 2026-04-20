@@ -141,6 +141,10 @@ class TestCitationShape:
 
 
 class TestCitationStrictness:
+    """Cycle 2 F5 tightening: strict is the DEFAULT. Flexible is
+    opt-in for PREPARE/ARCHITECT phase (or preparer/architect agent
+    when phase absent). Phase WINS over agent prefix."""
+
     def test_phase_code_is_strict(self):
         assert _citation_strictness({"phase": "CODE"}, "anyone") == "strict"
 
@@ -150,18 +154,42 @@ class TestCitationStrictness:
     def test_phase_prepare_is_flexible(self):
         assert _citation_strictness({"phase": "PREPARE"}, "preparer") == "flexible"
 
+    def test_phase_architect_is_flexible(self):
+        assert _citation_strictness({"phase": "ARCHITECT"}, "architect") == "flexible"
+
     def test_coder_agent_is_strict(self):
+        # Strict-by-default — any agent not in the flexible list.
         assert _citation_strictness({}, "backend-coder-1") == "strict"
         assert _citation_strictness({}, "frontend-coder-2") == "strict"
         assert _citation_strictness({}, "test-engineer") == "strict"
 
-    def test_non_coder_agent_is_flexible(self):
+    def test_unknown_agent_is_strict(self):
+        # Cycle 2 F5 — previously defaulted to flexible. Now default
+        # is strict. Counter-test-by-revert: reverting the default
+        # flip would make this fail with "flexible".
+        assert _citation_strictness({}, "anyone-else") == "strict"
+        assert _citation_strictness({}, "security-engineer") == "strict"
+        assert _citation_strictness({}, "qa-engineer") == "strict"
+
+    def test_preparer_architect_agent_is_flexible(self):
         assert _citation_strictness({}, "architect") == "flexible"
         assert _citation_strictness({}, "preparer") == "flexible"
+        assert _citation_strictness({}, "architect-round2") == "flexible"
+        assert _citation_strictness({}, "preparer-1") == "flexible"
 
-    def test_phase_override_wins_over_agent(self):
-        # Even if agent is non-coder, CODE phase → strict
+    def test_phase_wins_over_agent_prefix_strict_direction(self):
+        # Cycle 2 F5: architect agent on CODE phase → phase wins → strict.
+        # Was "phase_override_wins_over_agent" pre-tightening; phase
+        # semantics now explicitly beat agent prefix whenever phase is
+        # present, in both directions (CODE forces strict on architect;
+        # ARCHITECT forces flexible on coder).
         assert _citation_strictness({"phase": "CODE"}, "architect") == "strict"
+
+    def test_phase_wins_over_agent_prefix_flexible_direction(self):
+        # ARCHITECT phase on a coder agent → phase wins → flexible.
+        assert _citation_strictness(
+            {"phase": "ARCHITECT"}, "backend-coder-1"
+        ) == "flexible"
 
 
 # ---------------------------------------------------------------------------
@@ -242,10 +270,22 @@ class TestEvidenceGrounded:
 # ---------------------------------------------------------------------------
 
 class TestTokenSharing:
-    def test_shared_content_token_passes(self):
-        text = "the session_token validation path might be buggy"
+    """Cycle 2 F5 tightening: requires >= 2 shared non-stopword tokens
+    (length >= 3 each) with at least one required_scope_items entry.
+    One-token overlap is too weak a grounding signal."""
+
+    def test_two_shared_tokens_passes(self):
+        # `session_token` AND `handling` both appear in text and item.
+        text = "the session_token handling path might be buggy"
         items = ["session_token handling"]
         assert _shares_non_stopword_token(text, items) is True
+
+    def test_one_shared_token_fails(self):
+        # Only `session_token` overlaps; `validation` / `path` are not
+        # in the item; `buggy` not in item. Count < 2 → fails.
+        text = "the session_token validation path might be buggy"
+        items = ["session_token handling"]
+        assert _shares_non_stopword_token(text, items) is False
 
     def test_only_stopwords_fails(self):
         # All tokens are stopwords → no sharing possible
@@ -669,13 +709,13 @@ class TestSharesNonStopwordTokenNonStringItem:
     required_scope_items entry became an int/None."""
 
     def test_non_string_items_skipped(self):
-        # Three non-string entries + one valid entry that SHARES a token.
-        # Tokenization splits on non-alphanumeric-underscore, so
-        # "middleware flow" contains two tokens (middleware + flow);
-        # "middleware integration" shares "middleware" with that entry.
+        # Three non-string entries + one valid entry that SHARES two
+        # tokens (per cycle 2 F5 tightening — 2-token requirement).
+        # "auth middleware integration" shares `middleware` and `auth`
+        # with "auth middleware".
         assert _shares_non_stopword_token(
             "auth middleware integration",
-            [None, 42, "middleware flow"],  # type: ignore[list-item]
+            [None, 42, "auth middleware"],  # type: ignore[list-item]
         ) is True
 
     def test_all_non_string_items_returns_false(self):
@@ -1452,3 +1492,69 @@ class TestTruncateStripsBeforeCap:
         # contract that non-string input doesn't raise.
         assert tv._truncate(None) == ""
         assert tv._truncate(42) == "42"
+
+
+# ---------------------------------------------------------------------------
+# Cycle 2 F5 counter-test-by-revert: citation-strictness default flip
+# ---------------------------------------------------------------------------
+
+
+class TestCitationStrictnessDefaultFlipCounterTest:
+    """Cycle 2 F5 tightening: strict-by-default. Reverting to the
+    pre-cycle-2 flexible default would let a teammate on an unknown
+    phase and unknown agent pass a 3-word noun-phrase citation that
+    strict mode rejects.
+    """
+
+    def test_unknown_context_defaults_to_strict(self):
+        # Counter-test-by-revert: if _citation_strictness returned
+        # "flexible" for unknown context (the pre-cycle-2 default),
+        # this assertion would fail with 'flexible' != 'strict'.
+        assert _citation_strictness({}, "unknown-agent") == "strict", (
+            "Cycle 2 F5 flip: unknown phase + unknown agent must "
+            "default to strict citation. Reverting the flip to "
+            "pre-cycle-2 default-flexible would break this."
+        )
+
+    def test_coder_agent_strict_without_phase(self):
+        # Pre-cycle-2: strict via _CODER_PREFIXES list. Post-cycle-2:
+        # strict because default is strict (not via prefix list).
+        # Semantic equivalence: this still passes, but the REASON
+        # changed. Drift guard: asserts the post-change behavior is
+        # stable.
+        assert _citation_strictness({}, "backend-coder-2") == "strict"
+
+    def test_three_word_citation_rejected_by_strict(self):
+        # The 3-word flexible alternate (`(?:\w+\s){2,}\w+`) is
+        # unavailable to strict mode. This makes the tightening
+        # observable end-to-end at the citation-regex layer.
+        assert _matches_citation(
+            "validate session token inputs", "strict"
+        ) is False
+        assert _matches_citation(
+            "validate session token inputs", "flexible"
+        ) is True
+
+
+class TestTokenSharingCounterTestByRevert:
+    """Cycle 2 F5 tightening: 2-token requirement. Reverting to the
+    pre-cycle-2 truthy-intersection (>=1 token) would let single-word
+    echoing pass."""
+
+    def test_single_shared_token_rejected(self):
+        # One shared non-stopword token MUST fail now. Pre-cycle-2
+        # this returned True.
+        assert _shares_non_stopword_token(
+            "the token system needs rework", ["token handling"]
+        ) is False, (
+            "Cycle 2 F5 flip: single-token overlap no longer "
+            "satisfies the token-sharing rule. Reverting to the "
+            "truthy-intersection check would make this pass."
+        )
+
+    def test_two_shared_tokens_accepted(self):
+        # Two shared tokens passes — establishes the new floor.
+        assert _shares_non_stopword_token(
+            "the token handling path needs rework",
+            ["token handling"],
+        ) is True

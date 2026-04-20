@@ -1199,7 +1199,15 @@ class TestCounterTestByRevertGate:
                                  "first_failing_reason": "awaiting_approval",
                                  "first_failing_metadata": {
                                      "variety": {"total": 11},
-                                     "required_scope_items": ["session_token"],
+                                     # Cycle 2 F5 tightening: 2-token
+                                     # share required between
+                                     # assumption and one scope item.
+                                     # `session_token` and `middleware`
+                                     # both appear in the submit's
+                                     # most_likely_wrong.assumption.
+                                     "required_scope_items": [
+                                         "session_token middleware",
+                                     ],
                                      "teachback_submit": submit,
                                  },
                                  "first_failing_protocol_level": "full",
@@ -1346,7 +1354,17 @@ class TestCounterTestByRevertGate:
                                  "first_failing_reason": "awaiting_approval",
                                  "first_failing_metadata": {
                                      "variety": {"total": 11},
-                                     "required_scope_items": ["session_token"],
+                                     # Cycle 2 F5: 2-token share
+                                     # requirement. Assumption shares
+                                     # `session_token` and `middleware`
+                                     # with this scope item so the
+                                     # first failing field remains
+                                     # first_action.action (the invalid
+                                     # citation shape — this test's
+                                     # actual subject).
+                                     "required_scope_items": [
+                                         "session_token middleware",
+                                     ],
                                      "teachback_submit": submit,
                                  },
                                  "first_failing_protocol_level": "full",

@@ -666,3 +666,127 @@ class TestCounterTestByRevertScan:
         reason, state = _classify_task_state(meta, "simplified")
         assert reason == "unaddressed_items"
         assert state == "teachback_correcting"
+
+
+# ---------------------------------------------------------------------------
+# Cycle 2 F2 counter-test-by-revert: scanner isinstance guard on
+# conditions_met. Previously silent-active; must now be invalid_submit.
+# ---------------------------------------------------------------------------
+
+
+class TestScannerConditionsMetIsinstanceGuard:
+    """Cycle 2 F2 tightening: _classify_task_state MUST require
+    conditions_met to be a dict before accepting approved as active.
+    Reverting the isinstance check would reopen the silent-active
+    rubber-stamp surface for malformed approved.
+    """
+
+    def test_non_dict_conditions_met_rejects(self):
+        # Non-dict conditions_met types each produce invalid_submit.
+        for bad_conditions in (None, "not-a-dict", [], 42, True):
+            meta = {
+                "teachback_approved": {"conditions_met": bad_conditions},
+            }
+            reason, state = _classify_task_state(meta, "full")
+            assert reason == "invalid_submit", (
+                f"Cycle 2 F2 flip: non-dict conditions_met "
+                f"({bad_conditions!r}) must classify invalid_submit, "
+                f"not silently-active. Reverting the isinstance guard "
+                f"would make this fall through to active."
+            )
+            assert state == "teachback_pending"
+
+    def test_missing_conditions_met_rejects(self):
+        # approved dict without a conditions_met key at all.
+        meta = {"teachback_approved": {"verdict": "ok"}}
+        reason, state = _classify_task_state(meta, "full")
+        assert reason == "invalid_submit"
+        assert state == "teachback_pending"
+
+    def test_dict_with_empty_unaddressed_still_active(self):
+        # Counter-test in the positive direction: valid dict-shaped
+        # conditions_met with empty unaddressed IS active. The guard
+        # only fails malformed shapes, not legitimate empty-unaddressed
+        # approvals.
+        meta = {
+            "teachback_approved": {
+                "conditions_met": {"addressed": ["item_a"], "unaddressed": []},
+            },
+        }
+        reason, state = _classify_task_state(meta, "full")
+        assert reason == ""
+        assert state == "active"
+
+
+# ---------------------------------------------------------------------------
+# Cycle 2 M2 counter-test-by-revert: scanner path sanitization
+# ---------------------------------------------------------------------------
+
+
+class TestScannerPathSanitization:
+    """Cycle 2 M2: scan_teachback_state rejects any team_name that is
+    not a positive-regex path component. Reverting the guard would
+    allow ../-escape into arbitrary directories."""
+
+    def test_unsafe_team_name_with_escape_returns_default_summary(self, tmp_path):
+        # Craft a real adversarial scenario: place a task file in a
+        # sibling directory of tasks_base_dir, and use a relative-
+        # escape team_name to target it. With the M2 guard: scanner
+        # rejects at the guard and returns _DEFAULT_SUMMARY. Without
+        # the guard: Path(tasks_base_dir) / "../outside" resolves to
+        # the escape target and the scanner descends into it.
+        from shared import teachback_scan as ts
+        import json as _json
+        # Inner dir is tasks_base_dir; outside is a sibling under the
+        # SAME tmp_path (not tmp_path.parent, which pytest reuses
+        # across tests and can produce flaky shared-state failures).
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        outside = tmp_path / "outside_target"
+        outside.mkdir()
+        (outside / "99.json").write_text(_json.dumps({
+            "id": "99", "owner": "coder-1", "status": "in_progress",
+            "metadata": {
+                "variety": {"total": 9},
+                # No teachback_submit → would fail the scanner →
+                # all_active=False and first_failing_reason populated
+                # under the revert. Under the M2 guard: scanner never
+                # reaches _classify_task_state for this file.
+            },
+        }), encoding="utf-8")
+
+        result = ts.scan_teachback_state(
+            "coder-1",
+            "../outside_target",  # unsafe — contains "/" and ".."
+            tasks_base_dir=str(inner),
+        )
+        assert result["task_count"] == 0, (
+            "Cycle 2 M2 flip: unsafe team_name must short-circuit "
+            "BEFORE Path() join descends into the escape target. "
+            "Reverting the is_safe_path_component guard would let "
+            "the scanner read the crafted 99.json and set task_count=1."
+        )
+        assert result["all_active"] is True
+
+    def test_unsafe_team_name_with_null_byte_rejected(self, tmp_path):
+        from shared import teachback_scan as ts
+        result = ts.scan_teachback_state(
+            "coder-1", "team\x00injected",
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result["task_count"] == 0
+        assert result["all_active"] is True
+
+    def test_safe_team_name_proceeds(self, tmp_path):
+        # Counter-test in the positive direction: legitimate team_name
+        # does NOT short-circuit — the scanner proceeds to check the
+        # task dir (which doesn't exist here, so still empty summary
+        # but via a different code path).
+        from shared import teachback_scan as ts
+        result = ts.scan_teachback_state(
+            "coder-1", "pact-test",
+            tasks_base_dir=str(tmp_path),
+        )
+        # task_dir doesn't exist → still _DEFAULT_SUMMARY, but this
+        # exercises the safe-name happy path (no guard-rejection).
+        assert result["task_count"] == 0

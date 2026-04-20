@@ -46,6 +46,7 @@ from shared import (
     TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS,
     TEACHBACK_FULL_PROTOCOL_VARIETY,
 )
+from shared.session_state import is_safe_path_component
 
 
 # Exempt-agent frozenset — verbatim mirror of teachback_check._EXEMPT_AGENTS
@@ -188,9 +189,18 @@ def _classify_task_state(
     # T4/T5 — approved present
     if isinstance(approved, dict) and approved:
         conditions_met = approved.get("conditions_met")
-        unaddressed = []
-        if isinstance(conditions_met, dict):
-            unaddressed = conditions_met.get("unaddressed") or []
+        # Cycle 2 F2 tightening: malformed approved (non-dict
+        # conditions_met, or missing the key entirely) MUST classify
+        # as invalid_submit — never silently-active. Previously the
+        # scanner fell through to active when conditions_met was any
+        # non-dict (including None or a string), which opened a rubber-
+        # stamp surface at the structural-triage layer. The downstream
+        # full validator (validate_approved) catches this too, but F2
+        # restores scanner-layer fail-safe matching the docstring's
+        # "valid approved" precondition on the T4 branch.
+        if not isinstance(conditions_met, dict):
+            return (_REASON_INVALID_SUBMIT, "teachback_pending")
+        unaddressed = conditions_met.get("unaddressed") or []
         if isinstance(unaddressed, list) and unaddressed:
             # T5 auto-downgrade
             return (_REASON_UNADDRESSED_ITEMS, "teachback_correcting")
@@ -261,6 +271,15 @@ def scan_teachback_state(
     allows.
     """
     if not agent_name or not team_name:
+        return dict(_DEFAULT_SUMMARY)
+
+    # Cycle 2 M2 path sanitization: reject any team_name that isn't a
+    # positive-regex path component ([A-Za-z0-9_-]+). Without this
+    # guard a crafted team_name like "../../.." or "team\x00" would
+    # land in the path join below. The caller-visible contract stays
+    # fail-open (gate allows) via the _DEFAULT_SUMMARY return. Mirrors
+    # the guard in shared.task_utils._read_task_json (PR #426 pattern).
+    if not is_safe_path_component(team_name):
         return dict(_DEFAULT_SUMMARY)
 
     if tasks_base_dir is None:

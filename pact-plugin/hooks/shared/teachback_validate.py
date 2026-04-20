@@ -101,14 +101,16 @@ _STOPWORDS: frozenset[str] = frozenset({
 # `section` OR `:N` line-number shape.
 _GROUNDING_SHAPE = re.compile(r"§|line\s+\d+|section|:\d+", re.IGNORECASE)
 
-# Coder-agent prefixes for _citation_strictness fallback.
-_CODER_PREFIXES = (
-    "backend-coder",
-    "frontend-coder",
-    "database-engineer",
-    "devops-engineer",
-    "n8n",
-    "test-engineer",
+# Agent-prefix fallback for _citation_strictness when metadata.phase
+# is absent. Cycle 2 F5 tightening: strict is DEFAULT; flexible opts in
+# ONLY for preparer / architect whose output is research / design
+# prose, not file:line or function() claims. Every other agent type
+# (coders, test-engineer, security-engineer, qa-engineer, devops-
+# engineer, database-engineer, n8n, secretary, auditor) falls through
+# to the strict default.
+_FLEXIBLE_AGENT_PREFIXES = (
+    "preparer",
+    "architect",
 )
 
 # Cap actual_value in FieldError so the deny_reason template doesn't
@@ -220,16 +222,30 @@ def _template_density_fails(text: str) -> bool:
 
 def _citation_strictness(metadata: dict, agent_name: str) -> str:
     """Return 'strict' | 'flexible' per CONTENT-SCHEMAS.md §Q1.
-    Phase override first; agent-type prefix fallback second."""
+
+    Cycle 2 F5 tightening: **strict by default**. Flexible mode is the
+    opt-in path for PREPARE / ARCHITECT phase work (research prose,
+    design rationale) where file:line and function() claims are
+    genuinely rare. Every other phase — CODE, TEST, security review,
+    qa — requires strict citations.
+
+    Resolution order — **phase wins over agent**:
+      1. metadata.phase in {"PREPARE", "ARCHITECT"} → flexible
+      2. metadata.phase present but NOT in {"PREPARE", "ARCHITECT"}
+         (i.e. CODE, TEST, etc.) → strict (phase explicitly asserts
+         the stricter context even if agent is preparer/architect)
+      3. phase absent → agent_name prefix fallback: preparer /
+         architect prefix → flexible; otherwise strict
+    """
     phase = metadata.get("phase", "") if isinstance(metadata, dict) else ""
-    if isinstance(phase, str) and phase in ("CODE", "TEST"):
-        return "strict"
+    if isinstance(phase, str) and phase:
+        return "flexible" if phase in ("PREPARE", "ARCHITECT") else "strict"
     if isinstance(agent_name, str):
         lower = agent_name.lower()
-        for prefix in _CODER_PREFIXES:
+        for prefix in _FLEXIBLE_AGENT_PREFIXES:
             if lower.startswith(prefix):
-                return "strict"
-    return "flexible"
+                return "flexible"
+    return "strict"
 
 
 def _matches_citation(text: str, strictness: str) -> bool:
@@ -244,17 +260,23 @@ def _matches_citation(text: str, strictness: str) -> bool:
 
 
 def _shares_non_stopword_token(text: str, required_scope_items: list) -> bool:
-    """CONTENT-SCHEMAS.md §Token-sharing check. Returns True iff `text`
-    shares >= 1 non-stopword token (length >= 3) with any
-    required_scope_items entry."""
+    """CONTENT-SCHEMAS.md §Token-sharing check. Cycle 2 F5 tightening:
+    requires **>= 2** shared non-stopword tokens (length >= 3 each)
+    with at least one required_scope_items entry.
+
+    One-token overlap is too weak a grounding signal — a teammate can
+    satisfy it by echoing any single domain word (e.g. "teachback")
+    that appears in the dispatch. Two tokens force the assumption to
+    reference a named scope item AND some concrete aspect of it.
+    """
     text_tokens = {t for t in _tokenize(text) if len(t) >= 3} - _STOPWORDS
-    if not text_tokens:
+    if len(text_tokens) < 2:
         return False
     for item in (required_scope_items or []):
         if not isinstance(item, str):
             continue
         item_tokens = {t for t in _tokenize(item) if len(t) >= 3} - _STOPWORDS
-        if text_tokens & item_tokens:
+        if len(text_tokens & item_tokens) >= 2:
             return True
     return False
 

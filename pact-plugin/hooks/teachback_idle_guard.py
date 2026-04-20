@@ -64,6 +64,7 @@ from shared.error_output import hook_error_json  # noqa: E402
 import shared.pact_context as pact_context  # noqa: E402
 from shared.pact_context import get_team_name  # noqa: E402
 from shared.session_journal import append_event, make_event  # noqa: E402
+from shared.session_state import is_safe_path_component  # noqa: E402
 from shared.task_utils import get_task_list  # noqa: E402
 from shared.teachback_scan import is_exempt_agent  # noqa: E402
 
@@ -254,6 +255,14 @@ def _check_teachback_idle(input_data: dict) -> tuple[str | None, dict]:
 
     team_name = (input_data.get("team_name") or get_team_name() or "").lower()
     if not team_name:
+        return (None, {})
+
+    # Cycle 2 M2 path sanitization: reject any team_name that is not a
+    # positive-regex path component before it reaches _sidecar_path.
+    # An unsafe value like "../foo" would escape ~/.claude/teams/ and
+    # read/write outside the team scope. Caller contract stays
+    # fail-open (no algedonic emitted) via the (None, {}) return.
+    if not is_safe_path_component(team_name):
         return (None, {})
 
     tasks = get_task_list()
