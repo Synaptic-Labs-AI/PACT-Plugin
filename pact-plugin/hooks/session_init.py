@@ -147,9 +147,32 @@ def check_pin_stale_block_directive() -> Optional[str]:
     Uses hard-rule instructional voice (MUST) per PACT protocol — the
     directive is architecturally binding via Tier-0 additionalContext
     (survives compaction per plan row 5 / compaction durability model).
+
+    Side effect (Phase F): writes a session-scoped pin-staleness-pending
+    marker so pin_staleness_gate.py (PreToolUse) can block later Edit/Write
+    on CLAUDE.md Pinned Context. Clears the marker when detection is
+    negative so resolved state does not leave the gate armed.
     """
     path = _get_project_claude_md_path()
     signal = _staleness_block_check(claude_md_path=path)
+
+    try:
+        from shared.pact_context import get_session_dir
+        from pin_staleness_gate import PIN_STALENESS_MARKER_NAME
+        session_dir = get_session_dir()
+        if session_dir:
+            marker = Path(session_dir) / PIN_STALENESS_MARKER_NAME
+            if signal is not None:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch(exist_ok=True)
+            elif marker.exists():
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+    except Exception:  # noqa: BLE001 — marker management is best-effort
+        pass
+
     if signal is None:
         return None
     return (
