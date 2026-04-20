@@ -432,3 +432,67 @@ class TestSessionStartCardinality:
         assert "session_init.py" in session_start[0]["hooks"][0]["command"], (
             "SessionStart's sole hook must be session_init.py."
         )
+
+
+class TestTeachbackModeDrift:
+    """F4 + M-R4-2 drift guard (cycle-5, round-4 architect sketch): the
+    two `_TEACHBACK_MODE` module constants MUST stay locked to the same
+    value.
+
+    Context: `teachback_gate.py` (PreToolUse gate) and
+    `teachback_check.py` (PostToolUse legacy advisory) each declare
+    their own `_TEACHBACK_MODE` constant. Cycle 4 C12 established
+    symmetry — both must sit in advisory during Phase 1 and flip to
+    blocking in lockstep at Phase 2 — but there was no mechanical
+    enforcement. A future refactor that flipped one without the other
+    would produce a split-brain at the Phase-2 cutover: the gate would
+    block (exit 2) while the legacy advisory warning continued to emit
+    teachback_gate_advisory events, poisoning the
+    check_teachback_phase2_readiness.py diagnostic's single-mode
+    invariant.
+
+    Precedent: mirrors `TestStripPatternDrift` at
+    test_teachback_validate.py:1812 — same pattern of locking two
+    parallel constants to grep-level equivalence so divergence surfaces
+    at pytest time rather than after a partial flip ships.
+    """
+
+    def test_teachback_mode_constants_locked_to_same_value(self):
+        import teachback_check as tb_check
+        import teachback_gate as tb_gate
+
+        assert tb_gate._TEACHBACK_MODE == tb_check._TEACHBACK_MODE, (
+            "Mode drift: teachback_gate._TEACHBACK_MODE and "
+            "teachback_check._TEACHBACK_MODE MUST ship with the same "
+            "value. Flipping one to 'blocking' without the other "
+            "creates a split-brain at the Phase-2 cutover — the gate "
+            "denies tool calls (exit 2) while the legacy "
+            "teachback_check hook keeps emitting "
+            "teachback_gate_advisory events alongside the real "
+            "teachback_gate_blocked stream. The Phase-2 readiness "
+            "diagnostic (scripts/check_teachback_phase2_readiness.py) "
+            "assumes a single-mode advisory stream and would mis-count "
+            "false positives. Update BOTH constants in the same commit."
+        )
+
+    def test_teachback_mode_is_known_vocabulary_value(self):
+        from shared import (
+            TEACHBACK_MODE_ADVISORY,
+            TEACHBACK_MODE_BLOCKING,
+        )
+
+        import teachback_check as tb_check
+        import teachback_gate as tb_gate
+
+        known = {TEACHBACK_MODE_ADVISORY, TEACHBACK_MODE_BLOCKING}
+        assert tb_gate._TEACHBACK_MODE in known, (
+            f"teachback_gate._TEACHBACK_MODE='{tb_gate._TEACHBACK_MODE}' "
+            f"is not one of the known mode constants {known}. "
+            "Use TEACHBACK_MODE_ADVISORY or TEACHBACK_MODE_BLOCKING "
+            "from shared — ad-hoc string values break the gate's "
+            "mode-check branches."
+        )
+        assert tb_check._TEACHBACK_MODE in known, (
+            f"teachback_check._TEACHBACK_MODE='{tb_check._TEACHBACK_MODE}' "
+            f"is not one of the known mode constants {known}."
+        )

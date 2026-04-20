@@ -677,9 +677,11 @@ class TestStateTransitionEmission:
             "teachback_pending", "teachback_under_review"
         ) == "teammate_submit"
         assert _trigger_for_transition("teachback_under_review", "active") == "lead_approve"
+        # M-R4-3: teachback_correcting -> active now emits "content_fixed"
+        # to distinguish teammate re-submit from true lead_approve.
         assert _trigger_for_transition(
             "teachback_correcting", "active"
-        ) == "lead_approve"
+        ) == "content_fixed"
         assert _trigger_for_transition(
             "teachback_under_review", "teachback_correcting"
         ) == "lead_correct"
@@ -687,6 +689,36 @@ class TestStateTransitionEmission:
             "teachback_correcting", "teachback_under_review"
         ) == "teammate_revise"
         assert _trigger_for_transition("", "") == "unknown"
+
+    def test_correcting_to_active_emits_content_fixed(self):
+        """M-R4-3 (round-4 architect): splitting the `to_state == active`
+        branch so Phase-2 forgery detection can distinguish the two
+        arrival paths.
+
+        Before cycle-5: teachback_correcting -> active returned
+        "lead_approve" (same as teachback_under_review -> active). A
+        teammate that overwrites teachback_approved with a conforming
+        dict cannot be distinguished from a real lead approve.
+
+        After cycle-5: content_fixed (teammate-authored re-submit)
+        vs lead_approve (true lead approve from under_review). The
+        auditor uses the trigger to filter forgery candidates.
+        """
+        from teachback_gate import _trigger_for_transition
+
+        assert _trigger_for_transition(
+            "teachback_correcting", "active"
+        ) == "content_fixed"
+
+    def test_under_review_to_active_emits_lead_approve(self):
+        """M-R4-3 partner: under_review -> active remains lead_approve.
+        Locks the true-lead-approve path against accidental conflation
+        with content_fixed during future refactors."""
+        from teachback_gate import _trigger_for_transition
+
+        assert _trigger_for_transition(
+            "teachback_under_review", "active"
+        ) == "lead_approve"
 
     def test_active_to_teachback_pending_trigger_is_content_invalid(self):
         """M2 (round 3): explicit trigger for the active → teachback_pending
@@ -713,9 +745,9 @@ class TestStateTransitionEmission:
 
         trigger = _trigger_for_transition("active", "teachback_pending")
         assert trigger in {
-            "teammate_submit", "lead_approve", "lead_correct",
-            "auto_downgrade", "teammate_revise", "content_invalid",
-            "unknown",
+            "teammate_submit", "lead_approve", "content_fixed",
+            "lead_correct", "auto_downgrade", "teammate_revise",
+            "content_invalid", "unknown",
         }, f"Trigger '{trigger}' is not in the controlled vocabulary"
         assert trigger != "unknown", (
             "active→teachback_pending must be an explicit named trigger, "

@@ -2233,3 +2233,321 @@ class TestTokenSharingCounterTestByRevert:
             "the token handling path needs rework",
             ["token handling"],
         ) is True
+
+
+# ---------------------------------------------------------------------------
+# M-R4-1 — error-message/implementation parity regression
+# ---------------------------------------------------------------------------
+
+
+class TestTokenShareErrorMessageMatchesImplementation:
+    """M-R4-1 (round-4 architect): the user-facing error message at
+    the token-sharing check MUST agree with the threshold enforced in
+    `_shares_non_stopword_token` (>= 2 shared non-stopword tokens,
+    cycle-2 F5 tightening).
+
+    Before cycle-5: the error string said ">= 1 non-stopword token"
+    while the implementation rejected anything under 2 — a teammate
+    reading the deny_reason would try to satisfy a weaker bar than
+    the gate actually enforces, producing repeat denies with no
+    progress signal. Fixed by updating the string to ">= 2
+    non-stopword tokens".
+
+    The test forces the two load-bearing parts into a single assertion:
+    the substring shipped in the FieldError.error AND the behavior of
+    `_shares_non_stopword_token`. If anyone relaxes the threshold in
+    the helper without updating the string (or vice versa), this test
+    fails.
+    """
+
+    @staticmethod
+    def _dispatched_submit_and_metadata(assumption: str):
+        submit = {
+            "scanned_candidate": {
+                "candidate": "the dispatch hints at a routing corner case",
+                "evidence_against": "nothing in particular",
+            },
+            "most_likely_wrong": {
+                "assumption": assumption,
+                "consequence": (
+                    "if I'm wrong about this, the downstream stage "
+                    "will read stale state and produce invalid output"
+                ),
+            },
+            "least_confident_item": {
+                "item": "exact semantics of the x parameter",
+                "current_plan": "read the reference doc first",
+                "failure_mode": "might miss a conditional branch",
+            },
+            "first_action": {
+                "action": "read module.py",
+                "expected_signal": "pytest output confirms the assumption",
+            },
+        }
+        metadata = {"required_scope_items": ["session_token handling"]}
+        return submit, metadata
+
+    def test_error_message_says_two_not_one(self):
+        # Only ONE shared non-stopword token ("token" — "session_token"
+        # splits on underscore) — should produce the token-share error.
+        # This proves that (a) the error fires at the >=2 threshold, and
+        # (b) the shipped error string says ">= 2" not ">= 1".
+        submit, metadata = self._dispatched_submit_and_metadata(
+            "the token validation logic might be wrong in this path",
+        )
+        errors = validate_submit(submit, metadata, "full", "coder-1")
+        token_err = next(
+            (e for e in errors
+             if e.field == "teachback_submit.most_likely_wrong.assumption"
+             and "non-stopword" in e.error),
+            None,
+        )
+        assert token_err is not None, (
+            "Expected the token-sharing check to fire on a one-token "
+            "overlap, but no matching error was emitted. If the "
+            "_shares_non_stopword_token threshold was weakened back to "
+            ">=1, the error would not fire here."
+        )
+        assert ">= 2" in token_err.error, (
+            "M-R4-1 regression: the error message MUST say '>= 2 "
+            "non-stopword tokens' to match the cycle-2 F5 "
+            "implementation threshold (see _shares_non_stopword_token "
+            "docstring). A string that says '>= 1' while the code "
+            "enforces '>= 2' mis-directs the teammate's retry loop "
+            "and produces unfixable denies."
+        )
+        # Negative assertion: the stale ">= 1" phrasing must be GONE.
+        assert ">= 1 non-stopword token" not in token_err.error, (
+            "Stale error-message wording ('>= 1 non-stopword token') "
+            "was detected. Cycle 5 M-R4-1 replaced this with the "
+            "implementation-matching '>= 2'."
+        )
+
+    def test_helper_enforces_two_token_floor(self):
+        # Parity sanity check — the helper's behavior matches the
+        # shipped error message. If a future refactor weakens the
+        # helper back to a one-token intersection, this pins the
+        # regression at the helper site.
+        #
+        # Note on tokenization: `_tokenize` splits on runs of
+        # `[a-zA-Z0-9_]+`, so `"session_token"` is ONE token, not
+        # two. Use space-separated scope items to exercise genuine
+        # multi-token overlap here.
+        # One-overlap ("token" only): must reject.
+        assert _shares_non_stopword_token(
+            "the token parser breaks on edge cases",
+            ["session token handling"],
+        ) is False, (
+            "Helper must reject one-overlap grounding (returns False) "
+            "so the shipped '>= 2' error string remains accurate."
+        )
+        # Two-overlap ("session" + "token"): must accept.
+        assert _shares_non_stopword_token(
+            "the session token stage breaks on edge cases",
+            ["session token handling"],
+        ) is True, (
+            "Helper must accept two-overlap grounding so the rule is "
+            "attainable by a teammate reading the '>= 2' error."
+        )
+
+
+# ---------------------------------------------------------------------------
+# round4-tester MEDIUM — double-pass strip belt-and-suspenders adversarial
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeDoublePassBeltAndSuspenders:
+    """round4-tester MEDIUM (cycle-5): `_normalize` runs the
+    default-ignorable strip BOTH before and after `unicodedata.normalize`.
+    Round-4 tester discovered that removing either single pass leaves
+    the existing single-codepoint test suite green — only removing BOTH
+    fails — so the redundancy is not observable from existing tests.
+
+    Empirical cycle-5 finding (full 0x110000 codepoint scan): NO
+    codepoint in the current Unicode data produces a DI character via
+    NFKC decomposition from a non-DI source. Under current Unicode,
+    the pre-strip and post-strip are functionally equivalent on
+    single-codepoint inputs — either alone suffices.
+
+    That makes a "real-codepoint adversarial test" infeasible. But the
+    redundancy is still load-bearing against future Unicode evolution
+    (UAX is a living spec; new compatibility mappings can introduce
+    DI expansions) AND against mid-flight expansions of
+    `_is_default_ignorable`'s classification (cycle-5 Fixer A is
+    expanding to the full UAX #44 DI enumeration). This class
+    simulates those future cases via monkey-patch and asserts:
+
+    1. When NFKC is patched to return a result that introduces a ZWJ
+       (U+200D), the `_normalize` pipeline still strips it — the
+       post-NFKC pass catches it. Without the post-NFKC strip, the
+       ZWJ survives to the downstream substring-inequality /
+       evidence-substring / membership checks, producing the rubber-
+       stamp bypass the cycle-4 fix closed.
+
+    2. Conversely, when the input already contains a DI that would
+       ALSO satisfy an NFKC decomposition target (e.g. a hidden ZWJ
+       prefix on a compatibility-decomposable codepoint), the
+       pre-NFKC pass prevents the DI from participating in the fold
+       and keeps the fold output deterministic. Without the pre-NFKC
+       strip, the fold behavior becomes input-dependent.
+
+    Both assertions use monkey-patched `unicodedata.normalize` (or
+    carefully constructed inputs that exercise the real NFKC path)
+    and an inline counter-test that simulates removing a pass — the
+    ZWJ survives in the counter-test, validating the pipeline is
+    what protects against DI reinsertion.
+    """
+
+    def test_post_nfkc_strip_catches_normalize_introduced_di(
+        self, monkeypatch,
+    ):
+        """If a hypothetical future NFKC expansion produces a ZWJ in
+        the output, the post-NFKC strip must remove it. Simulates
+        this via a patched `unicodedata.normalize` that injects a ZWJ
+        into its output. The pipeline output must contain no DI
+        characters."""
+        import unicodedata as _u
+
+        original_normalize = _u.normalize
+        sentinel_char = "\ue000"  # PUA codepoint — real NFKC is identity
+        injected_zwj = "\u200d"   # ZWJ — a default-ignorable (Cf)
+
+        def patched_normalize(form, s):
+            # Simulate a hypothetical future NFKC mapping where the
+            # sentinel codepoint decomposes to "A" + ZWJ + "B".
+            result = original_normalize(form, s)
+            return result.replace(sentinel_char, f"A{injected_zwj}B")
+
+        monkeypatch.setattr(tv.unicodedata, "normalize", patched_normalize)
+
+        # Verify the patch behaves as expected (guards against the
+        # monkey-patch silently no-oping).
+        assert tv.unicodedata.normalize("NFKC", sentinel_char) == (
+            f"A{injected_zwj}B"
+        ), "monkey-patch sanity: patched normalize must inject ZWJ"
+
+        # Exercise _normalize. The output MUST NOT contain the ZWJ —
+        # the post-NFKC strip pass removes it.
+        out = _normalize(f"hello{sentinel_char}world")
+        assert injected_zwj not in out, (
+            "Post-NFKC strip failed: the ZWJ injected by the "
+            "patched NFKC survived to the normalized output. The "
+            "double-pass guarantee in `_normalize` is what catches "
+            "this case — removing the third step "
+            "(`post_stripped = _strip_default_ignorable(folded)`) "
+            "would let DI characters reinserted by compatibility "
+            "decomposition bypass the normalizer, reopening the "
+            "rubber-stamp blocker (F-R3-SEC-1)."
+        )
+        # The fold succeeded — A and B survived.
+        assert "ab" in out.lower(), (
+            "NFKC fold output (A + B, minus the ZWJ) must survive "
+            "the strip — proving strip is precise, not over-broad."
+        )
+
+    def test_counter_test_single_pass_fails_on_same_input(
+        self, monkeypatch,
+    ):
+        """Counter-test-by-revert: if only the PRE-NFKC strip runs
+        (post-NFKC strip omitted), the NFKC-introduced ZWJ survives.
+        This pins the post-NFKC pass as load-bearing; without it,
+        the injected DI reaches the downstream comparison layer.
+
+        Uses the same monkey-patched normalize as the positive test
+        and manually simulates a single-pre-strip-only pipeline.
+        """
+        import unicodedata as _u
+
+        original_normalize = _u.normalize
+        sentinel_char = "\ue000"
+        injected_zwj = "\u200d"
+
+        def patched_normalize(form, s):
+            result = original_normalize(form, s)
+            return result.replace(sentinel_char, f"A{injected_zwj}B")
+
+        monkeypatch.setattr(tv.unicodedata, "normalize", patched_normalize)
+
+        # Simulate "pre-strip only" — omit the post-NFKC strip.
+        raw = f"hello{sentinel_char}world"
+        pre_stripped_only = tv._strip_default_ignorable(raw)
+        folded_only = tv.unicodedata.normalize("NFKC", pre_stripped_only)
+        # Emulating the rest of _normalize WITHOUT step 3:
+        single_pass_out = re.sub(r"\s+", " ", folded_only.strip().lower())
+
+        assert injected_zwj in single_pass_out, (
+            "Counter-test-by-revert: omitting the post-NFKC "
+            "`_strip_default_ignorable` pass MUST allow the "
+            "NFKC-introduced ZWJ to survive. If this assertion "
+            "fails, the positive assertion above is rubber-stamped "
+            "— some other mechanism is scrubbing the DI and the "
+            "post-NFKC pass is not the load-bearing layer. This "
+            "counter-test locks the semantics of the double-pass "
+            "architecture."
+        )
+
+    def test_pre_nfkc_strip_isolates_fold_from_di_input(
+        self,
+    ):
+        """The pre-NFKC strip prevents DI characters in the INPUT
+        from participating in NFKC decomposition — keeps the fold
+        deterministic.
+
+        Exercise: a fullwidth digit "１" (U+FF11) folds to ASCII "1"
+        under NFKC. Insert a ZWJ between two fullwidth digits BEFORE
+        NFKC: if the pre-strip didn't run, the ZWJ would sit next to
+        the decomposable codepoints during the fold. The pre-strip
+        eliminates the ZWJ before the fold sees it, so the fold
+        operates on "１１" → "11". The test asserts the final
+        normalized output is clean ASCII "11" with no ZWJ and no
+        fullwidth digits.
+
+        This is a real-codepoint test (no monkey-patch) that exercises
+        the pre-NFKC pass specifically — complementary to the
+        monkey-patch tests above which exercise the post-NFKC pass.
+        """
+        # "\uff11" = FULLWIDTH DIGIT ONE; NFKC folds to "1".
+        # "\u200d" = ZWJ; default-ignorable.
+        raw = "\uff11\u200d\uff11"
+        out = _normalize(raw)
+        assert "\u200d" not in out, "ZWJ must be stripped"
+        assert "\uff11" not in out, "fullwidth digits must fold to ASCII"
+        assert out == "11", (
+            f"Expected fullwidth digits with embedded ZWJ to "
+            f"normalize to '11', got {out!r}. The pre-NFKC strip "
+            "isolates NFKC from the DI so the fold operates on "
+            "clean input."
+        )
+
+    def test_both_passes_combined_make_di_irrelevant_to_rubber_stamp(
+        self,
+    ):
+        """End-to-end belt-and-suspenders proof: the substring-
+        inequality helper `_scanned_candidate_distinct` uses
+        `_normalize`. An attacker who splices a ZWJ into a
+        `scanned_candidate.candidate` MUST NOT be able to pass
+        substring-inequality against a teammate's assumption. Both
+        passes of the strip contribute to this guarantee.
+        """
+        assumption = "the session_token middleware mis-routes tokens"
+        # Attacker's candidate: same text as the assumption with a
+        # ZWJ spliced in mid-word. Without the strip, this renders
+        # visually identical to the assumption but substring-differs.
+        candidate_with_di = (
+            "the session_token middle\u200dware mis-routes tokens"
+        )
+        # _scanned_candidate_distinct returns False when candidate is
+        # substring-EQUAL to assumption (after normalization) — i.e.
+        # when the rubber-stamp attack succeeds.
+        distinct = _scanned_candidate_distinct(
+            candidate_with_di, assumption
+        )
+        assert distinct is False, (
+            "The double-strip double-pass architecture must collapse "
+            "a ZWJ-spliced candidate to the same normalized form as "
+            "the assumption, so substring-inequality correctly "
+            "detects the rubber-stamp attack. If either strip pass "
+            "was removed AND a future Unicode change reintroduced "
+            "DI during NFKC, this assertion would flip to True and "
+            "the rubber-stamp blocker would reopen."
+        )

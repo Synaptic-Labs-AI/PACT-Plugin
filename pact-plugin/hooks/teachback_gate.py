@@ -484,14 +484,37 @@ def _trigger_for_transition(from_state: str, to_state: str) -> str:
     """Infer the trigger vocabulary term from the state pair per
     JOURNAL-EVENTS.md §Trigger values controlled vocabulary.
 
-    Returns one of: teammate_submit | lead_approve | lead_correct |
-    auto_downgrade | teammate_revise | content_invalid | unknown.
+    Returns one of: teammate_submit | lead_approve | content_fixed |
+    lead_correct | auto_downgrade | teammate_revise | content_invalid |
+    unknown.
+
+    M-R4-3 (round-4 architect): the `to_state == "active"` transition
+    splits by from_state so the Phase-2 auditor can distinguish
+    lead-authored approvals from teammate-authored re-submits. The
+    bare `to_state == "active"` branch previously returned
+    `"lead_approve"` unconditionally, which conflated the two paths and
+    made forgery detection impossible (a teammate that overwrites their
+    own teachback_approved dict cannot be distinguished from a genuine
+    lead approve).
     """
     if from_state == "" and to_state == "teachback_under_review":
         return "teammate_submit"
     if from_state == "teachback_pending" and to_state == "teachback_under_review":
         return "teammate_submit"
+    if from_state == "teachback_correcting" and to_state == "active":
+        # Teammate re-submit path: correcting -> active means the
+        # teammate addressed the lead's corrections. Distinct from a
+        # fresh lead_approve; forgery-detection auditor uses this split.
+        return "content_fixed"
+    if from_state == "teachback_under_review" and to_state == "active":
+        # True lead-approve path: under_review -> active means the lead
+        # wrote a valid teachback_approved with unaddressed=[].
+        return "lead_approve"
     if to_state == "active":
+        # First-observation fallback (no prior from_state) — bias toward
+        # lead_approve since that is the normal arrival at active from a
+        # cold journal read. The named from_state branches above handle
+        # the split cases explicitly.
         return "lead_approve"
     if from_state == "teachback_under_review" and to_state == "teachback_correcting":
         # Ambiguous between lead_correct and auto_downgrade from the gate's

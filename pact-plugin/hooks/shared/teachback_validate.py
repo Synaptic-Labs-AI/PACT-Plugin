@@ -263,12 +263,29 @@ def _normalize(text: str) -> str:
          correct semantics (the tokens ARE different characters, even
          if visually identical).
       3. Strip default-ignorables AGAIN after NFKC as belt-and-
-         suspenders — catches the rare case where NFKC decomposition
-         EXPANDS a compatibility codepoint into a sequence that
-         contains a default-ignorable codepoint. Cost: one extra O(n)
-         pass; benefit: forecloses the post-fold reinsertion class of
-         bug. Cycle 4 architectural fix for the round-3 convergent
-         blocker (coder SEC-1 + security F-R3-SEC-1) — see
+         suspenders. Empirical scan of the full Unicode codepoint
+         space (cycle-5 round-4 tester audit) confirms NO current
+         codepoint produces a DI character via NFKC decomposition
+         from a non-DI source, so under current Unicode data the
+         post-NFKC pass is functionally redundant on single-char
+         inputs. It is retained as future-proofing against:
+           - UAX spec updates that add new NFKC compatibility
+             mappings whose decomposition introduces DI codepoints
+             (the Unicode Standard is a living spec)
+           - expansions to `_is_default_ignorable`'s definition
+             (e.g. cycle-5 Fixer A's full UAX #44 DI enumeration)
+             that classify new codepoints as DI mid-fold
+           - interaction effects with multi-char compatibility
+             decompositions that future-proof testing cannot
+             predict by single-codepoint scan alone
+         Cost: one extra O(n) pass; benefit: forecloses the
+         post-fold reinsertion class of bug under any foreseeable
+         Unicode evolution. See the adversarial test
+         `TestNormalizeDoublePassBeltAndSuspenders` (test file)
+         for the monkey-patched simulation that proves the
+         pipeline robust to this hypothetical. Cycle 4
+         architectural fix for the round-3 convergent blocker
+         (coder SEC-1 + security F-R3-SEC-1) — see
          `_strip_default_ignorable`.
       4. Lowercase + whitespace-collapse (pre-F-SEC-R2-1 behavior).
 
