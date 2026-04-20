@@ -884,40 +884,120 @@ class TestStateTransitionEmission:
         assert ev["from_state"] == "teachback_correcting"
         assert ev["trigger"] == "content_fixed"
 
-    def test_emit_under_review_to_active_includes_lead_approve_trigger(
-        self, monkeypatch,
-    ):
-        """Integration emit (cycle-6 item 4): the under_review -> active
-        transition must include {trigger: "lead_approve"} in the emitted
-        event. Locks the true-lead-approve integration path against
-        silent-drop regressions in the emitter."""
-        import teachback_gate
-
+    def test_emit_auto_downgrade_through_real_gate_flow(self, monkeypatch):
+        """Cycle-7 integration-emit test (3-reviewer convergent Medium):
+        drive the REAL `_check_tool_allowed` gate flow end-to-end so the
+        M-R5-A reason_code → trigger split (`unaddressed_items` →
+        `auto_downgrade`) is exercised through the actual emission plumbing
+        at teachback_gate.py:267-270, not the pure helper.
+        Counter-test-by-revert: removing `reason_code=reason_code` from the
+        `_emit_state_transition_if_changed` call at teachback_gate.py:269
+        drops the kwarg → `_trigger_for_transition` receives reason_code=""
+        → the `under_review -> correcting` branch falls back to
+        `lead_correct` → this assertion fails.
+        """
+        # Fully schema-valid approved with unaddressed non-empty — the
+        # scanner classifies as `unaddressed_items` (T5 auto-downgrade
+        # path). A valid-structure approved is required so
+        # `validate_approved` doesn't upgrade the reason to
+        # `invalid_submit` (which would hit the teachback_pending state).
+        submit = {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to the session_token handling path."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the session_token handling path integrates cleanly with the existing middleware flow",
+                "consequence": "if wrong the session_token handling may silently accept expired tokens",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of the session_token expiry check across timezones",
+                "current_plan": "mirror the approach from auth.py:42 which handles UTC offsets",
+                "failure_mode": "timezone drift could let stale session_tokens slip past the gate",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+        approved = {
+            "scanned_candidate": {
+                "candidate": "the middleware might instead be mis-routing the session_token lookup",
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": "confirm",
+                "grounding": "dispatch §Scope line 17 session_token",
+            },
+            "response_to_least_confident": {
+                "verdict": "correct",
+                "grounding": "see architecture §Token-Validation line 42",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {
+                "addressed": ["scope_a"],
+                "unaddressed": ["scope_b", "scope_c"],
+            },
+        }
+        # Pre-seed the journal with a prior teachback_under_review event
+        # so the from_state resolves to teachback_under_review and the
+        # emitted transition is the under_review -> correcting arc.
         prior = [
             {"type": "teachback_state_transition", "task_id": "17",
              "to_state": "teachback_under_review"},
         ]
-        emitted = []
-        monkeypatch.setattr(
-            teachback_gate, "read_events", lambda _type: prior
-        )
-        monkeypatch.setattr(
-            teachback_gate, "append_event",
-            lambda ev: emitted.append(ev) or True,
-        )
-        monkeypatch.setattr(
-            teachback_gate, "make_event",
-            lambda _type, **kw: {"type": _type, **kw},
+        emitted: list[dict] = []
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name",
+                             lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "17",
+                                 "first_failing_reason": "unaddressed_items",
+                                 "first_failing_metadata": {
+                                     "variety": {"total": 11},
+                                     "required_scope_items":
+                                         ["scope_a", "scope_b", "scope_c"],
+                                     "teachback_submit": submit,
+                                     "teachback_approved": approved,
+                                 },
+                                 "first_failing_protocol_level": "full",
+                                 "all_active": False,
+                             })
+        monkeypatch.setattr(teachback_gate, "read_events",
+                             lambda _t: prior)
+        monkeypatch.setattr(teachback_gate, "append_event",
+                             lambda ev: emitted.append(ev) or True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
         )
 
-        teachback_gate._emit_state_transition_if_changed(
-            task_id="17", agent="coder-1", to_state="active",
-        )
-        assert len(emitted) == 1
-        ev = emitted[0]
-        assert ev["to_state"] == "active"
+        # Gate denies with the unaddressed_items reason code.
+        assert reason is not None
+        assert ctx["reason_code"] == "unaddressed_items"
+
+        # Exactly one transition emitted: under_review -> correcting
+        # with trigger auto_downgrade. This is the assertion that fails
+        # on counter-test-by-revert of the reason_code kwarg.
+        transitions = [
+            e for e in emitted
+            if e.get("type") == "teachback_state_transition"
+        ]
+        assert len(transitions) == 1
+        ev = transitions[0]
+        assert ev["task_id"] == "17"
+        assert ev["to_state"] == "teachback_correcting"
         assert ev["from_state"] == "teachback_under_review"
-        assert ev["trigger"] == "lead_approve"
+        assert ev["trigger"] == "auto_downgrade"
 
     def test_dedupe_task_scoped(self, monkeypatch):
         """Transitions for other tasks don't block emission for this task."""

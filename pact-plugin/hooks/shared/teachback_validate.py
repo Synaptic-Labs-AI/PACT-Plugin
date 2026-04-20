@@ -275,7 +275,7 @@ def _normalize(text: str) -> str:
     belt-and-suspenders. A full 0x110000 Unicode codepoint scan
     (cycle-5 round-4 tester audit) falsified the premise of the
     pre-NFKC pass. Of the 4174 Default_Ignorable codepoints in
-    Unicode 16.0, 4172 preserve verbatim through NFKC. 2 (U+3164
+    Unicode 15.0 (Python 3.12), 4172 preserve verbatim through NFKC. 2 (U+3164
     HANGUL FILLER, U+FFA0 HALFWIDTH HANGUL FILLER) fold to U+1160
     HANGUL JUNGSEONG FILLER which is itself Default_Ignorable and
     correctly stripped post-NFKC. Zero non-DI→DI NFKC folds exist,
