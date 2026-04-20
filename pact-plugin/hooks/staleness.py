@@ -426,7 +426,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
 
     try:
         content = claude_md_path.read_text(encoding="utf-8")
-    except (IOError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError):
         return None
 
     parsed = _parse_pinned_section(content)
@@ -474,7 +474,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
                 claude_md_path.write_text(new_content, encoding="utf-8")
         except TimeoutError:
             return "Pinned staleness update skipped: lock contention."
-        except (IOError, OSError) as e:
+        except OSError as e:
             logger_msg = f"Failed to update pinned staleness: {e}"
             return logger_msg
 
@@ -515,7 +515,7 @@ def check_pinned_block_signal(
 
     try:
         content = claude_md_path.read_text(encoding="utf-8")
-    except (IOError, OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError):
         return None
 
     parsed = _parse_pinned_section(content)
