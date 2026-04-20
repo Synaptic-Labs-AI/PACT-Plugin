@@ -73,6 +73,13 @@ _STALE_MARKER_RE = re.compile(
 # Pin heading anchor — "### " at start of line.
 _PIN_HEADING_RE = re.compile(r'^### ', re.MULTILINE)
 
+# Sec-F5b: Unicode line terminators that must not survive inside an
+# override rationale. Stripped via str.translate in parse_pins.
+# U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE,
+# U+000D CARRIAGE RETURN — any of these can span logical lines in some
+# renderers, enabling prompt-injection or comment-boundary spoofing.
+_FORBIDDEN_TERMINATOR_TABLE = str.maketrans("", "", "\u2028\u2029\u0085\r")
+
 
 class Pin(NamedTuple):
     """A single pinned entry with its boundaries and override state."""
@@ -166,6 +173,12 @@ def parse_pins(pinned_content: str) -> List[Pin]:
             if override_match:
                 date_comment = candidate
                 rationale = override_match.group(1).strip()
+                # Sec-F5b: strip Unicode line terminators (U+2028 LINE
+                # SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE,
+                # \r CARRIAGE RETURN) from the rationale before accepting
+                # it. These span logical lines in some renderers and are
+                # latent prompt-injection / comment-boundary-spoofing risks.
+                rationale = rationale.translate(_FORBIDDEN_TERMINATOR_TABLE)
                 # Strict parser: empty rationale or > max → treat as no-override.
                 if rationale and len(rationale) <= OVERRIDE_RATIONALE_MAX:
                     override_rationale = rationale
