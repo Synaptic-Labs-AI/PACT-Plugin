@@ -343,7 +343,7 @@ class TestPinStalenessGate_MainDenyPath:
         assert "stale pins" in hso["permissionDecisionReason"]
 
 
-class TestPinStalenessGate_F1LivelockRegression:
+class TestPinStalenessGate_Archival:
     """Regression: marker armed + /PACT:pin-memory archival edit → ALLOW.
 
     Reviewer-security F1 (#492 Cycle 1): same-session marker livelock.

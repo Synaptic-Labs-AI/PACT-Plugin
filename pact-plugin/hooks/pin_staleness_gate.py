@@ -116,6 +116,13 @@ def _is_add_shaped_edit(tool_input: dict, claude_md_path: Path) -> bool:
     Fail-open: any shape-detection error returns False (allow). This
     preserves the SACROSANCT gate invariant.
     """
+    # WHY net-new detection: the gate exists to stop the user adding a 13th
+    # pin while stale pins remain. Archival is the REMEDIATION the user is
+    # directed to perform — denying it causes a same-session livelock
+    # (reviewer-security F1). A substring match on `<!-- pinned:` is
+    # symmetric across add and archive shapes, so it cannot distinguish
+    # them. A strict count increase is asymmetric by construction: ADD
+    # raises the count, ARCHIVE lowers it, REFACTOR leaves it unchanged.
     try:
         if "content" in tool_input:
             # Write tool — diff against current file content.
