@@ -1974,3 +1974,78 @@ class TestLegacyAdvisoryEmission:
         output = json.loads(capsys.readouterr().out.strip())
         assert "systemMessage" in output
         assert "TEACHBACK REMINDER" in output["systemMessage"]
+
+    def test_legacy_emit_gated_on_advisory_mode(
+        self, capsys, pact_context, monkeypatch,
+    ):
+        """C12 (round 3): legacy advisory emit must fire ONLY when
+        teachback_check._TEACHBACK_MODE == TEACHBACK_MODE_ADVISORY.
+
+        Mirrors teachback_gate.py:578 symmetry. Post-Phase-2 flip,
+        teachback_gate stops emitting advisory events; the readiness
+        diagnostic must observe a consistent single-mode stream. If the
+        legacy path keeps emitting after the flip, it poisons the
+        diagnostic with stale advisory events while blocked events
+        accumulate alongside.
+
+        Counter-test-by-revert: if the mode guard is removed from
+        main()'s warn branch, this test fails (the append_event call
+        fires even in blocking mode).
+        """
+        import teachback_check
+        from shared import TEACHBACK_MODE_BLOCKING
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+        # Flip the mode to blocking — legacy emit must suppress.
+        monkeypatch.setattr(teachback_check, "_TEACHBACK_MODE", TEACHBACK_MODE_BLOCKING)
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # Blocking mode: legacy emit MUST NOT fire.
+        mock_append.assert_not_called()
+        # The systemMessage warning still emits (mode gate only affects
+        # observability, not the user-facing reminder).
+        output = json.loads(capsys.readouterr().out.strip())
+        assert "systemMessage" in output
+        assert "TEACHBACK REMINDER" in output["systemMessage"]
+
+    def test_legacy_emit_fires_in_advisory_mode(
+        self, capsys, pact_context, monkeypatch,
+    ):
+        """C12 positive case — advisory mode keeps the legacy emit live.
+
+        Confirms the mode guard does not over-block: when
+        _TEACHBACK_MODE == TEACHBACK_MODE_ADVISORY (the default), the
+        legacy advisory event fires as before. Paired with
+        test_legacy_emit_gated_on_advisory_mode, this is the
+        bi-directional symmetry check — absence of this test would let
+        a bug that ALWAYS suppresses the emit slip through.
+        """
+        import teachback_check
+        from shared import TEACHBACK_MODE_ADVISORY
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+        monkeypatch.setattr(teachback_check, "_TEACHBACK_MODE", TEACHBACK_MODE_ADVISORY)
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event", side_effect=lambda *a, **k: {"args": a, "kwargs": k}):
+            with pytest.raises(SystemExit):
+                main()
+
+        # Advisory mode: legacy emit DOES fire.
+        mock_append.assert_called_once()

@@ -355,15 +355,19 @@ def _check_teachback_idle(input_data: dict) -> tuple[str | None, dict]:
         return (None, {})
 
     # At or above threshold — emit an algedonic systemMessage.
-    # Sanitize teammate_name before interpolation — defense-in-depth
-    # against role-marker injection via the PR #426 unified strip set.
-    # Mirrors the deny-reason rendering pathway in
-    # teachback_example.format_deny_reason.
+    # Sanitize BOTH teammate_name AND task_id before interpolation — defense-
+    # in-depth against role-marker injection via the PR #426 unified strip
+    # set. Mirrors the deny-reason rendering pathway in
+    # teachback_example.format_deny_reason. task_id is platform-supplied but
+    # flows through in user-authored task filenames (task IDs stored as file
+    # basenames under ~/.claude/tasks/{team}/); cross-cycle symmetry with
+    # teammate_name (F-R3-SEC-2, round 3).
     safe_teammate_name = _strip_control_chars(teammate_name)
+    safe_task_id = _strip_control_chars(task_id)
     message = (
         _ALGEDONIC_PREAMBLE
         + f"Teammate '{safe_teammate_name}' has been idle for {count} consecutive "
-        + f"events while task #{task_id} is in teachback_under_review "
+        + f"events while task #{safe_task_id} is in teachback_under_review "
         + f"(variety={variety_total}). The lead has not written "
         + "metadata.teachback_approved OR metadata.teachback_corrections. "
         + "Review the teammate's teachback_submit and respond (approve or "

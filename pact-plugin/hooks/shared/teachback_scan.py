@@ -341,8 +341,11 @@ def scan_teachback_state(
             task_count += 1
 
             metadata = data.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                metadata = {}
+            # Non-dict normalization is handled inside _is_carve_out_task
+            # (returns True on non-dict metadata → fail-open carve-out).
+            # Earlier versions had a redundant isinstance reset here; removed
+            # per round-3-tester dead-patch finding (counter-test-by-revert
+            # confirmed downstream handler covers the same surface).
 
             if _is_carve_out_task(metadata):
                 continue

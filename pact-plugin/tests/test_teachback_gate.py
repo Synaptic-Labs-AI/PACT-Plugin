@@ -688,6 +688,40 @@ class TestStateTransitionEmission:
         ) == "teammate_revise"
         assert _trigger_for_transition("", "") == "unknown"
 
+    def test_active_to_teachback_pending_trigger_is_content_invalid(self):
+        """M2 (round 3): explicit trigger for the active → teachback_pending
+        transition. This transition fires when _check_active_tasks_content
+        denies a structurally-active task on a generation-shape content
+        violation (substring-inequality, citation, template-density, etc.);
+        it is neither a lead_approve nor a teammate_revise. Previously
+        mapped to 'unknown' — fails the JOURNAL-EVENTS.md §Trigger values
+        controlled-vocab intent. Adds 'content_invalid' per the T10
+        Transition Matrix row in STATE-MACHINE.md."""
+        from teachback_gate import _trigger_for_transition
+
+        assert _trigger_for_transition(
+            "active", "teachback_pending"
+        ) == "content_invalid"
+
+    def test_content_invalid_in_controlled_vocabulary(self):
+        """Defensive: confirm 'content_invalid' is the ONLY trigger the
+        active→teachback_pending transition can return. If a future
+        refactor renames the trigger to, e.g., 'active_reject', the
+        JOURNAL-EVENTS.md docs must be updated in lockstep. This test
+        pins the string so drift surfaces at pytest time."""
+        from teachback_gate import _trigger_for_transition
+
+        trigger = _trigger_for_transition("active", "teachback_pending")
+        assert trigger in {
+            "teammate_submit", "lead_approve", "lead_correct",
+            "auto_downgrade", "teammate_revise", "content_invalid",
+            "unknown",
+        }, f"Trigger '{trigger}' is not in the controlled vocabulary"
+        assert trigger != "unknown", (
+            "active→teachback_pending must be an explicit named trigger, "
+            "not the fallback 'unknown' bucket"
+        )
+
     def test_emit_on_first_observation(self, monkeypatch):
         """First transition for a task emits with no from_state."""
         import teachback_gate

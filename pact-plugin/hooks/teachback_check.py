@@ -28,10 +28,18 @@ import os
 import sys
 from pathlib import Path
 
+from shared import TEACHBACK_MODE_ADVISORY
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_dir, get_team_name, resolve_agent_name
 from shared.session_journal import append_event, make_event
+
+# Mirror teachback_gate.py _TEACHBACK_MODE semantics. Legacy advisory emit is
+# a Phase 1 observability surface only; once teachback_gate flips to blocking
+# (_TEACHBACK_MODE="blocking"), the legacy emit here must also stop — the
+# check_teachback_phase2_readiness.py diagnostic reads a single advisory-event
+# stream and a mixed-mode stream poisons the readiness signal (C12, round 3).
+_TEACHBACK_MODE: str = TEACHBACK_MODE_ADVISORY
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -313,7 +321,14 @@ def main():
         warn, task_id = should_warn(agent_name, team_name)
         if warn:
             _mark_warned(agent_name, task_id)
-            _emit_legacy_advisory(task_id, agent_name, tool_name)
+            # C12 (round 3): gate the legacy advisory emit on Phase-1 advisory
+            # mode so it mirrors teachback_gate.py:578 symmetry. Post-Phase-2
+            # flip, the readiness diagnostic must observe a consistent single-
+            # mode advisory stream — emitting here while teachback_gate has
+            # moved to blocking mode would inject stale false-positive advisory
+            # events alongside real teachback_gate_blocked events.
+            if _TEACHBACK_MODE == TEACHBACK_MODE_ADVISORY:
+                _emit_legacy_advisory(task_id, agent_name, tool_name)
             print(json.dumps({"systemMessage": _WARNING_MESSAGE}))
         else:
             print(_SUPPRESS_OUTPUT)

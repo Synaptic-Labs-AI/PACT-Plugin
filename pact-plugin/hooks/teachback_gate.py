@@ -485,7 +485,7 @@ def _trigger_for_transition(from_state: str, to_state: str) -> str:
     JOURNAL-EVENTS.md §Trigger values controlled vocabulary.
 
     Returns one of: teammate_submit | lead_approve | lead_correct |
-    auto_downgrade | teammate_revise | unknown.
+    auto_downgrade | teammate_revise | content_invalid | unknown.
     """
     if from_state == "" and to_state == "teachback_under_review":
         return "teammate_submit"
@@ -502,6 +502,16 @@ def _trigger_for_transition(from_state: str, to_state: str) -> str:
         return "lead_correct"
     if from_state == "teachback_correcting" and to_state == "teachback_under_review":
         return "teammate_revise"
+    if from_state == "active" and to_state == "teachback_pending":
+        # R2-A1 active-path content validation failure: scanner classified
+        # the task as structurally active, but _check_active_tasks_content
+        # found a generation-shape error (substring-inequality, citation,
+        # template-density, etc.) and is denying with invalid_submit. The
+        # to_state emits at teachback_pending even though from_state=active
+        # — this transition is NOT a teammate revise or a lead approve; it
+        # is the gate observing that an already-approved teachback fails
+        # content validation. M2 (round 3) controlled-vocab expansion.
+        return "content_invalid"
     return "unknown"
 
 
