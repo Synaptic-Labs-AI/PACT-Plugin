@@ -36,7 +36,7 @@ import re
 import secrets
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # Add hooks directory to path for shared package imports
 _hooks_dir = Path(__file__).parent
@@ -61,10 +61,17 @@ from shared.task_utils import (
 # inside session_init itself — they form the module's public interface.
 from staleness import (  # noqa: F401
     check_pinned_staleness as _staleness_check,
+    check_pinned_block_signal as _staleness_block_check,
     PINNED_STALENESS_DAYS,
     PINNED_CONTEXT_TOKEN_BUDGET,
     _get_project_claude_md_path,
     _estimate_tokens,
+    _parse_pinned_section,
+)
+from pin_caps import (  # noqa: F401
+    PIN_COUNT_CAP,
+    format_slot_status,
+    parse_pins,
 )
 
 from shared import BOOTSTRAP_MARKER_NAME, build_session_path
@@ -99,6 +106,56 @@ def check_pinned_staleness():
     """
     path = _get_project_claude_md_path()
     return _staleness_check(claude_md_path=path)
+
+
+def check_pin_slot_status() -> Optional[str]:
+    """Return a Tier-0 slot-status line for additionalContext, or None.
+
+    Builds "Pin slots: N/12 used, K chars remaining on largest pin" via
+    pin_caps.format_slot_status. Fail-open: any resolution/read/parse
+    error returns None so the SessionStart flow degrades to existing
+    behavior rather than DoS.
+    """
+    path = _get_project_claude_md_path()
+    if path is None:
+        return None
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
+
+    parsed = _parse_pinned_section(content)
+    if parsed is None:
+        # Empty or missing Pinned Context section — surface 0-used state
+        # so the orchestrator sees pin headroom from session start.
+        return format_slot_status([])
+
+    _, _, pinned_content = parsed
+    try:
+        pins = parse_pins(pinned_content)
+    except Exception:  # noqa: BLE001 — fail-open by construction
+        return None
+
+    return format_slot_status(pins)
+
+
+def check_pin_stale_block_directive() -> Optional[str]:
+    """Return an unconditional stale-block directive for additionalContext, or None.
+
+    Fires only when check_pinned_block_signal reports positive detection.
+    Uses hard-rule instructional voice (MUST) per PACT protocol — the
+    directive is architecturally binding via Tier-0 additionalContext
+    (survives compaction per plan row 5 / compaction durability model).
+    """
+    path = _get_project_claude_md_path()
+    signal = _staleness_block_check(claude_md_path=path)
+    if signal is None:
+        return None
+    return (
+        f"Pinned context: {signal.detail}. "
+        f"You MUST run /PACT:pin-memory to archive stale pins before adding new ones."
+    )
 
 
 def check_additional_directories() -> str | None:
@@ -569,6 +626,20 @@ def main():
                 system_messages.append(staleness_msg)
             else:
                 context_parts.append(staleness_msg)
+
+        # 4a. Surface pin slot count (#492). Tier-0 additionalContext —
+        # architecturally binding, survives compaction. Fail-open: None
+        # when CLAUDE.md cannot be resolved or parsed.
+        slot_status_msg = check_pin_slot_status()
+        if slot_status_msg:
+            context_parts.append(slot_status_msg)
+
+        # 4b. Emit unconditional stale-block directive when stale pin
+        # count meets threshold (#492). Never exit-2 — breaks /clear and
+        # /resume per plan key-decisions row 6.
+        stale_block_msg = check_pin_stale_block_directive()
+        if stale_block_msg:
+            context_parts.append(stale_block_msg)
 
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
