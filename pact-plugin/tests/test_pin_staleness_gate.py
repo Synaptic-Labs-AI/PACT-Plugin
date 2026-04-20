@@ -81,6 +81,14 @@ def _call_gate(input_data):
     return _check_tool_allowed(input_data)
 
 
+# Matrix coverage note: the full matrix is (marker absent/present) × (path match/miss) ×
+# (teammate/lead) × (Edit/Write) = 16 cells. Three cells are NOT exercised explicitly
+# because they reduce to tested paths: (marker-absent × teammate × {Edit,Write,path-miss})
+# all short-circuit at the same marker-check before any teammate/path logic runs —
+# TestPinStalenessGate_MarkerAbsent already covers that short-circuit for lead callers,
+# and the marker-absent return is agent-name-independent by construction.
+
+
 class TestPinStalenessGate_ToolMatch:
     """Only Edit and Write are gated — other tools always pass."""
 
