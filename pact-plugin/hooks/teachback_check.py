@@ -31,6 +31,7 @@ from pathlib import Path
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_dir, get_team_name, resolve_agent_name
+from shared.session_journal import append_event, make_event
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -245,6 +246,42 @@ def should_warn(
     return (True, task_id)
 
 
+def _emit_legacy_advisory(task_id: str, agent_name: str, tool_name: str) -> None:
+    """Emit a teachback_gate_advisory journal event for the legacy
+    missing_teachback_sent warning path.
+
+    Phase 1 observability: scripts/check_teachback_phase2_readiness.py reads
+    teachback_gate_advisory events to classify would_have_blocked observations
+    and drive the Phase 2 flip decision. The legacy PostToolUse warning here
+    must emit with reason="missing_teachback_sent" so the diagnostic can
+    distinguish legacy-advisory false positives from the new teachback_gate
+    reason codes (missing_submit / invalid_submit / awaiting_approval /
+    unaddressed_items / corrections_pending).
+
+    Per COMPONENT-DESIGN.md §Hook 5 (lines 645-678), JOURNAL-EVENTS.md
+    §Writer site audit (line 341), and RISK-MAP.md §Risk #5 (de-dup-by-reason
+    diagnostic). Schema per session_journal.py _REQUIRED_FIELDS_BY_TYPE
+    (task_id, agent) + _OPTIONAL_FIELDS_BY_TYPE (would_have_blocked, reason,
+    tool_name). Mirrors teachback_gate._emit_advisory_event shape verbatim.
+
+    SACROSANCT fail-open: any journal error is swallowed; observability must
+    never block tool execution.
+    """
+    try:
+        append_event(
+            make_event(
+                "teachback_gate_advisory",
+                task_id=task_id,
+                agent=agent_name,
+                would_have_blocked=True,
+                reason="missing_teachback_sent",
+                tool_name=tool_name,
+            )
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         try:
@@ -267,9 +304,16 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # Extract tool_name for advisory-event attribution. PostToolUse fires
+        # on Edit|Write|Bash (matcher in hooks.json), so tool_name varies.
+        tool_name = input_data.get("tool_name", "")
+        if not isinstance(tool_name, str):
+            tool_name = ""
+
         warn, task_id = should_warn(agent_name, team_name)
         if warn:
             _mark_warned(agent_name, task_id)
+            _emit_legacy_advisory(task_id, agent_name, tool_name)
             print(json.dumps({"systemMessage": _WARNING_MESSAGE}))
         else:
             print(_SUPPRESS_OUTPUT)

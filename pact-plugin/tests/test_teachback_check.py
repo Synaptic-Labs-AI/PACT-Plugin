@@ -1816,3 +1816,161 @@ class TestMarkerPathSessionDirIntegration:
         # get_session_dir should not have been called
         mock_get.assert_not_called()
         assert result.parent == tmp_path
+
+
+# =============================================================================
+# Legacy advisory emission (#401 B1 remediation)
+# =============================================================================
+
+class TestLegacyAdvisoryEmission:
+    """Tests for _emit_legacy_advisory and its integration with main().
+
+    Closes the B1 shipping gap from task #17 architectural review: the
+    legacy missing_teachback_sent warning path must emit a
+    teachback_gate_advisory journal event so Phase 2 readiness diagnostic
+    (scripts/check_teachback_phase2_readiness.py) can distinguish
+    legacy-advisory false positives from new teachback_gate reason codes.
+
+    Per COMPONENT-DESIGN.md §Hook 5, JOURNAL-EVENTS.md §Writer site audit
+    line 341, RISK-MAP.md §Risk #5.
+    """
+
+    def test_emit_legacy_advisory_calls_append_event(self):
+        """Happy path — emit calls append_event with correct schema shape."""
+        from teachback_check import _emit_legacy_advisory
+
+        with patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event") as mock_make:
+            mock_make.return_value = {"dummy": "event"}
+
+            _emit_legacy_advisory(
+                task_id="42",
+                agent_name="backend-coder-1",
+                tool_name="Edit",
+            )
+
+        mock_make.assert_called_once_with(
+            "teachback_gate_advisory",
+            task_id="42",
+            agent="backend-coder-1",
+            would_have_blocked=True,
+            reason="missing_teachback_sent",
+            tool_name="Edit",
+        )
+        mock_append.assert_called_once_with({"dummy": "event"})
+
+    def test_emit_legacy_advisory_fail_open_on_append_error(self):
+        """Journal errors must NOT raise — fail-open SACROSANCT."""
+        from teachback_check import _emit_legacy_advisory
+
+        with patch(
+            "teachback_check.append_event",
+            side_effect=OSError("disk full"),
+        ):
+            # Should not raise
+            _emit_legacy_advisory(
+                task_id="42",
+                agent_name="coder-1",
+                tool_name="Write",
+            )
+
+    def test_emit_legacy_advisory_fail_open_on_make_event_error(self):
+        """make_event errors must NOT raise either."""
+        from teachback_check import _emit_legacy_advisory
+
+        with patch(
+            "teachback_check.make_event",
+            side_effect=ValueError("bad schema"),
+        ):
+            _emit_legacy_advisory(
+                task_id="42",
+                agent_name="coder-1",
+                tool_name="Bash",
+            )
+
+    def test_main_emits_advisory_on_warn_path(self, capsys, pact_context):
+        """Integration: main() emits advisory when should_warn returns True.
+
+        This is the counter-test-by-revert anchor: if _emit_legacy_advisory
+        is removed from main()'s warn branch, this test fails.
+        """
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event", side_effect=lambda *a, **k: {"args": a, "kwargs": k}):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_append.assert_called_once()
+        # Inspect the event shape fed through make_event
+        event = mock_append.call_args[0][0]
+        assert event["args"] == ("teachback_gate_advisory",)
+        assert event["kwargs"]["task_id"] == "42"
+        assert event["kwargs"]["agent"] == "backend-coder-1"
+        assert event["kwargs"]["would_have_blocked"] is True
+        assert event["kwargs"]["reason"] == "missing_teachback_sent"
+        assert event["kwargs"]["tool_name"] == "Edit"
+
+    def test_main_does_not_emit_when_should_warn_false(self, capsys, pact_context):
+        """Negative: no emission when there is no warning to advise about."""
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="coder-1"), \
+             patch("sys.stdin", io.StringIO("{}")), \
+             patch("teachback_check.should_warn", return_value=(False, "")), \
+             patch("teachback_check.append_event") as mock_append:
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_append.assert_not_called()
+
+    def test_main_tool_name_defaults_to_empty_string(self, capsys, pact_context):
+        """Non-string or missing tool_name in stdin must not raise."""
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        stdin_payload = json.dumps({"tool_name": None})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event", side_effect=lambda *a, **k: {"kwargs": k}):
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_append.assert_called_once()
+        event = mock_append.call_args[0][0]
+        assert event["kwargs"]["tool_name"] == ""
+
+    def test_main_journal_error_does_not_block_warning(self, capsys, pact_context):
+        """Fail-open at main() level — journal error must not suppress the warning."""
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event", side_effect=OSError("disk full")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # The systemMessage still emits even though the journal append failed
+        output = json.loads(capsys.readouterr().out.strip())
+        assert "systemMessage" in output
+        assert "TEACHBACK REMINDER" in output["systemMessage"]
