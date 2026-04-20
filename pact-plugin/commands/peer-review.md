@@ -187,7 +187,7 @@ This is the **primary memory trigger** — fires unconditionally at reviewer dis
 Each reviewer should state their understanding of the PR's intent before diving into review. This catches cases where a reviewer misunderstands the purpose and produces irrelevant findings.
 
 **Mechanism**: Include in each reviewer's task description:
-> "Before reviewing, send a teachback message to the lead stating your understanding of what this PR is trying to accomplish and what you'll focus on in your domain. Format: `[{sender}→lead] Teachback: I understand this PR is [intent]. Reviewing with focus on [domain focus]. Proceeding unless corrected.` Non-blocking — proceed with review after sending."
+> "Before reviewing, send a teachback message to the lead stating your understanding of what this PR is trying to accomplish and what you'll focus on in your domain. Format: `[{sender}→lead] Teachback: I understand this PR is [intent]. Reviewing with focus on [domain focus]. Halting until you send teachback_approved.` Do NOT begin reviewing until the lead writes `teachback_approved` to your task metadata."
 
 This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 

@@ -30,7 +30,7 @@ SendMessage(
     "- Key constraints: <constraints you're working within>\n"
     "- Interfaces: <interfaces you'll produce or consume>\n"
     "- Approach: <your intended approach, briefly>\n"
-    "Proceeding unless corrected."
+    "I will NOT begin implementation work until you respond with `teachback_approved`."
   ),
   summary="Teachback: <1-line summary>"
 )
@@ -51,10 +51,14 @@ implementation actions.
 
 ## Post-send behavior
 
-After sending the teachback, proceed with your work immediately. Do not
-wait for the lead to confirm — the protocol is non-blocking by design.
-If the lead sends a correction via SendMessage, adjust your approach
-as soon as you see it.
+**Teachback blocks work start.** After sending, halt and wait for the
+lead's structured `teachback_approved` to land on your task metadata via
+`TaskUpdate`. Do NOT begin work until the lead sends `teachback_approved`.
+No `Edit`, no `Write`, no `Bash`, no implementation tool calls until
+approval arrives. Reading files for understanding (`Read`, `Glob`, `Grep`)
+stays permitted. If the lead writes `teachback_corrections`, revise your
+`teachback_submit` and wait again. If the lead writes `teachback_approved`,
+you are cleared to begin.
 
 ## Exception
 

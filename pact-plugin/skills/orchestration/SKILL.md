@@ -457,7 +457,9 @@ A list of things that include the following:
 
 #### Validating Incoming Teachbacks
 
-When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+
+**Teachback blocks the teammate's work start.** The teammate is halted until you respond. Every teammate awaiting `teachback_approved` is idle — stalled work, not parallel progress. You MUST respond promptly via `TaskUpdate` writing either `teachback_approved` (cleared to proceed) or `teachback_corrections` (revise and re-submit) to the task's metadata. `SendMessage` alone is insufficient — the teammate is reading `metadata.teachback_approved` to decide whether to begin; the structured metadata write is the gate release. Delay = stalled team.
 
 **Structured `teachback_approved` at every dispatch.** Every teachback you
 validate — on every dispatch, no exceptions — MUST include a

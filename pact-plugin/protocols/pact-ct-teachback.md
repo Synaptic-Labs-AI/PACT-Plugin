@@ -22,6 +22,13 @@ in agent instructional voice, and does not gate whether the structured
 form is produced. From the agent's perspective, producing the structured
 form is always mandatory.
 
+**Teachback is a work-start gate.** The teammate MUST NOT begin
+implementation work until the lead writes `teachback_approved` to the
+task's metadata. Halting after submitting is the teammate's obligation;
+responding promptly is the lead's. An unblocked teammate beginning work
+before approval is a protocol violation; a lead delaying approval is
+stalling the team.
+
 ---
 
 ## Conversation Theory: Teachback Protocol
@@ -55,15 +62,16 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via `TaskGet(#5)`
-3. Agent sends teachback to lead via `SendMessage`:
-   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
-4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
+3. Agent sends teachback to lead via `SendMessage` + `teachback_submit` metadata:
+   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Halting until you send `teachback_approved`."
+4. Agent HALTS — does NOT begin implementation work; waits for lead's `teachback_approved` metadata write
+5. Lead reads teachback; writes `teachback_approved` (clear to proceed) or `teachback_corrections` (revise and re-submit) via `TaskUpdate` to the task's metadata
+6. Once `teachback_approved` lands, agent begins work
 ```
 
-#### Why Non-Blocking
+#### Why Blocking
 
-Blocking teachback (wait for confirmation before working) would serialize everything. Non-blocking gives the orchestrator a window to catch misunderstandings while the agent starts work. Most teachbacks will be correct — we're catching exceptions, not gatekeeping the norm.
+Teachback blocks the teammate's work start. The lead has explicit authority to catch misunderstandings BEFORE the teammate burns context on a wrong implementation. Unblocked teammates waiting for approval are idle, stalled work — not parallel progress — so the lead MUST respond promptly. The serialization cost is the correct trade for the correctness guarantee: a teammate who starts work on a misunderstood task produces faster-arriving waste, not faster-arriving value.
 
 #### Teachback Format
 
@@ -73,7 +81,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
 - Approach: {my intended approach, briefly}
-Proceeding unless corrected.
+Halting until you send `teachback_approved`.
 ```
 
 Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderstandings, not to restate the entire handoff.
