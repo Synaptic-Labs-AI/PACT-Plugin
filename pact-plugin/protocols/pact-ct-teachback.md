@@ -15,11 +15,12 @@ layer (orchestrator reading the teammate's teachback; teammate receiving
 the orchestrator's structured approval) constructs shared understanding
 with the same generative shape, just without mechanical fallback.
 
-**Implication**: `teachback_submit` and `teachback_approved` are produced
-at every dispatch in every PACT workflow. The variety threshold gates
-whether the tool-use gate fires on missing or invalid content; it does
-not gate whether the content should be produced. Both structured objects
-are the canonical per-dispatch practice regardless of variety score.
+**Implication**: `teachback_submit` and `teachback_approved` MUST be
+produced at every dispatch in every PACT workflow. No exceptions. The
+variety-7 threshold is a hidden mechanical enforcement layer — invisible
+in agent instructional voice, and does not gate whether the structured
+form is produced. From the agent's perspective, producing the structured
+form is always mandatory.
 
 ---
 
