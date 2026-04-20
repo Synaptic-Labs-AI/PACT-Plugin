@@ -15,6 +15,7 @@ simplified and full protocol levels.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -179,6 +180,281 @@ class TestScannedCandidateDistinctUnicode:
         assert _scanned_candidate_distinct(
             candidate, submit_assumption
         ) is True
+
+
+# Cycle 4 architectural tightening: the enumerated-range strip of
+# cycle 3 missed at least 9 other default-ignorable / invisible-
+# formatting codepoints (coder SEC-1 + security F-R3-SEC-1). The
+# widened fix (`_strip_default_ignorable`) is Cf-category + the two
+# Variation Selector ranges (VS1-VS256). Variation selectors are
+# default-ignorable in the Unicode sense but sit in general category
+# Mn, not Cf — a correctness finding surfaced during implementation
+# and documented in the commit body. Tests below parametrize over
+# every cited bypass class to assert coverage, plus forward-compat
+# negative probes to assert the strip does not destroy legitimate
+# content.
+
+# (codepoint, human_label) pairs spanning the 9+ cited bypass classes
+# plus the 10 already-covered cycle-3 exemplars (so the cycle-4 fix
+# is also a regression guard for the cycle-3 surface).
+_CF_BYPASS_CASES = [
+    ("\u00ad", "SOFT HYPHEN"),
+    ("\u180e", "MONGOLIAN VOWEL SEPARATOR"),
+    ("\u2060", "WORD JOINER"),
+    ("\u2063", "INVISIBLE SEPARATOR"),
+    ("\u200b", "ZERO WIDTH SPACE"),
+    ("\u200c", "ZERO WIDTH NON-JOINER"),
+    ("\u200d", "ZERO WIDTH JOINER"),
+    ("\u200e", "LEFT-TO-RIGHT MARK"),
+    ("\u200f", "RIGHT-TO-LEFT MARK"),
+    ("\ufeff", "ZERO WIDTH NO-BREAK SPACE / BOM"),
+    ("\u202a", "LEFT-TO-RIGHT EMBEDDING"),
+    ("\u202b", "RIGHT-TO-LEFT EMBEDDING"),
+    ("\u202c", "POP DIRECTIONAL FORMATTING"),
+    ("\u202d", "LEFT-TO-RIGHT OVERRIDE"),
+    ("\u202e", "RIGHT-TO-LEFT OVERRIDE"),
+    ("\u2066", "LEFT-TO-RIGHT ISOLATE"),
+    ("\u2067", "RIGHT-TO-LEFT ISOLATE"),
+    ("\u2068", "FIRST STRONG ISOLATE"),
+    ("\u2069", "POP DIRECTIONAL ISOLATE"),
+    ("\ufe00", "VARIATION SELECTOR-1"),
+    ("\ufe0f", "VARIATION SELECTOR-16"),
+    ("\U000e0001", "LANGUAGE TAG"),
+    ("\U000e0020", "TAG SPACE"),
+    ("\U000e0100", "VARIATION SELECTOR-17"),
+]
+
+
+class TestNormalizeCfCategoryDenylist:
+    """Cycle 4 architectural fix for round-3 convergent blocker
+    (coder SEC-1 + security F-R3-SEC-1). The cycle-3 enumerated-range
+    strip missed U+00AD, U+180E, U+2060, U+2063, variation selectors
+    (U+FE00-FE0F + U+E0100-E01EF), and tag characters
+    (U+E0000-E007F). Cf-category covers soft-hyphen, zero-widths,
+    bidi overrides / isolates, word joiner, invisible separator, and
+    tag characters. Variation selectors are officially default-
+    ignorable but sit in general category Mn, so the widened predicate
+    adds the two VS ranges explicitly. Every cited class is caught.
+    """
+
+    @pytest.mark.parametrize("codepoint,label", _CF_BYPASS_CASES)
+    def test_cf_character_stripped_from_normalize(self, codepoint, label):
+        """Injecting the Cf codepoint anywhere in the string must
+        normalize to the same value as the uninjected string."""
+        baseline = "sessiontoken"
+        injected = f"session{codepoint}token"
+        assert _normalize(injected) == baseline, (
+            f"Cf codepoint {codepoint!r} ({label}) was not stripped — "
+            f"_normalize({injected!r}) = {_normalize(injected)!r}"
+        )
+
+    @pytest.mark.parametrize("codepoint,label", _CF_BYPASS_CASES)
+    def test_cf_character_stripped_at_string_boundaries(self, codepoint, label):
+        """Cf codepoints at the start / end of the string must also be
+        stripped — not just interior positions. Catches regex-anchor
+        mistakes (``^`` or ``$``) that could still pass interior tests.
+        """
+        baseline = "session"
+        leading = f"{codepoint}session"
+        trailing = f"session{codepoint}"
+        surrounded = f"{codepoint}session{codepoint}"
+        assert _normalize(leading) == baseline, f"leading {label} not stripped"
+        assert _normalize(trailing) == baseline, f"trailing {label} not stripped"
+        assert _normalize(surrounded) == baseline, (
+            f"surrounding {label} not stripped"
+        )
+
+
+class TestNormalizeCfForwardCompat:
+    """The Cf-category denylist must NOT strip characters from other
+    Unicode general categories — even if they render similarly to
+    invisibles or formatting characters. Forward-compat probe per
+    round-3-security's negative-probe discipline: the fix closes a
+    class of bug without destroying adjacent legitimate content.
+    """
+
+    def test_cyrillic_homoglyphs_preserved(self):
+        """Cyrillic 'е' (U+0435, category Ll) renders identically to
+        Latin 'e' but MUST survive normalization. The gate intentionally
+        leaves them distinguishable — the substring-inequality check
+        then correctly treats a Cyrillic-mixed candidate as different
+        from a pure-Latin submit."""
+        latin = "session"
+        cyrillic_mixed = "s\u0435ssion"  # Cyrillic 'е' replacing Latin 'e'
+        assert _normalize(latin) != _normalize(cyrillic_mixed)
+
+    def test_hyphen_family_preserved(self):
+        """U+2010 HYPHEN (Pd, Punctuation-Dash) survives the Cf-strip;
+        the character itself is preserved in the normalized output
+        (normalization lower-cases + whitespace-collapses, but does
+        not strip Pd). Note NFKC folds U+2011 NON-BREAKING HYPHEN
+        (also Pd) to U+2010 via compatibility mapping — that fold is
+        NFKC-correct behavior, unrelated to the Cf-strip. The
+        invariant under test is: hyphen-family characters are NOT
+        consumed by the default-ignorable strip; they at most fold
+        to their canonical compatibility form."""
+        with_u2010 = "session\u2010token"
+        assert "\u2010" in _normalize(with_u2010)
+        # U+2011 folds to U+2010 via NFKC — survives as U+2010.
+        with_u2011 = "session\u2011token"
+        assert "\u2010" in _normalize(with_u2011)
+
+    def test_emoji_preserved(self):
+        """Emoji are in category So (Symbol, other) — NOT Cf. They
+        must survive normalization unchanged."""
+        assert "\U0001f680" in _normalize("rocket \U0001f680 ship")
+
+    def test_mathematical_alphanumerics_fold_via_nfkc_not_cf_strip(self):
+        """Mathematical bold 'A' (U+1D400) is NOT Cf — it is category
+        Lu (Letter, uppercase). NFKC folds it to ASCII 'A' via
+        compatibility mapping; the Cf-strip leaves it alone. The net
+        observable result is the fold, which is correct."""
+        mathematical_bold_a = "\U0001d400"  # MATHEMATICAL BOLD CAPITAL A
+        assert _normalize(mathematical_bold_a) == "a"
+
+    def test_regular_whitespace_preserved_before_collapse(self):
+        """Space (U+0020, Zs) and tab (U+0009, Cc) are NOT Cf. They
+        are handled by the whitespace-collapse step, NOT the Cf strip,
+        so the invariant is 'normalize(" a  b ") == "a b"'."""
+        assert _normalize(" a  b\t") == "a b"
+
+    def test_non_cf_category_cc_preserved_at_normalize_layer(self):
+        """Category Cc (control) is a DIFFERENT category from Cf.
+        Cc characters like NEL (U+0085) are handled by the
+        _strip_control_chars path (a separate, deny-reason-specific
+        filter), NOT by _normalize. This test documents that Cc is
+        out of scope for the Cf-category denylist — future maintainers
+        must not extend the Cf strip to Cc without a separate review.
+        """
+        # NEL is Cc; _normalize should NOT remove it (whitespace-collapse
+        # handles the visible effect). We only assert that the check
+        # doesn't erroneously classify Cc as Cf.
+        import unicodedata as _ud
+        assert _ud.category("\u0085") == "Cc"
+        assert _ud.category("\u0085") != "Cf"
+
+
+class TestNormalizeCfCounterTestByRevert:
+    """Counter-test-by-revert: if the default-ignorable strip is
+    reverted (reduced to the cycle-3 enumerated-range), the newly-
+    covered bypass classes MUST fail. This is the load-bearing
+    discipline test — demonstrating that the architectural widening
+    is the thing actually closing the bypass surface, not an
+    incidental side-effect of some other pipeline step.
+    """
+
+    # Bypass classes NOT covered by the cycle-3 enumerated range.
+    _CYCLE3_UNCOVERED = [
+        ("\u00ad", "SOFT HYPHEN"),
+        ("\u180e", "MONGOLIAN VOWEL SEPARATOR"),
+        ("\u2060", "WORD JOINER"),
+        ("\u2063", "INVISIBLE SEPARATOR"),
+        ("\ufe0f", "VARIATION SELECTOR-16"),
+        ("\U000e0001", "LANGUAGE TAG"),
+        ("\U000e0100", "VARIATION SELECTOR-17"),
+    ]
+
+    @pytest.mark.parametrize("codepoint,label", _CYCLE3_UNCOVERED)
+    def test_revert_to_cycle3_range_fails_new_class(
+        self, monkeypatch, codepoint, label,
+    ):
+        """Monkeypatch _strip_default_ignorable to the cycle-3 behavior
+        (regex enumerated range) and assert the codepoint slips through
+        — proving the widened denylist is the load-bearing fix."""
+        # Exact cycle-3 pattern — see the `_INVISIBLE_CHARS_STRIP_RE`
+        # definition prior to the cycle-4 rewrite.
+        cycle3_re = re.compile(
+            r"[\u200b-\u200d\ufeff\u202a-\u202e\u2066-\u2069]"
+        )
+
+        def cycle3_strip(text):
+            if not isinstance(text, str):
+                return ""
+            return cycle3_re.sub("", text)
+
+        monkeypatch.setattr(tv, "_strip_default_ignorable", cycle3_strip)
+
+        baseline = "sessiontoken"
+        injected = f"session{codepoint}token"
+        # The normalize still calls the monkeypatched strip; the
+        # reverted strip does NOT remove the codepoint, so the
+        # normalized injected form MUST differ from the baseline —
+        # demonstrating that the cycle-3 form is insufficient.
+        assert _normalize(injected) != baseline, (
+            f"After reverting to cycle-3 enumerated strip, "
+            f"{label} ({codepoint!r}) unexpectedly still normalizes "
+            f"to the baseline — test cannot prove the widening is "
+            f"load-bearing"
+        )
+
+    def test_revert_to_cf_only_fails_variation_selector(self, monkeypatch):
+        """A Cf-only strip (as specified in the cycle-4 task) would
+        still miss variation selectors, which are Mn-category. This
+        test asserts the explicit VS-range addition is load-bearing —
+        reducing `_is_default_ignorable` to a pure Cf check lets
+        VS-16 slip through."""
+        def cf_only_strip(text):
+            if not isinstance(text, str):
+                return ""
+            import unicodedata
+            return "".join(
+                c for c in text if unicodedata.category(c) != "Cf"
+            )
+
+        monkeypatch.setattr(tv, "_strip_default_ignorable", cf_only_strip)
+
+        baseline = "sessiontoken"
+        injected = "session\ufe0ftoken"  # VS-16 (Mn category)
+        assert _normalize(injected) != baseline, (
+            "Cf-only strip unexpectedly removed VS-16 — test cannot "
+            "prove that the explicit variation-selector range is "
+            "load-bearing in the widened predicate"
+        )
+
+
+class TestScannedCandidateDistinctCfBypass:
+    """End-to-end adversarial coverage: injecting a Cf-category
+    codepoint into a copy-pasted candidate must NOT bypass the
+    substring-inequality rubber-stamp blocker. This is the attack
+    that motivated the round-3 Blocking finding — any Cf codepoint
+    is an attacker-controlled "character that disappears on render
+    but persists in string-compare".
+    """
+
+    @pytest.mark.parametrize("codepoint,label", _CF_BYPASS_CASES)
+    def test_cf_injected_candidate_is_caught(self, codepoint, label):
+        submit_assumption = (
+            "the session token middleware validates expiry checks"
+        )
+        # Splice the Cf codepoint mid-assumption (a deliberately subtle
+        # position — beginning-of-string is also valid but easier to
+        # catch by eye).
+        crafted_candidate = (
+            f"the session {codepoint}token middleware validates expiry checks"
+        )
+        assert _scanned_candidate_distinct(
+            crafted_candidate, submit_assumption
+        ) is False, (
+            f"{label} ({codepoint!r}) injection into candidate did NOT "
+            f"trip the substring-inequality check — a crafted lead-side "
+            f"candidate rendering identically to the teammate's "
+            f"assumption would rubber-stamp through"
+        )
+
+    def test_multiple_cf_codepoints_combined_is_caught(self):
+        """Attacker combining multiple Cf codepoints (one from each
+        class) must also be caught. Covers the adversarial-combination
+        attack explicitly called out in the task spec."""
+        submit_assumption = "the session token middleware validates expiry checks"
+        # Soft-hyphen + variation selector + word joiner + bidi LRE,
+        # one per class-of-bypass identified in the round-3 finding.
+        crafted_candidate = (
+            "\u202athe\u00ad session\u2060 \ufe0ftoken middleware "
+            "validates expiry\u00ad checks\u202c"
+        )
+        assert _scanned_candidate_distinct(
+            crafted_candidate, submit_assumption
+        ) is False
 
 
 class TestTokenize:

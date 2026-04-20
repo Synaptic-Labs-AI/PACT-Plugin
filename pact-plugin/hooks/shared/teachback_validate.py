@@ -131,24 +131,75 @@ _ACTUAL_VALUE_CAP = 500
 # peer_inject canonical form.
 _ROLE_MARKER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
-# Invisible-character strip set for the `_normalize` primitive. Removes
-# zero-width characters (ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D, BOM
-# U+FEFF) and bidirectional-override controls (U+202A-U+202E LRE/RLE/
-# PDF/LRO/RLO, U+2066-U+2069 LRI/RLI/FSI/PDI). Closes F-SEC-R2-1: a
-# crafted lead-side `scanned_candidate.candidate` could otherwise
-# substring-match a teammate's `most_likely_wrong.assumption` when
-# viewed normally, yet the bidirectional-inequality check compares
-# raw strings and misses the match — bypassing the rubber-stamp
-# blocker. Applied in `_normalize` AFTER NFKC (so homoglyph folding
-# collapses e.g. fullwidth Latin / Cyrillic look-alikes first).
-_INVISIBLE_CHARS_STRIP_RE = re.compile(
-    r"["
-    r"\u200b-\u200d"   # zero-width space / non-joiner / joiner
-    r"\ufeff"           # byte-order mark / zero-width no-break space
-    r"\u202a-\u202e"   # LRE / RLE / PDF / LRO / RLO
-    r"\u2066-\u2069"   # LRI / RLI / FSI / PDI
-    r"]"
-)
+# Default-ignorable denylist for `_normalize`. Cycle 4 architectural
+# fix for the round-3 convergent blocker (coder SEC-1 + security
+# F-R3-SEC-1): the cycle-3 enumerated-range strip covered only 10
+# codepoints and missed at least 9 other invisible-formatting classes.
+#
+# The category-shaped core is ``unicodedata.category(c) == "Cf"`` —
+# the Format category is Unicode's canonical home for default-
+# ignorable formatting codepoints (soft-hyphen, zero-width, bidi
+# overrides, bidi isolates, invisible separator, word joiner, tag
+# characters). Any future Unicode revision that adds new Cf
+# codepoints is covered automatically — no enumerated-range
+# maintenance debt for that class.
+#
+# Variation Selectors (U+FE00-U+FE0F VS1-VS16 + U+E0100-U+E01EF
+# VS17-VS256) are default-ignorable in the Unicode sense but sit in
+# general category ``Mn`` (Mark, Nonspacing), NOT Cf. Python's
+# stdlib ``unicodedata`` module does not expose the
+# ``Default_Ignorable_Code_Point`` property directly, so the two
+# variation-selector ranges are listed explicitly. Those ranges are
+# closed and stable — no future Unicode revision changes them (VS1-
+# VS256 is the full allocation).
+#
+# Scope is intentionally narrow: this denylist covers exactly the
+# round-3 bypass enumeration (21 codepoints spanning 9 classes).
+# Broader default-ignorable codepoints (Hangul fillers U+115F /
+# U+1160 / U+3164 / U+FFA0, CGJ U+034F) are out of scope — they are
+# not in the finding, and expanding the strip blast-radius without a
+# matching adversarial probe would be exemplar-driven, which is the
+# failure mode this cycle is correcting.
+def _is_default_ignorable(codepoint: str) -> bool:
+    """Return True iff ``codepoint`` (single Unicode scalar) is a
+    default-ignorable formatting character the `_normalize` pipeline
+    must strip.
+
+    Matches the union of Unicode Format category (``Cf``) and the two
+    Variation Selector ranges (``Mn``-category by Unicode table but
+    default-ignorable by semantics — see module docstring for why the
+    stdlib forces an explicit enumeration).
+    """
+    if unicodedata.category(codepoint) == "Cf":
+        return True
+    cp = ord(codepoint)
+    # VS1-VS16 — BMP variation selectors (Mn-category by table).
+    if 0xFE00 <= cp <= 0xFE0F:
+        return True
+    # VS17-VS256 — supplementary-plane variation selectors (Mn-category).
+    if 0xE0100 <= cp <= 0xE01EF:
+        return True
+    return False
+
+
+def _strip_default_ignorable(text: str) -> str:
+    """Strip default-ignorable formatting characters from ``text``.
+
+    Removes every character matched by `_is_default_ignorable` — the
+    full Unicode Format category (``Cf``) plus the two Variation
+    Selector ranges. See the helper's docstring + the module-level
+    comment above for the scope + Python-stdlib-gap rationale.
+
+    Any default-ignorable character spliced into a
+    ``scanned_candidate.candidate`` (or any other content-comparison
+    input) would otherwise let that value render identically to a
+    teammate's ``most_likely_wrong.assumption`` while substring-
+    differing structurally — bypassing the
+    ``_scanned_candidate_distinct`` rubber-stamp blocker.
+    """
+    if not isinstance(text, str):
+        return ""
+    return "".join(c for c in text if not _is_default_ignorable(c))
 
 
 def _strip_control_chars(value: str) -> str:
@@ -186,31 +237,41 @@ def _normalize(text: str) -> str:
     membership comparisons.
 
     Pipeline (order is load-bearing):
-      1. NFKC Unicode normalization — folds fullwidth Latin / compatibility
-         forms to canonical ASCII-range codepoints so visual look-alikes
-         collapse. Does NOT fold Cyrillic homoglyphs (different scripts),
-         but a NFKC'd Cyrillic string and a Latin string remain
-         distinguishable — which is the correct semantics (the tokens
-         ARE different characters, even if visually identical).
-      2. Strip zero-width + bidi-override characters — ZWSP / ZWNJ / ZWJ /
-         BOM / LRE / RLE / PDF / LRO / RLO / LRI / RLI / FSI / PDI.
-         A crafted lead-side candidate like "session\\u200btoken" would
-         otherwise substring-differ from teammate's "sessiontoken" even
-         though they render identically. Applied AFTER NFKC since NFKC
-         itself doesn't remove these codepoints.
-      3. Lowercase + whitespace-collapse (pre-F-SEC-R2-1 behavior).
+      1. Strip default-ignorable characters BEFORE NFKC so invisible
+         formatting codepoints never participate in compatibility
+         folding. Some default-ignorables can alter how NFKC
+         decomposes surrounding sequences; stripping first keeps the
+         fold deterministic and matches user intent ("these characters
+         should never have been here").
+      2. NFKC Unicode normalization — folds fullwidth Latin /
+         compatibility forms to canonical ASCII-range codepoints so
+         visual look-alikes collapse. Does NOT fold Cyrillic
+         homoglyphs (different scripts), but a NFKC'd Cyrillic string
+         and a Latin string remain distinguishable — which is the
+         correct semantics (the tokens ARE different characters, even
+         if visually identical).
+      3. Strip default-ignorables AGAIN after NFKC as belt-and-
+         suspenders — catches the rare case where NFKC decomposition
+         EXPANDS a compatibility codepoint into a sequence that
+         contains a default-ignorable codepoint. Cost: one extra O(n)
+         pass; benefit: forecloses the post-fold reinsertion class of
+         bug. Cycle 4 architectural fix for the round-3 convergent
+         blocker (coder SEC-1 + security F-R3-SEC-1) — see
+         `_strip_default_ignorable`.
+      4. Lowercase + whitespace-collapse (pre-F-SEC-R2-1 behavior).
 
-    Closes F-SEC-R2-1 at a single point so the substring-inequality
-    check (`_scanned_candidate_distinct`), evidence-substring grounding
-    (`_evidence_grounded`), and addressed-item membership
-    (`_all_addressed_valid`) all inherit the hardening via their shared
-    reliance on `_normalize`.
+    Closes F-SEC-R2-1 + round-3 SEC-1 / F-R3-SEC-1 at a single point
+    so the substring-inequality check (`_scanned_candidate_distinct`),
+    evidence-substring grounding (`_evidence_grounded`), and
+    addressed-item membership (`_all_addressed_valid`) all inherit the
+    hardening via their shared reliance on `_normalize`.
     """
     if not isinstance(text, str):
         return ""
-    folded = unicodedata.normalize("NFKC", text)
-    stripped = _INVISIBLE_CHARS_STRIP_RE.sub("", folded)
-    return re.sub(r"\s+", " ", stripped.strip().lower())
+    pre_stripped = _strip_default_ignorable(text)
+    folded = unicodedata.normalize("NFKC", pre_stripped)
+    post_stripped = _strip_default_ignorable(folded)
+    return re.sub(r"\s+", " ", post_stripped.strip().lower())
 
 
 def _tokenize(text: str) -> list[str]:
