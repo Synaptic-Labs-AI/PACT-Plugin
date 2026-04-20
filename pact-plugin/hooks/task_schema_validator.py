@@ -14,34 +14,55 @@ metadata.gates. The orchestrator writes `metadata.gates` at TaskCreate
 time; this hook only rejects agent tasks that arrive without the
 required variety fields.
 
-STDIN PAYLOAD SHAPE (empirically derived from
-/Users/mj/Sites/claude-code-rev/src/utils/hooks.ts:3745-3770
-`executeTaskCreatedHooks` + `TaskCreatedHookInputSchema`):
+DATA DISCIPLINE — DISK-READ-AUTHORITATIVE (not stdin-metadata-based):
 
-    {
-        "hook_event_name": "TaskCreated",
-        "task_id": "<numeric-or-uuid string>",
-        "task_subject": "<subject line from TaskCreate>",
-        "task_description": "<optional description>",
-        "teammate_name": "<optional owner name>",
-        "team_name": "<optional team name>",
-        ... (plus base hook fields: session_id, cwd, etc.)
-    }
+The validator reads task metadata from disk via
+`shared.task_utils._read_task_json` (hoisted in #401 Commit #4), never
+from stdin. Stdin is used only for identifying fields
+(`task_id`, `task_subject`, `team_name`). This matches the shipped
+PACT-hook convention verbatim — see handoff_gate.py:242-253 and
+teammate_idle.py — where stdin is optimization-only and disk is the
+authoritative source.
 
-Note: `metadata` is NOT present in TaskCreated stdin. The task IS on
-disk at hook-time (TaskCreateTool.ts:81-89 calls `createTask()` BEFORE
-`executeTaskCreatedHooks()`, so the JSON file is authored first). The
-validator reads metadata via `shared.task_utils._read_task_json`
-(hoisted in #401 Commit #4). On a blocking exit-2 rejection, the
-platform calls `deleteTask()` to roll back the disk write
-(TaskCreateTool.ts:109).
+Rationale for the discipline (see full investigation at
+docs/investigations/2026-04-20-task-created-stdin-probe.md):
+
+  1. Empirical probe observation of TaskCreated stdin shape was
+     ATTEMPTED by backend-coder-1 (copied the Commit #0 probe to the
+     installed plugin path at
+     ~/.claude/plugins/cache/pact-marketplace/PACT/3.17.13/hooks/,
+     triggered TaskCreates, looked for stderr output). Result:
+     TaskCreated hook stderr is NOT surfaced to the teammate
+     tool-response channel the way PreToolUse / PostToolUse /
+     TaskCompleted / TeammateIdle stderr is. Stdin payload shape
+     remains unobservable at runtime from a teammate's seat.
+  2. Stdin field names for TaskCreated are INFERRED from the rev-repo
+     source at /Users/mj/Sites/claude-code-rev/src/utils/hooks.ts:3745-3770
+     (executeTaskCreatedHooks + TaskCreatedHookInputSchema):
+     `{hook_event_name, task_id, task_subject, task_description,
+     teammate_name, team_name}` + base hook fields. Strong inference
+     but not empirically confirmed at runtime.
+  3. Whether stdin includes `metadata` at all is UNKNOWN. Some
+     platform-hook emission sites pass metadata through; others do
+     not. Shipped PACT hooks treat metadata-on-stdin as OPTIMIZATION
+     ONLY and always disk-read as the enforcement path.
+  4. The task IS on disk at hook-time (TaskCreateTool.ts:81-89 calls
+     `createTask()` BEFORE `executeTaskCreatedHooks()`, so the JSON
+     file is authored first). On blocking exit-2, the platform rolls
+     back via `deleteTask()` at TaskCreateTool.ts:109. Disk-read is
+     reliable.
 
 Pass-through predicate (_is_agent_dispatch_task): cheap O(1)
-stdin-only classification — is this TaskCreate worth schema
-enforcement? Non-agent tasks (signal, blocker, secretary, auditor,
-feature-level, phase-level) short-circuit to allow WITHOUT any disk
-I/O. Reuses the agent-prefix convention from
-shared.task_utils.find_active_agents:142-155.
+stdin + disk-metadata classification — is this TaskCreate worth
+schema enforcement? Non-agent tasks (signal, blocker, secretary,
+auditor, feature-level, phase-level) short-circuit to allow. The
+predicate uses stdin's `task_subject` for prefix matching and the
+(already-disk-read) metadata for type/completion_type/lifecycle
+carve-outs. Reuses the agent-prefix convention from
+shared.task_utils.find_active_agents:143-164 but with strict
+lowercase leading-token matching (phase labels like ARCHITECT:
+would otherwise collide with the architect: agent prefix under
+the ambient lowercased-prefix form).
 
 Validation rules (COMPONENT-DESIGN.md §Hook 2, CONTENT-SCHEMAS.md §D):
     - variety.total missing → reject
@@ -324,10 +345,14 @@ def main() -> None:
         task_subject = input_data.get("task_subject") or ""
         team_name = (input_data.get("team_name") or get_team_name() or "").lower() or None
 
-        # stdin does NOT include `metadata` per rev-repo
-        # TaskCreatedHookInput schema. Read from disk instead (the task
-        # file is written by createTask() BEFORE executeTaskCreatedHooks
-        # per TaskCreateTool.ts:81-89).
+        # Disk-read-authoritative: always read metadata from disk via
+        # shared.task_utils._read_task_json. Mirrors handoff_gate.py:242
+        # + teammate_idle.py convention. Whether TaskCreated stdin
+        # includes `metadata` is unconfirmed at runtime (see module
+        # docstring for the investigation); disk is the authoritative
+        # source regardless. The task file is on disk at hook-time
+        # because TaskCreateTool.ts:81-89 calls createTask() BEFORE
+        # executeTaskCreatedHooks().
         task_data: dict[str, Any] = {}
         if task_id:
             task_data = _read_task_json(task_id, team_name)
