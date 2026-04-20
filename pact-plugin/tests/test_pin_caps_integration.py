@@ -418,6 +418,15 @@ class TestParsePinsVsDetectStaleEntries_Agreement:
             f"parse_pins stale set {actual_stale} disagrees with "
             f"expected {stale_indices}"
         )
+        # Cross-parser agreement: detect_stale_entries skips entries already
+        # carrying a STALE marker, so on marked fixtures it MUST return the
+        # empty list — both parsers agree "marked entries are finalized
+        # stale, no further flagging needed."
+        from staleness import detect_stale_entries
+        assert len(detect_stale_entries(content)) == 0, (
+            "detect_stale_entries flagged marker-carrying entries; it "
+            "should skip them to avoid double-marking"
+        )
 
 
 class TestLiveClaudeMdOverrideLine_RoundTrip:
