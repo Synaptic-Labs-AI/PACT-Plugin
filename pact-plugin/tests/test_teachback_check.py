@@ -2049,3 +2049,77 @@ class TestLegacyAdvisoryEmission:
 
         # Advisory mode: legacy emit DOES fire.
         mock_append.assert_called_once()
+
+
+class TestCheckTeachbackSentPathSanitization:
+    """Cycle 8 round7-security C: check_teachback_sent must reject any
+    team_name that isn't a positive-regex path component before joining
+    it into the tasks_base_dir path. Mirrors the sibling guard in
+    shared.teachback_scan.scan_teachback_state (PR #426 pattern).
+
+    Fail-open contract: unsafe team_name returns (True, "") so the
+    gate allows. This matches the existing early-return semantics
+    for missing agent_name / team_name (see line 166-167 pre-guard).
+
+    Counter-test-by-revert: removing the is_safe_path_component guard
+    causes test_unsafe_team_name_with_escape to fail — the scanner
+    would descend into the escape target and find the crafted task
+    file, returning (False, "99") instead of (True, "").
+    """
+
+    def test_unsafe_team_name_with_escape_returns_fail_open(self, tmp_path):
+        from teachback_check import check_teachback_sent
+
+        # Craft a real adversarial scenario: sibling dir of tasks_base_dir
+        # with a task file that, if discovered, would return
+        # (False, "99") because metadata.teachback_sent is absent.
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        outside = tmp_path / "outside_target"
+        outside.mkdir()
+        (outside / "99.json").write_text(json.dumps({
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},  # no teachback_sent → would yield (False, "99")
+        }), encoding="utf-8")
+
+        confirmed, task_id = check_teachback_sent(
+            "coder-1",
+            "../outside_target",  # unsafe — contains "/" and ".."
+            tasks_base_dir=str(inner),
+        )
+        # With guard: early fail-open, no descent into escape target.
+        # Without guard (revert): would return (False, "99").
+        assert confirmed is True, (
+            "Cycle 8 round7-security C flip: unsafe team_name must "
+            "short-circuit BEFORE Path() join descends into the escape "
+            "target. Reverting the is_safe_path_component guard would "
+            "let the scanner read 99.json and return (False, '99')."
+        )
+        assert task_id == ""
+
+    def test_unsafe_team_name_with_null_byte_returns_fail_open(self, tmp_path):
+        from teachback_check import check_teachback_sent
+
+        confirmed, task_id = check_teachback_sent(
+            "coder-1",
+            "team\x00injected",
+            tasks_base_dir=str(tmp_path),
+        )
+        assert confirmed is True
+        assert task_id == ""
+
+    def test_safe_team_name_proceeds_past_guard(self, tmp_path):
+        # Counter-test in the positive direction: a legitimate team_name
+        # does NOT short-circuit at the path guard — the scanner proceeds
+        # to the task_dir.exists() check (dir doesn't exist here, so
+        # still (True, "") but via the next-in-line early-return path).
+        from teachback_check import check_teachback_sent
+
+        confirmed, task_id = check_teachback_sent(
+            "coder-1",
+            "pact-test",
+            tasks_base_dir=str(tmp_path),
+        )
+        assert confirmed is True
+        assert task_id == ""

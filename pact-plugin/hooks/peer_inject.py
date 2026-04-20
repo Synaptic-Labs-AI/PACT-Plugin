@@ -143,12 +143,14 @@ def get_peer_context(
         # names in the team config, so matching against the sanitized
         # form is correct under normal conditions. Under attack, both
         # sides flow through the same sanitization and remain consistent.
-        peers = [m["name"] for m in members if m.get("name") != safe_name]
+        # Sanitize the emitted name so a hostile config entry cannot inject
+        # a line-anchored `YOUR PACT ROLE:` marker via the peer list.
+        peers = [_sanitize_agent_name(m["name"]) for m in members if m.get("name") != safe_name]
     else:
         # Fallback: filter by agentType. This excludes ALL agents of the same
         # type, not just the spawning agent. This is a known limitation when
         # the hook input does not include agent_name/agent_id.
-        peers = [m["name"] for m in members if m.get("agentType") != agent_type]
+        peers = [_sanitize_agent_name(m["name"]) for m in members if m.get("agentType") != agent_type]
 
     if not peers:
         peer_context = "You are the only active teammate on this team."

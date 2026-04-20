@@ -33,6 +33,7 @@ from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_dir, get_team_name, resolve_agent_name
 from shared.session_journal import append_event, make_event
+from shared.session_state import is_safe_path_component
 
 # Mirror teachback_gate.py _TEACHBACK_MODE semantics. Legacy advisory emit is
 # a Phase 1 observability surface only; once teachback_gate flips to blocking
@@ -165,6 +166,14 @@ def check_teachback_sent(
     """
     if not agent_name or not team_name:
         return (True, "")  # Can't identify agent — fail open
+
+    # Cycle 8 sibling-symmetry: reject any team_name that isn't a positive-
+    # regex path component. Mirrors the guard in shared.teachback_scan:308
+    # (PR #426 pattern). Without this, a crafted team_name like "../escape"
+    # or "team\x00" would land in the Path join below. Fail-open matches the
+    # return contract: (True, "") = gate allows.
+    if not is_safe_path_component(team_name):
+        return (True, "")
 
     if tasks_base_dir is None:
         tasks_base_dir = str(Path.home() / ".claude" / "tasks")

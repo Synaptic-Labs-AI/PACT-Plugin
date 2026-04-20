@@ -135,6 +135,15 @@ What the gate explicitly does NOT close (accepted risk):
   `teachback_approved`. The gate mitigates via **content-presence precedence**
   (it reads `teachback_approved` content, not the state field), but the
   `TaskUpdate` call itself cannot be intercepted by any hook.
+- **Carve-out forgery via `TaskUpdate`.** A teammate could write
+  `metadata.terminated`, `metadata.skipped`, `metadata.stalled`,
+  `metadata.type = "blocker" | "algedonic"`, or
+  `metadata.completion_type = "signal"` to their own in-progress task,
+  bypassing the gate via the carve-out path. Content-primacy defense does
+  NOT apply here because the carve-out fires BEFORE content classification.
+  Accepted under the honest-but-careless threat model; documented but not
+  mechanically prevented because `TaskUpdated` is not a hookable event
+  (F1 in RISK-MAP.md).
 - **Adversarial orchestrator output.** Nothing prevents a compromised
   orchestrator process from writing its own `teachback_approved` dict that
   passes schema. The gate assumes honest-but-careless, not hostile.

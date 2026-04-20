@@ -792,3 +792,81 @@ class TestScannerPathSanitization:
         # task_dir doesn't exist → still _DEFAULT_SUMMARY, but this
         # exercises the safe-name happy path (no guard-rejection).
         assert result["task_count"] == 0
+
+
+class TestScannerUnicodeDecodeErrorTolerance:
+    """Cycle 8 round7-security D: scan_teachback_state must tolerate
+    malformed UTF-8 in task files without propagating UnicodeDecodeError.
+    Mirrors the sibling convention at session_journal._read_events_at:617-618
+    (errors="replace"). A single corrupt byte in an unrelated sibling
+    task file must NOT halt the scan.
+
+    Counter-test-by-revert: removing the errors="replace" argument on
+    Path.read_text causes test_malformed_utf8_does_not_raise to fail
+    with UnicodeDecodeError propagating out of scan_teachback_state.
+    """
+
+    def test_malformed_utf8_does_not_raise(self, tmp_path):
+        from shared import teachback_scan as ts
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir()
+
+        # Valid sibling task owned by our agent — scanner should still
+        # classify it correctly even though a neighboring file has a
+        # corrupt UTF-8 byte.
+        (task_dir / "1.json").write_text(json.dumps({
+            "id": "1",
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {
+                "variety": {"total": 9},
+                "teachback_submit": {
+                    "dispatch_citation": "Per dispatch line 12, build X.",
+                    "constraints": "Minimal diffs required.",
+                    "approach": "Apply sibling pattern and verify.",
+                },
+            },
+        }), encoding="utf-8")
+
+        # Corrupt file: 0xFF is not a valid UTF-8 start byte. Without
+        # errors="replace" this raises UnicodeDecodeError out of
+        # Path.read_text, propagating past the (JSONDecodeError, OSError)
+        # handler and halting the scan loop.
+        (task_dir / "2.json").write_bytes(b'\xff\xfe{"id":"2"}')
+
+        # Must not raise — scan proceeds, corrupt file is replaced-then-
+        # JSON-decode-failed and skipped via the inner try/except.
+        result = ts.scan_teachback_state(
+            "coder-1",
+            "pact-test",
+            tasks_base_dir=str(tmp_path),
+        )
+
+        # Legitimate task #1 is still found despite the corrupt sibling.
+        # Under the revert: the loop raises on file #2 (or #1 depending
+        # on sort order) and the outer `try` catches only OSError, so
+        # UnicodeDecodeError (a ValueError subclass) propagates.
+        assert result["task_count"] == 1, (
+            "Cycle 8 round7-security D flip: corrupt UTF-8 in a "
+            "sibling task file must not halt the scan. Reverting the "
+            "errors='replace' parameter causes UnicodeDecodeError to "
+            "propagate out of scan_teachback_state."
+        )
+
+    def test_malformed_utf8_on_target_task_skips_cleanly(self, tmp_path):
+        # Edge case: the corrupt file is the ONLY file. Scan should
+        # return _DEFAULT_SUMMARY (not raise), because the inner
+        # json.loads fails cleanly on the replacement-char payload.
+        from shared import teachback_scan as ts
+
+        task_dir = tmp_path / "pact-test"
+        task_dir.mkdir()
+        (task_dir / "only.json").write_bytes(b'\xff\xfe\xfd not json at all')
+
+        result = ts.scan_teachback_state(
+            "coder-1",
+            "pact-test",
+            tasks_base_dir=str(tmp_path),
+        )
+        assert result["task_count"] == 0

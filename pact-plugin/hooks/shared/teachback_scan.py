@@ -328,7 +328,14 @@ def scan_teachback_state(
             if not task_file.name.endswith(".json"):
                 continue
             try:
-                data = json.loads(task_file.read_text(encoding="utf-8"))
+                # errors="replace" mirrors session_journal._read_events_at
+                # convention: a single malformed UTF-8 byte in a sibling
+                # task file must not propagate UnicodeDecodeError and halt
+                # the scan (fail-open via outer OSError catch would return
+                # _DEFAULT_SUMMARY and hide legitimate state).
+                data = json.loads(
+                    task_file.read_text(encoding="utf-8", errors="replace")
+                )
             except (json.JSONDecodeError, OSError):
                 continue
             if not isinstance(data, dict):
