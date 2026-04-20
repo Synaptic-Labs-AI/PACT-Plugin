@@ -153,8 +153,15 @@ def check_pin_stale_block_directive() -> Optional[str]:
     on CLAUDE.md Pinned Context. Clears the marker when detection is
     negative so resolved state does not leave the gate armed.
     """
-    path = _get_project_claude_md_path()
-    signal = _staleness_block_check(claude_md_path=path)
+    # Defense-in-depth (Back-M1): _staleness_block_check is fail-open by
+    # its own contract, but session_init is on the SessionStart hot path —
+    # a regression inside the callee should not propagate out of this
+    # surfacing helper. Wrap in fail-open try/except.
+    try:
+        path = _get_project_claude_md_path()
+        signal = _staleness_block_check(claude_md_path=path)
+    except Exception:  # noqa: BLE001 — fail-open
+        return None
 
     try:
         from shared.pact_context import get_session_dir
