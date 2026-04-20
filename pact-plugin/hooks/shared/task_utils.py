@@ -1,7 +1,8 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: phase_completion.py, session_init.py
+Used by: phase_completion.py, session_init.py, handoff_gate.py,
+         task_schema_validator.py, teachback_gate.py.
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
@@ -14,7 +15,11 @@ Functions:
     find_current_phase: Find the currently active phase task
     find_active_agents: Find all active agent tasks
     find_blockers: Find blocker/algedonic tasks
-    build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
+    build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message
+    _read_task_json: Single-file task JSON reader with positive-allowlist
+        path sanitization. Hoisted from handoff_gate.py (#401 Commit #4) so
+        task_schema_validator.py and teachback_gate.py can reuse it.
+    read_task_metadata / read_task_owner: thin wrappers over _read_task_json.
 """
 
 import json
@@ -23,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.pact_context import get_session_id
+from shared.session_state import is_safe_path_component
 
 
 def get_task_list() -> list[dict[str, Any]] | None:
@@ -186,6 +192,92 @@ def find_blockers(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 blockers.append(task)
 
     return blockers
+
+
+def _read_task_json(
+    task_id: str,
+    team_name: str | None,
+    tasks_base_dir: str | None = None,
+) -> dict[str, Any]:
+    """
+    Read the raw task JSON from disk.
+
+    Hoisted from handoff_gate.py (#401 Commit #4). Shared between
+    handoff_gate.py, task_schema_validator.py, and teachback_gate.py.
+
+    Path sanitization uses the POSITIVE ALLOWLIST `is_safe_path_component`
+    (SAFE_PATH_COMPONENT_RE = [A-Za-z0-9_-]+) instead of the weaker
+    `re.sub(r'[/\\\\]|\\.\\.', '', task_id)` form that shipped in
+    handoff_gate.py pre-#401. The positive allowlist rejects dot-only
+    values, separators, null bytes, unicode line separators, whitespace,
+    and every shell metachar by construction — per pact-memory
+    `patterns_path_name_fallback_escape.md` (PR #426).
+
+    Args:
+        task_id: Task identifier (filename stem).
+        team_name: Lowercase team name for scoped lookup; None → base only.
+        tasks_base_dir: Override for ~/.claude/tasks; tests only.
+
+    Returns:
+        Full task dict from the JSON file, or {} if not found / invalid /
+        sanitizer rejected task_id / team_name.
+
+    Fail-open: any IOError, JSONDecodeError, or sanitizer rejection →
+    returns empty dict. Never raises.
+    """
+    if not task_id or not is_safe_path_component(task_id):
+        return {}
+
+    # team_name is optional, but if present it must also be safe.
+    if team_name is not None and not is_safe_path_component(team_name):
+        return {}
+
+    if tasks_base_dir is None:
+        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+
+    base = Path(tasks_base_dir)
+
+    # Try team task directory first, then default.
+    task_dirs: list[Path] = []
+    if team_name:
+        task_dirs.append(base / team_name)
+    task_dirs.append(base)
+
+    for task_dir in task_dirs:
+        task_file = task_dir / f"{task_id}.json"
+        if task_file.exists():
+            try:
+                return json.loads(task_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, IOError, OSError):
+                return {}
+
+    return {}
+
+
+def read_task_metadata(
+    task_id: str,
+    team_name: str | None,
+    tasks_base_dir: str | None = None,
+) -> dict[str, Any]:
+    """
+    Read task metadata from the task file.
+
+    Thin wrapper: _read_task_json(...).get("metadata", {}).
+    """
+    return _read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
+
+
+def read_task_owner(
+    task_id: str,
+    team_name: str | None,
+    tasks_base_dir: str | None = None,
+) -> str | None:
+    """
+    Read task owner from the task file.
+
+    Thin wrapper: _read_task_json(...).get("owner").
+    """
+    return _read_task_json(task_id, team_name, tasks_base_dir).get("owner")
 
 
 def build_post_compaction_checkpoint(

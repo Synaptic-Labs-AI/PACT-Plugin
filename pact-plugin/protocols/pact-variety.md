@@ -121,3 +121,44 @@ CalibrationRecord:
 5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
 
 ---
+
+### Gate Thresholds (Teachback Gate, issue #401)
+
+Variety feeds two dispatch-time decisions enforced by the teachback-gate
+hooks (`teachback_gate.py` PreToolUse + `task_schema_validator.py`
+TaskCreated). The thresholds live as named constants in
+`shared.variety_scorer` and are re-exported from `shared.__init__`:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `TEACHBACK_BLOCKING_THRESHOLD` | 7 | `metadata.variety.total >= this` → gate applies; below → carve-out bypass |
+| `TEACHBACK_FULL_PROTOCOL_VARIETY` | 9 | `metadata.variety.total >= this` → full protocol required (rich teachback schema) |
+| `TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS` | 2 | `len(required_scope_items) >= this` → full protocol required (OR semantics with variety) |
+| `TEACHBACK_TIMEOUT_IDLE_COUNT` | 3 | `teachback_idle_guard` emits algedonic ALERT at this many consecutive idle events in `teachback_under_review` |
+
+Mapping the thresholds to the variety-level table above:
+
+| Variety Level | Score range | Teachback gate applies? | Protocol level |
+|---|---|---|---|
+| Low | 4-6 | NO (carve-out) | Exempt |
+| Medium | 7-8 | YES | Simplified (unless `required_scope_items >= 2` → full) |
+| Medium-High | 9-10 | YES | Full |
+| High | 11-14 | YES | Full |
+| Extreme | 15-16 | YES | Full + research spike recommended |
+
+**Agent tasks inherit scoring from the dispatch site**: `orchestrate.md`
+(and the other 5 command files covered by #401 Commit #10) require the
+lead to score each agent's own variety at dispatch, not copy the feature
+variety. Scoring discipline matters — softening an agent's score to
+bypass the gate is exactly the "honest-but-careless" failure mode the
+gate exists to catch. See
+[pact-ct-teachback.md §Honest Reframe](pact-ct-teachback.md#honest-reframe-ritual-enforcement-not-adversarial-defense).
+
+**Why variety-based gating**: a low-variety dispatch (routine CRUD, a
+pagination tweak) doesn't benefit from teachback ritual — the cost would
+exceed the value. Medium+ variety is where misunderstanding-disguised-
+as-agreement starts to matter. The thresholds were chosen to match
+existing workflow-selection thresholds (comPACT vs orchestrate) so the
+gate kicks in exactly when work moves past the "trivial" tier.
+
+---

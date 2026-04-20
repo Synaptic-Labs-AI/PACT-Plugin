@@ -188,8 +188,9 @@ If a specialist fails entirely (timeout, error):
 4. Recommend the user consider re-running plan-mode or consulting that specialist manually
 
 **Dispatch each consultant**:
-1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
+1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "PREPARE"})`
    - Add to description: "Send a teachback to lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
+   - Score this consultant's variety per the [orchestrate.md Per-Agent Variety Scoring section](orchestrate.md#per-agent-variety-scoring-dispatch-time). Planning consultations typically score in the simplified-protocol range (variety 7–8) — one consultation per specialist, not a research campaign. Use `phase: "PREPARE"` since planning is research-shaped.
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. Spawn the consultant with the canonical dispatch form:
 

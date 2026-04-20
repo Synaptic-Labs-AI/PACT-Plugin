@@ -15,14 +15,13 @@ Output: stderr message on block (exit 2), nothing on allow (exit 0)
 """
 
 import json
-import re
 import sys
-from pathlib import Path
 
 from shared.handoff_example import format_handoff_example
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.session_journal import append_event, make_event
+from shared.task_utils import _read_task_json, read_task_metadata, read_task_owner
 
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
@@ -86,6 +85,91 @@ def validate_task_handoff(
     return None
 
 
+def validate_variety_dimensions(
+    task_metadata: dict,
+    teammate_name: str | None,
+) -> str | None:
+    """
+    Belt-and-suspenders check at task completion: verify that
+    metadata.variety.total equals the sum of its dimensions (novelty,
+    scope, uncertainty, risk). #401 Commit #6 defense-in-depth.
+
+    An inconsistent score at completion indicates either (a) dimensions
+    were mutated post-dispatch without updating total, or (b) total was
+    written without proper per-dimension scoring (the issue-body's
+    "hand-computed sum" failure mode). task_schema_validator.py rejects
+    at CREATE time when dimensions are MISSING; this check catches
+    sum-mismatch at COMPLETE time when dimensions exist but don't add up.
+
+    Bypass conditions (mirror validate_task_handoff:48-58):
+      - Non-agent task (teammate_name absent)
+      - metadata.skipped truthy
+      - Signal tasks (metadata.type in ("blocker", "algedonic"))
+      - variety field absent (pre-#401 tasks and below-threshold tasks)
+      - variety dimensions partially missing (validator handles at
+        CREATE; at complete time partial shape means the orchestrator
+        intentionally skipped full scoring — pass)
+
+    Args:
+        task_metadata: Task metadata dict (from task file).
+        teammate_name: Name of completing teammate (None for non-agent).
+
+    Returns:
+        Error message on sum-mismatch, None otherwise. Fail-open on any
+        malformed input (non-int dimensions, etc.).
+    """
+    if not teammate_name:
+        return None
+    if task_metadata.get("skipped"):
+        return None
+    if task_metadata.get("type") in ("blocker", "algedonic"):
+        return None
+
+    variety = task_metadata.get("variety")
+    if not isinstance(variety, dict):
+        return None  # not a variety-scored task
+
+    try:
+        total = variety.get("total")
+        novelty = variety.get("novelty")
+        scope = variety.get("scope")
+        uncertainty = variety.get("uncertainty")
+        risk = variety.get("risk")
+        dims = (novelty, scope, uncertainty, risk)
+
+        # Partial variety (any dim None or total None) -> pass. The schema
+        # validator handles missing dims at CREATE time; at COMPLETE time
+        # a partial shape means the orchestrator skipped full scoring
+        # deliberately (below threshold, or pre-#401 task).
+        if total is None or any(d is None for d in dims):
+            return None
+
+        # bool is int subclass — reject as invalid type (mirrors
+        # task_schema_validator and session_journal bool-in-int traps).
+        if isinstance(total, bool) or any(isinstance(d, bool) for d in dims):
+            return None
+        if not all(isinstance(x, int) for x in (total,) + dims):
+            return None
+
+        actual_sum = sum(dims)
+        if total != actual_sum:
+            return (
+                f"Task completion blocked: variety score inconsistent. "
+                f"metadata.variety.total={total} but sum of dimensions is "
+                f"{actual_sum} (novelty={novelty}, scope={scope}, "
+                f"uncertainty={uncertainty}, risk={risk}). "
+                f"Fix via TaskUpdate(metadata={{\"variety\": {{\"total\": "
+                f"{actual_sum}, \"novelty\": {novelty}, \"scope\": {scope}, "
+                f"\"uncertainty\": {uncertainty}, \"risk\": {risk}}}}}) so "
+                f"total matches the dimension sum."
+            )
+    except (TypeError, AttributeError):
+        # Fail-open on any malformed variety shape
+        return None
+
+    return None
+
+
 # Note: The secretary processes HANDOFFs sequentially ("read all before saving")
 # for deduplication. This serializes writes but produces cleaner entries.
 # Acceptable at current scale (2-5 HANDOFFs per workflow).
@@ -126,85 +210,6 @@ def check_memory_saved(
         f"If you have nothing new to save, that's OK — just set the flag. "
         f"Then set memory_saved: true via TaskUpdate(taskId, metadata={{\"memory_saved\": true}})."
     )
-
-
-def _read_task_json(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
-    """
-    Read the raw task JSON from disk.
-
-    Shared logic for read_task_metadata() and read_task_owner(). Locates the
-    task file in the team directory first, then falls back to the base directory.
-
-    Args:
-        task_id: Task identifier
-        team_name: Team name for scoped task lookup
-        tasks_base_dir: Override for tasks base directory (for testing)
-
-    Returns:
-        Full task dict from the JSON file, or empty dict if not found
-    """
-    if not task_id:
-        return {}
-
-    # Sanitize task_id to prevent path traversal
-    task_id = re.sub(r'[/\\]|\.\.', '', task_id)
-    if not task_id:
-        return {}
-
-    if tasks_base_dir is None:
-        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
-
-    base = Path(tasks_base_dir)
-
-    # Try team task directory first, then default
-    task_dirs = []
-    if team_name:
-        task_dirs.append(base / team_name)
-    task_dirs.append(base)
-
-    for task_dir in task_dirs:
-        task_file = task_dir / f"{task_id}.json"
-        if task_file.exists():
-            try:
-                return json.loads(task_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, IOError):
-                return {}
-
-    return {}
-
-
-def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
-    """
-    Read task metadata from the task file.
-
-    Args:
-        task_id: Task identifier
-        team_name: Team name for scoped task lookup
-        tasks_base_dir: Override for tasks base directory (for testing)
-
-    Returns:
-        Task metadata dict, or empty dict if not found
-    """
-    return _read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
-
-
-def read_task_owner(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> str | None:
-    """
-    Read the task owner from the task file.
-
-    Used as a fallback when the platform doesn't provide teammate_name in hook
-    input (e.g., orchestrator marks a task completed on behalf of an agent).
-
-    Args:
-        task_id: Task identifier
-        team_name: Team name for scoped task lookup
-        tasks_base_dir: Override for tasks base directory (for testing)
-
-    Returns:
-        Owner string if present, None otherwise
-    """
-    return _read_task_json(task_id, team_name, tasks_base_dir).get("owner")
-
 
 
 def main():
@@ -260,6 +265,16 @@ def main():
     if error:
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
+
+    # #401 Commit #6 defense-in-depth: verify variety.total matches its
+    # dimension sum before completion. Bypasses same as validate_task_handoff.
+    variety_error = validate_variety_dimensions(
+        task_metadata=task_metadata,
+        teammate_name=teammate_name,
+    )
+    if variety_error:
+        print(variety_error, file=sys.stderr)
+        sys.exit(2)
 
     # Blocking enforcement: agent must acknowledge memory save before completing.
     # Exit 2 blocks task completion and feeds stderr back to the agent as

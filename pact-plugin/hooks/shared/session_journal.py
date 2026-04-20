@@ -158,6 +158,33 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # activates the _OPTIONAL_FIELDS_BY_TYPE enforcement below (same pattern
     # as session_end and cleanup_summary).
     "session_consolidated": {},
+    # Teachback gate Phase 1 observations (#401 Commit #7 emits;
+    # scripts/check_teachback_phase2_readiness.py consumes). Emitted when
+    # the gate would have denied but is running in advisory mode.
+    # task_id + agent identify WHAT + WHO — mandatory for consumer filters.
+    "teachback_gate_advisory": {"task_id": str, "agent": str},
+    # Teachback gate Phase 2 blocks (#401 Commit #14b emits after the
+    # _TEACHBACK_MODE flip). Same task_id + agent identity anchor as
+    # advisory; reason + tool_name are optional attribution per PR #416
+    # pattern (absence preserves backwards-read cleanliness).
+    "teachback_gate_blocked": {"task_id": str, "agent": str},
+    # State transition observations (#401 Commit #7 emits from gate when
+    # inferred state differs from last-emitted per task_id). to_state is
+    # REQUIRED because the event is ABOUT the target state — absence
+    # breaks consumer correctness.
+    "teachback_state_transition": {
+        "task_id": str,
+        "agent": str,
+        "to_state": str,
+    },
+    # Idle-guard algedonic signal (#401 Commit #8 emits at idle_count >= 3
+    # in teachback_under_review). idle_count is REQUIRED — the algedonic
+    # IS the threshold signal; absence makes the event meaningless.
+    "teachback_idle_algedonic": {
+        "task_id": str,
+        "agent": str,
+        "idle_count": int,
+    },
 }
 
 
@@ -221,6 +248,42 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "pass": int,
         "task_count": int,
         "memories_saved": int,
+    },
+    # Teachback Phase 1 advisory attribution (#401 Commit #7 writes these
+    # when emitting the advisory event). would_have_blocked is always
+    # True in the current emit path but exists for symmetry with Phase 2
+    # + future "would have allowed" observation modes. reason is one of
+    # the five reason codes from shared.teachback_example
+    # (missing_submit/invalid_submit/awaiting_approval/unaddressed_items/
+    # corrections_pending) but the schema does not enforce the controlled
+    # vocabulary — emitter drift-tests live in test_teachback_gate.
+    "teachback_gate_advisory": {
+        "would_have_blocked": bool,
+        "reason": str,
+        "tool_name": str,
+    },
+    # Teachback Phase 2 block attribution (#401 Commit #14b writes after
+    # mode flip). reason + tool_name are strongly RECOMMENDED but optional
+    # per PR #416 lesson — a future consumer that only filters by agent
+    # must not break on events without these fields.
+    "teachback_gate_blocked": {
+        "reason": str,
+        "tool_name": str,
+    },
+    # Teachback state-transition attribution (#401 Commit #7). from_state
+    # is OPTIONAL because initial transitions (pre-existence → pending
+    # or pre-existence → under_review) have no meaningful "from". trigger
+    # names the cause of the transition — controlled vocabulary documented
+    # in JOURNAL-EVENTS.md §Event 3 but not schema-enforced.
+    "teachback_state_transition": {
+        "from_state": str,
+        "trigger": str,
+    },
+    # Idle-guard algedonic attribution (#401 Commit #8). variety_total
+    # lets future auditors correlate algedonic frequency with variety
+    # tier. Int type rejects bool per PR #416 int-subclass trap.
+    "teachback_idle_algedonic": {
+        "variety_total": int,
     },
 }
 
@@ -559,6 +622,12 @@ def _read_events_at(
                 continue
             try:
                 event = json.loads(line)
+                # Guard against non-dict JSON values (null/int/string/list)
+                # — json.loads("null") returns None, and subsequent
+                # event.get("type") would raise AttributeError, escape to
+                # the outer except, and drop ALL valid events in the file.
+                if not isinstance(event, dict):
+                    continue
                 if event_type and event.get("type") != event_type:
                     continue
                 events.append(event)
@@ -664,10 +733,15 @@ def _read_last_event_at(
                 continue
             try:
                 event = json.loads(line)
-                if event.get("type") == event_type:
-                    return event
             except (json.JSONDecodeError, ValueError):
                 continue
+            # Symmetric with _read_events_at: non-dict JSON values
+            # (null/int/str/list) would raise AttributeError on the
+            # .get("type") lookup and poison the reverse scan.
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == event_type:
+                return event
         return None
 
     except Exception:

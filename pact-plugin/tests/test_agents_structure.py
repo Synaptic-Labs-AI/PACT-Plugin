@@ -440,7 +440,7 @@ class TestTeachbackMicroSkillExtraction:
     FULL_PROTOCOL_MARKERS = [
         "Send as your **first message**",
         "Keep concise: 3-6 bullet points",
-        "Non-blocking: proceed with work after sending",
+        "Do NOT begin work until the lead sends `teachback_approved`",
     ]
 
     @pytest.fixture

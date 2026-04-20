@@ -1,3 +1,36 @@
+## Design principle: shared understanding is constructed, not transmitted
+
+Per Pask's Conversation Theory, shared understanding between two agents is
+CONSTRUCTED through mutual generative exchange — not transmitted from one
+to the other. The teachback protocol implements this construction: the
+teammate produces self-identified risk plus concrete plan; the lead
+produces independent-read verification plus distinct-risk scan. Both sides
+generate content grounded in the other's text.
+
+The ritual applies at every dispatch, regardless of variety. Mechanical
+enforcement (the variety-7 gate threshold in `teachback_gate.py`) is a
+second-layer safeguard for high-consequence work — it does NOT define the
+scope of the ritual itself. Below the threshold, the discipline-based
+layer (orchestrator reading the teammate's teachback; teammate receiving
+the orchestrator's structured approval) constructs shared understanding
+with the same generative shape, just without mechanical fallback.
+
+**Implication**: `teachback_submit` and `teachback_approved` MUST be
+produced at every dispatch in every PACT workflow. No exceptions. The
+variety-7 threshold is a hidden mechanical enforcement layer — invisible
+in agent instructional voice, and does not gate whether the structured
+form is produced. From the agent's perspective, producing the structured
+form is always mandatory.
+
+**Teachback is a work-start gate.** The teammate MUST NOT begin
+implementation work until the lead writes `teachback_approved` to the
+task's metadata. Halting after submitting is the teammate's obligation;
+responding promptly is the lead's. An unblocked teammate beginning work
+before approval is a protocol violation; a lead delaying approval is
+stalling the team.
+
+---
+
 ## Conversation Theory: Teachback Protocol
 
 > **Source**: Gordon Pask's Conversation Theory, applied to LLM multi-agent systems.
@@ -29,15 +62,16 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via `TaskGet(#5)`
-3. Agent sends teachback to lead via `SendMessage`:
-   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
-4. Agent proceeds with work (non-blocking)
-5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
+3. Agent sends teachback to lead via `SendMessage` + `teachback_submit` metadata:
+   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Halting until you send `teachback_approved`."
+4. Agent HALTS — does NOT begin implementation work; waits for lead's `teachback_approved` metadata write
+5. Lead reads teachback; writes `teachback_approved` (clear to proceed) or `teachback_corrections` (revise and re-submit) via `TaskUpdate` to the task's metadata
+6. Once `teachback_approved` lands, agent begins work
 ```
 
-#### Why Non-Blocking
+#### Why Blocking
 
-Blocking teachback (wait for confirmation before working) would serialize everything. Non-blocking gives the orchestrator a window to catch misunderstandings while the agent starts work. Most teachbacks will be correct — we're catching exceptions, not gatekeeping the norm.
+Teachback blocks the teammate's work start. The lead has explicit authority to catch misunderstandings BEFORE the teammate burns context on a wrong implementation. Unblocked teammates waiting for approval are idle, stalled work — not parallel progress — so the lead MUST respond promptly. The serialization cost is the correct trade for the correctness guarantee: a teammate who starts work on a misunderstood task produces faster-arriving waste, not faster-arriving value.
 
 #### Teachback Format
 
@@ -47,7 +81,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
 - Approach: {my intended approach, briefly}
-Proceeding unless corrected.
+Halting until you send `teachback_approved`.
 ```
 
 Keep teachbacks concise — 3-6 bullet points. The goal is to surface misunderstandings, not to restate the entire handoff.
@@ -103,5 +137,137 @@ If the specialist has been shut down or is unresponsive when agreement verificat
 - **HANDOFF format**: Teachback doesn't change the handoff format. It adds a verification conversation on top of the existing document-based handoff.
 - **`SendMessage` prefix convention**: Teachback messages follow the existing `[{sender}→{recipient}]` prefix convention.
 - **Conversation Failure Taxonomy**: See [pact-workflows.md](pact-workflows.md) (imPACT section) for diagnosing communication failures between agents.
+
+---
+
+## Honest Reframe: Ritual Enforcement, Not Adversarial Defense
+
+> Added for issue #401 (teachback gate). Source: plan-mode security-engineer
+> finding, validated empirically 2026-04-17 in session 9097e100.
+
+The teachback gate (`teachback_gate.py` + `task_schema_validator.py`) provides
+**hard-to-accidentally-bypass ritual enforcement for honest-but-careless LLM
+output — NOT adversarial defense.**
+
+What the gate closes:
+- Teammate forgets to send the teachback SendMessage → gate blocks
+  Edit/Write/Agent/NotebookEdit until `teachback_submit` metadata is written.
+- Orchestrator writes "Pre-review teachback OPTIONAL" in a dispatch prompt
+  (observed in session 9097e100, PR #447 round 2) → gate binds on
+  `metadata.teachback_submit` presence + schema validity, NOT on task-description
+  wording. The "OPTIONAL" prose becomes structurally inert.
+- Teammate submits a placeholder teachback ("I understand the task and will
+  proceed") → gate's content-shape validators (citation regex,
+  substring-inequality, template-phrase blocklist) reject the placeholder.
+
+What the gate explicitly does NOT close (accepted risk):
+- **Bash is not in the blocked-tool set.** A teammate determined to bypass
+  can run arbitrary shell commands. Blocking Bash would break the
+  recovery-of-last-resort pattern from `bootstrap_gate.py`.
+- **State forgery via `TaskUpdate`.** A teammate could write
+  `teachback_state = "active"` without also writing a valid
+  `teachback_approved`. The gate mitigates via **content-presence precedence**
+  (it reads `teachback_approved` content, not the state field), but the
+  `TaskUpdate` call itself cannot be intercepted by any hook.
+- **Carve-out forgery via `TaskUpdate`.** A teammate could write
+  `metadata.terminated`, `metadata.skipped`, `metadata.stalled`,
+  `metadata.type = "blocker" | "algedonic"`, or
+  `metadata.completion_type = "signal"` to their own in-progress task,
+  bypassing the gate via the carve-out path. Content-primacy defense does
+  NOT apply here because the carve-out fires BEFORE content classification.
+  Accepted under the honest-but-careless threat model; documented but not
+  mechanically prevented because `TaskUpdated` is not a hookable event
+  (F1 in RISK-MAP.md).
+- **Adversarial orchestrator output.** Nothing prevents a compromised
+  orchestrator process from writing its own `teachback_approved` dict that
+  passes schema. The gate assumes honest-but-careless, not hostile.
+
+**Why the honest-reframe is load-bearing**: past attempts to describe the
+gate as "teachback enforcement" without this caveat produced misaligned
+expectations ("the gate will catch malicious agents"). Framing the gate as
+ritual enforcement for honest-but-careless output both (a) sets accurate
+expectations and (b) prevents over-investment in closing the accepted-risk
+surfaces (F1 and F3 in RISK-MAP.md).
+
+---
+
+## Teachback Gate State Machine (issue #401)
+
+The teachback protocol, once enforced mechanically by `teachback_gate.py`,
+is a **cooperative 4-state machine**. "Cooperative" means state transitions
+happen via `TaskUpdate` writes by teammates and lead — NOT via hook-enforced
+atomic transitions. Claude Code's platform does not expose a `TaskUpdate`
+hook event (F8 in RISK-MAP.md), so the gate's role is to read the current
+state at `PreToolUse` and allow/deny, not to drive transitions.
+
+### States (4)
+
+| State | Semantics | Who is blocked? |
+|---|---|---|
+| `teachback_pending` | Task created; no `teachback_submit` yet | Teammate blocked on Edit/Write/Agent/NotebookEdit |
+| `teachback_under_review` | Teammate submitted; lead has not approved/corrected | Teammate still blocked on same tool set |
+| `active` | Lead approved with valid `teachback_approved` AND empty `unaddressed` list | Nobody blocked (normal work proceeds) |
+| `teachback_correcting` | Lead requested corrections OR `teachback_approved.conditions_met.unaddressed` non-empty | Teammate blocked except for re-submission via TaskUpdate |
+
+**Locked by TERMINOLOGY-LOCK.md**: the 4 names above are load-bearing. For
+the full banned-alternatives list (superseded synonyms that must not appear
+in code or new docs), see
+`docs/architecture/teachback-gate/TERMINOLOGY-LOCK.md` §Banned terms.
+
+### Transitions
+
+Each transition is driven by a `TaskUpdate` write by either the teammate or
+lead. The gate observes the transition on the next `PreToolUse` tool call
+and emits a `teachback_state_transition` journal event.
+
+| Transition | Driver | Writes to metadata | Gate observes |
+|---|---|---|---|
+| `teachback_pending` → `teachback_under_review` | Teammate | `teachback_submit` (valid) | ALLOW if schema-valid; DENY otherwise with per-field feedback |
+| `teachback_under_review` → `active` | Lead | `teachback_approved` with empty `unaddressed` | ALLOW |
+| `teachback_under_review` → `teachback_correcting` | Lead | `teachback_corrections` OR `teachback_approved` with non-empty `unaddressed` (auto-downgrade) | DENY teammate work, surface correction items |
+| `teachback_correcting` → `teachback_under_review` | Teammate | updated `teachback_submit` addressing flagged fields | ALLOW cycle repeats (gate re-validates) |
+
+**Carve-outs** (bypass the state machine entirely, by predicate order
+locked in TERMINOLOGY-LOCK.md):
+1. Signal tasks (`metadata.type in (blocker, algedonic)`)
+2. Auditor/secretary signal tasks (`metadata.completion_type == "signal"`)
+3. Skipped / stalled / terminated tasks
+4. Exempt agents (`secretary`, `pact-secretary`, `auditor`, `pact-auditor`)
+5. Low-variety tasks (`metadata.variety.total < TEACHBACK_BLOCKING_THRESHOLD = 7`)
+
+### Protocol Levels (Q2 — full vs simplified)
+
+The content schema for `teachback_submit` / `teachback_approved` has two
+shapes gated on task variety + scope-items count:
+
+- **Full protocol** — `metadata.variety.total >= 9` OR `len(required_scope_items) >= 2`
+  - Required fields: `understanding`, `most_likely_wrong`, `least_confident_item`, `first_action`
+- **Simplified protocol** — `variety in [7, 9)` AND `len(required_scope_items) < 2`
+  - Required fields: `understanding`, `first_action` (only)
+- **Exempt** — `variety < 7`: no teachback required (carve-out #5)
+
+Full schemas with field-level validation rules live in
+`docs/architecture/teachback-gate/CONTENT-SCHEMAS.md`. The gate enforces
+validation at `PreToolUse` by reading `metadata.teachback_submit` and
+applying the per-field rules (minimum length, not-template, citation regex,
+substring-inequality against the teammate's own claims, membership checks
+against `required_scope_items`).
+
+### Revision Cycle (Q4 — targeted re-emission)
+
+When the lead writes `teachback_corrections` with `request_revisions_on:
+[field1, field2, ...]`, the teammate re-emits ONLY those fields via a new
+`teachback_submit`. Unchanged fields are carried forward automatically;
+the teammate does not re-write the entire submit. The gate re-validates
+the whole submit on each cycle — no per-revision history.
+
+### Relationship to Legacy `teachback_sent` Boolean
+
+The legacy `metadata.teachback_sent` boolean (set by teammates pre-#401) is
+preserved for Phase 1 backward compat but retired in Phase 3. During Phase
+1 and Phase 2, `teachback_check.py` (PostToolUse advisory) and
+`teachback_gate.py` (PreToolUse, advisory→blocking) run in parallel.
+`teachback_gate.py` reads the richer `teachback_submit` dict and ignores
+`teachback_sent`. New code MUST NOT introduce `teachback_sent` reads.
 
 ---

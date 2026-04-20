@@ -34,6 +34,7 @@ VALID_HOOK_EVENTS = {
     "SubagentStop",
     "Stop",
     "TaskCompleted",
+    "TaskCreated",  # #401 Commit #5: task_schema_validator.py
     "TeammateIdle",
 }
 
@@ -318,6 +319,81 @@ class TestBootstrapGateInvariants:
                     )
 
 
+class TestBootstrapBeforeTeachbackGate:
+    """#401 Commit #14a — hooks.json PreToolUse ordering invariant.
+
+    bootstrap_gate.py and teachback_gate.py are BOTH matcherless
+    PreToolUse hooks. Claude Code fires PreToolUse hooks in registration
+    order. The invariant is: bootstrap_gate MUST fire BEFORE
+    teachback_gate. Rationale:
+
+    - bootstrap_gate is the gate-of-gates: if bootstrap hasn't run,
+      NO teammate work should proceed regardless of teachback state.
+    - If teachback_gate fires first and denies (because teachback_submit
+      is missing), the deny reason is misleading — the real blocker is
+      that bootstrap never ran.
+    - Cleaner error surface for teammates: one "you need to bootstrap"
+      message, not a confusing "you need to teachback" followed by
+      "oh wait, you also need to bootstrap".
+
+    This test SKIPS until teachback_gate.py is registered in hooks.json
+    (#401 Commit #7 adds the registration). Once both hooks are
+    present, the invariant is load-bearing and must hold.
+    """
+
+    def test_bootstrap_gate_precedes_teachback_gate(self, hooks_config):
+        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
+        bootstrap_index = None
+        teachback_index = None
+        for i, entry in enumerate(pre_tool_entries):
+            for hook in entry.get("hooks", []):
+                command = hook.get("command", "")
+                if "bootstrap_gate.py" in command and bootstrap_index is None:
+                    bootstrap_index = i
+                if "teachback_gate.py" in command and teachback_index is None:
+                    teachback_index = i
+
+        if teachback_index is None:
+            pytest.skip(
+                "teachback_gate.py not yet registered in hooks.json — "
+                "this ordering invariant activates once #401 Commit #7 lands"
+            )
+
+        assert bootstrap_index is not None, (
+            "bootstrap_gate.py must be registered in PreToolUse; "
+            "teachback_gate.py ordering cannot be checked without it"
+        )
+        assert bootstrap_index < teachback_index, (
+            f"bootstrap_gate.py (PreToolUse entry #{bootstrap_index}) must "
+            f"precede teachback_gate.py (PreToolUse entry #{teachback_index}). "
+            f"Registration order determines hook-fire order in Claude Code. "
+            f"If teachback fires first and denies, the deny reason misleads "
+            f"the teammate — bootstrap is the real blocker."
+        )
+
+    def test_both_gates_are_matcherless(self, hooks_config):
+        """Both gates must be matcherless — they fire for ALL hookable tools.
+        A matcher on either would create a gate-bypass on non-matched tools.
+        Skipped if teachback_gate.py isn't registered yet.
+        """
+        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
+        teachback_found = False
+        for entry in pre_tool_entries:
+            for hook in entry.get("hooks", []):
+                command = hook.get("command", "")
+                if "teachback_gate.py" in command:
+                    teachback_found = True
+                    assert "matcher" not in entry, (
+                        "teachback_gate.py must NOT have a matcher — it must "
+                        "fire for ALL hookable tools to enforce the gate"
+                    )
+        if not teachback_found:
+            pytest.skip(
+                "teachback_gate.py not yet registered — matcherless invariant "
+                "activates once #401 Commit #7 lands"
+            )
+
+
 class TestSessionStartCardinality:
     """Post-#444 SessionStart registration invariant.
 
@@ -355,4 +431,68 @@ class TestSessionStartCardinality:
         )
         assert "session_init.py" in session_start[0]["hooks"][0]["command"], (
             "SessionStart's sole hook must be session_init.py."
+        )
+
+
+class TestTeachbackModeDrift:
+    """F4 + M-R4-2 drift guard (cycle-5, round-4 architect sketch): the
+    two `_TEACHBACK_MODE` module constants MUST stay locked to the same
+    value.
+
+    Context: `teachback_gate.py` (PreToolUse gate) and
+    `teachback_check.py` (PostToolUse legacy advisory) each declare
+    their own `_TEACHBACK_MODE` constant. Cycle 4 C12 established
+    symmetry — both must sit in advisory during Phase 1 and flip to
+    blocking in lockstep at Phase 2 — but there was no mechanical
+    enforcement. A future refactor that flipped one without the other
+    would produce a split-brain at the Phase-2 cutover: the gate would
+    block (exit 2) while the legacy advisory warning continued to emit
+    teachback_gate_advisory events, poisoning the
+    check_teachback_phase2_readiness.py diagnostic's single-mode
+    invariant.
+
+    Precedent: mirrors `TestStripPatternDrift` at
+    test_teachback_validate.py:1812 — same pattern of locking two
+    parallel constants to grep-level equivalence so divergence surfaces
+    at pytest time rather than after a partial flip ships.
+    """
+
+    def test_teachback_mode_constants_locked_to_same_value(self):
+        import teachback_check as tb_check
+        import teachback_gate as tb_gate
+
+        assert tb_gate._TEACHBACK_MODE == tb_check._TEACHBACK_MODE, (
+            "Mode drift: teachback_gate._TEACHBACK_MODE and "
+            "teachback_check._TEACHBACK_MODE MUST ship with the same "
+            "value. Flipping one to 'blocking' without the other "
+            "creates a split-brain at the Phase-2 cutover — the gate "
+            "denies tool calls (exit 2) while the legacy "
+            "teachback_check hook keeps emitting "
+            "teachback_gate_advisory events alongside the real "
+            "teachback_gate_blocked stream. The Phase-2 readiness "
+            "diagnostic (scripts/check_teachback_phase2_readiness.py) "
+            "assumes a single-mode advisory stream and would mis-count "
+            "false positives. Update BOTH constants in the same commit."
+        )
+
+    def test_teachback_mode_is_known_vocabulary_value(self):
+        from shared import (
+            TEACHBACK_MODE_ADVISORY,
+            TEACHBACK_MODE_BLOCKING,
+        )
+
+        import teachback_check as tb_check
+        import teachback_gate as tb_gate
+
+        known = {TEACHBACK_MODE_ADVISORY, TEACHBACK_MODE_BLOCKING}
+        assert tb_gate._TEACHBACK_MODE in known, (
+            f"teachback_gate._TEACHBACK_MODE='{tb_gate._TEACHBACK_MODE}' "
+            f"is not one of the known mode constants {known}. "
+            "Use TEACHBACK_MODE_ADVISORY or TEACHBACK_MODE_BLOCKING "
+            "from shared — ad-hoc string values break the gate's "
+            "mode-check branches."
+        )
+        assert tb_check._TEACHBACK_MODE in known, (
+            f"teachback_check._TEACHBACK_MODE='{tb_check._TEACHBACK_MODE}' "
+            f"is not one of the known mode constants {known}."
         )

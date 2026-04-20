@@ -1816,3 +1816,310 @@ class TestMarkerPathSessionDirIntegration:
         # get_session_dir should not have been called
         mock_get.assert_not_called()
         assert result.parent == tmp_path
+
+
+# =============================================================================
+# Legacy advisory emission (#401 B1 remediation)
+# =============================================================================
+
+class TestLegacyAdvisoryEmission:
+    """Tests for _emit_legacy_advisory and its integration with main().
+
+    Closes the B1 shipping gap from task #17 architectural review: the
+    legacy missing_teachback_sent warning path must emit a
+    teachback_gate_advisory journal event so Phase 2 readiness diagnostic
+    (scripts/check_teachback_phase2_readiness.py) can distinguish
+    legacy-advisory false positives from new teachback_gate reason codes.
+
+    Per COMPONENT-DESIGN.md §Hook 5, JOURNAL-EVENTS.md §Writer site audit
+    line 341, RISK-MAP.md §Risk #5.
+    """
+
+    def test_emit_legacy_advisory_calls_append_event(self):
+        """Happy path — emit calls append_event with correct schema shape."""
+        from teachback_check import _emit_legacy_advisory
+
+        with patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event") as mock_make:
+            mock_make.return_value = {"dummy": "event"}
+
+            _emit_legacy_advisory(
+                task_id="42",
+                agent_name="backend-coder-1",
+                tool_name="Edit",
+            )
+
+        mock_make.assert_called_once_with(
+            "teachback_gate_advisory",
+            task_id="42",
+            agent="backend-coder-1",
+            would_have_blocked=True,
+            reason="missing_teachback_sent",
+            tool_name="Edit",
+        )
+        mock_append.assert_called_once_with({"dummy": "event"})
+
+    def test_emit_legacy_advisory_fail_open_on_append_error(self):
+        """Journal errors must NOT raise — fail-open SACROSANCT."""
+        from teachback_check import _emit_legacy_advisory
+
+        with patch(
+            "teachback_check.append_event",
+            side_effect=OSError("disk full"),
+        ):
+            # Should not raise
+            _emit_legacy_advisory(
+                task_id="42",
+                agent_name="coder-1",
+                tool_name="Write",
+            )
+
+    def test_emit_legacy_advisory_fail_open_on_make_event_error(self):
+        """make_event errors must NOT raise either."""
+        from teachback_check import _emit_legacy_advisory
+
+        with patch(
+            "teachback_check.make_event",
+            side_effect=ValueError("bad schema"),
+        ):
+            _emit_legacy_advisory(
+                task_id="42",
+                agent_name="coder-1",
+                tool_name="Bash",
+            )
+
+    def test_main_emits_advisory_on_warn_path(self, capsys, pact_context):
+        """Integration: main() emits advisory when should_warn returns True.
+
+        This is the counter-test-by-revert anchor: if _emit_legacy_advisory
+        is removed from main()'s warn branch, this test fails.
+        """
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event", side_effect=lambda *a, **k: {"args": a, "kwargs": k}):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_append.assert_called_once()
+        # Inspect the event shape fed through make_event
+        event = mock_append.call_args[0][0]
+        assert event["args"] == ("teachback_gate_advisory",)
+        assert event["kwargs"]["task_id"] == "42"
+        assert event["kwargs"]["agent"] == "backend-coder-1"
+        assert event["kwargs"]["would_have_blocked"] is True
+        assert event["kwargs"]["reason"] == "missing_teachback_sent"
+        assert event["kwargs"]["tool_name"] == "Edit"
+
+    def test_main_does_not_emit_when_should_warn_false(self, capsys, pact_context):
+        """Negative: no emission when there is no warning to advise about."""
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        with patch("teachback_check.resolve_agent_name", return_value="coder-1"), \
+             patch("sys.stdin", io.StringIO("{}")), \
+             patch("teachback_check.should_warn", return_value=(False, "")), \
+             patch("teachback_check.append_event") as mock_append:
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_append.assert_not_called()
+
+    def test_main_tool_name_defaults_to_empty_string(self, capsys, pact_context):
+        """Non-string or missing tool_name in stdin must not raise."""
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        stdin_payload = json.dumps({"tool_name": None})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event", side_effect=lambda *a, **k: {"kwargs": k}):
+            with pytest.raises(SystemExit):
+                main()
+
+        mock_append.assert_called_once()
+        event = mock_append.call_args[0][0]
+        assert event["kwargs"]["tool_name"] == ""
+
+    def test_main_journal_error_does_not_block_warning(self, capsys, pact_context):
+        """Fail-open at main() level — journal error must not suppress the warning."""
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event", side_effect=OSError("disk full")):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # The systemMessage still emits even though the journal append failed
+        output = json.loads(capsys.readouterr().out.strip())
+        assert "systemMessage" in output
+        assert "TEACHBACK REMINDER" in output["systemMessage"]
+
+    def test_legacy_emit_gated_on_advisory_mode(
+        self, capsys, pact_context, monkeypatch,
+    ):
+        """C12 (round 3): legacy advisory emit must fire ONLY when
+        teachback_check._TEACHBACK_MODE == TEACHBACK_MODE_ADVISORY.
+
+        Mirrors teachback_gate.py:578 symmetry. Post-Phase-2 flip,
+        teachback_gate stops emitting advisory events; the readiness
+        diagnostic must observe a consistent single-mode stream. If the
+        legacy path keeps emitting after the flip, it poisons the
+        diagnostic with stale advisory events while blocked events
+        accumulate alongside.
+
+        Counter-test-by-revert: if the mode guard is removed from
+        main()'s warn branch, this test fails (the append_event call
+        fires even in blocking mode).
+        """
+        import teachback_check
+        from shared import TEACHBACK_MODE_BLOCKING
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+        # Flip the mode to blocking — legacy emit must suppress.
+        monkeypatch.setattr(teachback_check, "_TEACHBACK_MODE", TEACHBACK_MODE_BLOCKING)
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        # Blocking mode: legacy emit MUST NOT fire.
+        mock_append.assert_not_called()
+        # The systemMessage warning still emits (mode gate only affects
+        # observability, not the user-facing reminder).
+        output = json.loads(capsys.readouterr().out.strip())
+        assert "systemMessage" in output
+        assert "TEACHBACK REMINDER" in output["systemMessage"]
+
+    def test_legacy_emit_fires_in_advisory_mode(
+        self, capsys, pact_context, monkeypatch,
+    ):
+        """C12 positive case — advisory mode keeps the legacy emit live.
+
+        Confirms the mode guard does not over-block: when
+        _TEACHBACK_MODE == TEACHBACK_MODE_ADVISORY (the default), the
+        legacy advisory event fires as before. Paired with
+        test_legacy_emit_gated_on_advisory_mode, this is the
+        bi-directional symmetry check — absence of this test would let
+        a bug that ALWAYS suppresses the emit slip through.
+        """
+        import teachback_check
+        from shared import TEACHBACK_MODE_ADVISORY
+        from teachback_check import main
+
+        pact_context(team_name="pact-test")
+        monkeypatch.setattr(teachback_check, "_TEACHBACK_MODE", TEACHBACK_MODE_ADVISORY)
+
+        stdin_payload = json.dumps({"tool_name": "Edit"})
+        with patch("teachback_check.resolve_agent_name", return_value="backend-coder-1"), \
+             patch("sys.stdin", io.StringIO(stdin_payload)), \
+             patch("teachback_check.should_warn", return_value=(True, "42")), \
+             patch("teachback_check._mark_warned"), \
+             patch("teachback_check.append_event") as mock_append, \
+             patch("teachback_check.make_event", side_effect=lambda *a, **k: {"args": a, "kwargs": k}):
+            with pytest.raises(SystemExit):
+                main()
+
+        # Advisory mode: legacy emit DOES fire.
+        mock_append.assert_called_once()
+
+
+class TestCheckTeachbackSentPathSanitization:
+    """Cycle 8 round7-security C: check_teachback_sent must reject any
+    team_name that isn't a positive-regex path component before joining
+    it into the tasks_base_dir path. Mirrors the sibling guard in
+    shared.teachback_scan.scan_teachback_state (PR #426 pattern).
+
+    Fail-open contract: unsafe team_name returns (True, "") so the
+    gate allows. This matches the existing early-return semantics
+    for missing agent_name / team_name (see line 166-167 pre-guard).
+
+    Counter-test-by-revert: removing the is_safe_path_component guard
+    causes test_unsafe_team_name_with_escape to fail — the scanner
+    would descend into the escape target and find the crafted task
+    file, returning (False, "99") instead of (True, "").
+    """
+
+    def test_unsafe_team_name_with_escape_returns_fail_open(self, tmp_path):
+        from teachback_check import check_teachback_sent
+
+        # Craft a real adversarial scenario: sibling dir of tasks_base_dir
+        # with a task file that, if discovered, would return
+        # (False, "99") because metadata.teachback_sent is absent.
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        outside = tmp_path / "outside_target"
+        outside.mkdir()
+        (outside / "99.json").write_text(json.dumps({
+            "owner": "coder-1",
+            "status": "in_progress",
+            "metadata": {},  # no teachback_sent → would yield (False, "99")
+        }), encoding="utf-8")
+
+        confirmed, task_id = check_teachback_sent(
+            "coder-1",
+            "../outside_target",  # unsafe — contains "/" and ".."
+            tasks_base_dir=str(inner),
+        )
+        # With guard: early fail-open, no descent into escape target.
+        # Without guard (revert): would return (False, "99").
+        assert confirmed is True, (
+            "Cycle 8 round7-security C flip: unsafe team_name must "
+            "short-circuit BEFORE Path() join descends into the escape "
+            "target. Reverting the is_safe_path_component guard would "
+            "let the scanner read 99.json and return (False, '99')."
+        )
+        assert task_id == ""
+
+    def test_unsafe_team_name_with_null_byte_returns_fail_open(self, tmp_path):
+        from teachback_check import check_teachback_sent
+
+        confirmed, task_id = check_teachback_sent(
+            "coder-1",
+            "team\x00injected",
+            tasks_base_dir=str(tmp_path),
+        )
+        assert confirmed is True
+        assert task_id == ""
+
+    def test_safe_team_name_proceeds_past_guard(self, tmp_path):
+        # Counter-test in the positive direction: a legitimate team_name
+        # does NOT short-circuit at the path guard — the scanner proceeds
+        # to the task_dir.exists() check (dir doesn't exist here, so
+        # still (True, "") but via the next-in-line early-return path).
+        from teachback_check import check_teachback_sent
+
+        confirmed, task_id = check_teachback_sent(
+            "coder-1",
+            "pact-test",
+            tasks_base_dir=str(tmp_path),
+        )
+        assert confirmed is True
+        assert task_id == ""

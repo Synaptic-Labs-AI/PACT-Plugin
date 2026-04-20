@@ -28,9 +28,19 @@ import os
 import sys
 from pathlib import Path
 
+from shared import TEACHBACK_MODE_ADVISORY
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.pact_context import get_session_dir, get_team_name, resolve_agent_name
+from shared.session_journal import append_event, make_event
+from shared.session_state import is_safe_path_component
+
+# Mirror teachback_gate.py _TEACHBACK_MODE semantics. Legacy advisory emit is
+# a Phase 1 observability surface only; once teachback_gate flips to blocking
+# (_TEACHBACK_MODE="blocking"), the legacy emit here must also stop — the
+# check_teachback_phase2_readiness.py diagnostic reads a single advisory-event
+# stream and a mixed-mode stream poisons the readiness signal (C12, round 3).
+_TEACHBACK_MODE: str = TEACHBACK_MODE_ADVISORY
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -157,6 +167,14 @@ def check_teachback_sent(
     if not agent_name or not team_name:
         return (True, "")  # Can't identify agent — fail open
 
+    # Cycle 8 sibling-symmetry: reject any team_name that isn't a positive-
+    # regex path component. Mirrors the guard in shared.teachback_scan:308
+    # (PR #426 pattern). Without this, a crafted team_name like "../escape"
+    # or "team\x00" would land in the Path join below. Fail-open matches the
+    # return contract: (True, "") = gate allows.
+    if not is_safe_path_component(team_name):
+        return (True, "")
+
     if tasks_base_dir is None:
         tasks_base_dir = str(Path.home() / ".claude" / "tasks")
 
@@ -245,6 +263,42 @@ def should_warn(
     return (True, task_id)
 
 
+def _emit_legacy_advisory(task_id: str, agent_name: str, tool_name: str) -> None:
+    """Emit a teachback_gate_advisory journal event for the legacy
+    missing_teachback_sent warning path.
+
+    Phase 1 observability: scripts/check_teachback_phase2_readiness.py reads
+    teachback_gate_advisory events to classify would_have_blocked observations
+    and drive the Phase 2 flip decision. The legacy PostToolUse warning here
+    must emit with reason="missing_teachback_sent" so the diagnostic can
+    distinguish legacy-advisory false positives from the new teachback_gate
+    reason codes (missing_submit / invalid_submit / awaiting_approval /
+    unaddressed_items / corrections_pending).
+
+    Per COMPONENT-DESIGN.md §Hook 5 (lines 645-678), JOURNAL-EVENTS.md
+    §Writer site audit (line 341), and RISK-MAP.md §Risk #5 (de-dup-by-reason
+    diagnostic). Schema per session_journal.py _REQUIRED_FIELDS_BY_TYPE
+    (task_id, agent) + _OPTIONAL_FIELDS_BY_TYPE (would_have_blocked, reason,
+    tool_name). Mirrors teachback_gate._emit_advisory_event shape verbatim.
+
+    SACROSANCT fail-open: any journal error is swallowed; observability must
+    never block tool execution.
+    """
+    try:
+        append_event(
+            make_event(
+                "teachback_gate_advisory",
+                task_id=task_id,
+                agent=agent_name,
+                would_have_blocked=True,
+                reason="missing_teachback_sent",
+                tool_name=tool_name,
+            )
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         try:
@@ -267,9 +321,23 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # Extract tool_name for advisory-event attribution. PostToolUse fires
+        # on Edit|Write|Bash (matcher in hooks.json), so tool_name varies.
+        tool_name = input_data.get("tool_name", "")
+        if not isinstance(tool_name, str):
+            tool_name = ""
+
         warn, task_id = should_warn(agent_name, team_name)
         if warn:
             _mark_warned(agent_name, task_id)
+            # C12 (round 3): gate the legacy advisory emit on Phase-1 advisory
+            # mode so it mirrors teachback_gate.py:578 symmetry. Post-Phase-2
+            # flip, the readiness diagnostic must observe a consistent single-
+            # mode advisory stream — emitting here while teachback_gate has
+            # moved to blocking mode would inject stale false-positive advisory
+            # events alongside real teachback_gate_blocked events.
+            if _TEACHBACK_MODE == TEACHBACK_MODE_ADVISORY:
+                _emit_legacy_advisory(task_id, agent_name, tool_name)
             print(json.dumps({"systemMessage": _WARNING_MESSAGE}))
         else:
             print(_SUPPRESS_OUTPUT)

@@ -25,11 +25,17 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 _TEACHBACK_REMINDER = (
-    "\n\nTEACHBACK TIMING: Send your teachback via SendMessage BEFORE any "
-    "Edit/Write/Bash calls. Teachback is a gate — nothing proceeds until "
-    "it is sent. See the pact-teachback skill loaded by "
-    "/PACT:teammate-bootstrap for the exact format. If you haven't sent "
-    "a teachback yet, do it now before any implementation work."
+    "\n\nSend your teachback before any Edit/Write/Agent/NotebookEdit tool "
+    "call. Tasks at variety >= 7 must include a structured "
+    "metadata.teachback_submit written via TaskUpdate — not just a "
+    "teachback_sent flag — so the teachback_gate hook can validate the "
+    "submit schema and route you to the `active` state once the lead "
+    "approves. See the teachback state machine + schema in the skills "
+    "loaded by /PACT:teammate-bootstrap (pact-teachback + teammate-bootstrap "
+    "commands). In Phase 1 the gate is advisory (deny reasons arrive as "
+    "systemMessage but tools still run); Phase 2 flips to blocking so "
+    "non-compliant tool calls are denied. Write your teachback correctly "
+    "now so Phase 2 does not break your workflow later."
 )
 
 
@@ -137,12 +143,14 @@ def get_peer_context(
         # names in the team config, so matching against the sanitized
         # form is correct under normal conditions. Under attack, both
         # sides flow through the same sanitization and remain consistent.
-        peers = [m["name"] for m in members if m.get("name") != safe_name]
+        # Sanitize the emitted name so a hostile config entry cannot inject
+        # a line-anchored `YOUR PACT ROLE:` marker via the peer list.
+        peers = [_sanitize_agent_name(m["name"]) for m in members if m.get("name") != safe_name]
     else:
         # Fallback: filter by agentType. This excludes ALL agents of the same
         # type, not just the spawning agent. This is a known limitation when
         # the hook input does not include agent_name/agent_id.
-        peers = [m["name"] for m in members if m.get("agentType") != agent_type]
+        peers = [_sanitize_agent_name(m["name"]) for m in members if m.get("agentType") != agent_type]
 
     if not peers:
         peer_context = "You are the only active teammate on this team."

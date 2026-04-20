@@ -386,3 +386,188 @@ class TestFindBlockers:
         ]
         result = find_blockers(tasks)
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# _read_task_json / read_task_metadata / read_task_owner
+# Hoisted from handoff_gate.py in #401 Commit #4. Tests cover:
+#   - positive-allowlist path sanitization (upgrade from re.sub negative regex)
+#   - happy-path reads (team-scoped + base fallback)
+#   - corrupted JSON / missing files / empty task_id → fail-open {}
+#   - thin-wrapper semantics of read_task_metadata / read_task_owner
+# ---------------------------------------------------------------------------
+
+class TestReadTaskJsonHoistedHelpers:
+    """Sanitization contract for the hoisted helpers in shared.task_utils."""
+
+    def test_happy_path_team_dir(self, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        task_data = {"id": "42", "subject": "hi", "owner": "coder-1",
+                     "metadata": {"variety": {"total": 7}}}
+        (team_dir / "42.json").write_text(json.dumps(task_data))
+
+        result = _read_task_json("42", "pact-test", tasks_base_dir=str(tmp_path))
+        assert result == task_data
+
+    def test_falls_back_to_base_when_team_dir_missing(self, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        (tmp_path / "5.json").write_text(json.dumps({"id": "5"}))
+        result = _read_task_json("5", "pact-does-not-exist", tasks_base_dir=str(tmp_path))
+        assert result == {"id": "5"}
+
+    def test_team_name_none_uses_base_only(self, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        (tmp_path / "9.json").write_text(json.dumps({"id": "9"}))
+        result = _read_task_json("9", None, tasks_base_dir=str(tmp_path))
+        assert result == {"id": "9"}
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        assert _read_task_json("404", "pact-test", tasks_base_dir=str(tmp_path)) == {}
+
+    def test_corrupted_json_returns_empty(self, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "1.json").write_text("{{{not json")
+
+        assert _read_task_json("1", "pact-test", tasks_base_dir=str(tmp_path)) == {}
+
+    def test_empty_task_id_returns_empty(self):
+        from shared.task_utils import _read_task_json
+
+        assert _read_task_json("", "pact-test") == {}
+
+
+class TestReadTaskJsonPathSanitization:
+    """Positive-allowlist path-traversal defense (is_safe_path_component)."""
+
+    @pytest.mark.parametrize("bad_id", [
+        "..",
+        "../../etc/passwd",
+        "/absolute/path",
+        "..\\windows",
+        "foo/bar",
+        "foo\\bar",
+        "with space",
+        "with\tab",
+        "with\nnewline",
+        "\u2028line_sep",
+        "\u2029para_sep",
+        "\u0085nel_sep",
+        "\x00null",
+        ".",
+        "..foo",  # rejected — contains '.'
+        "foo.bar",  # rejected — contains '.'
+    ])
+    def test_sanitizer_rejects_traversal_and_separators(self, bad_id, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        # Bad id never resolves to any file regardless of what's on disk
+        assert _read_task_json(bad_id, "pact-test", tasks_base_dir=str(tmp_path)) == {}
+
+    @pytest.mark.parametrize("good_id", [
+        "42",
+        "task-17",
+        "ABC_def",
+        "a1b2c3",
+        "3c82-d41e-f76b",  # UUID-like
+        "0",
+    ])
+    def test_sanitizer_accepts_safe_ids(self, good_id, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / f"{good_id}.json").write_text(json.dumps({"id": good_id}))
+
+        assert _read_task_json(good_id, "pact-test", tasks_base_dir=str(tmp_path)) == {"id": good_id}
+
+    def test_unsafe_team_name_rejected(self, tmp_path):
+        from shared.task_utils import _read_task_json
+
+        # Even with a valid task_id, an unsafe team_name must reject
+        (tmp_path / "42.json").write_text(json.dumps({"id": "42"}))
+
+        assert _read_task_json("42", "../escape", tasks_base_dir=str(tmp_path)) == {}
+
+
+class TestReadTaskMetadataWrapper:
+    def test_returns_metadata_dict(self, tmp_path):
+        from shared.task_utils import read_task_metadata
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "1.json").write_text(json.dumps({"id": "1", "metadata": {"foo": "bar"}}))
+
+        assert read_task_metadata("1", "pact-test", tasks_base_dir=str(tmp_path)) == {"foo": "bar"}
+
+    def test_missing_metadata_returns_empty_dict(self, tmp_path):
+        from shared.task_utils import read_task_metadata
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "1.json").write_text(json.dumps({"id": "1"}))  # no metadata key
+
+        assert read_task_metadata("1", "pact-test", tasks_base_dir=str(tmp_path)) == {}
+
+    def test_missing_file_returns_empty_dict(self, tmp_path):
+        from shared.task_utils import read_task_metadata
+
+        assert read_task_metadata("404", "pact-test", tasks_base_dir=str(tmp_path)) == {}
+
+
+class TestReadTaskOwnerWrapper:
+    def test_returns_owner_when_present(self, tmp_path):
+        from shared.task_utils import read_task_owner
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "1.json").write_text(
+            json.dumps({"id": "1", "owner": "backend-coder-2"})
+        )
+
+        assert read_task_owner("1", "pact-test", tasks_base_dir=str(tmp_path)) == "backend-coder-2"
+
+    def test_returns_none_when_owner_absent(self, tmp_path):
+        from shared.task_utils import read_task_owner
+
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "1.json").write_text(json.dumps({"id": "1"}))
+
+        assert read_task_owner("1", "pact-test", tasks_base_dir=str(tmp_path)) is None
+
+    def test_returns_none_on_missing_file(self, tmp_path):
+        from shared.task_utils import read_task_owner
+
+        assert read_task_owner("nope", "pact-test", tasks_base_dir=str(tmp_path)) is None
+
+
+class TestHandoffGateReexportDriftGuard:
+    """handoff_gate.py MUST still re-export these symbols for test patch targets."""
+
+    def test_handoff_gate_reexports_read_task_json(self):
+        import handoff_gate
+        from shared.task_utils import _read_task_json as shared_read
+
+        assert handoff_gate._read_task_json is shared_read
+
+    def test_handoff_gate_reexports_read_task_metadata(self):
+        import handoff_gate
+        from shared.task_utils import read_task_metadata as shared_rm
+
+        assert handoff_gate.read_task_metadata is shared_rm
+
+    def test_handoff_gate_reexports_read_task_owner(self):
+        import handoff_gate
+        from shared.task_utils import read_task_owner as shared_ro
+
+        assert handoff_gate.read_task_owner is shared_ro

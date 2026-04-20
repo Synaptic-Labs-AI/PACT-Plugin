@@ -21,8 +21,8 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 4. **GATE — Send teachback**: Send a teachback to lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
    - **DO NOT** call `Edit`, `Write`, or `Bash` before sending your teachback
    - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
-   - Non-blocking: proceed immediately after sending — do not wait for the lead's reply
-5. Begin work — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
+   - **Teachback is a work-start gate.** After submitting, halt and wait for the lead's structured `teachback_approved` metadata write before any `Edit`, `Write`, or `Bash` call. Full gating rules + template in the `pact-teachback` skill. Reading files for understanding (`Read`, `Glob`, `Grep`) is permitted; implementation is not.
+5. Once `teachback_approved` arrives, begin work — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
 
 > **Worktree Scope**: If you are working in a worktree, files that are gitignored (e.g., `CLAUDE.md`) do not exist there. Do not edit or create `CLAUDE.md` — the orchestrator manages it separately. If you need to reference `CLAUDE.md` content, it is auto-loaded into your context. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead of editing it directly.
 
@@ -62,6 +62,29 @@ your agent body has a `# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)` secti
 content via `@`-ref.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
+
+### Structured `teachback_submit` at every dispatch
+
+Every teachback you produce — on every dispatch, no exceptions — MUST
+include `teachback_submit` metadata via `TaskUpdate` with the sub-fields
+`understanding`, `most_likely_wrong`, `least_confident_item`, and
+`first_action`. All 4 sub-fields are required on every dispatch. A
+teachback without these fields is not a teachback.
+
+The `SendMessage` notification described above remains the channel that
+alerts the lead a teachback is ready to read. The structured
+`teachback_submit` metadata is what the lead reads, validates, and replies
+to. Produce both at every dispatch: `SendMessage` carries the notification;
+`TaskUpdate(metadata={"teachback_submit": {...}})` carries the substance.
+
+**Teachback blocks work start.** Submitting is not starting. After your
+`teachback_submit` metadata + notification are sent, halt. The lead's
+`teachback_approved` metadata write on your task is the release signal;
+until it lands, no `Edit`, no `Write`, no `Bash`, no implementation tool
+calls. A teammate who begins work before approval is violating protocol.
+If the lead writes `teachback_corrections` instead, revise your
+`teachback_submit` and wait again. Full gating rules in the
+`pact-teachback` skill.
 
 ## Progress Reporting
 
