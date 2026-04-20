@@ -42,10 +42,19 @@ OVERRIDE_RATIONALE_MAX = 120
 # Strict regex for the combined pin date + size-override comment.
 # Live form (CLAUDE.md:69):
 #   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
-# Capture group 1 = rationale text (may contain any non-'-->' chars).
-# Anchored via .fullmatch() at call sites (one-line candidate).
+# Capture group 1 = rationale text — matches any character EXCEPT a run
+# that terminates the HTML comment (`-->`). Reluctant `.+?` was sufficient
+# under .fullmatch() but is vulnerable to future .search()/.match() misuse
+# by a downstream consumer. Self-anchoring via \A...\Z + a rationale
+# pattern that positively refuses to consume `-->` closes both a
+# latent-misuse vector (Sec-M2) and call-convention drift (Sec-F5).
+#
+# Rationale pattern: `(?:[^-]|-(?!->))+` — one or more chars that are
+# either not `-` at all, or `-` NOT followed by `->`. Equivalent to "any
+# char except the `-->` terminator" without resorting to reluctant
+# backtracking.
 OVERRIDE_COMMENT_RE = re.compile(
-    r'<!--\s*pinned:\s*[^,]+,\s*pin-size-override:\s*(.+?)\s*-->',
+    r'\A<!--\s*pinned:\s*[^,]+,\s*pin-size-override:\s*((?:[^-]|-(?!->))+?)\s*-->\Z',
     re.IGNORECASE,
 )
 
