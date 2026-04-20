@@ -249,45 +249,50 @@ def _normalize(text: str) -> str:
     membership comparisons.
 
     Pipeline (order is load-bearing):
-      1. Strip default-ignorable characters BEFORE NFKC so invisible
-         formatting codepoints never participate in compatibility
-         folding. Some default-ignorables can alter how NFKC
-         decomposes surrounding sequences; stripping first keeps the
-         fold deterministic and matches user intent ("these characters
-         should never have been here").
-      2. NFKC Unicode normalization — folds fullwidth Latin /
+      1. NFKC Unicode normalization — folds fullwidth Latin /
          compatibility forms to canonical ASCII-range codepoints so
          visual look-alikes collapse. Does NOT fold Cyrillic
          homoglyphs (different scripts), but a NFKC'd Cyrillic string
          and a Latin string remain distinguishable — which is the
          correct semantics (the tokens ARE different characters, even
          if visually identical).
-      3. Strip default-ignorables AGAIN after NFKC as belt-and-
-         suspenders. Empirical scan of the full Unicode codepoint
-         space (cycle-5 round-4 tester audit) confirms NO current
-         codepoint produces a DI character via NFKC decomposition
-         from a non-DI source, so under current Unicode data the
-         post-NFKC pass is functionally redundant on single-char
-         inputs. It is retained as future-proofing against:
-           - UAX spec updates that add new NFKC compatibility
-             mappings whose decomposition introduces DI codepoints
-             (the Unicode Standard is a living spec)
-           - expansions to `_is_default_ignorable`'s definition
-             (e.g. cycle-5 Fixer A's full UAX #44 DI enumeration)
-             that classify new codepoints as DI mid-fold
-           - interaction effects with multi-char compatibility
-             decompositions that future-proof testing cannot
-             predict by single-codepoint scan alone
-         Cost: one extra O(n) pass; benefit: forecloses the
-         post-fold reinsertion class of bug under any foreseeable
-         Unicode evolution. See the adversarial test
-         `TestNormalizeDoublePassBeltAndSuspenders` (test file)
-         for the monkey-patched simulation that proves the
-         pipeline robust to this hypothetical. Cycle 4
-         architectural fix for the round-3 convergent blocker
-         (coder SEC-1 + security F-R3-SEC-1) — see
-         `_strip_default_ignorable`.
-      4. Lowercase + whitespace-collapse (pre-F-SEC-R2-1 behavior).
+      2. Strip default-ignorable characters AFTER NFKC. Any DI
+         codepoint present in the raw input is preserved verbatim by
+         NFKC (Unicode stability guarantee; empirically verified
+         cycle-5), so a single post-NFKC strip is sufficient to
+         remove every DI character that was ever in the input or that
+         could be introduced by compatibility decomposition.
+      3. Lowercase + whitespace-collapse (pre-F-SEC-R2-1 behavior).
+
+    Cycle-5 simplification: an earlier pipeline (cycle-4) ran
+    `_strip_default_ignorable` BOTH before and after NFKC as
+    belt-and-suspenders. A full 0x110000 Unicode codepoint scan
+    (cycle-5 round-4 tester audit) falsified the premise of the
+    pre-NFKC pass: no current Unicode codepoint has an NFKC
+    decomposition that yields a default-ignorable codepoint from a
+    non-DI source, and all 426 DI codepoints are preserved verbatim
+    through NFKC. Under current Unicode data the two passes are
+    functionally equivalent; the pre-NFKC pass was dead code
+    disguised as defense-in-depth. Revisit trigger: Python Unicode
+    version upgrade (`unicodedata.unidata_version`) adding an NFKC
+    decomposition that introduces a DI codepoint — re-run the
+    reproduction scan below on the upgrade.
+
+    Reproduction (Python 3.12+):
+
+        import unicodedata
+        def is_di(c):
+            cat = unicodedata.category(c)
+            return (cat == "Cf"
+                    or 0xFE00 <= ord(c) <= 0xFE0F
+                    or 0xE0100 <= ord(c) <= 0xE01EF)
+        for cp in range(0x110000):
+            try: src = chr(cp)
+            except ValueError: continue
+            if is_di(src): continue
+            n = unicodedata.normalize("NFKC", src)
+            if n != src and any(is_di(c) for c in n):
+                print(hex(cp))  # fires iff pre-NFKC pass is needed
 
     Closes F-SEC-R2-1 + round-3 SEC-1 / F-R3-SEC-1 at a single point
     so the substring-inequality check (`_scanned_candidate_distinct`),
@@ -297,10 +302,9 @@ def _normalize(text: str) -> str:
     """
     if not isinstance(text, str):
         return ""
-    pre_stripped = _strip_default_ignorable(text)
-    folded = unicodedata.normalize("NFKC", pre_stripped)
-    post_stripped = _strip_default_ignorable(folded)
-    return re.sub(r"\s+", " ", post_stripped.strip().lower())
+    folded = unicodedata.normalize("NFKC", text)
+    stripped = _strip_default_ignorable(folded)
+    return re.sub(r"\s+", " ", stripped.strip().lower())
 
 
 def _tokenize(text: str) -> list[str]:
