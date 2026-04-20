@@ -682,9 +682,21 @@ class TestStateTransitionEmission:
         assert _trigger_for_transition(
             "teachback_correcting", "active"
         ) == "content_fixed"
+        # M-R5-A (cycle-6): under_review -> correcting splits on
+        # reason_code. corrections_pending = T6 lead-correct; absent
+        # reason_code defaults to the same (conservative, pre-cycle-6
+        # behavior); unaddressed_items = T5 auto-downgrade.
         assert _trigger_for_transition(
-            "teachback_under_review", "teachback_correcting"
+            "teachback_under_review", "teachback_correcting",
+            "corrections_pending",
         ) == "lead_correct"
+        assert _trigger_for_transition(
+            "teachback_under_review", "teachback_correcting",
+        ) == "lead_correct"
+        assert _trigger_for_transition(
+            "teachback_under_review", "teachback_correcting",
+            "unaddressed_items",
+        ) == "auto_downgrade"
         assert _trigger_for_transition(
             "teachback_correcting", "teachback_under_review"
         ) == "teammate_revise"
@@ -808,6 +820,77 @@ class TestStateTransitionEmission:
         assert emitted == []  # no duplicate emission
 
     def test_emit_on_state_change(self, monkeypatch):
+        import teachback_gate
+
+        prior = [
+            {"type": "teachback_state_transition", "task_id": "17",
+             "to_state": "teachback_under_review"},
+        ]
+        emitted = []
+        monkeypatch.setattr(
+            teachback_gate, "read_events", lambda _type: prior
+        )
+        monkeypatch.setattr(
+            teachback_gate, "append_event",
+            lambda ev: emitted.append(ev) or True,
+        )
+        monkeypatch.setattr(
+            teachback_gate, "make_event",
+            lambda _type, **kw: {"type": _type, **kw},
+        )
+
+        teachback_gate._emit_state_transition_if_changed(
+            task_id="17", agent="coder-1", to_state="active",
+        )
+        assert len(emitted) == 1
+        ev = emitted[0]
+        assert ev["to_state"] == "active"
+        assert ev["from_state"] == "teachback_under_review"
+        assert ev["trigger"] == "lead_approve"
+
+    def test_emit_correcting_to_active_includes_content_fixed_trigger(
+        self, monkeypatch,
+    ):
+        """Integration emit (cycle-6 item 4): the correcting -> active
+        transition must include {trigger: "content_fixed"} in the
+        emitted event, not only in the pure-function _trigger_for_transition.
+        Counter-test-by-revert: removing `trigger` from
+        _emit_state_transition_if_changed's event_fields fails this."""
+        import teachback_gate
+
+        prior = [
+            {"type": "teachback_state_transition", "task_id": "17",
+             "to_state": "teachback_correcting"},
+        ]
+        emitted = []
+        monkeypatch.setattr(
+            teachback_gate, "read_events", lambda _type: prior
+        )
+        monkeypatch.setattr(
+            teachback_gate, "append_event",
+            lambda ev: emitted.append(ev) or True,
+        )
+        monkeypatch.setattr(
+            teachback_gate, "make_event",
+            lambda _type, **kw: {"type": _type, **kw},
+        )
+
+        teachback_gate._emit_state_transition_if_changed(
+            task_id="17", agent="coder-1", to_state="active",
+        )
+        assert len(emitted) == 1
+        ev = emitted[0]
+        assert ev["to_state"] == "active"
+        assert ev["from_state"] == "teachback_correcting"
+        assert ev["trigger"] == "content_fixed"
+
+    def test_emit_under_review_to_active_includes_lead_approve_trigger(
+        self, monkeypatch,
+    ):
+        """Integration emit (cycle-6 item 4): the under_review -> active
+        transition must include {trigger: "lead_approve"} in the emitted
+        event. Locks the true-lead-approve integration path against
+        silent-drop regressions in the emitter."""
         import teachback_gate
 
         prior = [

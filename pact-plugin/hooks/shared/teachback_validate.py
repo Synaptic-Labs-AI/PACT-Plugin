@@ -198,9 +198,15 @@ def _strip_default_ignorable(text: str) -> str:
     """Strip default-ignorable formatting characters from ``text``.
 
     Removes every character matched by `_is_default_ignorable` — the
-    full Unicode Format category (``Cf``) plus the two Variation
-    Selector ranges. See the helper's docstring + the module-level
-    comment above for the scope + Python-stdlib-gap rationale.
+    authoritative 17-range enumeration of Unicode codepoints with
+    ``Default_Ignorable_Code_Point=Yes`` per
+    ``DerivedCoreProperties.txt``. Spans Cf / Mn / Lo / Cn categories
+    (soft hyphen, CGJ, Arabic letter mark, Hangul / Khmer / Mongolian
+    fillers and variation selectors, bidi + invisible controls, TAG
+    chars, shorthand format, musical symbol beams). Cycle-5 replacement
+    for the cycle-4 ``Cf`` + VS approximation; see the helper's
+    docstring + the module-level comment above for the scope +
+    Python-stdlib-gap rationale.
 
     Any default-ignorable character spliced into a
     ``scanned_candidate.candidate`` (or any other content-comparison
@@ -268,30 +274,25 @@ def _normalize(text: str) -> str:
     `_strip_default_ignorable` BOTH before and after NFKC as
     belt-and-suspenders. A full 0x110000 Unicode codepoint scan
     (cycle-5 round-4 tester audit) falsified the premise of the
-    pre-NFKC pass: no current Unicode codepoint has an NFKC
-    decomposition that yields a default-ignorable codepoint from a
-    non-DI source, and all 426 DI codepoints are preserved verbatim
-    through NFKC. Under current Unicode data the two passes are
-    functionally equivalent; the pre-NFKC pass was dead code
-    disguised as defense-in-depth. Revisit trigger: Python Unicode
-    version upgrade (`unicodedata.unidata_version`) adding an NFKC
-    decomposition that introduces a DI codepoint — re-run the
-    reproduction scan below on the upgrade.
+    pre-NFKC pass. Of the 4174 Default_Ignorable codepoints in
+    Unicode 16.0, 4172 preserve verbatim through NFKC. 2 (U+3164
+    HANGUL FILLER, U+FFA0 HALFWIDTH HANGUL FILLER) fold to U+1160
+    HANGUL JUNGSEONG FILLER which is itself Default_Ignorable and
+    correctly stripped post-NFKC. Zero non-DI→DI NFKC folds exist,
+    making the pre-NFKC pass redundant (hence cycle-5 single-pass
+    simplification). Revisit trigger: Python Unicode version upgrade
+    (`unicodedata.unidata_version`) adding an NFKC decomposition
+    that introduces a DI codepoint from a non-DI source — re-run
+    the reproduction scan below on the upgrade.
 
     Reproduction (Python 3.12+):
 
-        import unicodedata
-        def is_di(c):
-            cat = unicodedata.category(c)
-            return (cat == "Cf"
-                    or 0xFE00 <= ord(c) <= 0xFE0F
-                    or 0xE0100 <= ord(c) <= 0xE01EF)
         for cp in range(0x110000):
             try: src = chr(cp)
             except ValueError: continue
-            if is_di(src): continue
+            if _is_default_ignorable(src): continue
             n = unicodedata.normalize("NFKC", src)
-            if n != src and any(is_di(c) for c in n):
+            if n != src and any(_is_default_ignorable(c) for c in n):
                 print(hex(cp))  # fires iff pre-NFKC pass is needed
 
     Closes F-SEC-R2-1 + round-3 SEC-1 / F-R3-SEC-1 at a single point

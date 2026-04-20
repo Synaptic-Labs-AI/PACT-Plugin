@@ -266,6 +266,7 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
     try:
         _emit_state_transition_if_changed(
             task_id=task_id, agent=agent_name, to_state=to_state,
+            reason_code=reason_code,
         )
     except Exception:
         # Fail-open — observability must never block the gate.
@@ -418,7 +419,7 @@ def _state_from_reason(reason_code: str) -> str:
 
 
 def _emit_state_transition_if_changed(
-    task_id: str, agent: str, to_state: str
+    task_id: str, agent: str, to_state: str, reason_code: str = "",
 ) -> None:
     """Emit a teachback_state_transition event iff the target state
     differs from the most recent transition observed for this task_id
@@ -436,6 +437,14 @@ def _emit_state_transition_if_changed(
     state at the end of the prior session. That's the intended
     observability — "which transitions happened THIS session" is the
     load-bearing signal for the Phase 2 readiness diagnostic.
+
+    ``reason_code`` is the gate's first_failing_reason (or "" for the
+    active-path success branch); it is consulted only by
+    ``_trigger_for_transition`` to split the
+    ``under_review -> correcting`` transition between the T5 auto-
+    downgrade path (``unaddressed_items``) and the T6 lead-correct
+    path (``corrections_pending``). Cycle-6 M-R5-A split; prior to
+    this the two paths conflated under ``lead_correct``.
 
     Fail-open on any error (journal read failure, make_event/append_event
     exception, missing session context). Mirrors the advisory-event
@@ -462,7 +471,7 @@ def _emit_state_transition_if_changed(
         return  # de-dupe: no transition observed
 
     from_state = last_to_state or ""  # empty string means no prior
-    trigger = _trigger_for_transition(from_state, to_state)
+    trigger = _trigger_for_transition(from_state, to_state, reason_code)
 
     event_fields: dict = {
         "task_id": task_id,
@@ -480,7 +489,9 @@ def _emit_state_transition_if_changed(
         pass
 
 
-def _trigger_for_transition(from_state: str, to_state: str) -> str:
+def _trigger_for_transition(
+    from_state: str, to_state: str, reason_code: str = "",
+) -> str:
     """Infer the trigger vocabulary term from the state pair per
     JOURNAL-EVENTS.md §Trigger values controlled vocabulary.
 
@@ -496,6 +507,16 @@ def _trigger_for_transition(from_state: str, to_state: str) -> str:
     made forgery detection impossible (a teammate that overwrites their
     own teachback_approved dict cannot be distinguished from a genuine
     lead approve).
+
+    M-R5-A (cycle-6): the ``under_review -> correcting`` transition
+    splits on ``reason_code``. ``unaddressed_items`` is the T5 auto-
+    downgrade path (gate observed approved with unaddressed non-empty);
+    ``corrections_pending`` is the T6 lead-correct path (lead wrote
+    explicit teachback_corrections). Prior to cycle-6 both conflated
+    under ``lead_correct``, defeating the Phase-2 auditor's ability to
+    attribute the state change. Callers that do not have a reason_code
+    (e.g. pure-state tests) get the conservative ``lead_correct``
+    default.
     """
     if from_state == "" and to_state == "teachback_under_review":
         return "teammate_submit"
@@ -511,17 +532,22 @@ def _trigger_for_transition(from_state: str, to_state: str) -> str:
         # wrote a valid teachback_approved with unaddressed=[].
         return "lead_approve"
     if to_state == "active":
-        # First-observation fallback (no prior from_state) — bias toward
-        # lead_approve since that is the normal arrival at active from a
-        # cold journal read. The named from_state branches above handle
-        # the split cases explicitly.
+        # Catch-all for any unmodeled from_state -> active tuple
+        # (first-observation with no prior from_state, or an
+        # intermediate state not listed above). Bias toward
+        # lead_approve since that is the normal arrival at active from
+        # a cold journal read. The named from_state branches above
+        # handle the split cases explicitly.
         return "lead_approve"
     if from_state == "teachback_under_review" and to_state == "teachback_correcting":
-        # Ambiguous between lead_correct and auto_downgrade from the gate's
-        # seat. Bias toward lead_correct (the documented-write case);
-        # auto_downgrade is emitted only when the gate observes approved
-        # with unaddressed non-empty but absent corrections — caller
-        # can override via the signal path if needed.
+        # Split by reason_code (cycle-6 M-R5-A). unaddressed_items =
+        # T5 auto-downgrade (scanner observed approved with unaddressed
+        # non-empty); corrections_pending = T6 lead-correct (lead wrote
+        # teachback_corrections). Default (absent reason_code) biases
+        # toward lead_correct — the documented-write case and the
+        # behavior relied on by pre-cycle-6 callers.
+        if reason_code == "unaddressed_items":
+            return "auto_downgrade"
         return "lead_correct"
     if from_state == "teachback_correcting" and to_state == "teachback_under_review":
         return "teammate_revise"
