@@ -1128,3 +1128,43 @@ class TestParsePinnedSectionManagedRegionBounding:
         assert result is not None
         _, _, pinned_content = result
         assert "Old content." in pinned_content
+
+
+class TestPinCapsTwinCopyDrift:
+    """Drift detection for pin_caps constants twin-copied into working_memory.
+
+    pin_caps.py lives under pact-plugin/hooks/ and working_memory.py lives
+    under pact-plugin/skills/pact-memory/scripts/ — separate package
+    boundary means direct import is not available. Constants MUST stay in
+    sync; this test fails loudly when they drift.
+    """
+
+    def test_pin_count_cap_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.PIN_COUNT_CAP == working_memory.PIN_COUNT_CAP, (
+            "PIN_COUNT_CAP drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
+
+    def test_pin_size_cap_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.PIN_SIZE_CAP == working_memory.PIN_SIZE_CAP, (
+            "PIN_SIZE_CAP drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
+
+    def test_pin_stale_block_threshold_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.PIN_STALE_BLOCK_THRESHOLD == working_memory.PIN_STALE_BLOCK_THRESHOLD, (
+            "PIN_STALE_BLOCK_THRESHOLD drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
