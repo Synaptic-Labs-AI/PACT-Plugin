@@ -72,3 +72,44 @@ While specialists can invoke nested cycles autonomously, the orchestrator can al
 See [rePACT.md](../commands/rePACT.md) for full command documentation.
 
 ---
+
+### Teachback Gate Expectations (issue #401)
+
+Autonomy is bounded by the teachback gate when the agent's task is
+variety-scored at or above `TEACHBACK_BLOCKING_THRESHOLD` (=7, see
+[pact-variety.md §Gate Thresholds](pact-variety.md#gate-thresholds-teachback-gate-issue-401)).
+Specialists must:
+
+1. **Write `teachback_submit` before Edit/Write/Agent/NotebookEdit** — not
+   just send a SendMessage. The gate reads `metadata.teachback_submit`
+   via `TaskUpdate`, not the message stream. SendMessage alone no longer
+   satisfies the gate for variety >= 7 tasks.
+2. **Respect `teachback_corrections`** — when the lead writes
+   corrections, re-emit only the flagged fields per
+   `request_revisions_on`. Unchanged fields carry forward automatically
+   (see [pact-ct-teachback.md §Revision Cycle](pact-ct-teachback.md#revision-cycle-q4-targeted-re-emission)).
+3. **Address `required_scope_items`** — every scope item named in the
+   dispatch metadata must appear in either the teachback's
+   `understanding` / `most_likely_wrong` / `least_confident_item`
+   fields or in the completion HANDOFF's equivalent sections.
+   `teachback_approved.conditions_met.unaddressed` will be non-empty
+   until all items are addressed, auto-downgrading the state to
+   `teachback_correcting`.
+4. **Do NOT rationalize the gate away.** The gate enforces ritual for
+   honest-but-careless output. An agent that soft-loops ("I'll skip the
+   full teachback because the task is self-explanatory") violates the
+   autonomy boundary. If the scope genuinely doesn't warrant a teachback,
+   raise that as a scope-change signal to the orchestrator — do not
+   self-exempt.
+
+**Exempt agents** (carve-out, no teachback required at any variety):
+`secretary`, `pact-secretary`, `auditor`, `pact-auditor`. These agents
+either receive instructions via SendMessage (secretary briefings) or
+produce signal-shaped outputs (auditor findings) that don't fit the
+conversation-continuation model.
+
+**Signal tasks** (blocker, algedonic, skipped, stalled, terminated) also
+bypass the gate — those communicate via different channels and are
+structurally incompatible with the teachback workflow.
+
+---
