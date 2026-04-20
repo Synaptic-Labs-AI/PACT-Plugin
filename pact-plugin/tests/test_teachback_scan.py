@@ -404,3 +404,222 @@ class TestScanTeachbackStateStructural:
             "first_failing_protocol_level",
             "all_active",
         }
+
+
+# ---------------------------------------------------------------------------
+# Coverage fills — _submit_has_required_structure type-guard branches
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitRequiredStructureTypeGuards:
+    """Lines 132, 134, 140, 147, 149, 153, 155: each type guard inside
+    _submit_has_required_structure. The function is module-private but
+    exercised via _classify_task_state producing invalid_submit."""
+
+    def test_understanding_non_string(self):
+        # Non-string understanding → invalid_submit (line 132)
+        meta = {"teachback_submit": {"understanding": 42}}
+        reason, _ = _classify_task_state(meta, "simplified")
+        assert reason == "invalid_submit"
+
+    def test_understanding_whitespace_only(self):
+        # Whitespace-only understanding → invalid_submit (line 134)
+        meta = {"teachback_submit": {"understanding": "   \t  ",
+                                        "first_action": {"action": "f.py:1"}}}
+        reason, _ = _classify_task_state(meta, "simplified")
+        assert reason == "invalid_submit"
+
+    def test_first_action_non_dict(self):
+        # Non-dict first_action → invalid_submit (line 138)
+        meta = {"teachback_submit": {
+            "understanding": "valid-prose " * 10,
+            "first_action": "not-a-dict",
+        }}
+        reason, _ = _classify_task_state(meta, "simplified")
+        assert reason == "invalid_submit"
+
+    def test_first_action_missing_action_field(self):
+        # first_action dict without string "action" → invalid (line 140)
+        meta = {"teachback_submit": {
+            "understanding": "valid-prose " * 10,
+            "first_action": {"action": None},  # non-string
+        }}
+        reason, _ = _classify_task_state(meta, "simplified")
+        assert reason == "invalid_submit"
+
+    def test_full_protocol_missing_most_likely_wrong(self):
+        # Full protocol: mlw non-dict → invalid (line 144)
+        meta = {"teachback_submit": {
+            "understanding": "x" * 120,
+            "first_action": {"action": "f.py:1"},
+            "most_likely_wrong": "not-a-dict",
+            "least_confident_item": {"item": "x", "current_plan": "y", "failure_mode": "z"},
+        }}
+        reason, _ = _classify_task_state(meta, "full")
+        assert reason == "invalid_submit"
+
+    def test_full_protocol_mlw_missing_assumption(self):
+        # Full: mlw has no string assumption (line 147)
+        meta = {"teachback_submit": {
+            "understanding": "x" * 120,
+            "first_action": {"action": "f.py:1"},
+            "most_likely_wrong": {"assumption": 42, "consequence": "y"},
+            "least_confident_item": {"item": "x", "current_plan": "y", "failure_mode": "z"},
+        }}
+        reason, _ = _classify_task_state(meta, "full")
+        assert reason == "invalid_submit"
+
+    def test_full_protocol_mlw_missing_consequence(self):
+        # Full: mlw has no string consequence (line 149)
+        meta = {"teachback_submit": {
+            "understanding": "x" * 120,
+            "first_action": {"action": "f.py:1"},
+            "most_likely_wrong": {"assumption": "x", "consequence": None},
+            "least_confident_item": {"item": "x", "current_plan": "y", "failure_mode": "z"},
+        }}
+        reason, _ = _classify_task_state(meta, "full")
+        assert reason == "invalid_submit"
+
+    def test_full_protocol_missing_lci(self):
+        # Full: least_confident_item non-dict (line 152)
+        meta = {"teachback_submit": {
+            "understanding": "x" * 120,
+            "first_action": {"action": "f.py:1"},
+            "most_likely_wrong": {"assumption": "x", "consequence": "y"},
+            "least_confident_item": "wrong-type",
+        }}
+        reason, _ = _classify_task_state(meta, "full")
+        assert reason == "invalid_submit"
+
+    def test_full_protocol_lci_missing_item(self):
+        # Full: lci without string item (line 154)
+        meta = {"teachback_submit": {
+            "understanding": "x" * 120,
+            "first_action": {"action": "f.py:1"},
+            "most_likely_wrong": {"assumption": "x", "consequence": "y"},
+            "least_confident_item": {"item": None, "current_plan": "a",
+                                       "failure_mode": "b"},
+        }}
+        reason, _ = _classify_task_state(meta, "full")
+        assert reason == "invalid_submit"
+
+
+class TestIsCarveOutNonDictMetadata:
+    """Line 218-219: non-dict task_metadata → fail-open bypass (True)."""
+
+    def test_non_dict_metadata_carves_out(self, tmp_path):
+        # Write a task file whose metadata field is a list (invalid type).
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        bad_task = {
+            "id": "1", "subject": "backend-coder: task 1",
+            "owner": "coder-1", "status": "in_progress",
+            "metadata": ["not", "a", "dict"],  # malformed
+        }
+        (team_dir / "1.json").write_text(json.dumps(bad_task), encoding="utf-8")
+        # scan_teachback_state normalizes metadata=[] to {} before calling
+        # _is_carve_out_task, but the explicit guard defends against
+        # future callers passing non-dict directly.
+        from shared.teachback_scan import _is_carve_out_task
+        assert _is_carve_out_task(["not", "a", "dict"]) is True
+        assert _is_carve_out_task(None) is True
+        assert _is_carve_out_task("string") is True
+
+
+class TestIsCarveOutBoolVarietyTotal:
+    """Line 231: bool-in-int rejection for variety.total in carve-out
+    classification. True would otherwise be treated as int 1."""
+
+    def test_bool_variety_total_treated_as_zero(self):
+        from shared.teachback_scan import _is_carve_out_task
+        # variety.total = True should NOT count as a meaningful variety
+        # score. The carve-out therefore fires (low-variety branch).
+        assert _is_carve_out_task({"variety": {"total": True}}) is True
+        assert _is_carve_out_task({"variety": {"total": False}}) is True
+
+
+class TestScanTeachbackStateMissingStatus:
+    """Line 291-292: tasks without status='in_progress' are filtered out."""
+
+    def test_pending_status_ignored(self, tmp_path):
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        _write_task(team_dir, "1", "coder-1", status="pending",
+                     metadata={"variety": _valid_variety()})
+        result = scan_teachback_state("coder-1", "pact-test",
+                                        tasks_base_dir=str(tmp_path))
+        # pending status is not in_progress → filtered out
+        assert result["task_count"] == 0
+
+
+class TestScanTeachbackStateMissingOwner:
+    """Line 289-290: tasks without matching owner are filtered out."""
+
+    def test_missing_owner_field(self, tmp_path):
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        # Task file without owner field
+        data = {"id": "1", "subject": "x", "status": "in_progress",
+                "metadata": {"variety": _valid_variety()}}
+        (team_dir / "1.json").write_text(json.dumps(data), encoding="utf-8")
+        result = scan_teachback_state("coder-1", "pact-test",
+                                        tasks_base_dir=str(tmp_path))
+        assert result["task_count"] == 0
+
+
+class TestScanNonJsonFilesSkipped:
+    """Line 282-283: iterdir returns non-JSON files (e.g. .lock); they're
+    filtered by the .json suffix check."""
+
+    def test_non_json_files_skipped(self, tmp_path):
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "1.lock").write_text("ignored")
+        (team_dir / "1.json").write_text(json.dumps({
+            "id": "1", "subject": "backend-coder: x", "owner": "coder-1",
+            "status": "in_progress", "metadata": {"variety": _valid_variety(),
+                                                   "teachback_submit": _full_submit()},
+        }), encoding="utf-8")
+        result = scan_teachback_state("coder-1", "pact-test",
+                                        tasks_base_dir=str(tmp_path))
+        assert result["task_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Counter-test-by-revert — items 3, 7, 8 (scan/schema domain)
+# ---------------------------------------------------------------------------
+
+
+class TestCounterTestByRevertScan:
+    """Items 3 (under_review → correcting via corrections), 14 scanner-
+    side facets."""
+
+    def test_item3_submit_then_corrections_transitions_to_correcting(self):
+        """Item 3: when teammate has submit AND lead writes corrections,
+        state is teachback_correcting. Scanner returns
+        corrections_pending reason (not awaiting_approval)."""
+        meta = {
+            "teachback_submit": {
+                "understanding": "x" * 120,
+                "first_action": {"action": "f.py:1"},
+            },
+            "teachback_corrections": {"issues": ["fix first_action citation"]},
+        }
+        reason, state = _classify_task_state(meta, "simplified")
+        assert reason == "corrections_pending", (
+            "Reverting the corrections-takes-precedence rule in "
+            "_classify_task_state would misclassify this as awaiting_approval."
+        )
+        assert state == "teachback_correcting"
+
+    def test_item3_approval_with_unaddressed_auto_downgrade(self):
+        """Item 3 variant: approved with non-empty unaddressed also
+        transitions to correcting via auto-downgrade (T5)."""
+        meta = {
+            "teachback_approved": {
+                "conditions_met": {"addressed": [], "unaddressed": ["a"]},
+            },
+        }
+        reason, state = _classify_task_state(meta, "simplified")
+        assert reason == "unaddressed_items"
+        assert state == "teachback_correcting"
