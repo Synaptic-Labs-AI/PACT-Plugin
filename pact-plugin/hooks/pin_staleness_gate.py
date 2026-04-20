@@ -30,6 +30,7 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -56,6 +57,11 @@ def _resolve_project_claude_md(file_path_str: str) -> Optional[Path]:
     """Return the canonical project CLAUDE.md path if `file_path_str`
     resolves to it, otherwise None.
 
+    Relative `file_path_str` values are resolved against CLAUDE_PROJECT_DIR
+    (Back-M3/Sec-F4): Path.resolve() on a relative path uses cwd, and the
+    hook's cwd can drift (worktree switches, subprocess invocations). The
+    env var is the stable anchor the plugin sets on every session.
+
     Worktree-safe: imports staleness.get_project_claude_md_path lazily to
     avoid module-level import cost on every Edit/Write call.
     """
@@ -72,7 +78,16 @@ def _resolve_project_claude_md(file_path_str: str) -> Optional[Path]:
         return None
 
     try:
-        target = Path(file_path_str).resolve()
+        target_path = Path(file_path_str)
+        if not target_path.is_absolute():
+            # Anchor relative paths to CLAUDE_PROJECT_DIR (Back-M3). Fall
+            # back to cwd only if env var is unset, and treat that as a
+            # no-match rather than a silent cwd dependency.
+            project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+            if not project_dir:
+                return None
+            target_path = Path(project_dir) / target_path
+        target = target_path.resolve()
         canonical = project_md.resolve()
     except (OSError, RuntimeError):
         return None
