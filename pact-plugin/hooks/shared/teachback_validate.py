@@ -115,6 +115,38 @@ _CODER_PREFIXES = (
 # blast with multi-KB strings.
 _ACTUAL_VALUE_CAP = 500
 
+# Role-marker / line-terminator strip set. Matches
+# `peer_inject._sanitize_agent_name` (inline re.sub) and
+# `session_state._RENDER_STRIP_RE` verbatim — C0 control chars
+# (0x00-0x1F), DEL (0x7F), NEL (U+0085), LINE SEPARATOR (U+2028),
+# PARAGRAPH SEPARATOR (U+2029). Any deny-reason placeholder whose
+# value is drawn from teammate- or lead-authored task metadata is
+# passed through this filter BEFORE truncation and BEFORE str.format()
+# interpolation so crafted content cannot inject a `YOUR PACT ROLE:`
+# line into the teammate-visible systemMessage. Drift test in
+# test_teachback_validate asserts pattern equivalence with the
+# peer_inject canonical form.
+_ROLE_MARKER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+
+
+def _strip_control_chars(value: str) -> str:
+    """Remove C0 / DEL / Unicode line-terminator characters from ``value``.
+
+    Replacement is the empty string (mirrors
+    ``session_state._sanitize_member_name`` — render-context precedent,
+    where stripped chars collapse without merging identifiers). This is
+    the filter applied to every teammate/lead-authored string reaching
+    the deny-reason rendering pathway: placeholder values in
+    ``teachback_example.format_deny_reason`` and the truncated preview
+    in ``FieldError.actual_value``.
+
+    Non-string inputs pass through unchanged — callers decide whether
+    to coerce to str first.
+    """
+    if not isinstance(value, str):
+        return value
+    return _ROLE_MARKER_STRIP_RE.sub("", value)
+
 
 class FieldError(NamedTuple):
     """Per-field validation error surfaced to the deny_reason template."""
@@ -274,8 +306,17 @@ def _all_addressed_valid(addressed, required_scope_items) -> list[str]:
 
 def _truncate(value) -> str:
     """Return a truncated str representation suitable for
-    FieldError.actual_value. Caps at _ACTUAL_VALUE_CAP chars."""
+    FieldError.actual_value. Caps at _ACTUAL_VALUE_CAP chars.
+
+    Strips role-marker / line-terminator characters BEFORE the length
+    cap so stripped chars do not consume the truncation budget. The
+    ``actual_value`` field is rendered back into a teammate-visible
+    systemMessage via ``teachback_example._INVALID_SUBMIT_TEMPLATE``;
+    an un-stripped newline from teammate-authored content could inject
+    a fake ``YOUR PACT ROLE:`` line into that rendered output.
+    """
     s = str(value) if value is not None else ""
+    s = _strip_control_chars(s)
     if len(s) > _ACTUAL_VALUE_CAP:
         return s[: _ACTUAL_VALUE_CAP - 3] + "..."
     return s

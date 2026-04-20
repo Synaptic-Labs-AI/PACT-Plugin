@@ -37,6 +37,8 @@ Framing contract:
 
 from __future__ import annotations
 
+from shared.teachback_validate import _strip_control_chars
+
 # Imperative first words approved for deny-reason templates. Drift test
 # (test_teachback_example.py) asserts every template's first word is in
 # this set.
@@ -218,11 +220,35 @@ def format_deny_reason(
     # Normalize list-shaped fields to comma-separated strings for direct
     # interpolation. The template authors may pass a list from upstream
     # code (e.g., unaddressed from conditions_met.unaddressed) without
-    # needing to join at the call site.
+    # needing to join at the call site. List elements are individually
+    # stripped before the join so a crafted `\n` inside one element
+    # cannot inject a fake line via the comma-joined rendering.
     for key_ in ("unaddressed", "corrections_issues", "corrections_targets"):
         value = merged.get(key_)
         if isinstance(value, list):
-            merged[key_] = ", ".join(str(v) for v in value)
+            # COUNTER-TEST-WITHOUT-ELEMENT-STRIP: reverting to
+            # `", ".join(str(v) for v in value)` here still leaves the
+            # outer loop at line ~248 as the defense. The list-element
+            # strip is belt-and-suspenders against a crafted element
+            # that defeats the joined-string strip via e.g. future
+            # template-shape changes.
+            merged[key_] = ", ".join(
+                _strip_control_chars(str(v)) for v in value
+            )
+
+    # Strip role-marker / line-terminator characters from every
+    # string-typed placeholder before str.format() interpolation. The
+    # deny-reason is rendered back into a teammate-visible systemMessage
+    # (teachback_gate.py:425) or permissionDecisionReason
+    # (teachback_gate.py:417); any un-stripped newline / NEL / U+2028 /
+    # U+2029 from teammate- or lead-authored metadata could inject a
+    # fake `YOUR PACT ROLE:` line into that rendered output and bypass
+    # the line-anchor consumer check. Mirrors the PR #426 unified strip
+    # set used by peer_inject._sanitize_agent_name and
+    # session_state._RENDER_STRIP_RE — the canonical role-marker filter.
+    for placeholder_key, placeholder_value in list(merged.items()):
+        if isinstance(placeholder_value, str):
+            merged[placeholder_key] = _strip_control_chars(placeholder_value)
 
     try:
         return template.format(**merged)
