@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""
+Check Pin Caps CLI Entry
+
+Location: pact-plugin/scripts/check_pin_caps.py
+
+Summary: Command-line entry point invoked by /PACT:pin-memory before any
+pin add or pin edit. Parses the project CLAUDE.md Pinned Context section
+via hooks/pin_caps.parse_pins, applies count + size cap predicates, and
+emits a JSON decision to stdout.
+
+Usage:
+  # Check whether adding a new pin with given body is allowed
+  python3 check_pin_caps.py --new-body "pin body text" [--has-override]
+
+  # Status-only query (no add under consideration) — emits slot status
+  python3 check_pin_caps.py --status
+
+JSON output contract (stdout):
+  {
+    "allowed": bool,
+    "violation": {"kind": "count|size|stale", "detail": "...",
+                  "offending_pin_chars": int|null, "current_count": int|null}
+                 | null,
+    "slot_status": "Pin slots: N/12 used, ...",
+    "evictable_pins": [
+      {"index": int, "heading": str, "chars": int,
+       "stale": bool, "override": bool}, ...
+    ]
+  }
+
+Exit codes:
+  0 — add allowed (or status query)
+  1 — add refused (cap violation)
+  2 — reserved: NEVER used by this CLI. Fail-open: any I/O or parse error
+      yields allowed=true with an informational slot_status so the
+      pin-memory flow degrades gracefully rather than DoS-ing the user.
+
+Used by:
+  - commands/pin-memory.md: bash step before pin add; branches on exit code
+  - Test files: tests/test_check_pin_caps.py
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+# Import from hooks/pin_caps and hooks/staleness (path resolution).
+_HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+sys.path.insert(0, str(_HOOKS_DIR))
+
+from pin_caps import (  # noqa: E402
+    PIN_COUNT_CAP,
+    check_add_allowed,
+    parse_pins,
+)
+from staleness import (  # noqa: E402
+    _parse_pinned_section,
+    get_project_claude_md_path,
+)
+from pin_caps import format_slot_status  # noqa: E402
+
+
+def _build_evictable_pins(pins):
+    """Transform parsed pins into the evictable_pins JSON shape.
+
+    Order is presentation order (top-to-bottom in CLAUDE.md). Caller
+    (pin-memory.md) paginates 4-at-a-time into AskUserQuestion options.
+    """
+    evictable = []
+    for idx, pin in enumerate(pins):
+        heading_text = pin.heading
+        if heading_text.startswith("### "):
+            heading_text = heading_text[4:]
+        evictable.append({
+            "index": idx,
+            "heading": heading_text,
+            "chars": pin.body_chars,
+            "stale": pin.is_stale,
+            "override": pin.override_rationale is not None,
+        })
+    return evictable
+
+
+def _resolve_pins():
+    """Resolve CLAUDE.md and return parsed pins, or ([], reason_str) on failure.
+
+    Fail-open: any resolution / read / parse failure yields an empty pin
+    list and a short reason string. Callers treat empty + reason as
+    "unknown state, allow the add".
+    """
+    claude_md = get_project_claude_md_path()
+    if claude_md is None:
+        return [], "claude.md not found"
+
+    try:
+        content = claude_md.read_text(encoding="utf-8")
+    except (IOError, OSError, UnicodeDecodeError):
+        return [], "claude.md unreadable"
+
+    parsed = _parse_pinned_section(content)
+    if parsed is None:
+        return [], "no pinned section"
+
+    _, _, pinned_content = parsed
+    try:
+        pins = parse_pins(pinned_content)
+    except Exception:  # noqa: BLE001 — fail-open by construction
+        return [], "parse error"
+
+    return pins, None
+
+
+def _emit(
+    allowed,
+    violation=None,
+    slot_status="",
+    evictable_pins=None,
+):
+    payload = {
+        "allowed": bool(allowed),
+        "violation": None,
+        "slot_status": slot_status,
+        "evictable_pins": evictable_pins or [],
+    }
+    if violation is not None:
+        payload["violation"] = {
+            "kind": violation.kind,
+            "detail": violation.detail,
+            "offending_pin_chars": violation.offending_pin_chars,
+            "current_count": violation.current_count,
+        }
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def _fail_open(reason):
+    """Emit an allow decision when we cannot determine cap state.
+
+    Slot status carries the reason so the user-facing command still
+    renders something actionable rather than silently allowing.
+    """
+    slot_status = f"Pin slots: unknown ({reason}); proceeding"
+    _emit(allowed=True, violation=None, slot_status=slot_status, evictable_pins=[])
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="check_pin_caps",
+        description="Enforce pin count + size caps on project CLAUDE.md",
+    )
+    parser.add_argument(
+        "--new-body",
+        default=None,
+        help="Body text of the proposed new pin (triggers cap check)",
+    )
+    parser.add_argument(
+        "--has-override",
+        action="store_true",
+        help="Proposed pin carries a valid pin-size-override rationale",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Status-only query: emit slot status, no add check",
+    )
+    args = parser.parse_args(argv)
+
+    pins, fail_reason = _resolve_pins()
+    if fail_reason is not None and not args.status:
+        # Fail-open: unknown state, allow the add rather than block the user.
+        return _fail_open(fail_reason)
+
+    slot_status = format_slot_status(pins)
+    evictable_pins = _build_evictable_pins(pins)
+
+    if args.status or args.new_body is None:
+        # Status query or no body provided — emit current state, no check.
+        _emit(
+            allowed=True,
+            violation=None,
+            slot_status=slot_status,
+            evictable_pins=evictable_pins,
+        )
+        return 0
+
+    violation = check_add_allowed(
+        existing=pins,
+        new_body=args.new_body,
+        new_has_override=args.has_override,
+    )
+
+    if violation is None:
+        _emit(
+            allowed=True,
+            violation=None,
+            slot_status=slot_status,
+            evictable_pins=evictable_pins,
+        )
+        return 0
+
+    _emit(
+        allowed=False,
+        violation=violation,
+        slot_status=slot_status,
+        evictable_pins=evictable_pins,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
