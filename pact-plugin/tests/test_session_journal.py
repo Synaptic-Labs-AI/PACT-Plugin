@@ -2947,6 +2947,19 @@ class TestValidateEventSchemaPerType:
         "session_end": {},  # No required fields; baseline-only.
         "cleanup_summary": {},  # No required fields; optional-only (#412 Fix B).
         "session_consolidated": {},  # No required fields; optional-only (#453 Fix B).
+        # #401 Commit #8 — teachback gate events.
+        "teachback_gate_advisory": {"task_id": "17", "agent": "coder-1"},
+        "teachback_gate_blocked": {"task_id": "23", "agent": "coder-2"},
+        "teachback_state_transition": {
+            "task_id": "17",
+            "agent": "coder-1",
+            "to_state": "teachback_under_review",
+        },
+        "teachback_idle_algedonic": {
+            "task_id": "17",
+            "agent": "coder-1",
+            "idle_count": 3,
+        },
     }
 
     def test_samples_mirror_required_fields_dict(self):
@@ -3908,3 +3921,207 @@ class TestValidateOptionalFieldTypes:
         ok, reason = _validate_event_schema(event)
         assert ok is True, f"full payload should pass; got {reason!r}"
         assert reason == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Teachback gate event schemas (#401 Commit #8)
+# Four new event types registered in _REQUIRED_FIELDS_BY_TYPE +
+# _OPTIONAL_FIELDS_BY_TYPE. JOURNAL-EVENTS.md + INTERFACE-CONTRACTS.md
+# §session_journal extensions lock the exact field assignments.
+# ---------------------------------------------------------------------------
+
+from shared.session_journal import _validate_event_schema, make_event  # noqa: E402
+
+
+class TestTeachbackGateAdvisorySchema:
+    def test_happy_path_required_only(self):
+        event = make_event(
+            "teachback_gate_advisory",
+            task_id="17",
+            agent="backend-coder-1",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, reason
+
+    def test_happy_path_with_optional_fields(self):
+        event = make_event(
+            "teachback_gate_advisory",
+            task_id="17",
+            agent="backend-coder-1",
+            would_have_blocked=True,
+            reason="missing_submit",
+            tool_name="Edit",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, reason
+
+    def test_missing_task_id_rejects(self):
+        event = make_event(
+            "teachback_gate_advisory",
+            agent="backend-coder-1",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert "task_id" in reason
+
+    def test_missing_agent_rejects(self):
+        event = make_event(
+            "teachback_gate_advisory",
+            task_id="17",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+        assert "agent" in reason
+
+    def test_wrong_type_task_id_rejects(self):
+        event = make_event(
+            "teachback_gate_advisory",
+            task_id=17,  # int, not str
+            agent="backend-coder-1",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+
+    def test_optional_would_have_blocked_wrong_type_rejects(self):
+        event = make_event(
+            "teachback_gate_advisory",
+            task_id="17",
+            agent="backend-coder-1",
+            would_have_blocked="true",  # str, not bool
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+
+
+class TestTeachbackGateBlockedSchema:
+    def test_happy_path(self):
+        event = make_event(
+            "teachback_gate_blocked",
+            task_id="23",
+            agent="frontend-coder-2",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, reason
+
+    def test_happy_path_with_optional(self):
+        event = make_event(
+            "teachback_gate_blocked",
+            task_id="23",
+            agent="frontend-coder-2",
+            reason="corrections_pending",
+            tool_name="Write",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+
+    def test_missing_required_rejects(self):
+        event = make_event("teachback_gate_blocked", agent="a")
+        ok, _reason = _validate_event_schema(event)
+        assert ok is False
+
+
+class TestTeachbackStateTransitionSchema:
+    def test_happy_path(self):
+        event = make_event(
+            "teachback_state_transition",
+            task_id="17",
+            agent="backend-coder-1",
+            to_state="teachback_under_review",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, reason
+
+    def test_happy_path_with_optional(self):
+        event = make_event(
+            "teachback_state_transition",
+            task_id="17",
+            agent="backend-coder-1",
+            to_state="active",
+            from_state="teachback_under_review",
+            trigger="lead_approve",
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+
+    def test_missing_to_state_rejects(self):
+        event = make_event(
+            "teachback_state_transition",
+            task_id="17",
+            agent="backend-coder-1",
+        )
+        ok, _reason = _validate_event_schema(event)
+        assert ok is False
+
+    def test_wrong_type_to_state_rejects(self):
+        event = make_event(
+            "teachback_state_transition",
+            task_id="17",
+            agent="backend-coder-1",
+            to_state=1,  # int, not str
+        )
+        ok, _reason = _validate_event_schema(event)
+        assert ok is False
+
+
+class TestTeachbackIdleAlgedonicSchema:
+    def test_happy_path(self):
+        event = make_event(
+            "teachback_idle_algedonic",
+            task_id="17",
+            agent="backend-coder-1",
+            idle_count=3,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True, reason
+
+    def test_happy_path_with_variety_total(self):
+        event = make_event(
+            "teachback_idle_algedonic",
+            task_id="17",
+            agent="backend-coder-1",
+            idle_count=3,
+            variety_total=11,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is True
+
+    def test_missing_idle_count_rejects(self):
+        event = make_event(
+            "teachback_idle_algedonic",
+            task_id="17",
+            agent="backend-coder-1",
+        )
+        ok, _reason = _validate_event_schema(event)
+        assert ok is False
+
+    def test_bool_idle_count_rejects(self):
+        """PR #416 trap: bool is int subclass — must reject."""
+        event = make_event(
+            "teachback_idle_algedonic",
+            task_id="17",
+            agent="backend-coder-1",
+            idle_count=True,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+
+    def test_bool_variety_total_rejects(self):
+        event = make_event(
+            "teachback_idle_algedonic",
+            task_id="17",
+            agent="backend-coder-1",
+            idle_count=3,
+            variety_total=False,
+        )
+        ok, reason = _validate_event_schema(event)
+        assert ok is False
+
+    def test_string_idle_count_rejects(self):
+        event = make_event(
+            "teachback_idle_algedonic",
+            task_id="17",
+            agent="backend-coder-1",
+            idle_count="three",
+        )
+        ok, _reason = _validate_event_schema(event)
+        assert ok is False
