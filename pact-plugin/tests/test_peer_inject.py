@@ -195,7 +195,21 @@ class TestTeachbackReminder:
         )
 
         assert result.endswith(_TEACHBACK_REMINDER)
-        assert "TEACHBACK TIMING" in result
+        # #401 Commit #11: reminder references the structured
+        # teachback_submit metadata and the teachback_gate hook instead
+        # of the pre-#401 "TEACHBACK TIMING" / "teachback_sent" wording.
+        assert "teachback_submit" in result
+        assert "teachback_gate" in result
+        # Imperative first word — must NOT open with the pre-#401
+        # passive-framing banned set (Reminder, Note, Advisory, Consider,
+        # Tip, Optional, You). The reminder is prefixed with "\n\n" so
+        # strip first.
+        first_word = _TEACHBACK_REMINDER.strip().split(maxsplit=1)[0]
+        _BANNED_FIRST = {"Reminder", "Note", "Advisory", "Tip", "Consider",
+                         "Optional", "You"}
+        assert first_word not in _BANNED_FIRST, (
+            f"reminder opens with {first_word!r}; must use imperative voice"
+        )
 
     def test_reminder_appended_when_alone(self, tmp_path):
         from peer_inject import get_peer_context, _TEACHBACK_REMINDER
@@ -231,10 +245,18 @@ class TestTeachbackReminder:
         drift without either side noticing."""
         from peer_inject import _TEACHBACK_REMINDER
 
-        assert "SendMessage" in _TEACHBACK_REMINDER
-        assert "Edit/Write/Bash" in _TEACHBACK_REMINDER
+        # #401 Commit #11: the reminder is now structured around
+        # metadata.teachback_submit + the teachback_gate hook rather than
+        # the pre-#401 SendMessage / teachback_sent flag pattern. The
+        # blocked-tool list expanded from Edit/Write/Bash to
+        # Edit/Write/Agent/NotebookEdit to match bootstrap_gate +
+        # teachback_gate _BLOCKED_TOOLS.
+        assert "TaskUpdate" in _TEACHBACK_REMINDER
+        assert "teachback_submit" in _TEACHBACK_REMINDER
+        assert "Edit/Write/Agent/NotebookEdit" in _TEACHBACK_REMINDER
         assert "gate" in _TEACHBACK_REMINDER.lower()
         assert "pact-teachback" in _TEACHBACK_REMINDER
+        assert "teammate-bootstrap" in _TEACHBACK_REMINDER
 
     def test_reminder_not_present_when_no_team(self, tmp_path):
         """When get_peer_context returns None, no reminder is attached."""
