@@ -141,6 +141,16 @@
         ]
       }
     ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/_task_created_probe.py\""
+          }
+        ]
+      }
+    ],
     "TeammateIdle": [
       {
         "hooks": [
