@@ -56,11 +56,16 @@ from shared import (  # noqa: E402
 from shared.error_output import hook_error_json  # noqa: E402
 import shared.pact_context as pact_context  # noqa: E402
 from shared.pact_context import get_team_name, resolve_agent_name  # noqa: E402
-from shared.session_journal import append_event, make_event  # noqa: E402
+from shared.session_journal import append_event, make_event, read_events  # noqa: E402
 from shared.teachback_example import format_deny_reason  # noqa: E402
 from shared.teachback_scan import (  # noqa: E402
     is_exempt_agent,
     scan_teachback_state,
+)
+from shared.teachback_validate import (  # noqa: E402
+    FieldError,
+    validate_approved,
+    validate_submit,
 )
 
 
@@ -141,6 +146,45 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
         if isinstance(t, int) and not isinstance(t, bool):
             variety_total = t
 
+    # Full content-shape validation (Y2) — Phase 1 gate exercises the
+    # complete CONTENT-SCHEMAS.md rule surface so the Phase 2 readiness
+    # diagnostic produces a meaningful false-positive signal. If the
+    # scanner classified a task as awaiting_approval (structurally-valid
+    # submit), the full validator may still find per-field errors that
+    # upgrade the reason to invalid_submit.
+    submit = metadata.get("teachback_submit") if isinstance(metadata, dict) else None
+    approved = metadata.get("teachback_approved") if isinstance(metadata, dict) else None
+
+    submit_errors: list[FieldError] = []
+    approved_errors: list[FieldError] = []
+    try:
+        if isinstance(submit, dict):
+            submit_errors = validate_submit(
+                submit, metadata, protocol_level, agent_name
+            )
+        if isinstance(approved, dict):
+            approved_errors = validate_approved(
+                approved, submit, metadata, protocol_level, agent_name
+            )
+    except Exception:
+        # Fail-open on validator-internal exception — scanner's
+        # structural classification still drives reason_code.
+        submit_errors = []
+        approved_errors = []
+
+    first_error: FieldError | None = None
+    if reason_code == "awaiting_approval" and submit_errors:
+        # Structurally valid but semantically invalid — upgrade reason.
+        reason_code = "invalid_submit"
+        first_error = submit_errors[0]
+    elif reason_code == "invalid_submit" and submit_errors:
+        first_error = submit_errors[0]
+    elif reason_code == "unaddressed_items" and approved_errors:
+        # Invalid approved structure takes precedence over the mere
+        # unaddressed_items signal so the lead sees the schema error.
+        reason_code = "invalid_submit"
+        first_error = approved_errors[0]
+
     # Build deny-reason string via the shared templates (Commit #3).
     context = {
         "task_id": task_id,
@@ -152,8 +196,8 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
 
     # Enrich context for reasons that need extra fields.
     if reason_code == "unaddressed_items":
-        approved = metadata.get("teachback_approved", {}) or {}
-        cm = approved.get("conditions_met", {}) or {}
+        approved_dict = metadata.get("teachback_approved", {}) or {}
+        cm = approved_dict.get("conditions_met", {}) or {}
         context["unaddressed"] = cm.get("unaddressed") or []
     elif reason_code == "corrections_pending":
         corrections = metadata.get("teachback_corrections", {}) or {}
@@ -162,12 +206,35 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
             "request_revisions_on"
         ) or []
     elif reason_code == "invalid_submit":
-        # Phase 1: minimal hint; TEST phase adds per-field detail
-        context["fail_field"] = "teachback_submit"
-        context["fail_error"] = "missing required fields for protocol level"
-        context["actual_value"] = "<see teachback_submit metadata>"
+        if first_error is not None:
+            context["fail_field"] = first_error.field
+            context["fail_error"] = first_error.error
+            context["actual_value"] = first_error.actual_value
+        else:
+            # Fallback when the scanner flagged invalid_submit but the
+            # full validator found no per-field error (e.g. submit key
+            # is None rather than a dict). Surface a minimal hint.
+            context["fail_field"] = "teachback_submit"
+            context["fail_error"] = (
+                "missing required fields for the {} protocol level"
+                .format(protocol_level)
+            )
+            context["actual_value"] = str(submit)[:200] if submit is not None else ""
 
     deny_reason = format_deny_reason(reason_code, context, protocol_level)
+
+    # State transition emission (Y1). Derive the inferred to_state from
+    # the final reason_code and emit a teachback_state_transition event
+    # only if the last-emitted to_state for this task_id in this session
+    # was different. Per JOURNAL-EVENTS.md §Event 3 de-dupe rule.
+    to_state = _state_from_reason(reason_code)
+    try:
+        _emit_state_transition_if_changed(
+            task_id=task_id, agent=agent_name, to_state=to_state,
+        )
+    except Exception:
+        # Fail-open — observability must never block the gate.
+        pass
 
     telemetry = {
         "reason_code": reason_code,
@@ -176,6 +243,112 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
         "agent_name": agent_name,
     }
     return (deny_reason, telemetry)
+
+
+# Map reason_code -> state_name for teachback_state_transition emission.
+# Locked in STATE-MACHINE.md §Per-Transition Journal Events + aligned
+# with shared.teachback_scan._classify_task_state return values.
+_REASON_TO_STATE: dict[str, str] = {
+    "missing_submit": "teachback_pending",
+    "invalid_submit": "teachback_pending",
+    "awaiting_approval": "teachback_under_review",
+    "unaddressed_items": "teachback_correcting",
+    "corrections_pending": "teachback_correcting",
+}
+
+
+def _state_from_reason(reason_code: str) -> str:
+    """Return the state_name for a given gate reason_code. Falls back to
+    'teachback_pending' on unknown codes (most conservative state)."""
+    return _REASON_TO_STATE.get(reason_code, "teachback_pending")
+
+
+def _emit_state_transition_if_changed(
+    task_id: str, agent: str, to_state: str
+) -> None:
+    """Emit a teachback_state_transition event iff the target state
+    differs from the most recent transition observed for this task_id
+    in the current session's journal.
+
+    Per JOURNAL-EVENTS.md §Event 3 de-dupe rule: one read per PreToolUse
+    invocation (~5ms budget, judged acceptable by architect given
+    PreToolUse is human-synchronous). Reads the session journal
+    filtered to "teachback_state_transition" events, filters by task_id
+    in Python, compares latest to_state, and emits only on change.
+
+    Cross-session behavior: each session starts with an empty transition
+    history from its own journal, so the first PreToolUse in a new
+    session emits a transition even if the task was already in this
+    state at the end of the prior session. That's the intended
+    observability — "which transitions happened THIS session" is the
+    load-bearing signal for the Phase 2 readiness diagnostic.
+
+    Fail-open on any error (journal read failure, make_event/append_event
+    exception, missing session context). Mirrors the advisory-event
+    emitter's fail-open pattern.
+    """
+    try:
+        prior = read_events("teachback_state_transition")
+    except Exception:
+        prior = []
+
+    last_to_state = ""
+    if isinstance(prior, list):
+        for event in reversed(prior):
+            if not isinstance(event, dict):
+                continue
+            if event.get("task_id") != task_id:
+                continue
+            candidate = event.get("to_state", "")
+            if isinstance(candidate, str):
+                last_to_state = candidate
+                break
+
+    if last_to_state == to_state:
+        return  # de-dupe: no transition observed
+
+    from_state = last_to_state or ""  # empty string means no prior
+    trigger = _trigger_for_transition(from_state, to_state)
+
+    event_fields: dict = {
+        "task_id": task_id,
+        "agent": agent,
+        "to_state": to_state,
+    }
+    if from_state:
+        event_fields["from_state"] = from_state
+    if trigger:
+        event_fields["trigger"] = trigger
+
+    try:
+        append_event(make_event("teachback_state_transition", **event_fields))
+    except Exception:
+        pass
+
+
+def _trigger_for_transition(from_state: str, to_state: str) -> str:
+    """Infer the trigger vocabulary term from the state pair per
+    JOURNAL-EVENTS.md §Trigger values controlled vocabulary.
+
+    Returns one of: teammate_submit | lead_approve | lead_correct |
+    auto_downgrade | teammate_revise | unknown.
+    """
+    if from_state == "" and to_state == "teachback_under_review":
+        return "teammate_submit"
+    if from_state == "teachback_pending" and to_state == "teachback_under_review":
+        return "teammate_submit"
+    if to_state == "active":
+        return "lead_approve"
+    if from_state == "teachback_under_review" and to_state == "teachback_correcting":
+        # Ambiguous between lead_correct and auto_downgrade from the gate's
+        # seat. Bias toward lead_correct (the documented-write case);
+        # auto_downgrade is emitted only when the gate observes approved
+        # with unaddressed non-empty but absent corrections — caller
+        # can override via the signal path if needed.
+        return "lead_correct"
+    if from_state == "teachback_correcting" and to_state == "teachback_under_review":
+        return "teammate_revise"
+    return "unknown"
 
 
 def _emit_advisory_event(telemetry: dict) -> None:
