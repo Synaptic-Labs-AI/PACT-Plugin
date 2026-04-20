@@ -34,6 +34,7 @@ VALID_HOOK_EVENTS = {
     "SubagentStop",
     "Stop",
     "TaskCompleted",
+    "TaskCreated",  # #401 Commit #5: task_schema_validator.py
     "TeammateIdle",
 }
 
