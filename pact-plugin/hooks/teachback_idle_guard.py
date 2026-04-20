@@ -41,6 +41,7 @@ Output:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,7 @@ from shared.session_journal import append_event, make_event  # noqa: E402
 from shared.session_state import is_safe_path_component  # noqa: E402
 from shared.task_utils import get_task_list  # noqa: E402
 from shared.teachback_scan import is_exempt_agent  # noqa: E402
+from shared.teachback_validate import _strip_control_chars  # noqa: E402
 
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -148,16 +150,46 @@ def _atomic_update_idle_counts(
     mutator,
 ) -> dict:
     """Atomically read-modify-write the sidecar JSON under exclusive
-    lock. Mirrors teammate_idle._atomic_update_idle_counts:184-232 —
-    reuse the pattern verbatim for consistency.
+    lock. Mirrors teammate_idle._atomic_update_idle_counts:184-232 but
+    hardened per #401 cycle-3 fix B:
 
-    Fail-open: any OS error returns an empty dict without raising.
+      - `mkdir(..., mode=0o700)` matches canonical PACT secure-by-default
+        permission scheme (failure_log.py:128, session_journal.py:502,
+        symlinks.py:47/66, pact_context.py:384, claude_md_manager.py:418).
+      - mkdir wrapped in try/except OSError: return {} — closes the
+        contract-leak where a PermissionError from mkdir propagated past
+        the "fail-open: any OS error returns empty dict" promise.
+      - `open(sidecar_path, "a+")` upgraded to `os.open(..., O_RDWR |
+        O_CREAT | O_NOFOLLOW, 0o600)` + `os.fdopen` so a pre-existing
+        symlink at the sidecar path fails the open with `ELOOP` rather
+        than writing through to the symlink target. Matches failure_log's
+        symlink-guard posture. Append-mode was not load-bearing — we
+        always `seek(0)` before read and `seek(0) + truncate()` before
+        write, so read/write mode suffices.
+
+    Fail-open: any OS error (mkdir / os.open / flock / read / write /
+    symlink-rejection) returns an empty dict without raising.
     """
-    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        return {}
 
     if HAS_FLOCK:
+        fd = -1
         try:
-            with open(sidecar_path, "a+") as f:
+            # O_NOFOLLOW rejects the open with ELOOP if sidecar_path is
+            # a symlink. TOCTOU defense — no separate is_symlink() check
+            # needed because the open itself is the atomic guard.
+            fd = os.open(
+                str(sidecar_path),
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(fd, "r+", encoding="utf-8") as f:
+                # os.fdopen has taken ownership of the fd; do NOT close
+                # it in the except handler below.
+                fd = -1
                 fcntl.flock(f, fcntl.LOCK_EX)
                 try:
                     f.seek(0)
@@ -176,6 +208,14 @@ def _atomic_update_idle_counts(
                     fcntl.flock(f, fcntl.LOCK_UN)
             return counts
         except OSError:
+            # If os.fdopen raised before taking ownership, close the raw
+            # fd to avoid a leak. After successful fdopen, fd was reset
+            # to -1 above and the context manager closes the file on exit.
+            if fd != -1:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             return {}
     else:
         # Best-effort non-atomic fallback (Windows).
@@ -315,9 +355,14 @@ def _check_teachback_idle(input_data: dict) -> tuple[str | None, dict]:
         return (None, {})
 
     # At or above threshold — emit an algedonic systemMessage.
+    # Sanitize teammate_name before interpolation — defense-in-depth
+    # against role-marker injection via the PR #426 unified strip set.
+    # Mirrors the deny-reason rendering pathway in
+    # teachback_example.format_deny_reason.
+    safe_teammate_name = _strip_control_chars(teammate_name)
     message = (
         _ALGEDONIC_PREAMBLE
-        + f"Teammate '{teammate_name}' has been idle for {count} consecutive "
+        + f"Teammate '{safe_teammate_name}' has been idle for {count} consecutive "
         + f"events while task #{task_id} is in teachback_under_review "
         + f"(variety={variety_total}). The lead has not written "
         + "metadata.teachback_approved OR metadata.teachback_corrections. "

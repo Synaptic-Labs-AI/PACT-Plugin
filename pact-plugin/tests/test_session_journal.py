@@ -750,6 +750,112 @@ class TestReadEvents:
 
 
 # ---------------------------------------------------------------------------
+# #401 cycle-3 fix B: non-dict-JSON guard in _read_events_at + _read_last_event_at
+# ---------------------------------------------------------------------------
+
+
+class TestReadEventsNonDictGuard:
+    """Covers #401 cycle-3 fix B (test-engineer Minor). A journal line
+    whose JSON parses to a non-dict value (null, int, string, list) was
+    previously dropping every valid event in the file: json.loads('null')
+    returns None, the subsequent None.get('type') lookup raised
+    AttributeError, and the outer `except Exception: return []` swallowed
+    the whole scan.
+
+    The fix: after `json.loads`, skip the line if `event` is not a dict.
+    Valid-dict events before and after are preserved.
+    """
+
+    def _write_raw(self, journal_file, lines: list[str]) -> None:
+        """Write raw lines to the journal file, appending newlines."""
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        journal_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_read_events_skips_null_value(
+        self, journal_home, team_name, journal_file,
+    ):
+        from shared.session_journal import read_events
+
+        self._write_raw(journal_file, [
+            '{"v":1,"type":"test","seq":1,"ts":"2026-01-01T00:00:00Z"}',
+            'null',
+            '{"v":1,"type":"test","seq":2,"ts":"2026-01-01T00:00:00Z"}',
+        ])
+
+        events = read_events()
+        assert len(events) == 2, (
+            f"null line must be skipped, not drop all events; got {len(events)}"
+        )
+        assert events[0]["seq"] == 1
+        assert events[1]["seq"] == 2
+
+    def test_read_events_skips_non_dict_values(
+        self, journal_home, team_name, journal_file,
+    ):
+        """Multiple non-dict shapes: null, int, string, list, bool."""
+        from shared.session_journal import read_events
+
+        self._write_raw(journal_file, [
+            '{"v":1,"type":"test","seq":1,"ts":"2026-01-01T00:00:00Z"}',
+            'null',
+            '42',
+            '"hello"',
+            '[1, 2, 3]',
+            'true',
+            '{"v":1,"type":"test","seq":2,"ts":"2026-01-01T00:00:00Z"}',
+        ])
+
+        events = read_events()
+        assert len(events) == 2, (
+            "Every non-dict JSON line must be skipped; got "
+            f"{len(events)} events: {events!r}"
+        )
+        assert {e["seq"] for e in events} == {1, 2}
+
+    def test_read_events_filter_works_with_non_dict_mix(
+        self, journal_home, team_name, journal_file,
+    ):
+        """Type filter still applies after non-dict skip."""
+        from shared.session_journal import read_events
+
+        self._write_raw(journal_file, [
+            '{"v":1,"type":"alpha","seq":1,"ts":"2026-01-01T00:00:00Z"}',
+            'null',
+            '{"v":1,"type":"beta","seq":2,"ts":"2026-01-01T00:00:00Z"}',
+            '42',
+            '{"v":1,"type":"alpha","seq":3,"ts":"2026-01-01T00:00:00Z"}',
+        ])
+
+        alphas = read_events(event_type="alpha")
+        assert len(alphas) == 2
+        assert {e["seq"] for e in alphas} == {1, 3}
+
+    def test_read_last_event_skips_non_dict_values(
+        self, journal_home, team_name, journal_file,
+    ):
+        """Reverse-scan variant: non-dict at the end must not poison
+        the scan so the most recent valid event of the target type is
+        still returned."""
+        from shared.session_journal import read_last_event
+
+        self._write_raw(journal_file, [
+            '{"v":1,"type":"checkpoint","phase":"PREPARE","ts":"2026-01-01T00:00:00Z"}',
+            '{"v":1,"type":"checkpoint","phase":"CODE","ts":"2026-01-02T00:00:00Z"}',
+            # Trailing non-dict values — without the guard these would
+            # raise AttributeError and drop the whole scan to None.
+            'null',
+            '42',
+        ])
+
+        last = read_last_event("checkpoint")
+        assert last is not None, (
+            "Reverse scan returned None — non-dict guard missing in "
+            "_read_last_event_at."
+        )
+        assert last.get("phase") == "CODE"
+
+
+# ---------------------------------------------------------------------------
 # read_last_event()
 # ---------------------------------------------------------------------------
 

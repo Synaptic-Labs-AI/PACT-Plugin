@@ -622,6 +622,12 @@ def _read_events_at(
                 continue
             try:
                 event = json.loads(line)
+                # Guard against non-dict JSON values (null/int/string/list)
+                # — json.loads("null") returns None, and subsequent
+                # event.get("type") would raise AttributeError, escape to
+                # the outer except, and drop ALL valid events in the file.
+                if not isinstance(event, dict):
+                    continue
                 if event_type and event.get("type") != event_type:
                     continue
                 events.append(event)
@@ -727,10 +733,15 @@ def _read_last_event_at(
                 continue
             try:
                 event = json.loads(line)
-                if event.get("type") == event_type:
-                    return event
             except (json.JSONDecodeError, ValueError):
                 continue
+            # Symmetric with _read_events_at: non-dict JSON values
+            # (null/int/str/list) would raise AttributeError on the
+            # .get("type") lookup and poison the reverse scan.
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == event_type:
+                return event
         return None
 
     except Exception:
