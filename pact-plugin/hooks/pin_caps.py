@@ -43,7 +43,7 @@ OVERRIDE_RATIONALE_MAX = 120
 # Live form (CLAUDE.md:69):
 #   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
 # Capture group 1 = rationale text (may contain any non-'-->' chars).
-# Anchored to full-line match via re.MULTILINE application at call sites.
+# Anchored via .fullmatch() at call sites (one-line candidate).
 OVERRIDE_COMMENT_RE = re.compile(
     r'<!--\s*pinned:\s*[^,]+,\s*pin-size-override:\s*(.+?)\s*-->',
     re.IGNORECASE,

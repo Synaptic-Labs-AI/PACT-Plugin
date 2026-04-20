@@ -84,10 +84,10 @@ def _edit_touches_pinned_section(tool_input: dict) -> bool:
     For Write: we treat the whole file as in-scope (the write replaces
     everything, so Pinned Context is necessarily affected if present).
 
-    For Edit: inspect old_string/new_string for a 'Pinned Context'
-    substring marker. Conservative: if we can't tell, allow — the
-    SessionStart directive is the primary enforcement, this hook only
-    catches high-confidence violations.
+    For Edit: inspect old_string/new_string for pinned-section boundary
+    markers. Block if any are present (high-confidence in-scope edit).
+    Allow otherwise — SessionStart directive is the primary enforcement;
+    this hook is the secondary marker-based guard.
     """
     if "content" in tool_input:
         # Write tool — full-file replacement

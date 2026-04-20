@@ -51,15 +51,14 @@ _HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 sys.path.insert(0, str(_HOOKS_DIR))
 
 from pin_caps import (  # noqa: E402
-    PIN_COUNT_CAP,
     check_add_allowed,
+    format_slot_status,
     parse_pins,
 )
 from staleness import (  # noqa: E402
     _parse_pinned_section,
     get_project_claude_md_path,
 )
-from pin_caps import format_slot_status  # noqa: E402
 
 
 def _build_evictable_pins(pins):
