@@ -49,6 +49,13 @@ RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 # the skills-to-hooks package boundary). Drift-detection test in
 # tests/test_staleness.py guards against divergence; if you change these,
 # update hooks/pin_caps.py in the SAME commit.
+#
+# Forward-looking drift anchors: no skill-side code currently consumes these
+# constants — they exist here solely so a future skills-side pin-cap
+# consumer can read the budget without needing to cross the package
+# boundary. Anchored only by TestPinCapsTwinCopyDrift. Do NOT remove
+# even if unused at read time; the drift test + forward-compat intent are
+# the justification for the twin copy.
 PIN_COUNT_CAP = 12
 PIN_SIZE_CAP = 1500
 PIN_STALE_BLOCK_THRESHOLD = 2
