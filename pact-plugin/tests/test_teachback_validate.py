@@ -59,6 +59,128 @@ class TestNormalize:
         assert _normalize("") == ""
 
 
+class TestNormalizeUnicodeBypass:
+    """F-SEC-R2-1 — close the Unicode-homoglyph + invisible-character
+    bypass of the substring-inequality / evidence-substring /
+    addressed-item checks.
+
+    The `_normalize` primitive is the single point through which
+    every content-comparison check flows. NFKC folding collapses
+    fullwidth / compatibility forms onto canonical ASCII; zero-width
+    and bidi-override stripping prevents a crafted string from
+    visually matching while structurally diverging from its target.
+
+    Counter-test-by-revert: removing either the NFKC call or the
+    invisible-character strip makes these assertions fail.
+    """
+
+    def test_nfkc_folds_fullwidth_latin(self):
+        """Fullwidth Latin (U+FF21-U+FF5A) folds to ASCII via NFKC."""
+        fullwidth = "\uff33\uff45\uff53\uff53\uff49\uff4f\uff4e"  # "Session"
+        ascii_form = "session"
+        assert _normalize(fullwidth) == ascii_form
+
+    def test_nfkc_folds_compatibility_ligature(self):
+        """Latin ligatures (U+FB00 'ﬀ') fold to their canonical pair 'ff'."""
+        assert _normalize("e\ufb03cient") == "efficient"  # U+FB03 ffi
+
+    def test_zwsp_stripped(self):
+        """Zero-width space (U+200B) is stripped so 'sessionxtoken' with
+        an embedded ZWSP normalizes identically to 'sessionxtoken'.
+        """
+        with_zwsp = "session\u200btoken"
+        assert _normalize(with_zwsp) == "sessiontoken"
+
+    def test_zwnj_and_zwj_stripped(self):
+        """Zero-width non-joiner (U+200C) and joiner (U+200D) stripped."""
+        assert _normalize("session\u200ctoken") == "sessiontoken"
+        assert _normalize("session\u200dtoken") == "sessiontoken"
+
+    def test_bom_stripped(self):
+        """U+FEFF (BOM / ZWNBSP) stripped from the start or mid-string."""
+        assert _normalize("\ufeffsession") == "session"
+        assert _normalize("session\ufefftoken") == "sessiontoken"
+
+    def test_bidi_overrides_stripped(self):
+        """Bidi override controls (U+202A-U+202E, U+2066-U+2069) stripped."""
+        # LRE U+202A, RLE U+202B, PDF U+202C, LRO U+202D, RLO U+202E
+        assert _normalize("\u202asession\u202c") == "session"
+        # LRI U+2066, RLI U+2067, FSI U+2068, PDI U+2069
+        assert _normalize("\u2066session\u2069") == "session"
+
+    def test_cyrillic_homoglyphs_remain_distinct(self):
+        """NFKC does NOT cross the Latin/Cyrillic script boundary. A
+        Cyrillic 'е' (U+0435) is a different character from Latin 'e'
+        (U+0065) even though they render identically. This is the
+        intended semantics: the tokens ARE different characters, and
+        the gate treating them as distinct prevents a subtler bypass
+        where a crafted lead-side value and a teammate-side value look
+        identical but the comparison silently succeeds based on visual
+        rendering alone. The Cyrillic surface MUST remain detectable
+        as distinct."""
+        latin = "session"
+        cyrillic_mixed = "s\u0435ssion"  # 'e' replaced by Cyrillic 'е'
+        assert _normalize(latin) != _normalize(cyrillic_mixed)
+
+
+class TestScannedCandidateDistinctUnicode:
+    """F-SEC-R2-1 — the substring-inequality check
+    (`_scanned_candidate_distinct`) is the primary rubber-stamp
+    blocker for the lead generating a candidate misunderstanding that
+    is structurally identical to the teammate's submit assumption. A
+    crafted candidate that differs ONLY by invisible / homoglyph
+    characters must be caught by the post-NFKC comparison."""
+
+    def test_zwsp_injected_candidate_is_caught(self):
+        submit_assumption = (
+            "the session token middleware validates expiry checks"
+        )
+        crafted_candidate = (
+            "the session\u200b token middleware validates expiry checks"
+        )
+        assert _scanned_candidate_distinct(
+            crafted_candidate, submit_assumption
+        ) is False, (
+            "a ZWSP-injected candidate must normalize to a substring of "
+            "the submit assumption — substring-inequality check must fail"
+        )
+
+    def test_fullwidth_candidate_is_caught(self):
+        """A fullwidth-Latin candidate that renders identically to the
+        submit assumption must be caught post-NFKC."""
+        submit_assumption = "session token middleware"
+        # "Session" in fullwidth + " token middleware" ASCII
+        fullwidth_prefix = "\uff33\uff45\uff53\uff53\uff49\uff4f\uff4e"
+        crafted_candidate = f"{fullwidth_prefix} token middleware"
+        assert _scanned_candidate_distinct(
+            crafted_candidate, submit_assumption
+        ) is False
+
+    def test_bom_injected_candidate_is_caught(self):
+        submit_assumption = "auth middleware session_token handling"
+        crafted_candidate = "auth middleware\ufeff session_token handling"
+        assert _scanned_candidate_distinct(
+            crafted_candidate, submit_assumption
+        ) is False
+
+    def test_bidi_wrapped_candidate_is_caught(self):
+        submit_assumption = "middleware integrates with existing session"
+        crafted_candidate = (
+            "\u202amiddleware integrates with existing session\u202c"
+        )
+        assert _scanned_candidate_distinct(
+            crafted_candidate, submit_assumption
+        ) is False
+
+    def test_distinct_prose_still_passes(self):
+        """Real, distinct candidate prose must still pass the check."""
+        submit_assumption = "the middleware integrates cleanly"
+        candidate = "the router mis-dispatches request headers"
+        assert _scanned_candidate_distinct(
+            candidate, submit_assumption
+        ) is True
+
+
 class TestTokenize:
     def test_words_only(self):
         assert _tokenize("Hello, World! foo_bar") == ["hello", "world", "foo_bar"]

@@ -131,6 +131,41 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
         return (None, {})
 
     if scan["all_active"]:
+        # R2-A1 fix: every in_progress task passed the scanner's
+        # STRUCTURAL classification (T4 active branch). We MUST still
+        # run the full content validator on each active task's
+        # teachback_approved + teachback_submit — otherwise a lead can
+        # rubber-stamp with the minimal shape
+        # `{"teachback_approved": {"conditions_met": {"unaddressed": []}}}`
+        # and bypass every generation-shaped check (substring-
+        # inequality, evidence-substring grounding, addressed-item
+        # membership, verdict/match vocabulary, first_action_check
+        # citation). If ANY active task fails content validation,
+        # upgrade to an invalid_submit deny.
+        content_deny = _check_active_tasks_content(
+            scan.get("active_tasks") or [],
+            agent_name,
+            tool_name,
+        )
+        if content_deny is not None:
+            return content_deny
+
+        # All active tasks passed content validation — observability:
+        # emit teachback_state_transition(to_state="active",
+        # trigger="lead_approve") for each (de-dup'd by task_id per
+        # JOURNAL-EVENTS.md §Event 3 semantics). Closes R2-A2: the
+        # lead_approve transition was previously write-only dead code
+        # in the controlled vocabulary because this emission site was
+        # missing.
+        for task_id, _metadata, _level in (scan.get("active_tasks") or []):
+            try:
+                _emit_state_transition_if_changed(
+                    task_id=task_id, agent=agent_name, to_state="active",
+                )
+            except Exception:
+                # Fail-open — observability must never block the gate.
+                pass
+
         return (None, {})
 
     # At least one in_progress task is NOT active — deny.
@@ -243,6 +278,125 @@ def _check_tool_allowed(input_data: dict) -> tuple[str | None, dict]:
         "agent_name": agent_name,
     }
     return (deny_reason, telemetry)
+
+
+def _check_active_tasks_content(
+    active_tasks: list,
+    agent_name: str,
+    tool_name: str,
+) -> tuple[str | None, dict] | None:
+    """Run full content validation on every structurally-active task.
+
+    R2-A1 fix: `scan["all_active"] == True` guarantees each task passed
+    the scanner's T4 structural classification (teachback_approved is
+    a dict AND conditions_met is a dict AND unaddressed is empty-list).
+    It does NOT run the generation-shaped content rules from
+    CONTENT-SCHEMAS.md §B (substring-inequality, evidence-substring
+    grounding, addressed-item membership, verdict/match vocabulary,
+    first_action_check citation, grounding-shape, template-density).
+    This helper closes that gap by iterating every active task and
+    running both `validate_submit` (when present at full protocol) and
+    `validate_approved`. On the FIRST task with any content error, it
+    returns a deny tuple shaped exactly like `_check_tool_allowed` so
+    the caller can return directly.
+
+    Args:
+        active_tasks: list of (task_id, metadata, protocol_level) tuples
+            from `scan["active_tasks"]`.
+        agent_name: teammate name (for citation-strictness fallback).
+        tool_name: tool being gated (for the deny-reason template).
+
+    Returns:
+        - None if every active task passes content validation (caller
+          proceeds to emit the active-state transition and allow).
+        - (deny_reason_string, telemetry_dict) when any active task
+          fails. Matches `_check_tool_allowed`'s return shape exactly.
+
+    Fail-open on validator-internal exception: treat as pass so a
+    validator bug cannot block legitimate work (SACROSANCT). Caller
+    already wraps in outer try/except for further defense in depth.
+    """
+    for task_id, metadata, protocol_level in active_tasks:
+        if not isinstance(metadata, dict):
+            continue
+
+        submit = metadata.get("teachback_submit")
+        approved = metadata.get("teachback_approved")
+
+        submit_errors: list[FieldError] = []
+        approved_errors: list[FieldError] = []
+        try:
+            if isinstance(submit, dict):
+                submit_errors = validate_submit(
+                    submit, metadata, protocol_level, agent_name
+                )
+            if isinstance(approved, dict):
+                approved_errors = validate_approved(
+                    approved, submit, metadata, protocol_level, agent_name
+                )
+        except Exception:
+            # Fail-open on validator-internal exception.
+            continue
+
+        first_error: FieldError | None = None
+        if approved_errors:
+            first_error = approved_errors[0]
+        elif submit_errors:
+            first_error = submit_errors[0]
+
+        if first_error is None:
+            # This task passed content validation.
+            continue
+
+        # Build an invalid_submit deny response mirroring the shape
+        # from _check_tool_allowed's non-active branch. The
+        # active-path failure semantically matches invalid_submit
+        # (schema / content-shape failure) rather than a distinct
+        # "invalid_approved" reason — CONTENT-SCHEMAS.md §Deny Reason
+        # Shapes defines only 5 codes, and invalid_submit's template
+        # handles per-field errors for both submit AND approved fields.
+        variety_total = 0
+        variety = metadata.get("variety")
+        if isinstance(variety, dict):
+            t = variety.get("total")
+            if isinstance(t, int) and not isinstance(t, bool):
+                variety_total = t
+
+        context = {
+            "task_id": task_id,
+            "tool_name": tool_name,
+            "variety_total": variety_total,
+            "threshold": TEACHBACK_BLOCKING_THRESHOLD,
+            "required_scope_items": metadata.get("required_scope_items") or [],
+            "fail_field": first_error.field,
+            "fail_error": first_error.error,
+            "actual_value": first_error.actual_value,
+        }
+        deny_reason = format_deny_reason(
+            "invalid_submit", context, protocol_level
+        )
+
+        # Emit state_transition per JOURNAL-EVENTS.md §Event 3 — the
+        # observed state is teachback_pending because content is
+        # semantically invalid even though structurally approved was
+        # present. Fail-open.
+        try:
+            _emit_state_transition_if_changed(
+                task_id=task_id, agent=agent_name,
+                to_state="teachback_pending",
+            )
+        except Exception:
+            pass
+
+        telemetry = {
+            "reason_code": "invalid_submit",
+            "tool_name": tool_name if isinstance(tool_name, str) else "",
+            "task_id": task_id,
+            "agent_name": agent_name,
+        }
+        return (deny_reason, telemetry)
+
+    return None
 
 
 # Map reason_code -> state_name for teachback_state_transition emission.

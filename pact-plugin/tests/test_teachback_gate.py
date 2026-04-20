@@ -191,20 +191,27 @@ class TestCheckToolAllowedScanBranches:
         assert "least_confident_item" not in reason
 
     def test_unaddressed_items_populates_context(self, monkeypatch):
-        # After #7-follow-up (Y2 wiring), a minimally-shaped approved
-        # dict fails full content-schema validation and the gate upgrades
-        # the reason to invalid_submit. To exercise the unaddressed_items
-        # path proper, provide a fully schema-valid approved with
-        # non-empty unaddressed. required_scope_items MUST match the
-        # addressed items (case-insensitive membership check).
+        # Non-active branch context: the scanner classified this task as
+        # `unaddressed_items` (T5 auto-downgrade). To exercise that
+        # branch cleanly we must also supply a fully schema-valid
+        # approved — otherwise `validate_approved` would find per-field
+        # errors and the gate would upgrade the reason to
+        # `invalid_submit` (see TestInvalidSubmitErrorSurfacing below).
+        # required_scope_items MUST match the addressed items
+        # (case-insensitive membership check).
+        #
+        # This test exercises the NON-ACTIVE (deny) branch of
+        # _check_tool_allowed, not the active-path R2-A1 fix. The R2-A1
+        # active-path content-validation is covered by
+        # TestActiveTaskContentValidation below.
         submit = {
             "understanding": (
                 "I will implement the auth middleware per the architect spec "
                 "with careful attention to the session_token handling path."
             ),
             "most_likely_wrong": {
-                "assumption": "the auth middleware integrates cleanly with the existing session_token flow",
-                "consequence": "if wrong the session_token validation may silently accept expired tokens",
+                "assumption": "the session_token handling path integrates cleanly with the existing middleware flow",
+                "consequence": "if wrong the session_token handling may silently accept expired tokens",
             },
             "least_confident_item": {
                 "item": "exact semantics of the session_token expiry check across timezones",
@@ -279,6 +286,266 @@ class TestCheckToolAllowedScanBranches:
         )
         assert "missing citation" in reason
         assert "first_action" in reason
+
+
+class TestActiveTaskContentValidation:
+    """R2-A1 fix: when scan[all_active]=True the gate runs the full
+    content validator on every active task's teachback_approved +
+    teachback_submit. A lead writing the minimal
+    `{"teachback_approved": {"conditions_met": {"unaddressed": []}}}`
+    rubber-stamp shape passes the scanner's T4 structural check, but the
+    full validator finds empty/missing fields and upgrades to an
+    invalid_submit deny. These tests counter-test-by-revert the bypass:
+    with the fix removed, the gate returns None on minimal approved and
+    the test fails as intended.
+    """
+
+    def _setup(self, monkeypatch, scan_result):
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "backend-coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: scan_result)
+        # Silence state-transition journal writes during the active
+        # path's observability emit.
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _ev: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+    def _valid_submit(self):
+        return {
+            "understanding": (
+                "I will implement the auth middleware per the architect "
+                "spec with careful attention to the session_token handling "
+                "path across UTC offsets."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the session_token handling path integrates cleanly with the existing middleware flow",
+                "consequence": "if wrong the session_token handling may silently accept expired tokens",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of the session_token expiry check across timezones",
+                "current_plan": "mirror the approach from auth.py:42 which handles UTC offsets",
+                "failure_mode": "timezone drift could let stale session_tokens slip past the gate",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+
+    def test_minimal_rubber_stamp_approved_is_rejected(self, monkeypatch):
+        """Counter-test-by-revert: minimal approved
+        `{"conditions_met": {"unaddressed": []}}` MUST be rejected.
+        Revert the R2-A1 fix (remove _check_active_tasks_content call)
+        and this test fails — confirming the fix is load-bearing."""
+        submit = self._valid_submit()
+        # Minimal rubber-stamp — just the structural T4 minimum.
+        approved = {"conditions_met": {"unaddressed": []}}
+        metadata = {
+            "variety": {"total": 11, "novelty": 3, "scope": 3,
+                         "uncertainty": 3, "risk": 2},
+            "required_scope_items": ["session_token handling",
+                                     "UTC offset handling"],
+            "teachback_submit": submit,
+            "teachback_approved": approved,
+        }
+        self._setup(monkeypatch, {
+            "task_count": 1,
+            "first_failing_task_id": "",
+            "first_failing_reason": "",
+            "first_failing_metadata": {},
+            "first_failing_protocol_level": "exempt",
+            "all_active": True,
+            "active_tasks": [("17", metadata, "full")],
+        })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is not None, "minimal approved must NOT silently pass"
+        assert ctx["reason_code"] == "invalid_submit"
+        assert ctx["task_id"] == "17"
+
+    def test_fully_valid_approved_is_allowed(self, monkeypatch):
+        """Happy path: a lead-written approved that satisfies every
+        content-shape rule allows the tool call."""
+        submit = self._valid_submit()
+        approved = {
+            "scanned_candidate": {
+                "candidate": "the middleware might instead be mis-routing the session_token lookup",
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": "confirm",
+                "grounding": "dispatch §auth-middleware section line 42",
+            },
+            "response_to_least_confident": {
+                "verdict": "confirm",
+                "grounding": "dispatch §UTC-offset section line 55",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {
+                "addressed": ["session_token handling", "UTC offset handling"],
+                "unaddressed": [],
+            },
+        }
+        metadata = {
+            "variety": {"total": 11, "novelty": 3, "scope": 3,
+                         "uncertainty": 3, "risk": 2},
+            "required_scope_items": ["session_token handling",
+                                     "UTC offset handling"],
+            "teachback_submit": submit,
+            "teachback_approved": approved,
+        }
+        self._setup(monkeypatch, {
+            "task_count": 1,
+            "first_failing_task_id": "",
+            "first_failing_reason": "",
+            "first_failing_metadata": {},
+            "first_failing_protocol_level": "exempt",
+            "all_active": True,
+            "active_tasks": [("19", metadata, "full")],
+        })
+        reason, _ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is None, "fully-valid approved must allow the tool"
+
+    def test_one_rubber_stamped_among_many_taints_all(self, monkeypatch):
+        """ALL-match semantics inherit from the existing scanner design:
+        if ANY active task has a rubber-stamped approved, the gate denies
+        for the entire agent (a valid approval on task A cannot satisfy
+        the gate for task B's content violation)."""
+        submit = self._valid_submit()
+        good_approved = {
+            "scanned_candidate": {
+                "candidate": "the middleware might mis-route session_token lookups",
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": "confirm",
+                "grounding": "dispatch §auth-middleware line 42",
+            },
+            "response_to_least_confident": {
+                "verdict": "confirm",
+                "grounding": "dispatch §UTC-offset line 55",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {
+                "addressed": ["session_token handling"],
+                "unaddressed": [],
+            },
+        }
+        rubber_stamp = {"conditions_met": {"unaddressed": []}}
+        good_meta = {
+            "variety": {"total": 11, "novelty": 3, "scope": 3,
+                         "uncertainty": 3, "risk": 2},
+            "required_scope_items": ["session_token handling"],
+            "teachback_submit": submit,
+            "teachback_approved": good_approved,
+        }
+        bad_meta = {
+            "variety": {"total": 11, "novelty": 3, "scope": 3,
+                         "uncertainty": 3, "risk": 2},
+            "required_scope_items": ["session_token handling"],
+            "teachback_submit": submit,
+            "teachback_approved": rubber_stamp,
+        }
+        self._setup(monkeypatch, {
+            "task_count": 2,
+            "first_failing_task_id": "",
+            "first_failing_reason": "",
+            "first_failing_metadata": {},
+            "first_failing_protocol_level": "exempt",
+            "all_active": True,
+            "active_tasks": [
+                ("21", good_meta, "full"),
+                ("22", bad_meta, "full"),
+            ],
+        })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is not None
+        # Sorted iteration; good task (21) is checked first and passes,
+        # bad task (22) is checked second and produces the deny.
+        assert ctx["task_id"] == "22"
+        assert ctx["reason_code"] == "invalid_submit"
+
+    def test_state_transition_emitted_for_active(self, monkeypatch):
+        """R2-A2 fix: on the active-allow path, emit
+        teachback_state_transition(to_state='active') for each active
+        task so the lead_approve trigger is observed."""
+        submit = self._valid_submit()
+        approved = {
+            "scanned_candidate": {
+                "candidate": "the middleware might mis-route session_token lookups",
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": "confirm",
+                "grounding": "dispatch §auth line 42",
+            },
+            "response_to_least_confident": {
+                "verdict": "confirm",
+                "grounding": "dispatch §auth line 55",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {
+                "addressed": ["session_token handling"],
+                "unaddressed": [],
+            },
+        }
+        metadata = {
+            "variety": {"total": 11, "novelty": 3, "scope": 3,
+                         "uncertainty": 3, "risk": 2},
+            "required_scope_items": ["session_token handling"],
+            "teachback_submit": submit,
+            "teachback_approved": approved,
+        }
+        emitted: list[dict] = []
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "backend-coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "",
+                                 "first_failing_reason": "",
+                                 "first_failing_metadata": {},
+                                 "first_failing_protocol_level": "exempt",
+                                 "all_active": True,
+                                 "active_tasks": [("23", metadata, "full")],
+                             })
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event",
+                             lambda ev: emitted.append(ev) or True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+        reason, _ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is None
+        transitions = [e for e in emitted
+                       if e.get("type") == "teachback_state_transition"]
+        assert len(transitions) == 1
+        assert transitions[0]["to_state"] == "active"
+        assert transitions[0]["task_id"] == "23"
+        assert transitions[0].get("trigger") == "lead_approve"
 
 
 # ---------------------------------------------------------------------------

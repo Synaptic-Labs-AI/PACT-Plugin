@@ -446,7 +446,9 @@ class TestScanTeachbackStateStructural:
             "first_failing_metadata",
             "first_failing_protocol_level",
             "all_active",
+            "active_tasks",
         }
+        assert result["active_tasks"] == []
 
 
 # ---------------------------------------------------------------------------

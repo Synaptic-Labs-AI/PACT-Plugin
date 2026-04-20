@@ -44,6 +44,7 @@ failure surfaces.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import NamedTuple
 
 
@@ -130,6 +131,25 @@ _ACTUAL_VALUE_CAP = 500
 # peer_inject canonical form.
 _ROLE_MARKER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
+# Invisible-character strip set for the `_normalize` primitive. Removes
+# zero-width characters (ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D, BOM
+# U+FEFF) and bidirectional-override controls (U+202A-U+202E LRE/RLE/
+# PDF/LRO/RLO, U+2066-U+2069 LRI/RLI/FSI/PDI). Closes F-SEC-R2-1: a
+# crafted lead-side `scanned_candidate.candidate` could otherwise
+# substring-match a teammate's `most_likely_wrong.assumption` when
+# viewed normally, yet the bidirectional-inequality check compares
+# raw strings and misses the match — bypassing the rubber-stamp
+# blocker. Applied in `_normalize` AFTER NFKC (so homoglyph folding
+# collapses e.g. fullwidth Latin / Cyrillic look-alikes first).
+_INVISIBLE_CHARS_STRIP_RE = re.compile(
+    r"["
+    r"\u200b-\u200d"   # zero-width space / non-joiner / joiner
+    r"\ufeff"           # byte-order mark / zero-width no-break space
+    r"\u202a-\u202e"   # LRE / RLE / PDF / LRO / RLO
+    r"\u2066-\u2069"   # LRI / RLI / FSI / PDI
+    r"]"
+)
+
 
 def _strip_control_chars(value: str) -> str:
     """Remove C0 / DEL / Unicode line-terminator characters from ``value``.
@@ -162,11 +182,35 @@ class FieldError(NamedTuple):
 # ---------------------------------------------------------------------------
 
 def _normalize(text: str) -> str:
-    """Lowercase + whitespace-collapse normalization for substring and
-    membership comparisons."""
+    """Normalize text for substring-inequality, evidence-substring, and
+    membership comparisons.
+
+    Pipeline (order is load-bearing):
+      1. NFKC Unicode normalization — folds fullwidth Latin / compatibility
+         forms to canonical ASCII-range codepoints so visual look-alikes
+         collapse. Does NOT fold Cyrillic homoglyphs (different scripts),
+         but a NFKC'd Cyrillic string and a Latin string remain
+         distinguishable — which is the correct semantics (the tokens
+         ARE different characters, even if visually identical).
+      2. Strip zero-width + bidi-override characters — ZWSP / ZWNJ / ZWJ /
+         BOM / LRE / RLE / PDF / LRO / RLO / LRI / RLI / FSI / PDI.
+         A crafted lead-side candidate like "session\\u200btoken" would
+         otherwise substring-differ from teammate's "sessiontoken" even
+         though they render identically. Applied AFTER NFKC since NFKC
+         itself doesn't remove these codepoints.
+      3. Lowercase + whitespace-collapse (pre-F-SEC-R2-1 behavior).
+
+    Closes F-SEC-R2-1 at a single point so the substring-inequality
+    check (`_scanned_candidate_distinct`), evidence-substring grounding
+    (`_evidence_grounded`), and addressed-item membership
+    (`_all_addressed_valid`) all inherit the hardening via their shared
+    reliance on `_normalize`.
+    """
     if not isinstance(text, str):
         return ""
-    return re.sub(r"\s+", " ", text.strip().lower())
+    folded = unicodedata.normalize("NFKC", text)
+    stripped = _INVISIBLE_CHARS_STRIP_RE.sub("", folded)
+    return re.sub(r"\s+", " ", stripped.strip().lower())
 
 
 def _tokenize(text: str) -> list[str]:

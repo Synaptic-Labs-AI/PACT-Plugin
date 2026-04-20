@@ -70,6 +70,11 @@ _REASON_UNADDRESSED_ITEMS = "unaddressed_items"  # T5 — auto-downgrade
 _REASON_CORRECTIONS_PENDING = "corrections_pending"  # T6 — correcting
 
 # Default fail-open summary returned on error / no-task / no-agent paths.
+# `active_tasks` carries (task_id, metadata, protocol_level) tuples for
+# every structurally-active in_progress task so teachback_gate can run
+# the full content validator on them (R2-A1 fix). Default empty list
+# preserves fail-open semantics — a failing scan returns no active tasks
+# and the gate runs its regular no-task-present path.
 _DEFAULT_SUMMARY: dict[str, Any] = {
     "task_count": 0,
     "first_failing_task_id": "",
@@ -77,6 +82,7 @@ _DEFAULT_SUMMARY: dict[str, Any] = {
     "first_failing_metadata": {},
     "first_failing_protocol_level": "exempt",
     "all_active": True,
+    "active_tasks": [],
 }
 
 
@@ -194,10 +200,19 @@ def _classify_task_state(
         # as invalid_submit — never silently-active. Previously the
         # scanner fell through to active when conditions_met was any
         # non-dict (including None or a string), which opened a rubber-
-        # stamp surface at the structural-triage layer. The downstream
-        # full validator (validate_approved) catches this too, but F2
-        # restores scanner-layer fail-safe matching the docstring's
-        # "valid approved" precondition on the T4 branch.
+        # stamp surface at the structural-triage layer.
+        #
+        # R2-A3 correction: earlier versions of this comment claimed
+        # "the downstream full validator (validate_approved) catches
+        # this too" — that was misleading. `validate_approved` runs
+        # from teachback_gate._check_tool_allowed on the NON-ACTIVE
+        # path only. On the T4 active branch the gate short-circuits
+        # to allow, so content validation never fires unless we also
+        # reach it via the R2-A1 `active_tasks` iteration introduced
+        # in cycle 3. The scanner's T4 structural check is therefore
+        # the FIRST-layer fail-safe; teachback_gate's active_tasks
+        # iteration is the SECOND-layer fail-safe (generation-shaped
+        # content validation).
         if not isinstance(conditions_met, dict):
             return (_REASON_INVALID_SUBMIT, "teachback_pending")
         unaddressed = conditions_met.get("unaddressed") or []
@@ -264,11 +279,22 @@ def scan_teachback_state(
             "first_failing_protocol_level": "exempt"|"simplified"|"full",
             "all_active":                 bool (True iff every in_progress
                                                task is in active state),
+            "active_tasks":               list[tuple[str, dict, str]]
+                                               — (task_id, metadata,
+                                               protocol_level) for every
+                                               structurally-active task.
+                                               Consumed by teachback_gate to
+                                               run the full content
+                                               validator (closes R2-A1:
+                                               the scanner's T4 structural
+                                               check alone doesn't catch
+                                               minimal rubber-stamped
+                                               approvals).
         }
 
     On fail-open (can't scan, no agent, no team, exception), returns
-    _DEFAULT_SUMMARY (task_count=0, all_active=True) so the gate
-    allows.
+    _DEFAULT_SUMMARY (task_count=0, all_active=True, active_tasks=[]) so
+    the gate allows.
     """
     if not agent_name or not team_name:
         return dict(_DEFAULT_SUMMARY)
@@ -295,6 +321,7 @@ def scan_teachback_state(
     first_failing_metadata: dict = {}
     first_failing_protocol_level = "exempt"
     all_active = True
+    active_tasks: list[tuple[str, dict, str]] = []
 
     try:
         for task_file in sorted(task_dir.iterdir()):
@@ -340,6 +367,13 @@ def scan_teachback_state(
                     first_failing_reason = reason
                     first_failing_metadata = metadata
                     first_failing_protocol_level = level
+            else:
+                # Structurally-active task: teachback_gate runs the full
+                # content validator on these to close the R2-A1 rubber-
+                # stamp bypass (a minimal `{"teachback_approved":
+                # {"conditions_met": {"unaddressed": []}}}` classifies as
+                # active structurally but would fail validate_approved).
+                active_tasks.append((task_file.stem, metadata, level))
     except OSError:
         return dict(_DEFAULT_SUMMARY)
 
@@ -350,4 +384,5 @@ def scan_teachback_state(
         "first_failing_metadata": first_failing_metadata,
         "first_failing_protocol_level": first_failing_protocol_level,
         "all_active": all_active,
+        "active_tasks": active_tasks,
     }
