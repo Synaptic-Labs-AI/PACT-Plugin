@@ -65,14 +65,11 @@ Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (option
 
 ### Structured `teachback_submit` at every dispatch
 
-Every teachback, regardless of task variety, produces the structured
-`teachback_submit` metadata via `TaskUpdate` (with `understanding`,
-`most_likely_wrong`, `least_confident_item`, and `first_action` sub-fields).
-The gate's variety-7 threshold controls mechanical enforcement — NOT whether
-the structured form applies as a practice. Below the threshold, the
-orchestrator validates discipline-based; at or above the threshold,
-mechanical enforcement adds a second layer on top of the same ritual. The
-structured shape is the canonical practice at every dispatch.
+Every teachback you produce — on every dispatch, no exceptions — MUST
+include `teachback_submit` metadata via `TaskUpdate` with the sub-fields
+`understanding`, `most_likely_wrong`, `least_confident_item`, and
+`first_action`. All 4 sub-fields are required on every dispatch. A
+teachback without these fields is not a teachback.
 
 The `SendMessage` notification described above remains the channel that
 alerts the lead a teachback is ready to read. The structured
