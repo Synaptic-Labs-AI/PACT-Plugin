@@ -48,6 +48,28 @@ LEARNING_II_MIN_MATCHES = 5
 LEARNING_II_MAX_BUMP = 1  # max +1 per dimension
 
 # ---------------------------------------------------------------------------
+# Teachback gate thresholds (#401)
+# ---------------------------------------------------------------------------
+# At or above this total variety score, the teachback gate applies.
+# Locked in docs/architecture/teachback-gate/TERMINOLOGY-LOCK.md §Constants.
+TEACHBACK_BLOCKING_THRESHOLD = 7
+
+# At or above this score, the teammate+lead follow the full-protocol
+# teachback schema (4 submit fields + 5 approved fields). Below this
+# threshold — but at or above TEACHBACK_BLOCKING_THRESHOLD — simplified
+# protocol applies IF required_scope_items is also below the cardinality
+# threshold. See docs/architecture/teachback-gate/STATE-MACHINE.md §Q2.
+TEACHBACK_FULL_PROTOCOL_VARIETY = 9
+
+# If `len(required_scope_items) >= this`, full protocol applies regardless
+# of variety score (provided variety >= TEACHBACK_BLOCKING_THRESHOLD).
+TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS = 2
+
+# Teachback mode values returned by teachback_mode_for_score.
+TEACHBACK_MODE_BLOCKING = "blocking"
+TEACHBACK_MODE_ADVISORY = "advisory"
+
+# ---------------------------------------------------------------------------
 # Functions
 # ---------------------------------------------------------------------------
 
@@ -133,3 +155,88 @@ def route_workflow(score: int) -> str:
     if score <= PLAN_MODE_MAX:
         return ROUTE_PLAN_MODE
     return ROUTE_RESEARCH_SPIKE
+
+
+def _validate_score(score: int) -> None:
+    """Shared int+range validator for the teachback gate helpers."""
+    if not isinstance(score, int) or isinstance(score, bool):
+        raise TypeError(
+            f"score must be an integer, got {type(score).__name__}"
+        )
+    if score < MIN_SCORE or score > MAX_SCORE:
+        raise ValueError(
+            f"score must be between {MIN_SCORE} and {MAX_SCORE}, got {score}"
+        )
+
+
+def teachback_mode_for_score(score: int) -> str:
+    """Return the teachback gate mode for a given variety score.
+
+    Args:
+        score: Total variety score (4-16)
+
+    Returns:
+        "blocking" when score >= TEACHBACK_BLOCKING_THRESHOLD (7), else "advisory".
+
+    Raises:
+        TypeError: If score is not an integer (booleans rejected).
+        ValueError: If score is not in range [MIN_SCORE, MAX_SCORE].
+    """
+    _validate_score(score)
+    if score >= TEACHBACK_BLOCKING_THRESHOLD:
+        return TEACHBACK_MODE_BLOCKING
+    return TEACHBACK_MODE_ADVISORY
+
+
+def auditor_required_for_score(score: int) -> bool:
+    """Return True when mandatory auditor dispatch applies for a variety score.
+
+    Issue #401 §Locked design decisions names the auditor gate as an
+    independent dimension alongside the teachback gate. Both trip at the
+    same threshold (7) by current policy, but they are kept as separate
+    functions so future calibration can move them independently.
+
+    Args:
+        score: Total variety score (4-16)
+
+    Returns:
+        True iff score >= TEACHBACK_BLOCKING_THRESHOLD.
+
+    Raises:
+        TypeError / ValueError: See teachback_mode_for_score.
+    """
+    _validate_score(score)
+    return score >= TEACHBACK_BLOCKING_THRESHOLD
+
+
+def gates_for_score(score: int) -> dict:
+    """Return the canonical gate configuration for a given variety score.
+
+    Used by the orchestrator at TaskCreate time to pre-populate
+    `metadata.gates`. The TaskCreated hook (task_schema_validator.py,
+    Commit #5) cannot write metadata back (platform constraint F8), so
+    this value must be computed orchestrator-side and included in the
+    TaskCreate payload.
+
+    Shape matches issue #401 body §TaskCreate schema validation:
+        {
+            "teachback_mode": "blocking" | "advisory",
+            "auditor_required": bool,
+            "workflow_route": "comPACT" | "orchestrate" | "plan-mode" | "research-spike",
+        }
+
+    Args:
+        score: Total variety score (4-16)
+
+    Returns:
+        Three-key dict described above.
+
+    Raises:
+        TypeError / ValueError: See teachback_mode_for_score.
+    """
+    _validate_score(score)
+    return {
+        "teachback_mode": teachback_mode_for_score(score),
+        "auditor_required": auditor_required_for_score(score),
+        "workflow_route": route_workflow(score),
+    }

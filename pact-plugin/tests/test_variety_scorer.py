@@ -30,8 +30,16 @@ from shared.variety_scorer import (
     ROUTE_ORCHESTRATE,
     ROUTE_PLAN_MODE,
     ROUTE_RESEARCH_SPIKE,
+    TEACHBACK_BLOCKING_THRESHOLD,
+    TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS,
+    TEACHBACK_FULL_PROTOCOL_VARIETY,
+    TEACHBACK_MODE_ADVISORY,
+    TEACHBACK_MODE_BLOCKING,
+    auditor_required_for_score,
+    gates_for_score,
     route_workflow,
     score_variety,
+    teachback_mode_for_score,
     validate_dimension,
 )
 
@@ -297,3 +305,192 @@ class TestRouteWorkflow:
     def test_none_raises_type_error(self):
         with pytest.raises(TypeError):
             route_workflow(None)
+
+
+# =============================================================================
+# Teachback gate constants and helpers (#401)
+# =============================================================================
+
+
+class TestTeachbackConstants:
+    """Verify teachback-gate constants match architecture spec and are self-consistent."""
+
+    def test_blocking_threshold_literal(self):
+        assert TEACHBACK_BLOCKING_THRESHOLD == 7
+
+    def test_full_protocol_variety_literal(self):
+        assert TEACHBACK_FULL_PROTOCOL_VARIETY == 9
+
+    def test_full_protocol_scope_items_literal(self):
+        assert TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS == 2
+
+    def test_blocking_threshold_inside_score_range(self):
+        assert MIN_SCORE <= TEACHBACK_BLOCKING_THRESHOLD <= MAX_SCORE
+
+    def test_full_protocol_variety_inside_score_range(self):
+        assert MIN_SCORE <= TEACHBACK_FULL_PROTOCOL_VARIETY <= MAX_SCORE
+
+    def test_full_protocol_variety_ge_blocking_threshold(self):
+        """Full-protocol threshold must be >= blocking threshold — otherwise
+        simplified protocol is unreachable."""
+        assert TEACHBACK_FULL_PROTOCOL_VARIETY >= TEACHBACK_BLOCKING_THRESHOLD
+
+    def test_mode_constants(self):
+        assert TEACHBACK_MODE_BLOCKING == "blocking"
+        assert TEACHBACK_MODE_ADVISORY == "advisory"
+
+
+class TestTeachbackModeForScore:
+    """Verify teachback_mode_for_score boundary behavior and validation."""
+
+    def test_below_threshold_is_advisory(self):
+        assert teachback_mode_for_score(6) == TEACHBACK_MODE_ADVISORY
+
+    def test_at_threshold_is_blocking(self):
+        """Boundary: score == 7 must be blocking (>= threshold)."""
+        assert teachback_mode_for_score(7) == TEACHBACK_MODE_BLOCKING
+
+    def test_above_threshold_is_blocking(self):
+        assert teachback_mode_for_score(8) == TEACHBACK_MODE_BLOCKING
+        assert teachback_mode_for_score(16) == TEACHBACK_MODE_BLOCKING
+
+    def test_min_score_is_advisory(self):
+        assert teachback_mode_for_score(MIN_SCORE) == TEACHBACK_MODE_ADVISORY
+
+    def test_literal_threshold_matches_constant(self):
+        """Regression: if TEACHBACK_BLOCKING_THRESHOLD moves, this test
+        forces a downstream audit of every `variety >= 7` literal in the
+        codebase (command .md files, hook constants)."""
+        assert teachback_mode_for_score(TEACHBACK_BLOCKING_THRESHOLD) == TEACHBACK_MODE_BLOCKING
+        assert teachback_mode_for_score(TEACHBACK_BLOCKING_THRESHOLD - 1) == TEACHBACK_MODE_ADVISORY
+
+    # --- Validation ---
+
+    def test_below_min_raises_value_error(self):
+        with pytest.raises(ValueError):
+            teachback_mode_for_score(MIN_SCORE - 1)
+
+    def test_above_max_raises_value_error(self):
+        with pytest.raises(ValueError):
+            teachback_mode_for_score(MAX_SCORE + 1)
+
+    def test_bool_raises_type_error(self):
+        """bool is an int subclass; the validator must reject it explicitly."""
+        with pytest.raises(TypeError, match="must be an integer"):
+            teachback_mode_for_score(True)
+
+    def test_float_raises_type_error(self):
+        with pytest.raises(TypeError, match="must be an integer"):
+            teachback_mode_for_score(7.0)
+
+    def test_string_raises_type_error(self):
+        with pytest.raises(TypeError):
+            teachback_mode_for_score("7")
+
+    def test_none_raises_type_error(self):
+        with pytest.raises(TypeError):
+            teachback_mode_for_score(None)
+
+
+class TestAuditorRequiredForScore:
+    """Verify auditor_required_for_score tracks blocking threshold."""
+
+    def test_below_threshold_not_required(self):
+        assert auditor_required_for_score(6) is False
+
+    def test_at_threshold_required(self):
+        assert auditor_required_for_score(7) is True
+
+    def test_above_threshold_required(self):
+        assert auditor_required_for_score(16) is True
+
+    def test_min_score_not_required(self):
+        assert auditor_required_for_score(MIN_SCORE) is False
+
+    def test_bool_raises_type_error(self):
+        with pytest.raises(TypeError, match="must be an integer"):
+            auditor_required_for_score(True)
+
+    def test_out_of_range_raises_value_error(self):
+        with pytest.raises(ValueError):
+            auditor_required_for_score(17)
+
+
+class TestGatesForScore:
+    """Verify gates_for_score returns the canonical three-key dict."""
+
+    def test_shape_has_three_keys(self):
+        result = gates_for_score(7)
+        assert set(result.keys()) == {"teachback_mode", "auditor_required", "workflow_route"}
+
+    def test_blocking_tier_at_threshold(self):
+        assert gates_for_score(7) == {
+            "teachback_mode": TEACHBACK_MODE_BLOCKING,
+            "auditor_required": True,
+            "workflow_route": ROUTE_ORCHESTRATE,
+        }
+
+    def test_advisory_tier_below_threshold(self):
+        assert gates_for_score(6) == {
+            "teachback_mode": TEACHBACK_MODE_ADVISORY,
+            "auditor_required": False,
+            "workflow_route": ROUTE_COMPACT,
+        }
+
+    def test_plan_mode_route_at_variety_11(self):
+        result = gates_for_score(11)
+        assert result["teachback_mode"] == TEACHBACK_MODE_BLOCKING
+        assert result["auditor_required"] is True
+        assert result["workflow_route"] == ROUTE_PLAN_MODE
+
+    def test_research_spike_route_at_variety_15(self):
+        result = gates_for_score(15)
+        assert result["workflow_route"] == ROUTE_RESEARCH_SPIKE
+        assert result["teachback_mode"] == TEACHBACK_MODE_BLOCKING
+
+    def test_bool_raises_type_error(self):
+        with pytest.raises(TypeError, match="must be an integer"):
+            gates_for_score(True)
+
+    def test_float_raises_type_error(self):
+        with pytest.raises(TypeError):
+            gates_for_score(7.0)
+
+    def test_out_of_range_raises_value_error(self):
+        with pytest.raises(ValueError):
+            gates_for_score(17)
+        with pytest.raises(ValueError):
+            gates_for_score(3)
+
+
+# Q2 tier matrix — variety-vs-scope-items classification (documentation-level
+# test; actual protocol-level decision lives in teachback_gate.py Commit #7).
+# Here we verify the primitives that Commit #7's _protocol_level helper will
+# compose.
+class TestProtocolLevelTierMatrix:
+    """Ground the simplified-vs-full tier decisions in the primitives."""
+
+    @pytest.mark.parametrize("variety,scope_items,expected_blocks,expected_full", [
+        # (variety, scope_items, expected_blocking?, expected_full_protocol_via_variety_OR_scope?)
+        (4, 0, False, False),   # exempt: below blocking threshold
+        (6, 5, False, False),   # exempt: below blocking threshold even with many scope items
+        (7, 0, True, False),    # blocking, simplified (variety<9 and scope<2)
+        (7, 1, True, False),    # blocking, simplified
+        (7, 2, True, True),     # blocking, full via scope_items cardinality
+        (8, 0, True, False),    # blocking, simplified
+        (8, 2, True, True),     # blocking, full via scope_items
+        (9, 0, True, True),     # blocking, full via variety alone
+        (9, 5, True, True),     # blocking, full via both
+        (10, 1, True, True),    # blocking, full via variety
+        (16, 0, True, True),    # max variety, full
+    ])
+    def test_tier_classification(self, variety, scope_items, expected_blocks, expected_full):
+        blocks = teachback_mode_for_score(variety) == TEACHBACK_MODE_BLOCKING
+        assert blocks is expected_blocks
+
+        # Full protocol applies when blocked AND (variety >= 9 OR scope_items >= 2)
+        full = blocks and (
+            variety >= TEACHBACK_FULL_PROTOCOL_VARIETY
+            or scope_items >= TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS
+        )
+        assert full is expected_full
