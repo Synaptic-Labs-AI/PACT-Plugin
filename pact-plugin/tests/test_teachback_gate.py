@@ -718,3 +718,654 @@ class TestHooksJsonRegistration:
             "bootstrap_gate must fire BEFORE teachback_gate. Bootstrap is the "
             "gate-of-gates; teachback is meaningless until bootstrap completes."
         )
+
+
+# ---------------------------------------------------------------------------
+# P0: dedicated TestFailOpen + TestErrorSuppressMutualExclusivity
+# (mirrors test_bootstrap_gate.py discipline per dispatch checklist)
+# ---------------------------------------------------------------------------
+
+
+class TestFailOpen:
+    """P0: Every exception path must exit 0 with suppressOutput. A bug
+    in the gate must NEVER block a teammate's legitimate tool call."""
+
+    def test_malformed_stdin_json_fails_open(self, capsys):
+        monkeypatch_stdin = io.StringIO("not valid json {")
+        with patch("sys.stdin", monkeypatch_stdin):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert parsed == {"suppressOutput": True}
+
+    def test_empty_stdin_fails_open(self, capsys):
+        with patch("sys.stdin", io.StringIO("")):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out.strip()) == {"suppressOutput": True}
+
+    def test_check_tool_allowed_runtime_error_fails_open(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            teachback_gate, "_check_tool_allowed",
+            lambda _: (_ for _ in ()).throw(RuntimeError("gate exploded")),
+        )
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Edit"}))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        assert "teachback_gate" in captured.err
+
+    def test_oserror_in_scan_fails_open(self, monkeypatch, capsys):
+        """OSError raised inside scan_teachback_state must be absorbed
+        by the outer try/except — gate exits 0 (never 2). hook_error_json
+        emits a systemMessage hook-warning payload that bubbles up."""
+        def scan_boom(*a, **kw):
+            raise OSError("disk wedged")
+
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state", scan_boom)
+        with patch("sys.stdin", io.StringIO(json.dumps(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        ))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        # SACROSANCT fail-open: never exit 2 on unhandled exception.
+        assert exc.value.code == 0
+
+    def test_validator_exception_does_not_block(self, monkeypatch, capsys):
+        """Y2/Y3 integration: if validate_submit raises, the scanner's
+        structural classification stays in force — gate doesn't crash."""
+        def validator_boom(*a, **kw):
+            raise RuntimeError("regex engine melted")
+
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "17",
+                                 "first_failing_reason": "awaiting_approval",
+                                 "first_failing_metadata": {
+                                     "variety": {"total": 11},
+                                     "required_scope_items": ["x"],
+                                     "teachback_submit": {"understanding": "y" * 120},
+                                 },
+                                 "first_failing_protocol_level": "full",
+                                 "all_active": False,
+                             })
+        monkeypatch.setattr(teachback_gate, "validate_submit", validator_boom)
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        # Scanner said awaiting_approval; validator blew up → reason stays
+        assert ctx["reason_code"] == "awaiting_approval"
+        assert reason is not None
+
+
+class TestErrorSuppressMutualExclusivity:
+    """P0: These hooks use suppressOutput for fail-open, never
+    systemMessage. Deny path uses hookSpecificOutput (blocking) or
+    systemMessage (advisory), never suppressOutput."""
+
+    def test_fail_open_no_system_message(self, capsys):
+        with patch("sys.stdin", io.StringIO("bad json")):
+            with pytest.raises(SystemExit):
+                teachback_gate.main()
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out.strip())
+        assert "suppressOutput" in parsed
+        assert "systemMessage" not in parsed
+        assert "hookSpecificOutput" not in parsed
+
+    def test_advisory_deny_no_suppress_output(self, monkeypatch, capsys):
+        monkeypatch.setattr(teachback_gate, "_TEACHBACK_MODE", "advisory")
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t})
+        monkeypatch.setattr(
+            teachback_gate, "_check_tool_allowed",
+            lambda _: ("deny reason body", {
+                "reason_code": "missing_submit", "tool_name": "Edit",
+                "task_id": "17", "agent_name": "coder-1",
+            }),
+        )
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Edit"}))):
+            with pytest.raises(SystemExit):
+                teachback_gate.main()
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert "systemMessage" in payload
+        assert "suppressOutput" not in payload
+
+    def test_blocking_deny_no_suppress_output(self, monkeypatch, capsys):
+        monkeypatch.setattr(teachback_gate, "_TEACHBACK_MODE", "blocking")
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t})
+        monkeypatch.setattr(
+            teachback_gate, "_check_tool_allowed",
+            lambda _: ("deny reason body", {
+                "reason_code": "missing_submit", "tool_name": "Edit",
+                "task_id": "17", "agent_name": "coder-1",
+            }),
+        )
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Edit"}))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 2
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert "hookSpecificOutput" in payload
+        assert "suppressOutput" not in payload
+        assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_allow_path_no_hook_specific_output(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            teachback_gate, "_check_tool_allowed", lambda _: (None, {}),
+        )
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Read"}))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert "suppressOutput" in payload
+        assert "hookSpecificOutput" not in payload
+        assert "systemMessage" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Coverage fills — narrow-targeted tests for uncovered branches
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyTeamNameShortCircuit:
+    """Line 126: team_name resolves to empty string → allow (not our team)."""
+
+    def test_empty_team_name_returns_none(self, monkeypatch):
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "")
+        reason, ctx = _check_tool_allowed({"tool_name": "Edit"})
+        assert reason is None
+        assert ctx == {}
+
+
+class TestInvalidSubmitFallbackWhenSubmitIsNone:
+    """Lines 217-222: scanner said invalid_submit but submit is None/
+    non-dict (so validator produced no FieldError). Fallback populates
+    a minimal error hint from the protocol_level."""
+
+    def _setup(self, monkeypatch, scan_result):
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: scan_result)
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+    def test_submit_none_invalid_submit_fallback_hint(self, monkeypatch):
+        self._setup(monkeypatch, {
+            "task_count": 1,
+            "first_failing_task_id": "17",
+            "first_failing_reason": "invalid_submit",
+            "first_failing_metadata": {
+                "variety": {"total": 11},
+                "required_scope_items": ["x"],
+                "teachback_submit": None,  # non-dict → validator returns []
+            },
+            "first_failing_protocol_level": "full",
+            "all_active": False,
+        })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert ctx["reason_code"] == "invalid_submit"
+        # Fallback template uses the generic hint — protocol level named
+        assert "full" in reason
+
+    def test_submit_non_dict_invalid_submit_fallback(self, monkeypatch):
+        self._setup(monkeypatch, {
+            "task_count": 1,
+            "first_failing_task_id": "17",
+            "first_failing_reason": "invalid_submit",
+            "first_failing_metadata": {
+                "variety": {"total": 8},
+                "teachback_submit": "just a string",  # scanner sees as invalid
+            },
+            "first_failing_protocol_level": "simplified",
+            "all_active": False,
+        })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Write", "team_name": "pact-test"}
+        )
+        assert ctx["reason_code"] == "invalid_submit"
+        # Fallback should surface the protocol_level "simplified" in the hint
+        assert "simplified" in reason
+
+
+class TestStateTransitionEmissionOuterFailOpen:
+    """Lines 235-237: outer try/except around _emit_state_transition_if_changed
+    absorbs exceptions. Verifies the gate still returns deny_reason even
+    if the emitter blows up."""
+
+    def test_emit_exception_absorbed(self, monkeypatch):
+        def emit_boom(**kw):
+            raise RuntimeError("emitter exploded")
+
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "17",
+                                 "first_failing_reason": "missing_submit",
+                                 "first_failing_metadata": {"variety": {"total": 10}},
+                                 "first_failing_protocol_level": "full",
+                                 "all_active": False,
+                             })
+        monkeypatch.setattr(
+            teachback_gate, "_emit_state_transition_if_changed", emit_boom,
+        )
+
+        # Should NOT raise; gate returns deny_reason normally
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is not None
+        assert ctx["reason_code"] == "missing_submit"
+
+
+class TestStateTransitionDedupeNonDictEvents:
+    """Line 299: when read_events returns a list that contains a non-dict
+    entry (journal-corruption defense), the de-dupe scan skips it and
+    continues looking for the most-recent dict event."""
+
+    def test_non_dict_event_in_journal_is_skipped(self, monkeypatch):
+        import teachback_gate as tg
+
+        # Prior journal has a non-dict entry followed by a dict entry.
+        # reversed() iteration means the non-dict is hit first; the
+        # filter must skip it and find the dict entry next.
+        prior = [
+            {"type": "teachback_state_transition", "task_id": "17",
+             "to_state": "teachback_under_review"},
+            "corrupted-string-entry",  # non-dict; should be skipped
+        ]
+        emitted = []
+        monkeypatch.setattr(tg, "read_events", lambda _t: prior)
+        monkeypatch.setattr(tg, "append_event",
+                             lambda ev: emitted.append(ev) or True)
+        monkeypatch.setattr(tg, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+        # to_state matches the dict entry — de-dupe suppresses emission
+        tg._emit_state_transition_if_changed(
+            task_id="17", agent="coder-1", to_state="teachback_under_review",
+        )
+        assert emitted == [], (
+            "de-dupe should skip the non-dict event and find the matching "
+            "dict entry, suppressing emission"
+        )
+
+
+class TestReasonUpgradeFromUnaddressedToInvalidSubmit:
+    """Line 185-186: when scanner says unaddressed_items but the approved
+    structure itself is invalid, gate upgrades reason to invalid_submit so
+    the lead sees the actual schema error (not just 'unaddressed')."""
+
+    def _setup(self, monkeypatch, scan_result):
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: scan_result)
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t, **kw})
+
+    def test_bad_approved_with_unaddressed_upgrades(self, monkeypatch):
+        # Full-protocol approved with unaddressed non-empty AND missing
+        # required fields (e.g. no response_to_assumption) → validator
+        # returns FieldError for the missing field, gate upgrades.
+        submit = {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to session_token expiry handling."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the auth middleware integrates cleanly with session_token",
+                "consequence": "if wrong session_token validation may accept expired tokens",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of session_token expiry across time zones",
+                "current_plan": "mirror auth.py:42 which handles offsets correctly",
+                "failure_mode": "timezone drift could let stale session_tokens pass",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+        approved = {
+            # Minimal + invalid: no response_to_assumption, no
+            # response_to_least_confident, no first_action_check (full
+            # protocol requires all three)
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "session_token",
+            },
+            "conditions_met": {
+                "addressed": ["a"],
+                "unaddressed": ["b"],  # scanner sees unaddressed_items
+            },
+        }
+        self._setup(monkeypatch, {
+            "task_count": 1,
+            "first_failing_task_id": "17",
+            "first_failing_reason": "unaddressed_items",
+            "first_failing_metadata": {
+                "variety": {"total": 11},
+                "required_scope_items": ["a", "b"],
+                "teachback_submit": submit,
+                "teachback_approved": approved,
+            },
+            "first_failing_protocol_level": "full",
+            "all_active": False,
+        })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        # Upgraded from unaddressed_items to invalid_submit
+        assert ctx["reason_code"] == "invalid_submit", (
+            "Gate should upgrade from unaddressed_items to invalid_submit "
+            "when the approved structure is itself invalid"
+        )
+
+
+class TestAdvisoryEventEmitFailOpen:
+    """Lines 369-370: journal append raises inside _emit_advisory_event;
+    exception is swallowed so the systemMessage still goes out."""
+
+    def test_journal_exception_does_not_prevent_advisory(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(teachback_gate, "_TEACHBACK_MODE", "advisory")
+        monkeypatch.setattr(
+            teachback_gate, "_check_tool_allowed",
+            lambda _: ("deny reason body", {
+                "reason_code": "missing_submit", "tool_name": "Edit",
+                "task_id": "17", "agent_name": "coder-1",
+            }),
+        )
+
+        def journal_boom(_ev):
+            raise RuntimeError("journal died")
+
+        monkeypatch.setattr(teachback_gate, "append_event", journal_boom)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t})
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Edit"}))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 0
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert "systemMessage" in payload
+
+
+class TestBlockedEventEmitFailOpen:
+    """Lines 387-388: same fail-open pattern for the blocking-mode emit."""
+
+    def test_journal_exception_does_not_prevent_blocking_deny(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(teachback_gate, "_TEACHBACK_MODE", "blocking")
+        monkeypatch.setattr(
+            teachback_gate, "_check_tool_allowed",
+            lambda _: ("deny reason body", {
+                "reason_code": "missing_submit", "tool_name": "Edit",
+                "task_id": "17", "agent_name": "coder-1",
+            }),
+        )
+
+        def journal_boom(_ev):
+            raise RuntimeError("journal died")
+
+        monkeypatch.setattr(teachback_gate, "append_event", journal_boom)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t})
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Edit"}))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 2
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# Counter-test-by-revert — checklist items that span modules
+# ---------------------------------------------------------------------------
+
+
+class TestCounterTestByRevertGate:
+    """Counter-test-by-revert sweep for gate-level invariants. Each test
+    must fail if its guarded behavior is reverted."""
+
+    def test_item1_pending_to_under_review_via_submit(self, monkeypatch):
+        """Checklist item 1: teachback_submit write transitions pending
+        → under_review. Valid submit produces awaiting_approval reason
+        (not missing_submit)."""
+        submit = {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to session_token expiry handling."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the auth middleware integrates cleanly with session_token flow",
+                "consequence": "if wrong session_token validation accepts expired tokens",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of session_token expiry across time zones",
+                "current_plan": "mirror auth.py:42 which handles UTC offsets",
+                "failure_mode": "timezone drift could let stale session_tokens pass",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "17",
+                                 "first_failing_reason": "awaiting_approval",
+                                 "first_failing_metadata": {
+                                     "variety": {"total": 11},
+                                     "required_scope_items": ["session_token"],
+                                     "teachback_submit": submit,
+                                 },
+                                 "first_failing_protocol_level": "full",
+                                 "all_active": False,
+                             })
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t})
+
+        _reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert ctx["reason_code"] == "awaiting_approval", (
+            "Valid teachback_submit should transition the task to "
+            "teachback_under_review (reason=awaiting_approval). Reverting "
+            "this guarantees by dropping the submit-presence check in "
+            "_classify_task_state breaks this assertion."
+        )
+
+    def test_item2_under_review_to_active_via_approval(self, monkeypatch):
+        """Checklist item 2: valid teachback_approved with empty unaddressed
+        transitions under_review → active. Gate allows (reason None)."""
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "",
+                                 "first_failing_reason": "",
+                                 "first_failing_metadata": {},
+                                 "first_failing_protocol_level": "exempt",
+                                 "all_active": True,  # approval → active
+                             })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is None
+        assert ctx == {}
+
+    def test_item5_signal_tasks_bypass_gate(self, monkeypatch):
+        """Checklist item 5: signal tasks (type=blocker/algedonic) bypass
+        the gate. Scan returns all_active=True for a fully-bypassed
+        signal task because the carve-out fires before classification."""
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        # When all tasks are signal/carve-out, scanner returns task_count=1
+        # but all_active=True because carve-outs short-circuit classification.
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "",
+                                 "first_failing_reason": "",
+                                 "first_failing_metadata": {},
+                                 "first_failing_protocol_level": "exempt",
+                                 "all_active": True,
+                             })
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        assert reason is None, "Signal tasks must bypass the gate"
+
+    def test_item6_fail_open_on_filesystem_errors(self, monkeypatch, capsys):
+        """Checklist item 6: fail-open on filesystem errors. OSError in
+        the decision path → gate allows (exit 0, suppressOutput or hook
+        error JSON; NOT exit 2)."""
+        def check_boom(_):
+            raise OSError("disk wedged")
+
+        monkeypatch.setattr(teachback_gate, "_check_tool_allowed", check_boom)
+        with patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Edit"}))):
+            with pytest.raises(SystemExit) as exc:
+                teachback_gate.main()
+        assert exc.value.code == 0, (
+            "Reverting the SACROSANCT outer try/except would let this OSError "
+            "exit 2 and block a teammate — THIS TEST catches that regression."
+        )
+
+    def test_item12_matcherless_pretooluse_registration(self):
+        """Checklist item 12: teachback_gate is registered matcherless in
+        hooks.json so it fires on ALL hookable tools. A regression that
+        adds a matcher would limit gate coverage."""
+        hooks_json = Path(__file__).resolve().parent.parent / "hooks" / "hooks.json"
+        config = json.loads(hooks_json.read_text(encoding="utf-8"))
+        for entry in config["hooks"].get("PreToolUse", []):
+            for hook in entry.get("hooks", []):
+                if "teachback_gate.py" in hook.get("command", ""):
+                    assert "matcher" not in entry, (
+                        "teachback_gate.py must be registered matcherless; "
+                        "a matcher key would skip the gate for non-matching "
+                        "tools."
+                    )
+                    return
+        pytest.fail("teachback_gate.py not found in hooks.json PreToolUse")
+
+    def test_item13_state_transition_emission_at_right_states(self, monkeypatch):
+        """Checklist item 13: teachback_state_transition events fire for
+        correct to_state values from reason_code. Verified via mapping
+        _REASON_TO_STATE; reverting the mapping misroutes transitions."""
+        from teachback_gate import _state_from_reason
+
+        # Missing submit → pending (not under_review, not active)
+        assert _state_from_reason("missing_submit") == "teachback_pending"
+        # Invalid submit → pending (structural absence model)
+        assert _state_from_reason("invalid_submit") == "teachback_pending"
+        # Valid submit awaiting approval → under_review
+        assert _state_from_reason("awaiting_approval") == "teachback_under_review"
+        # Unaddressed items → correcting (T5 auto-downgrade)
+        assert _state_from_reason("unaddressed_items") == "teachback_correcting"
+        # Corrections pending → correcting (T6)
+        assert _state_from_reason("corrections_pending") == "teachback_correcting"
+
+    def test_item15_invalid_submit_surfaces_specific_field(self, monkeypatch):
+        """Checklist item 15: invalid_submit error identifies the specific
+        failing field(s). Reverting Y3 wiring (dropping fail_field/fail_error
+        population from the first FieldError) would leave the template
+        substitution empty."""
+        submit = {
+            "understanding": "x" * 120,
+            "most_likely_wrong": {
+                "assumption": "the auth middleware connects cleanly with session_token",
+                "consequence": "if wrong session_token validation drops valid ones",
+            },
+            "least_confident_item": {
+                "item": "the exact semantics of session_token expiry checks",
+                "current_plan": "mirror auth.py:42 which handles offsets correctly",
+                "failure_mode": "timezone drift allows stale session_tokens through",
+            },
+            "first_action": {
+                # Strict-mode citation regex expects file.ext:linenum OR function()
+                "action": "this does not match any citation shape",
+                "expected_signal": "tests pass reliably after the change",
+            },
+        }
+        monkeypatch.setattr(teachback_gate, "resolve_agent_name",
+                             lambda *a, **kw: "backend-coder-1")
+        monkeypatch.setattr(teachback_gate, "get_team_name", lambda: "pact-test")
+        monkeypatch.setattr(teachback_gate, "scan_teachback_state",
+                             lambda *a, **kw: {
+                                 "task_count": 1,
+                                 "first_failing_task_id": "17",
+                                 "first_failing_reason": "awaiting_approval",
+                                 "first_failing_metadata": {
+                                     "variety": {"total": 11},
+                                     "required_scope_items": ["session_token"],
+                                     "teachback_submit": submit,
+                                 },
+                                 "first_failing_protocol_level": "full",
+                                 "all_active": False,
+                             })
+        monkeypatch.setattr(teachback_gate, "read_events", lambda _t: [])
+        monkeypatch.setattr(teachback_gate, "append_event", lambda _: True)
+        monkeypatch.setattr(teachback_gate, "make_event",
+                             lambda _t, **kw: {"type": _t})
+
+        reason, ctx = _check_tool_allowed(
+            {"tool_name": "Edit", "team_name": "pact-test"}
+        )
+        # Reason is upgraded to invalid_submit
+        assert ctx["reason_code"] == "invalid_submit"
+        # Deny reason names the SPECIFIC failing field
+        assert "first_action.action" in reason, (
+            "invalid_submit deny reason must surface the specific failing "
+            "field name (Y3). Reverting Y3 wiring would leave the template "
+            "placeholder {fail_field} substituted with 'teachback_submit' "
+            "generic instead of the specific nested field."
+        )

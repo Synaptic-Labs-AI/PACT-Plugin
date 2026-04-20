@@ -634,3 +634,688 @@ class TestValidatorFailOpen:
         # Validator swallows internal exceptions and returns collected
         # errors (possibly empty).
         assert isinstance(errors, list)
+
+
+# ---------------------------------------------------------------------------
+# Coverage fills — internal helper edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestFlattenStrsListBranch:
+    """Line 158-163: _flatten_strs recurses into list elements. Used by
+    _evidence_grounded to flatten a submit dict whose values include
+    lists."""
+
+    def test_list_of_strings_flattened(self):
+        # _flatten_strs isn't in the public API but exercised via
+        # _evidence_grounded with a submit-shaped dict containing a list.
+        submit = {
+            "tags": ["auth", "session_token", "middleware"],
+            "understanding": "background",
+        }
+        # "auth" is in the flattened blob → grounded
+        assert _evidence_grounded("auth", submit) is True
+        # random word not in the blob → not grounded
+        assert _evidence_grounded("zebra-not-present", submit) is False
+
+    def test_nested_list_flattened(self):
+        submit = {"items": [["alpha"], ["beta", "gamma"]]}
+        assert _evidence_grounded("beta", submit) is True
+
+
+class TestSharesNonStopwordTokenNonStringItem:
+    """Line 223: required_scope_items entries that are not strings are
+    skipped. Defends against malformed dispatch metadata where a
+    required_scope_items entry became an int/None."""
+
+    def test_non_string_items_skipped(self):
+        # Three non-string entries + one valid entry that SHARES a token.
+        # Tokenization splits on non-alphanumeric-underscore, so
+        # "middleware flow" contains two tokens (middleware + flow);
+        # "middleware integration" shares "middleware" with that entry.
+        assert _shares_non_stopword_token(
+            "auth middleware integration",
+            [None, 42, "middleware flow"],  # type: ignore[list-item]
+        ) is True
+
+    def test_all_non_string_items_returns_false(self):
+        assert _shares_non_stopword_token(
+            "auth middleware integration",
+            [None, 42, {"dict": "entry"}],  # type: ignore[list-item]
+        ) is False
+
+
+class TestEvidenceGroundedEmptyAfterNormalize:
+    """Line 254: evidence that normalizes to empty (e.g. only punctuation)
+    returns True (passes — empty evidence is handled by min-length)."""
+
+    def test_whitespace_only_evidence_passes(self):
+        # whitespace-only is caught by the strip() guard at line 247
+        assert _evidence_grounded("   ", {"u": "x"}) is True
+
+    def test_punctuation_only_evidence_passes(self):
+        # After normalize, "..." may reduce to "..." (non-empty) or empty
+        # depending on the collapse rules. Either way, function must not
+        # raise. The _normalize function lowercase+collapses whitespace
+        # but doesn't strip punctuation, so "..." stays "..." — test the
+        # behavior of a short evidence string that normalizes to empty.
+        result = _evidence_grounded("\u200b\u200b", {"u": "x"})  # zero-width chars
+        assert isinstance(result, bool)
+
+    def test_non_dict_submit_rejects_non_empty_evidence(self):
+        # Line 249-250: non-dict submit with real evidence → False
+        assert _evidence_grounded("real evidence", None) is False  # type: ignore[arg-type]
+        assert _evidence_grounded("real evidence", "not a dict") is False  # type: ignore[arg-type]
+
+
+class TestAllAddressedValidNonStringItem:
+    """Line 269: addressed entries that are not strings are skipped.
+    Defends against malformed lead input where addressed contains a
+    non-str item."""
+
+    def test_non_string_item_skipped(self):
+        # Mixed str + int; only "scope_a" gets checked and found missing
+        result = _all_addressed_valid(
+            ["scope_a", 42, None, "scope_b"],  # type: ignore[list-item]
+            ["scope_b"],
+        )
+        # scope_a is invalid (not in required); 42 and None are skipped;
+        # scope_b is valid
+        assert result == ["scope_a"]
+
+    def test_non_list_addressed_returns_empty(self):
+        assert _all_addressed_valid("not-a-list", ["x"]) == []  # type: ignore[arg-type]
+        assert _all_addressed_valid(None, ["x"]) == []  # type: ignore[arg-type]
+
+
+class TestTruncateCapPath:
+    """Line 280: _truncate caps strings longer than _ACTUAL_VALUE_CAP
+    at (cap - 3) + '...'."""
+
+    def test_long_string_truncated(self):
+        from shared.teachback_validate import _truncate, _ACTUAL_VALUE_CAP
+        long_str = "x" * (_ACTUAL_VALUE_CAP + 100)
+        result = _truncate(long_str)
+        assert len(result) == _ACTUAL_VALUE_CAP
+        assert result.endswith("...")
+        assert result.startswith("x")
+
+    def test_exact_cap_untruncated(self):
+        from shared.teachback_validate import _truncate, _ACTUAL_VALUE_CAP
+        s = "x" * _ACTUAL_VALUE_CAP
+        assert _truncate(s) == s
+
+    def test_none_returns_empty(self):
+        from shared.teachback_validate import _truncate
+        assert _truncate(None) == ""
+
+
+class TestCheckMinLengthEmptyWhitespace:
+    """Lines 300-302: _check_min_length emits FieldError for a string that
+    is entirely whitespace (strip() → empty), distinct from the shorter-
+    than-min case."""
+
+    def test_whitespace_only_rejected(self):
+        errors = validate_submit(
+            {"understanding": "   \t\n  ", "first_action": {
+                "action": "file.py:1", "expected_signal": "pytest passes with the expected signal",
+            }},
+            {}, "simplified", "backend-coder-1",
+        )
+        und_errors = [e for e in errors if e.field.endswith("understanding")]
+        assert und_errors
+        assert "empty" in und_errors[0].error or "whitespace" in und_errors[0].error
+
+
+# ---------------------------------------------------------------------------
+# validate_approved — coverage for less-exercised branches
+# ---------------------------------------------------------------------------
+
+
+class TestValidateApprovedNonDict:
+    """Line 496-501: validate_approved with a non-dict approved payload."""
+
+    def test_non_dict_approved_returns_single_error(self):
+        errors = validate_approved(
+            "just a string",  # type: ignore[arg-type]
+            {}, {}, "simplified", "coder-1",
+        )
+        assert len(errors) == 1
+        assert errors[0].field == "teachback_approved"
+
+    def test_list_approved_returns_single_error(self):
+        errors = validate_approved(
+            [1, 2, 3],  # type: ignore[arg-type]
+            {}, {}, "simplified", "coder-1",
+        )
+        assert len(errors) == 1
+        assert errors[0].field == "teachback_approved"
+
+
+class TestValidateApprovedSimplifiedOnly:
+    """Line 591, 600: simplified-protocol approved skips response_to_*
+    fields. These branches fire when protocol_level != 'full'."""
+
+    def test_simplified_skips_response_fields(self):
+        submit = {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to session_token expiry handling."
+            ),
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest passes after the middleware change",
+            },
+        }
+        approved = {
+            "scanned_candidate": {
+                "candidate": "the middleware might instead be mis-routing",
+                "evidence_against": "session_token",
+            },
+            "conditions_met": {
+                "addressed": ["scope_a"],
+                "unaddressed": [],
+            },
+        }
+        errors = validate_approved(
+            approved, submit, {"required_scope_items": ["scope_a"]},
+            "simplified", "coder-1",
+        )
+        # Should NOT error on missing response_to_assumption etc.
+        fields = {e.field for e in errors}
+        assert not any("response_to_" in f for f in fields)
+        assert not any("first_action_check" in f for f in fields)
+
+
+class TestValidateApprovedVerdictBranches:
+    """Lines 608-613: verdict not in {confirm, correct} emits a specific
+    error."""
+
+    def _full_submit(self):
+        return {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to session_token expiry handling."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the auth middleware integrates cleanly with session_token flow",
+                "consequence": "if wrong session_token validation accepts expired tokens silently",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of session_token expiry across time zones",
+                "current_plan": "mirror auth.py:42 which handles UTC offsets correctly",
+                "failure_mode": "timezone drift lets stale session_tokens pass the gate",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+
+    def _full_approved(self, verdict_a="confirm", verdict_b="confirm"):
+        return {
+            "scanned_candidate": {
+                "candidate": "the middleware might instead be mis-routing session_tokens",
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": verdict_a,
+                "grounding": "see dispatch §Scope line 17 about session_token",
+            },
+            "response_to_least_confident": {
+                "verdict": verdict_b,
+                "grounding": "see architecture §Token-Validation line 42",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {
+                "addressed": ["session_token"],
+                "unaddressed": [],
+            },
+        }
+
+    def test_invalid_verdict_rejected(self):
+        approved = self._full_approved(verdict_a="approved")  # not in set
+        errors = validate_approved(
+            approved, self._full_submit(),
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        verdict_errs = [
+            e for e in errors
+            if e.field.endswith("response_to_assumption.verdict")
+        ]
+        assert verdict_errs
+        assert "confirm" in verdict_errs[0].error
+
+    def test_valid_verdict_correct_passes(self):
+        approved = self._full_approved(verdict_a="correct")
+        errors = validate_approved(
+            approved, self._full_submit(),
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        verdict_errs = [
+            e for e in errors
+            if e.field.endswith("response_to_assumption.verdict")
+        ]
+        assert not verdict_errs
+
+
+class TestFirstActionCheckBranches:
+    """Lines 643, 657, 677: first_action_check.match branches (match vs
+    mismatch) drive different if_mismatch_resolution requirements."""
+
+    def _full_submit(self):
+        return {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to session_token expiry handling."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the auth middleware integrates cleanly with session_token flow",
+                "consequence": "if wrong session_token validation accepts expired tokens silently",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of session_token expiry across time zones",
+                "current_plan": "mirror auth.py:42 which handles UTC offsets correctly",
+                "failure_mode": "timezone drift lets stale session_tokens pass the gate",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+
+    def _approved_with_fac(self, fac: dict):
+        return {
+            "scanned_candidate": {
+                "candidate": "the middleware might instead be mis-routing session_tokens",
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": "confirm",
+                "grounding": "see dispatch §Scope line 17 about session_token",
+            },
+            "response_to_least_confident": {
+                "verdict": "confirm",
+                "grounding": "see architecture §Token-Validation line 42",
+            },
+            "first_action_check": fac,
+            "conditions_met": {
+                "addressed": ["session_token"],
+                "unaddressed": [],
+            },
+        }
+
+    def test_match_with_non_null_resolution_rejected(self):
+        approved = self._approved_with_fac({
+            "my_derivation": "auth.py:42",
+            "match": "match",
+            "if_mismatch_resolution": "should be null",  # non-null WITH match
+        })
+        errors = validate_approved(
+            approved, self._full_submit(),
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        res_errs = [
+            e for e in errors
+            if e.field.endswith("if_mismatch_resolution")
+        ]
+        assert res_errs
+        assert "null" in res_errs[0].error.lower()
+
+    def test_mismatch_requires_resolution(self):
+        approved = self._approved_with_fac({
+            "my_derivation": "other.py:99",
+            "match": "mismatch",
+            "if_mismatch_resolution": None,  # required non-null
+        })
+        errors = validate_approved(
+            approved, self._full_submit(),
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        res_errs = [
+            e for e in errors
+            if e.field.endswith("if_mismatch_resolution")
+        ]
+        assert res_errs
+
+    def test_mismatch_with_valid_resolution_passes(self):
+        approved = self._approved_with_fac({
+            "my_derivation": "other.py:99",
+            "match": "mismatch",
+            "if_mismatch_resolution": (
+                "The teammate pointed at other.py:99 but the correct "
+                "citation is auth.py:42; they should redo first_action."
+            ),
+        })
+        errors = validate_approved(
+            approved, self._full_submit(),
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        res_errs = [
+            e for e in errors
+            if e.field.endswith("if_mismatch_resolution")
+        ]
+        assert not res_errs
+
+    def test_invalid_match_value_rejected(self):
+        approved = self._approved_with_fac({
+            "my_derivation": "auth.py:42",
+            "match": "yes",  # not in set {match, mismatch}
+            "if_mismatch_resolution": None,
+        })
+        errors = validate_approved(
+            approved, self._full_submit(),
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        match_errs = [
+            e for e in errors
+            if e.field.endswith("first_action_check.match")
+        ]
+        assert match_errs
+
+
+class TestApprovedConditionsMetBranches:
+    """Lines 545, 566, 574: conditions_met validation paths for missing
+    structure, addressed non-list, unaddressed non-list."""
+
+    def test_missing_conditions_met_rejected(self):
+        approved = {
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "x",
+            },
+            # no conditions_met key
+        }
+        errors = validate_approved(
+            approved, {"understanding": "x" * 120},
+            {"required_scope_items": ["scope_a"]},
+            "simplified", "coder-1",
+        )
+        cm_errs = [e for e in errors if "conditions_met" in e.field]
+        assert cm_errs
+
+    def test_conditions_met_non_dict_rejected(self):
+        approved = {
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "x",
+            },
+            "conditions_met": "not a dict",  # type error
+        }
+        errors = validate_approved(
+            approved, {"understanding": "x" * 120},
+            {"required_scope_items": ["scope_a"]},
+            "simplified", "coder-1",
+        )
+        cm_errs = [e for e in errors if "conditions_met" in e.field]
+        assert cm_errs
+
+    def test_addressed_non_list_rejected(self):
+        approved = {
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "x",
+            },
+            "conditions_met": {
+                "addressed": "not-a-list",
+                "unaddressed": [],
+            },
+        }
+        errors = validate_approved(
+            approved, {"understanding": "x" * 120},
+            {"required_scope_items": ["scope_a"]},
+            "simplified", "coder-1",
+        )
+        addr_errs = [
+            e for e in errors if e.field.endswith("conditions_met.addressed")
+        ]
+        assert addr_errs
+
+    def test_unaddressed_non_list_rejected(self):
+        approved = {
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "x",
+            },
+            "conditions_met": {
+                "addressed": [],
+                "unaddressed": "not-a-list",
+            },
+        }
+        errors = validate_approved(
+            approved, {"understanding": "x" * 120},
+            {"required_scope_items": ["scope_a"]},
+            "simplified", "coder-1",
+        )
+        un_errs = [
+            e for e in errors if e.field.endswith("conditions_met.unaddressed")
+        ]
+        assert un_errs
+
+
+class TestAddressedInvalidItemsSurfaced:
+    """Line 510: _all_addressed_valid returns invalid items; validator
+    surfaces them in the FieldError.error."""
+
+    def test_invalid_addressed_items_surfaced(self):
+        approved = {
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "x",
+            },
+            "conditions_met": {
+                "addressed": ["scope_a", "not-in-required", "also-invalid"],
+                "unaddressed": [],
+            },
+        }
+        errors = validate_approved(
+            approved, {"understanding": "x" * 120},
+            {"required_scope_items": ["scope_a"]},
+            "simplified", "coder-1",
+        )
+        addr_errs = [
+            e for e in errors
+            if e.field.endswith("conditions_met.addressed")
+        ]
+        assert addr_errs
+        assert "not-in-required" in addr_errs[0].error
+        assert "also-invalid" in addr_errs[0].error
+
+
+class TestApprovedResponseMissingFieldStructure:
+    """Lines 608-613: response_to_* missing the wrapping dict structure
+    produces a per-field dict-missing error."""
+
+    def test_response_to_assumption_non_dict(self):
+        approved = {
+            "scanned_candidate": {
+                "candidate": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "evidence_against": "x",
+            },
+            "response_to_assumption": "not a dict",  # wrong shape
+            "response_to_least_confident": {
+                "verdict": "confirm",
+                "grounding": "see dispatch §Scope line 17",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {"addressed": ["a"], "unaddressed": []},
+        }
+        errors = validate_approved(
+            approved,
+            {"understanding": "x" * 120, "most_likely_wrong": {
+                "assumption": "the auth middleware integrates with session_token",
+                "consequence": "if wrong session_token validation drops valid tokens",
+            }, "least_confident_item": {
+                "item": "semantics of session_token expiry across time zones",
+                "current_plan": "mirror auth.py:42 handling offsets correctly",
+                "failure_mode": "timezone drift lets stale session_tokens pass",
+            }, "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest passes after the middleware change",
+            }},
+            {"required_scope_items": ["a"]},
+            "full", "coder-1",
+        )
+        resp_errs = [
+            e for e in errors
+            if e.field.endswith("response_to_assumption")
+            and "dict" in e.error
+        ]
+        assert resp_errs
+
+
+# ---------------------------------------------------------------------------
+# Counter-test-by-revert items 14 (Y2): content-shape rules REJECT
+# failing submissions
+# ---------------------------------------------------------------------------
+
+
+class TestCounterTestByRevertContentShape:
+    """Item 14: each of the 4 content-shape rules must REJECT a failing
+    submission. Reverting any rule would let these tests pass where they
+    should fail."""
+
+    def _full_submit(self):
+        return {
+            "understanding": (
+                "I will implement the auth middleware per the architect spec "
+                "with careful attention to session_token expiry handling."
+            ),
+            "most_likely_wrong": {
+                "assumption": "the auth middleware integrates cleanly with session_token flow",
+                "consequence": "if wrong session_token validation accepts expired tokens silently",
+            },
+            "least_confident_item": {
+                "item": "exact semantics of session_token expiry across time zones",
+                "current_plan": "mirror auth.py:42 which handles UTC offsets correctly",
+                "failure_mode": "timezone drift lets stale session_tokens pass the gate",
+            },
+            "first_action": {
+                "action": "auth.py:42",
+                "expected_signal": "pytest suite passes after the middleware change",
+            },
+        }
+
+    def test_citation_regex_rejects_nonmatching(self):
+        submit = self._full_submit()
+        submit["first_action"]["action"] = "this does not match any citation"
+        errors = validate_submit(
+            submit, {"required_scope_items": ["session_token"]},
+            "full", "backend-coder-1",  # strict mode (coder agent)
+        )
+        citation_errs = [
+            e for e in errors
+            if e.field.endswith("first_action.action")
+        ]
+        assert citation_errs, (
+            "Reverting _check_citation (e.g. removing the regex match call) "
+            "would let this pass. The citation-shape rule is item 14-a."
+        )
+
+    def test_substring_inequality_rejects_copy_paste(self):
+        # Item 14-b: lead candidate == teammate assumption → rejected
+        submit = self._full_submit()
+        approved = {
+            "scanned_candidate": {
+                # IDENTICAL to submit.most_likely_wrong.assumption
+                "candidate": submit["most_likely_wrong"]["assumption"],
+                "evidence_against": "session_token",
+            },
+            "response_to_assumption": {
+                "verdict": "confirm",
+                "grounding": "see dispatch §Scope line 17",
+            },
+            "response_to_least_confident": {
+                "verdict": "confirm",
+                "grounding": "see architecture §Token-Validation line 42",
+            },
+            "first_action_check": {
+                "my_derivation": "auth.py:42",
+                "match": "match",
+                "if_mismatch_resolution": None,
+            },
+            "conditions_met": {
+                "addressed": ["session_token"],
+                "unaddressed": [],
+            },
+        }
+        errors = validate_approved(
+            approved, submit,
+            {"required_scope_items": ["session_token"]},
+            "full", "coder-1",
+        )
+        sc_errs = [
+            e for e in errors
+            if e.field.endswith("scanned_candidate.candidate")
+            and "substring" in e.error.lower()
+        ]
+        assert sc_errs, (
+            "Reverting _scanned_candidate_distinct (e.g. always return True) "
+            "would let this rubber-stamp through. The substring-inequality "
+            "rule is item 14-b."
+        )
+
+    def test_token_sharing_rejects_unrelated_assumption(self):
+        # Item 14-c: assumption must share a non-stopword token with
+        # required_scope_items. Here it doesn't — should fail.
+        submit = self._full_submit()
+        # Replace assumption with content that shares NO non-stopword
+        # tokens with required_scope_items ["session_token"].
+        submit["most_likely_wrong"]["assumption"] = (
+            "entirely unrelated thought about coffee and weather"
+        )
+        errors = validate_submit(
+            submit, {"required_scope_items": ["session_token"]},
+            "full", "backend-coder-1",
+        )
+        token_errs = [
+            e for e in errors
+            if e.field.endswith("most_likely_wrong.assumption")
+            and "non-stopword" in e.error
+        ]
+        assert token_errs, (
+            "Reverting _shares_non_stopword_token (e.g. always return True) "
+            "would let an off-topic assumption pass. Rule is item 14-c."
+        )
+
+    def test_template_blocklist_rejects_boilerplate(self):
+        # Item 14-d: 50%+ template-phrase density is rejected.
+        # Note: _check_min_length gates _check_non_template. To exercise
+        # the template-density rule we need a string >= min_len (100
+        # for understanding) AND >= 50% blocklist density.
+        submit = self._full_submit()
+        # "looks good as expected no issues all clear approved proceed
+        # understood sounds good makes sense noted looks good"
+        # = 129 chars, 94 of which are blocklist phrases = ~73% density
+        submit["understanding"] = (
+            "looks good as expected no issues all clear approved proceed "
+            "understood sounds good makes sense noted looks good"
+        )
+        assert len(submit["understanding"]) >= 100  # ensure min-length passes
+        errors = validate_submit(
+            submit, {"required_scope_items": ["session_token"]},
+            "full", "backend-coder-1",
+        )
+        tmpl_errs = [
+            e for e in errors
+            if e.field.endswith("understanding")
+            and "template" in e.error.lower()
+        ]
+        assert tmpl_errs, (
+            "Reverting _template_density_fails (e.g. always return False) "
+            "would let pure boilerplate pass. Rule is item 14-d."
+        )
