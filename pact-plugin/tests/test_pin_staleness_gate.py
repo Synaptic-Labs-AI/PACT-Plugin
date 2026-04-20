@@ -123,35 +123,16 @@ class TestPinStalenessGate_MarkerAbsent:
 
 
 class TestPinStalenessGate_MarkerPresent:
-    """Marker present × path match × pinned-touching content → DENY."""
+    """Marker present × path match × ADD-shaped edit → DENY.
 
-    def test_edit_on_claude_md_pinned_edit_denied(self, gate_env):
-        env = gate_env(marker_present=True)
-        result = _call_gate({
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": str(env["claude_md"]),
-                "old_string": "## Pinned Context",
-                "new_string": "## Pinned Context\nnew content",
-            },
-        })
-        assert result is not None
-        assert "Pinned Context" in result
-        assert "stale pins" in result
+    Post-F1 remediation: only ADD-shaped edits (net-new `<!-- pinned:`
+    comment) are gated. Archival (pin removal) and refactor (pin body
+    rewrite) MUST be allowed so the user can resolve the stale-pins
+    condition within the same session via /PACT:pin-memory.
+    """
 
-    def test_write_on_claude_md_always_denied(self, gate_env):
-        """Write replaces the full file → necessarily affects Pinned Context."""
-        env = gate_env(marker_present=True)
-        result = _call_gate({
-            "tool_name": "Write",
-            "tool_input": {
-                "file_path": str(env["claude_md"]),
-                "content": "anything",
-            },
-        })
-        assert result is not None
-
-    def test_edit_on_claude_md_touching_pin_comment_denied(self, gate_env):
+    def test_edit_adding_new_pin_denied(self, gate_env):
+        """Net-new pin comment in new_string → ADD → deny."""
         env = gate_env(marker_present=True)
         result = _call_gate({
             "tool_name": "Edit",
@@ -162,18 +143,27 @@ class TestPinStalenessGate_MarkerPresent:
             },
         })
         assert result is not None
+        assert "Pinned Context" in result
+        assert "stale pins" in result
 
-    def test_edit_on_claude_md_touching_memory_boundary_denied(self, gate_env):
+    def test_write_increasing_pin_count_denied(self, gate_env):
+        """Write replacement with MORE pin comments than current → deny."""
         env = gate_env(marker_present=True)
+        current = env["claude_md"].read_text(encoding="utf-8")
+        # current has exactly 1 pin (from make_claude_md_with_pins in fixture);
+        # build a replacement with 2 pins.
         result = _call_gate({
-            "tool_name": "Edit",
+            "tool_name": "Write",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "<!-- PACT_MEMORY_START -->",
-                "new_string": "<!-- PACT_MEMORY_START -->\nextra",
+                "content": (
+                    current
+                    + "\n<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n"
+                ),
             },
         })
         assert result is not None
+        assert "stale pins" in result
 
 
 class TestPinStalenessGate_PathMiss:
@@ -324,17 +314,22 @@ class TestPinStalenessGate_FailOpen:
 class TestPinStalenessGate_MainDenyPath:
     """Main emits permissionDecision=deny + exit 2 on positive detection."""
 
-    def test_main_denies_write_on_claude_md_with_marker(
+    def test_main_denies_write_increasing_pin_count(
         self, gate_env, monkeypatch, capsys
     ):
         from io import StringIO
         import pin_staleness_gate
         env = gate_env(marker_present=True)
+        current = env["claude_md"].read_text(encoding="utf-8")
+        # Write adds a net-new pin comment → ADD shape → deny.
         monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({
             "tool_name": "Write",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "content": "replacement",
+                "content": (
+                    current
+                    + "\n<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n"
+                ),
             },
         })))
         with pytest.raises(SystemExit) as exc_info:
@@ -346,3 +341,178 @@ class TestPinStalenessGate_MainDenyPath:
         assert hso["hookEventName"] == "PreToolUse"
         assert hso["permissionDecision"] == "deny"
         assert "stale pins" in hso["permissionDecisionReason"]
+
+
+class TestPinStalenessGate_F1LivelockRegression:
+    """Regression: marker armed + /PACT:pin-memory archival edit → ALLOW.
+
+    Reviewer-security F1 (#492 Cycle 1): same-session marker livelock.
+    The original _edit_touches_pinned_section did a substring check for
+    `<!-- pinned:` in combined old/new; ANY archival edit (whose
+    old_string contains the substring because a pin is being removed)
+    matched and was denied. The user could never resolve the stale-pins
+    condition within the session. Fix: gate only ADD-shaped edits
+    (new pin count > old pin count).
+    """
+
+    def test_archival_edit_allowed(self, gate_env):
+        """old_string has a pin comment; new_string does not → archive → allow."""
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": (
+                    "<!-- pinned: 2026-01-01 -->\n### Stale\nold body\n"
+                ),
+                "new_string": "",
+            },
+        })
+        assert result is None, (
+            "Archival edits must not be blocked — user needs this path "
+            "to resolve stale-pins condition within the same session "
+            "(F1 livelock fix)."
+        )
+
+    def test_archival_edit_single_pin_removal_allowed(self, gate_env):
+        """Strict pin count decrease → archive → allow."""
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": (
+                    "<!-- pinned: 2026-01-01 -->\n### A\nbody\n"
+                    "<!-- pinned: 2026-02-01 -->\n### B\nbody\n"
+                ),
+                "new_string": (
+                    "<!-- pinned: 2026-02-01 -->\n### B\nbody\n"
+                ),
+            },
+        })
+        assert result is None
+
+    def test_refactor_edit_unchanged_pin_count_allowed(self, gate_env):
+        """Pin body rewrite without count change → refactor → allow."""
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": (
+                    "<!-- pinned: 2026-04-20 -->\n### X\nold body\n"
+                ),
+                "new_string": (
+                    "<!-- pinned: 2026-04-20 -->\n### X\nnew body\n"
+                ),
+            },
+        })
+        assert result is None
+
+    def test_boundary_marker_touch_without_pin_add_allowed(self, gate_env):
+        """Touching PACT_MEMORY_START without adding a pin → allow.
+
+        The old substring matcher denied any edit that mentioned the
+        memory boundary marker, which would block migrations and
+        restructuring. Under the ADD-only contract, this is a refactor.
+        """
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- PACT_MEMORY_START -->",
+                "new_string": "<!-- PACT_MEMORY_START -->\nextra",
+            },
+        })
+        assert result is None
+
+    def test_stale_marker_injection_refactor_allowed(self, gate_env):
+        """SessionStart staleness.apply_staleness_markings-shaped edit → allow.
+
+        staleness.py inserts <!-- STALE: ... --> markers into existing
+        pins. This is a refactor: pin count unchanged. MUST not be
+        blocked or the hook self-deadlocks on its own detection pass.
+        """
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": (
+                    "<!-- pinned: 2026-01-01 -->\n### A\nbody\n"
+                ),
+                "new_string": (
+                    "<!-- pinned: 2026-01-01 -->\n"
+                    "<!-- STALE: Last relevant 2026-01-01 -->\n"
+                    "### A\nbody\n"
+                ),
+            },
+        })
+        assert result is None
+
+    def test_write_archival_via_shorter_content_allowed(self, gate_env):
+        """Write replacement with FEWER pin comments than current → allow."""
+        env = gate_env(marker_present=True)
+        # Fixture CLAUDE.md has 1 pin; replacement has 0.
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": "# Header\n\n## Pinned Context\n\n## Working Memory\n",
+            },
+        })
+        assert result is None
+
+    def test_write_refactor_same_pin_count_allowed(self, gate_env):
+        """Write replacement with SAME pin count → refactor → allow."""
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": (
+                    "# Header\n\n## Pinned Context\n\n"
+                    "<!-- pinned: 2026-04-20 -->\n### Rewritten\nnew body\n\n"
+                    "## Working Memory\n"
+                ),
+            },
+        })
+        assert result is None
+
+    def test_write_fails_open_on_unreadable_current(
+        self, gate_env, monkeypatch
+    ):
+        """If current CLAUDE.md cannot be read → fail-open (allow).
+
+        The Write-shape path depends on reading the current file to diff
+        pin counts. Any read error MUST return allow per SACROSANCT gate
+        invariant — not deny-by-default.
+        """
+        env = gate_env(marker_present=True)
+
+        # Monkey-patch Path.read_text to raise IOError specifically for
+        # the project CLAUDE.md. Identity-scoped so unrelated reads
+        # (tmp paths, marker file) aren't affected.
+        original_read_text = Path.read_text
+        target = env["claude_md"].resolve()
+
+        def _raising_read_text(self, *args, **kwargs):
+            if self.resolve() == target:
+                raise IOError("simulated unreadable CLAUDE.md")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _raising_read_text)
+
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": (
+                    "## Pinned Context\n\n"
+                    "<!-- pinned: 2026-04-20 -->\n### A\nbody\n"
+                    "<!-- pinned: 2026-04-20 -->\n### B\nbody\n"
+                ),
+            },
+        })
+        assert result is None

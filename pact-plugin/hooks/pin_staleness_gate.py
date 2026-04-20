@@ -32,6 +32,7 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 import shared.pact_context as pact_context
 
@@ -51,60 +52,89 @@ _DENY_REASON = (
 _GATED_TOOLS = frozenset({"Edit", "Write"})
 
 
-def _is_project_claude_md(file_path_str: str) -> bool:
-    """Return True if file_path resolves to the project CLAUDE.md.
+def _resolve_project_claude_md(file_path_str: str) -> Optional[Path]:
+    """Return the canonical project CLAUDE.md path if `file_path_str`
+    resolves to it, otherwise None.
 
     Worktree-safe: imports staleness.get_project_claude_md_path lazily to
     avoid module-level import cost on every Edit/Write call.
     """
     if not file_path_str:
-        return False
+        return None
 
     try:
         from staleness import get_project_claude_md_path
     except ImportError:
-        return False
+        return None
 
     project_md = get_project_claude_md_path()
     if project_md is None:
-        return False
+        return None
 
     try:
         target = Path(file_path_str).resolve()
         canonical = project_md.resolve()
     except (OSError, RuntimeError):
-        return False
+        return None
 
-    return target == canonical
+    if target != canonical:
+        return None
+    return canonical
 
 
-def _edit_touches_pinned_section(tool_input: dict) -> bool:
-    """Return True if the Edit/Write target locus overlaps Pinned Context.
+def _count_pin_comments(text: str) -> int:
+    """Count occurrences of the pin-comment marker `<!-- pinned:`.
 
-    For Write: we treat the whole file as in-scope (the write replaces
-    everything, so Pinned Context is necessarily affected if present).
-
-    For Edit: inspect old_string/new_string for pinned-section boundary
-    markers. Block if any are present (high-confidence in-scope edit).
-    Allow otherwise — SessionStart directive is the primary enforcement;
-    this hook is the secondary marker-based guard.
+    Conservative substring count — case-sensitive per the canonical
+    CLAUDE.md form. Fail-open: non-str input returns 0.
     """
-    if "content" in tool_input:
-        # Write tool — full-file replacement
-        return True
+    if not isinstance(text, str):
+        return 0
+    return text.count("<!-- pinned:")
 
-    old_string = tool_input.get("old_string", "")
-    new_string = tool_input.get("new_string", "")
 
-    # Conservative substring match. Any edit that mentions Pinned Context
-    # boundary markers or a pin comment is treated as in-scope.
-    combined = f"{old_string}\n{new_string}"
-    markers = (
-        "## Pinned Context",
-        "<!-- pinned:",
-        "<!-- PACT_MEMORY_",
-    )
-    return any(marker in combined for marker in markers)
+def _is_add_shaped_edit(tool_input: dict, claude_md_path: Path) -> bool:
+    """Return True if the Edit/Write adds a net-new pin comment.
+
+    The marker-gate fires only on ADD-shaped edits so the user can still
+    ARCHIVE stale pins (reducing pin count) to resolve the condition.
+    Archival edits (old_string contains `<!-- pinned:`, new_string does
+    not, or count strictly decreases) and refactor edits (pin count
+    unchanged) are allowed.
+
+    For Edit tool:
+      - ADD: new_count > old_count in the replacement strings
+      - ARCHIVE: new_count < old_count  → allow
+      - REFACTOR: new_count == old_count → allow (pin body rewrite,
+        STALE marker injection, etc.)
+
+    For Write tool (full-file replacement):
+      - Compare pin count in new content vs. current on-disk content.
+      - ADD: new file has MORE pin comments than current → block
+      - Otherwise → allow
+
+    Fail-open: any shape-detection error returns False (allow). This
+    preserves the SACROSANCT gate invariant.
+    """
+    try:
+        if "content" in tool_input:
+            # Write tool — diff against current file content.
+            new_content = tool_input.get("content", "")
+            if not isinstance(new_content, str):
+                return False
+            try:
+                current = claude_md_path.read_text(encoding="utf-8")
+            except (IOError, OSError, UnicodeDecodeError):
+                # Cannot compare → fail-open.
+                return False
+            return _count_pin_comments(new_content) > _count_pin_comments(current)
+
+        # Edit tool — compare old_string vs new_string pin counts.
+        old_string = tool_input.get("old_string", "")
+        new_string = tool_input.get("new_string", "")
+        return _count_pin_comments(new_string) > _count_pin_comments(old_string)
+    except Exception:  # noqa: BLE001 — SACROSANCT fail-open
+        return False
 
 
 def _check_tool_allowed(input_data: dict) -> str | None:
@@ -137,10 +167,16 @@ def _check_tool_allowed(input_data: dict) -> str | None:
         return None
 
     file_path_str = tool_input.get("file_path", "")
-    if not _is_project_claude_md(file_path_str):
+    claude_md_path = _resolve_project_claude_md(file_path_str)
+    if claude_md_path is None:
         return None
 
-    if not _edit_touches_pinned_section(tool_input):
+    # Narrow matcher: block only ADD-shaped edits (net-new pin comment).
+    # Archival edits (pin removal) and refactor edits (pin body rewrite)
+    # are allowed so the user can resolve the stale-pins condition by
+    # running /PACT:pin-memory within the same session. Fix for #492
+    # F1 marker livelock.
+    if not _is_add_shaped_edit(tool_input, claude_md_path):
         return None
 
     return _DENY_REASON

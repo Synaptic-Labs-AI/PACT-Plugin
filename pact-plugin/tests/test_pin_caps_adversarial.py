@@ -84,7 +84,9 @@ class TestPinCapsAdversarial_PathResolution:
     def test_symlink_to_claude_md_resolves_to_same_match(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Symlink pointing at CLAUDE.md resolves to the same path — MUST deny."""
+        """Symlink pointing at CLAUDE.md resolves to the same path — ADD-shape
+        edit MUST still trigger deny (proves symlink resolution works).
+        """
         from pin_staleness_gate import (
             _check_tool_allowed,
             PIN_STALENESS_MARKER_NAME,
@@ -104,11 +106,15 @@ class TestPinCapsAdversarial_PathResolution:
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
         import staleness
         monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+        # ADD-shape Write: new content has 1 pin comment; current file has 0.
         result = _check_tool_allowed({
             "tool_name": "Write",
-            "tool_input": {"file_path": str(symlink), "content": "x"},
+            "tool_input": {
+                "file_path": str(symlink),
+                "content": "# Project\n<!-- pinned: 2026-04-20 -->\n### New\nbody\n",
+            },
         })
-        # Symlink resolves to same target → must deny.
+        # Symlink resolves to same target → ADD-shape Write → must deny.
         assert result is not None
         assert "stale pins" in result
 
