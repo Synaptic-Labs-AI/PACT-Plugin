@@ -28,11 +28,10 @@ def patched_claude_md(tmp_path, monkeypatch):
     def _write(content):
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(content, encoding="utf-8")
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
-        # check_pin_caps.py binds the symbol at import — patch there too.
+        # check_pin_caps.py binds the symbol at import — patch there.
+        # Only the consumer-side patch is load-bearing; prior staleness-side
+        # patch was decorative and risked dead-patch status if staleness.py
+        # refactors its resolution callsite.
         import check_pin_caps
         monkeypatch.setattr(
             check_pin_caps, "get_project_claude_md_path", lambda: claude_md
