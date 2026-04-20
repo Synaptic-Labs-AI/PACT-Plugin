@@ -71,6 +71,35 @@ from .session_state import (
 # Used by bootstrap_gate.py, bootstrap_prompt_gate.py, and session_init.py.
 # Also referenced (as a string literal) in commands/bootstrap.md.
 BOOTSTRAP_MARKER_NAME = "bootstrap-complete"
+
+# Teachback gate state machine (#401).
+# Locked in docs/architecture/teachback-gate/TERMINOLOGY-LOCK.md §Locked terms.
+# Consumers: teachback_gate.py, teachback_idle_guard.py, teachback_scan.py,
+# teammate-bootstrap.md / pact-ct-teachback.md (as literal strings).
+TEACHBACK_STATES = frozenset({
+    "teachback_pending",
+    "teachback_under_review",
+    "active",
+    "teachback_correcting",
+})
+
+# Idle-event count at which teachback_idle_guard emits an algedonic ALERT
+# (teammate is stuck in teachback_under_review waiting on lead response).
+TEACHBACK_TIMEOUT_IDLE_COUNT = 3
+
+# Re-exports from variety_scorer so consumers can write
+# `from shared import TEACHBACK_BLOCKING_THRESHOLD` without reaching into
+# the variety_scorer module.
+from .variety_scorer import (
+    TEACHBACK_BLOCKING_THRESHOLD,
+    TEACHBACK_FULL_PROTOCOL_VARIETY,
+    TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS,
+    TEACHBACK_MODE_BLOCKING,
+    TEACHBACK_MODE_ADVISORY,
+    auditor_required_for_score,
+    gates_for_score,
+    teachback_mode_for_score,
+)
 # Convenience re-exports for the public API. Hooks import directly from
 # shared.pact_context, but these re-exports allow `from shared import get_team_name`.
 from .pact_context import (
@@ -128,4 +157,15 @@ __all__ = [
     "get_project_dir",
     "resolve_agent_name",
     "write_context",
+    # Teachback gate (#401)
+    "TEACHBACK_STATES",
+    "TEACHBACK_TIMEOUT_IDLE_COUNT",
+    "TEACHBACK_BLOCKING_THRESHOLD",
+    "TEACHBACK_FULL_PROTOCOL_VARIETY",
+    "TEACHBACK_FULL_PROTOCOL_SCOPE_ITEMS",
+    "TEACHBACK_MODE_BLOCKING",
+    "TEACHBACK_MODE_ADVISORY",
+    "teachback_mode_for_score",
+    "auditor_required_for_score",
+    "gates_for_score",
 ]
