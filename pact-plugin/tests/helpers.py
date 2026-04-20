@@ -596,3 +596,72 @@ def make_cli_memory_dict(
     if decisions is not None:
         result["decisions"] = decisions
     return result
+
+
+# =============================================================================
+# Pin Caps Fixture Factories (#492)
+# =============================================================================
+
+def make_pin_entry(
+    title: str = "Entry",
+    body_chars: int = 100,
+    date: str = "2026-04-20",
+    override_rationale: str | None = None,
+    stale_date: str | None = None,
+) -> str:
+    """Build a single pinned entry with optional override and stale marker.
+
+    Produces the two-line comment + heading + body shape expected by
+    pin_caps.parse_pins. Body is padded with 'x' characters to reach the
+    requested body_chars count (post-marker-stripping). The override
+    rationale, when provided, is inserted into the `<!-- pinned: ... -->`
+    annotation line per the plan's combined-comment grammar.
+    """
+    if override_rationale is not None:
+        comment = f"<!-- pinned: {date}, pin-size-override: {override_rationale} -->"
+    else:
+        comment = f"<!-- pinned: {date} -->"
+
+    lines = [comment, f"### {title}"]
+    if stale_date is not None:
+        lines.append(f"<!-- STALE: Last relevant {stale_date} -->")
+
+    # Body is plain text of exactly body_chars chars (post-strip). Use 'x'
+    # fill since markers are stripped before counting.
+    if body_chars > 0:
+        lines.append("x" * body_chars)
+
+    return "\n".join(lines)
+
+
+def make_pinned_section(entries: list[str]) -> str:
+    """Join pinned entries into a Pinned Context section body.
+
+    Returned text is suitable for pin_caps.parse_pins (i.e., AFTER the
+    "## Pinned Context" heading — the third element of
+    staleness._parse_pinned_section).
+    """
+    return "\n\n".join(entries) + "\n"
+
+
+def make_claude_md_with_pins(entries: list[str]) -> str:
+    """Build a full-file CLAUDE.md with managed-region wrapping + pins.
+
+    Matches the layered boundary contract (#404): outer PACT_MANAGED_START/END
+    wraps all plugin-managed content. Pinned Context lives inside the
+    managed region so pin_caps.parse_pins + staleness._parse_pinned_section
+    both read it via _extract_managed_region.
+    """
+    pinned_body = make_pinned_section(entries)
+    return (
+        "# PACT Framework and Managed Project Memory\n"
+        "\n"
+        "<!-- PACT_MANAGED_START -->\n"
+        "<!-- PACT_MEMORY_START -->\n"
+        "## Pinned Context\n"
+        "\n"
+        f"{pinned_body}"
+        "## Working Memory\n"
+        "<!-- PACT_MEMORY_END -->\n"
+        "<!-- PACT_MANAGED_END -->\n"
+    )
