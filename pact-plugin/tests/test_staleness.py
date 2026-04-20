@@ -1168,3 +1168,13 @@ class TestPinCapsTwinCopyDrift:
             "skills/pact-memory/scripts/working_memory.py — update both "
             "in the same commit"
         )
+
+    def test_override_rationale_max_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.OVERRIDE_RATIONALE_MAX == working_memory.OVERRIDE_RATIONALE_MAX, (
+            "OVERRIDE_RATIONALE_MAX drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )

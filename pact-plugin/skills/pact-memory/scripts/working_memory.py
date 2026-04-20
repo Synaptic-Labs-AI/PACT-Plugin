@@ -59,6 +59,7 @@ RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 PIN_COUNT_CAP = 12
 PIN_SIZE_CAP = 1500
 PIN_STALE_BLOCK_THRESHOLD = 2
+OVERRIDE_RATIONALE_MAX = 120
 
 # PACT-managed boundary marker prefixes. Used by _find_terminator_offset to
 # terminate section scans on any PACT boundary marker. The canonical
