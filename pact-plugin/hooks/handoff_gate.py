@@ -85,6 +85,91 @@ def validate_task_handoff(
     return None
 
 
+def validate_variety_dimensions(
+    task_metadata: dict,
+    teammate_name: str | None,
+) -> str | None:
+    """
+    Belt-and-suspenders check at task completion: verify that
+    metadata.variety.total equals the sum of its dimensions (novelty,
+    scope, uncertainty, risk). #401 Commit #6 defense-in-depth.
+
+    An inconsistent score at completion indicates either (a) dimensions
+    were mutated post-dispatch without updating total, or (b) total was
+    written without proper per-dimension scoring (the issue-body's
+    "hand-computed sum" failure mode). task_schema_validator.py rejects
+    at CREATE time when dimensions are MISSING; this check catches
+    sum-mismatch at COMPLETE time when dimensions exist but don't add up.
+
+    Bypass conditions (mirror validate_task_handoff:48-58):
+      - Non-agent task (teammate_name absent)
+      - metadata.skipped truthy
+      - Signal tasks (metadata.type in ("blocker", "algedonic"))
+      - variety field absent (pre-#401 tasks and below-threshold tasks)
+      - variety dimensions partially missing (validator handles at
+        CREATE; at complete time partial shape means the orchestrator
+        intentionally skipped full scoring — pass)
+
+    Args:
+        task_metadata: Task metadata dict (from task file).
+        teammate_name: Name of completing teammate (None for non-agent).
+
+    Returns:
+        Error message on sum-mismatch, None otherwise. Fail-open on any
+        malformed input (non-int dimensions, etc.).
+    """
+    if not teammate_name:
+        return None
+    if task_metadata.get("skipped"):
+        return None
+    if task_metadata.get("type") in ("blocker", "algedonic"):
+        return None
+
+    variety = task_metadata.get("variety")
+    if not isinstance(variety, dict):
+        return None  # not a variety-scored task
+
+    try:
+        total = variety.get("total")
+        novelty = variety.get("novelty")
+        scope = variety.get("scope")
+        uncertainty = variety.get("uncertainty")
+        risk = variety.get("risk")
+        dims = (novelty, scope, uncertainty, risk)
+
+        # Partial variety (any dim None or total None) -> pass. The schema
+        # validator handles missing dims at CREATE time; at COMPLETE time
+        # a partial shape means the orchestrator skipped full scoring
+        # deliberately (below threshold, or pre-#401 task).
+        if total is None or any(d is None for d in dims):
+            return None
+
+        # bool is int subclass — reject as invalid type (mirrors
+        # task_schema_validator and session_journal bool-in-int traps).
+        if isinstance(total, bool) or any(isinstance(d, bool) for d in dims):
+            return None
+        if not all(isinstance(x, int) for x in (total,) + dims):
+            return None
+
+        actual_sum = sum(dims)
+        if total != actual_sum:
+            return (
+                f"Task completion blocked: variety score inconsistent. "
+                f"metadata.variety.total={total} but sum of dimensions is "
+                f"{actual_sum} (novelty={novelty}, scope={scope}, "
+                f"uncertainty={uncertainty}, risk={risk}). "
+                f"Fix via TaskUpdate(metadata={{\"variety\": {{\"total\": "
+                f"{actual_sum}, \"novelty\": {novelty}, \"scope\": {scope}, "
+                f"\"uncertainty\": {uncertainty}, \"risk\": {risk}}}}}) so "
+                f"total matches the dimension sum."
+            )
+    except (TypeError, AttributeError):
+        # Fail-open on any malformed variety shape
+        return None
+
+    return None
+
+
 # Note: The secretary processes HANDOFFs sequentially ("read all before saving")
 # for deduplication. This serializes writes but produces cleaner entries.
 # Acceptable at current scale (2-5 HANDOFFs per workflow).
@@ -180,6 +265,16 @@ def main():
     if error:
         print(error, file=sys.stderr)
         sys.exit(2)  # Exit 2 = block completion
+
+    # #401 Commit #6 defense-in-depth: verify variety.total matches its
+    # dimension sum before completion. Bypasses same as validate_task_handoff.
+    variety_error = validate_variety_dimensions(
+        task_metadata=task_metadata,
+        teammate_name=teammate_name,
+    )
+    if variety_error:
+        print(variety_error, file=sys.stderr)
+        sys.exit(2)
 
     # Blocking enforcement: agent must acknowledge memory save before completing.
     # Exit 2 blocks task completion and feeds stderr back to the agent as

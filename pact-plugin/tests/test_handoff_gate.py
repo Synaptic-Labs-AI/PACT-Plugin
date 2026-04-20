@@ -927,3 +927,213 @@ class TestReadTaskOwnerCorruptedJson:
         result = read_task_owner("42", "pact-test", tasks_base_dir=str(tmp_path))
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# validate_variety_dimensions (#401 Commit #6)
+# Defense-in-depth: asserts metadata.variety.total == sum(dims) at
+# completion. Bypasses mirror validate_task_handoff's bypass set.
+# ---------------------------------------------------------------------------
+
+def _full_variety(total, novelty, scope, uncertainty, risk):
+    return {
+        "total": total,
+        "novelty": novelty,
+        "scope": scope,
+        "uncertainty": uncertainty,
+        "risk": risk,
+    }
+
+
+class TestValidateVarietyDimensionsHappyPath:
+    def test_passes_when_absent(self):
+        from handoff_gate import validate_variety_dimensions
+
+        assert validate_variety_dimensions({}, "coder-1") is None
+
+    def test_passes_when_sum_matches(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(10, 2, 3, 2, 3)}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_passes_when_sum_matches_small(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(4, 1, 1, 1, 1)}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+
+class TestValidateVarietyDimensionsRejections:
+    def test_fails_on_sum_mismatch(self):
+        from handoff_gate import validate_variety_dimensions
+
+        # Total says 10 but dims sum to 9
+        meta = {"variety": _full_variety(10, 2, 3, 2, 2)}
+        error = validate_variety_dimensions(meta, "coder-1")
+        assert error is not None
+        assert "variety score inconsistent" in error
+        assert "total=10" in error
+        assert "sum of dimensions is 9" in error
+
+    def test_error_message_shows_fixing_TaskUpdate(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(8, 1, 2, 2, 2)}  # actual sum = 7
+        error = validate_variety_dimensions(meta, "coder-1")
+        assert error is not None
+        assert "TaskUpdate" in error
+        assert '"total": 7' in error
+
+    def test_each_dim_surfaced_in_error(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(12, 1, 2, 3, 4)}  # sum=10, mismatch
+        error = validate_variety_dimensions(meta, "coder-1")
+        assert "novelty=1" in error
+        assert "scope=2" in error
+        assert "uncertainty=3" in error
+        assert "risk=4" in error
+
+
+class TestValidateVarietyDimensionsBypasses:
+    def test_non_agent_bypasses(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(10, 2, 3, 2, 2)}  # mismatch
+        # teammate_name=None → non-agent, no enforcement
+        assert validate_variety_dimensions(meta, None) is None
+
+    def test_skipped_bypasses(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(10, 2, 3, 2, 2), "skipped": True}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    @pytest.mark.parametrize("type_value", ["blocker", "algedonic"])
+    def test_signal_task_bypasses(self, type_value):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(10, 2, 3, 2, 2), "type": type_value}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+
+class TestValidateVarietyDimensionsPartialShape:
+    """Partial variety (missing dim or missing total) passes — the schema
+    validator enforces presence at CREATE time; at COMPLETE time a
+    partial shape means intentional below-threshold scoring."""
+
+    def test_missing_total_passes(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": {"novelty": 2, "scope": 3, "uncertainty": 2, "risk": 2}}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_missing_one_dim_passes(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": {"total": 10, "novelty": 2, "scope": 3, "risk": 2}}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_none_valued_dim_passes(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": _full_variety(10, 2, None, 3, 2)}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+
+class TestValidateVarietyDimensionsMalformed:
+    def test_variety_not_dict_fails_open(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": 10}  # int, not dict
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_variety_string_fails_open(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": "7"}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_bool_total_fails_open(self):
+        from handoff_gate import validate_variety_dimensions
+
+        # bool is int subclass — reject at type-check, fail-open (return None)
+        meta = {"variety": {"total": True, "novelty": 1, "scope": 1,
+                             "uncertainty": 1, "risk": 1}}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_bool_dimension_fails_open(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": {"total": 4, "novelty": True, "scope": 1,
+                             "uncertainty": 1, "risk": 1}}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+    def test_non_int_dimension_fails_open(self):
+        from handoff_gate import validate_variety_dimensions
+
+        meta = {"variety": {"total": 7, "novelty": "two", "scope": 2,
+                             "uncertainty": 2, "risk": 1}}
+        assert validate_variety_dimensions(meta, "coder-1") is None
+
+
+class TestHandoffGateMainVarietyCheck:
+    """End-to-end: main() blocks completion when variety dim-sum mismatches."""
+
+    def test_main_blocks_on_sum_mismatch(self, monkeypatch, capsys):
+        import handoff_gate
+        from handoff_gate import main
+
+        # Task with valid handoff but broken variety (total != sum)
+        task_data = {
+            "owner": "coder-1",
+            "metadata": {
+                "handoff": VALID_HANDOFF,
+                "memory_saved": True,
+                "variety": _full_variety(10, 2, 2, 2, 2),  # sum=8, not 10
+            },
+        }
+        stdin_payload = {
+            "task_id": "1",
+            "task_subject": "backend-coder: x",
+            "teammate_name": "coder-1",
+            "team_name": "pact-test",
+        }
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO(json.dumps(stdin_payload))
+        )
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_event"):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        captured = capsys.readouterr()
+        assert "variety score inconsistent" in captured.err
+
+    def test_main_allows_on_sum_match(self, monkeypatch, capsys):
+        import handoff_gate
+        from handoff_gate import main
+
+        task_data = {
+            "owner": "coder-1",
+            "metadata": {
+                "handoff": VALID_HANDOFF,
+                "memory_saved": True,
+                "variety": _full_variety(8, 2, 2, 2, 2),  # sum matches
+            },
+        }
+        stdin_payload = {
+            "task_id": "1",
+            "task_subject": "backend-coder: x",
+            "teammate_name": "coder-1",
+            "team_name": "pact-test",
+        }
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO(json.dumps(stdin_payload))
+        )
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("handoff_gate.append_event"):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 0
