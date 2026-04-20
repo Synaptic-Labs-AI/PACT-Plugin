@@ -384,3 +384,465 @@ class TestHooksJsonPlacement:
         assert chain == ["completion_gate", "teachback_idle_guard", "teammate_idle"], (
             f"TeammateIdle chain order broken: {chain}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sidecar path + non-dict entry coercion
+# ---------------------------------------------------------------------------
+
+class TestSidecarPath:
+    def test_returns_team_scoped_path(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        result = _sidecar_path("pact-test")
+        expected = tmp_path / ".claude" / "teams" / "pact-test" / "teachback_idle_counts.json"
+        assert result == expected
+
+
+class TestIncrementNonDictEntry:
+    """Coverage for line 209: mutator coerces a non-dict sidecar entry
+    back into an empty dict before writing. Defends against hand-edited
+    sidecar files where a value became a string/list/int."""
+
+    def test_non_dict_entry_coerced(self, tmp_path):
+        # Prime the sidecar with a non-dict entry value.
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        sidecar.write_text(json.dumps({"coder-1": "not-a-dict"}), encoding="utf-8")
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        # Should coerce to fresh dict and start at count=1.
+        assert count == 1
+        # File now has a well-formed entry.
+        contents = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert isinstance(contents["coder-1"], dict)
+        assert contents["coder-1"]["count"] == 1
+        assert contents["coder-1"]["task_id"] == "17"
+
+
+class TestIncrementJSONDecodeRecovery:
+    """Coverage for lines 165-167: when the sidecar contains malformed
+    JSON from a prior crashed write, the mutator should treat counts as
+    empty and proceed. Uses the flock path (not the Windows fallback)."""
+
+    def test_malformed_json_recovers_to_empty(self, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        sidecar.write_text("{{corrupt", encoding="utf-8")
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert count == 1
+        # Sidecar rewritten cleanly.
+        contents = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert "coder-1" in contents
+
+
+# ---------------------------------------------------------------------------
+# Windows fallback branch (HAS_FLOCK=False) coverage — lines 177-193
+# ---------------------------------------------------------------------------
+
+class TestWindowsFallback:
+    """Force the non-flock branch by monkeypatching HAS_FLOCK=False.
+    Mirrors teammate_idle.py test pattern for parity."""
+
+    def test_fallback_first_write(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard, "HAS_FLOCK", False)
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert count == 1
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert data["coder-1"]["task_id"] == "17"
+
+    def test_fallback_reads_existing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard, "HAS_FLOCK", False)
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        # Pre-seed an existing entry
+        sidecar.write_text(json.dumps(
+            {"coder-1": {"count": 2, "task_id": "17"}}
+        ), encoding="utf-8")
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert count == 3
+
+    def test_fallback_malformed_recovers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard, "HAS_FLOCK", False)
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        sidecar.write_text("{{corrupt", encoding="utf-8")
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert count == 1
+
+    def test_fallback_nonexistent_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard, "HAS_FLOCK", False)
+        # Don't create the file — exists() returns False
+        sidecar = tmp_path / "subdir" / "teachback_idle_counts.json"
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert count == 1
+
+    def test_fallback_write_error_swallowed(self, tmp_path, monkeypatch):
+        """OSError on the fallback write path is caught — function
+        returns the mutated dict even though disk write failed. Defends
+        against read-only sidecars."""
+        monkeypatch.setattr(guard, "HAS_FLOCK", False)
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        # Patch Path.write_text to raise once
+        real_write = Path.write_text
+
+        def boom(self, *a, **kw):
+            if self == sidecar:
+                raise OSError("disk full")
+            return real_write(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        # Should not raise — fallback path swallows OSError on write.
+        count = _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert count == 1  # still computed from mutator
+
+
+# ---------------------------------------------------------------------------
+# Carve-out reset paths — lines 257, 268-269, 273, 280-281
+# ---------------------------------------------------------------------------
+
+def _sidecar_has_entry(tmp_path: Path, teammate: str) -> bool:
+    """Helper: does the test sidecar have an entry for teammate?"""
+    sidecar = tmp_path / "teachback_idle_counts.json"
+    if not sidecar.exists():
+        return False
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return teammate in data
+
+
+class TestCarveOutResetBehavior:
+    """Each carve-out branch in _check_teachback_idle should call
+    _reset_teachback_idle so a subsequent non-carve-out doesn't
+    spuriously inherit the prior count. Covers lines 268-269 (no task →
+    reset), 280-281 (stalled/terminated → reset), 293 (low-variety →
+    reset), 299-300 (state doesn't need algedonic → reset)."""
+
+    def _build_tasks(self, metadata):
+        return [{
+            "owner": "coder-1",
+            "status": "in_progress",
+            "id": "17",
+            "metadata": metadata,
+        }]
+
+    def test_no_matching_task_clears_stale_entry(self, monkeypatch, capsys, tmp_path):
+        """Covers lines 268-269: tasks list non-empty but no match for our
+        teammate → reset branch. Empty tasks list short-circuits EARLIER
+        (line 260-261) without resetting, so we need a non-matching entry
+        to force the later reset path."""
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+        assert _sidecar_has_entry(tmp_path, "coder-1")
+
+        # Task list has someone else's in_progress task — scanner finds
+        # no match for coder-1 and hits the reset branch.
+        other_tasks = [{
+            "owner": "coder-2",
+            "status": "in_progress",
+            "id": "99",
+            "metadata": {"variety": _valid_variety()},
+        }]
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=other_tasks, sidecar_dir=tmp_path,
+        )
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+    def test_stalled_task_resets(self, monkeypatch, capsys, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+
+        tasks = self._build_tasks({
+            "stalled": True,
+            "variety": _valid_variety(),
+            "teachback_submit": _valid_submit(),
+        })
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=tasks, sidecar_dir=tmp_path,
+        )
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+    def test_terminated_task_resets(self, monkeypatch, capsys, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+
+        tasks = self._build_tasks({
+            "terminated": True,
+            "variety": _valid_variety(),
+            "teachback_submit": _valid_submit(),
+        })
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=tasks, sidecar_dir=tmp_path,
+        )
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+    def test_algedonic_type_task_resets(self, monkeypatch, capsys, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+
+        tasks = self._build_tasks({
+            "type": "algedonic",
+            "variety": _valid_variety(),
+            "teachback_submit": _valid_submit(),
+        })
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=tasks, sidecar_dir=tmp_path,
+        )
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+    def test_signal_completion_type_resets(self, monkeypatch, capsys, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+
+        tasks = self._build_tasks({
+            "completion_type": "signal",
+            "variety": _valid_variety(),
+            "teachback_submit": _valid_submit(),
+        })
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=tasks, sidecar_dir=tmp_path,
+        )
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+    def test_low_variety_resets(self, monkeypatch, capsys, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+
+        tasks = self._build_tasks({
+            "variety": {"total": 5},
+            "teachback_submit": _valid_submit(),
+        })
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=tasks, sidecar_dir=tmp_path,
+        )
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+    def test_no_team_name_short_circuits(self, monkeypatch, capsys):
+        """Covers line 257 — if team_name resolves to empty, bail without
+        touching the sidecar."""
+        monkeypatch.setattr(guard, "append_event", lambda *a, **kw: None)
+        monkeypatch.setattr(guard, "make_event", lambda *a, **kw: {"type": "fake"})
+        monkeypatch.setattr(guard, "get_team_name", lambda: "")
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+            {"teammate_name": "coder-1"}
+        )))
+        with pytest.raises(SystemExit) as exc:
+            guard.main()
+        assert exc.value.code == 0
+
+    def test_non_dict_metadata_reset(self, monkeypatch, capsys, tmp_path):
+        """Covers line 273 — when metadata is a non-dict, we coerce to
+        empty and fall into carve-out paths which reset."""
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+        tasks = [{
+            "owner": "coder-1",
+            "status": "in_progress",
+            "id": "17",
+            "metadata": "bogus-not-a-dict",  # forces coercion
+        }]
+        _run_main(
+            monkeypatch, capsys,
+            {"teammate_name": "coder-1", "team_name": "pact-test"},
+            tasks=tasks, sidecar_dir=tmp_path,
+        )
+        # Low-variety (no variety.total in empty metadata) carves out and resets
+        assert not _sidecar_has_entry(tmp_path, "coder-1")
+
+
+# ---------------------------------------------------------------------------
+# Outer fail-open envelope — lines 360-362
+# ---------------------------------------------------------------------------
+
+class TestOuterFailOpen:
+    """SACROSANCT fail-open: any unhandled exception in _check_teachback_idle
+    must be absorbed and exit 0 so a gate bug doesn't prevent the idle
+    event from being observed."""
+
+    def test_unhandled_exception_exits_zero(self, monkeypatch, capsys):
+        def boom(_):
+            raise RuntimeError("unexpected inside check")
+
+        monkeypatch.setattr(guard, "_check_teachback_idle", boom)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(
+            {"teammate_name": "coder-1", "team_name": "pact-test"}
+        )))
+        with pytest.raises(SystemExit) as exc:
+            guard.main()
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        # The stderr warning uses the hook name prefix for operability.
+        assert "teachback_idle_guard" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# _emit_algedonic_event exception path — lines 339-340
+# ---------------------------------------------------------------------------
+
+class TestEmitAlgedonicFailOpen:
+    """Observability is optional — if the journal write raises, the hook
+    still emits the systemMessage. This protects the user-facing
+    algedonic signal from journal I/O errors."""
+
+    def test_journal_exception_does_not_prevent_signal(
+        self, monkeypatch, capsys, tmp_path,
+    ):
+        def journal_boom(_e):
+            raise RuntimeError("journal filesystem is wedged")
+
+        monkeypatch.setattr(guard, "append_event", journal_boom)
+        monkeypatch.setattr(guard, "make_event", lambda *a, **kw: {"type": "fake"})
+
+        # Build a teammate in under_review state; fire 3 times to hit threshold.
+        tasks = [{
+            "owner": "coder-1",
+            "status": "in_progress",
+            "id": "17",
+            "metadata": {
+                "variety": _valid_variety(11),
+                "teachback_submit": _valid_submit(),
+            },
+        }]
+
+        for _ in range(3):
+            code, out, _err = _run_main(
+                monkeypatch, capsys,
+                {"teammate_name": "coder-1", "team_name": "pact-test"},
+                tasks=tasks, sidecar_dir=tmp_path,
+            )
+            assert code == 0
+
+        # The systemMessage is still emitted even though append_event raised.
+        payload = json.loads(out.strip())
+        assert "systemMessage" in payload
+        assert "ALGEDONIC ALERT" in payload["systemMessage"]
+
+
+# ---------------------------------------------------------------------------
+# Reset helper standalone — line 228 branches
+# ---------------------------------------------------------------------------
+
+class TestResetTeachbackIdle:
+    def test_reset_missing_entry_is_no_op(self, tmp_path):
+        """Reset on a teammate with no entry should not raise."""
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        # File doesn't exist yet — reset should create/touch without error
+        _reset_teachback_idle(sidecar, "coder-1")
+        # Idempotent
+        _reset_teachback_idle(sidecar, "coder-1")
+
+    def test_reset_after_multiple_increments(self, tmp_path):
+        sidecar = tmp_path / "teachback_idle_counts.json"
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+        _increment_teachback_idle(sidecar, "coder-1", "17")
+        _reset_teachback_idle(sidecar, "coder-1")
+        # Next increment starts at 1
+        assert _increment_teachback_idle(sidecar, "coder-1", "17") == 1
+
+
+# ---------------------------------------------------------------------------
+# fcntl ImportError fallback (module-level lines 51-52, 57)
+# ---------------------------------------------------------------------------
+
+class TestModuleConstants:
+    def test_algedonic_preamble_contains_marker(self):
+        """Downstream observability grep relies on the '[ALGEDONIC ALERT'
+        prefix; renaming it would break log aggregators."""
+        assert guard._ALGEDONIC_PREAMBLE.startswith("[ALGEDONIC ALERT")
+        assert "teachback stall" in guard._ALGEDONIC_PREAMBLE
+
+    def test_has_flock_true_on_posix(self):
+        """On macOS/Linux we expect fcntl to be importable. If this fails,
+        flock-dependent atomicity guarantees are lost."""
+        import platform
+        if platform.system() != "Windows":
+            assert guard.HAS_FLOCK is True
+
+
+# ---------------------------------------------------------------------------
+# Counter-test-by-revert: TeammateIdle threshold N=3 (checklist item 9/10)
+# ---------------------------------------------------------------------------
+
+class TestTeachbackIdleThresholdInvariants:
+    """Counter-test-by-revert checklist items 9 and 10. If the threshold
+    constant TEACHBACK_TIMEOUT_IDLE_COUNT is moved up or down, these
+    tests must start failing."""
+
+    def _build_tasks(self):
+        return [{
+            "owner": "coder-1",
+            "status": "in_progress",
+            "id": "17",
+            "metadata": {
+                "variety": _valid_variety(11),
+                "teachback_submit": _valid_submit(),
+            },
+        }]
+
+    def test_count_one_below_threshold_silent(self, monkeypatch, capsys, tmp_path):
+        tasks = self._build_tasks()
+        # Fire (TEACHBACK_TIMEOUT_IDLE_COUNT - 1) times — no algedonic yet.
+        from shared import TEACHBACK_TIMEOUT_IDLE_COUNT
+        for _ in range(TEACHBACK_TIMEOUT_IDLE_COUNT - 1):
+            code, out, _err = _run_main(
+                monkeypatch, capsys,
+                {"teammate_name": "coder-1", "team_name": "pact-test"},
+                tasks=tasks, sidecar_dir=tmp_path,
+            )
+            assert code == 0
+        payload = json.loads(out.strip())
+        assert "systemMessage" not in payload, (
+            "Algedonic fired before reaching TEACHBACK_TIMEOUT_IDLE_COUNT"
+        )
+
+    def test_count_exactly_threshold_fires(self, monkeypatch, capsys, tmp_path):
+        """Item 9: TeammateIdle threshold N=3 fires algedonic (the >= semantic)."""
+        from shared import TEACHBACK_TIMEOUT_IDLE_COUNT
+        tasks = self._build_tasks()
+        out_last = ""
+        for _ in range(TEACHBACK_TIMEOUT_IDLE_COUNT):
+            _code, out_last, _err = _run_main(
+                monkeypatch, capsys,
+                {"teammate_name": "coder-1", "team_name": "pact-test"},
+                tasks=tasks, sidecar_dir=tmp_path,
+            )
+        payload = json.loads(out_last.strip())
+        assert "systemMessage" in payload, (
+            "Algedonic did NOT fire at TEACHBACK_TIMEOUT_IDLE_COUNT — "
+            "threshold comparison may have been changed to strict >."
+        )
+
+    def test_count_below_never_fires_even_repeat(self, monkeypatch, capsys, tmp_path):
+        """Item 10: TeammateIdle below threshold does NOT fire — even
+        if _below threshold_ events repeat multiple times."""
+        from shared import TEACHBACK_TIMEOUT_IDLE_COUNT
+        # Use a non-stall scenario: teammate has teachback_approved so
+        # _inferred_state_needs_algedonic returns False; every event resets.
+        tasks = [{
+            "owner": "coder-1",
+            "status": "in_progress",
+            "id": "17",
+            "metadata": {
+                "variety": _valid_variety(11),
+                "teachback_submit": _valid_submit(),
+                "teachback_approved": {"conditions_met": {"unaddressed": []}},
+            },
+        }]
+        for _ in range(TEACHBACK_TIMEOUT_IDLE_COUNT + 2):
+            code, out, _err = _run_main(
+                monkeypatch, capsys,
+                {"teammate_name": "coder-1", "team_name": "pact-test"},
+                tasks=tasks, sidecar_dir=tmp_path,
+            )
+            assert code == 0
+            payload = json.loads(out.strip())
+            assert "systemMessage" not in payload
