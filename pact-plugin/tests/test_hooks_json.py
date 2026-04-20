@@ -319,6 +319,81 @@ class TestBootstrapGateInvariants:
                     )
 
 
+class TestBootstrapBeforeTeachbackGate:
+    """#401 Commit #14a — hooks.json PreToolUse ordering invariant.
+
+    bootstrap_gate.py and teachback_gate.py are BOTH matcherless
+    PreToolUse hooks. Claude Code fires PreToolUse hooks in registration
+    order. The invariant is: bootstrap_gate MUST fire BEFORE
+    teachback_gate. Rationale:
+
+    - bootstrap_gate is the gate-of-gates: if bootstrap hasn't run,
+      NO teammate work should proceed regardless of teachback state.
+    - If teachback_gate fires first and denies (because teachback_submit
+      is missing), the deny reason is misleading — the real blocker is
+      that bootstrap never ran.
+    - Cleaner error surface for teammates: one "you need to bootstrap"
+      message, not a confusing "you need to teachback" followed by
+      "oh wait, you also need to bootstrap".
+
+    This test SKIPS until teachback_gate.py is registered in hooks.json
+    (#401 Commit #7 adds the registration). Once both hooks are
+    present, the invariant is load-bearing and must hold.
+    """
+
+    def test_bootstrap_gate_precedes_teachback_gate(self, hooks_config):
+        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
+        bootstrap_index = None
+        teachback_index = None
+        for i, entry in enumerate(pre_tool_entries):
+            for hook in entry.get("hooks", []):
+                command = hook.get("command", "")
+                if "bootstrap_gate.py" in command and bootstrap_index is None:
+                    bootstrap_index = i
+                if "teachback_gate.py" in command and teachback_index is None:
+                    teachback_index = i
+
+        if teachback_index is None:
+            pytest.skip(
+                "teachback_gate.py not yet registered in hooks.json — "
+                "this ordering invariant activates once #401 Commit #7 lands"
+            )
+
+        assert bootstrap_index is not None, (
+            "bootstrap_gate.py must be registered in PreToolUse; "
+            "teachback_gate.py ordering cannot be checked without it"
+        )
+        assert bootstrap_index < teachback_index, (
+            f"bootstrap_gate.py (PreToolUse entry #{bootstrap_index}) must "
+            f"precede teachback_gate.py (PreToolUse entry #{teachback_index}). "
+            f"Registration order determines hook-fire order in Claude Code. "
+            f"If teachback fires first and denies, the deny reason misleads "
+            f"the teammate — bootstrap is the real blocker."
+        )
+
+    def test_both_gates_are_matcherless(self, hooks_config):
+        """Both gates must be matcherless — they fire for ALL hookable tools.
+        A matcher on either would create a gate-bypass on non-matched tools.
+        Skipped if teachback_gate.py isn't registered yet.
+        """
+        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
+        teachback_found = False
+        for entry in pre_tool_entries:
+            for hook in entry.get("hooks", []):
+                command = hook.get("command", "")
+                if "teachback_gate.py" in command:
+                    teachback_found = True
+                    assert "matcher" not in entry, (
+                        "teachback_gate.py must NOT have a matcher — it must "
+                        "fire for ALL hookable tools to enforce the gate"
+                    )
+        if not teachback_found:
+            pytest.skip(
+                "teachback_gate.py not yet registered — matcherless invariant "
+                "activates once #401 Commit #7 lands"
+            )
+
+
 class TestSessionStartCardinality:
     """Post-#444 SessionStart registration invariant.
 
