@@ -17,6 +17,9 @@ from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent))
+
+from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 
 @pytest.fixture
@@ -29,7 +32,7 @@ def gate_env(tmp_path, monkeypatch, pact_context):
     """
     claude_md = tmp_path / "CLAUDE.md"
     claude_md.write_text(
-        "# Project Memory\n\n## Pinned Context\n\n### Pin\nbody\n",
+        make_claude_md_with_pins([make_pin_entry(title="Pin", body_chars=4)]),
         encoding="utf-8",
     )
 

@@ -17,6 +17,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent))
+
+from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 
 @pytest.fixture
@@ -50,16 +53,16 @@ def _run_cli(argv):
 
 
 def _make_pinned_content(n_pins=0, pin_body_chars=100, stale_indices=()):
-    """Build a CLAUDE.md body with N pins, uniform body size, marked stale."""
-    parts = ["# Project Memory", "", "## Pinned Context", ""]
-    for i in range(n_pins):
-        parts.append(f"<!-- pinned: 2026-04-20 -->")
-        parts.append(f"### Pin {i}")
-        if i in stale_indices:
-            parts.append("<!-- STALE: Last relevant 2026-01-01 -->")
-        parts.append("x" * pin_body_chars)
-        parts.append("")
-    return "\n".join(parts) + "\n"
+    """Thin wrapper around helpers.py factories preserving legacy signature."""
+    entries = [
+        make_pin_entry(
+            title=f"Pin {i}",
+            body_chars=pin_body_chars,
+            stale_date="2026-01-01" if i in stale_indices else None,
+        )
+        for i in range(n_pins)
+    ]
+    return make_claude_md_with_pins(entries)
 
 
 class TestCheckPinCapsCli_StatusQuery:
@@ -231,13 +234,15 @@ class TestCheckPinCapsCli_EvictablePins:
         assert flags == [False, True, False]
 
     def test_evictable_includes_override_flag(self, patched_claude_md):
-        content = (
-            "# Project\n\n## Pinned Context\n\n"
-            "<!-- pinned: 2026-04-11, pin-size-override: load-bearing verbatim form -->\n"
-            "### Override Pin\nbody\n\n"
-            "<!-- pinned: 2026-04-20 -->\n"
-            "### Plain Pin\nbody\n"
-        )
+        content = make_claude_md_with_pins([
+            make_pin_entry(
+                title="Override Pin",
+                body_chars=4,
+                date="2026-04-11",
+                override_rationale="load-bearing verbatim form",
+            ),
+            make_pin_entry(title="Plain Pin", body_chars=4),
+        ])
         patched_claude_md(content)
         rc, payload = _run_cli(["--status"])
         overrides = [p["override"] for p in payload["evictable_pins"]]

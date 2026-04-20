@@ -22,18 +22,22 @@ from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).parent))
+
+from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 
 def _build_pinned_claude_md(n_pins=0, pin_body_chars=100, stale_indices=()):
-    parts = ["# Project Memory", "", "## Pinned Context", ""]
-    for i in range(n_pins):
-        parts.append("<!-- pinned: 2026-04-20 -->")
-        parts.append(f"### Pin {i}")
-        if i in stale_indices:
-            parts.append("<!-- STALE: Last relevant 2026-01-01 -->")
-        parts.append("x" * pin_body_chars)
-        parts.append("")
-    return "\n".join(parts) + "\n"
+    """Thin wrapper around helpers.py factories preserving legacy signature."""
+    entries = [
+        make_pin_entry(
+            title=f"Pin {i}",
+            body_chars=pin_body_chars,
+            stale_date="2026-01-01" if i in stale_indices else None,
+        )
+        for i in range(n_pins)
+    ]
+    return make_claude_md_with_pins(entries)
 
 
 class TestCheckPinnedBlockSignal_EndToEnd:
@@ -395,18 +399,19 @@ class TestParsePinsVsDetectStaleEntries_Agreement:
     ])
     def test_stale_marker_detection_agrees(self, n_pins, stale_indices):
         from pin_caps import parse_pins
+        from helpers import make_pin_entry, make_pinned_section
         # Build content with explicit STALE markers — detect_stale_entries
         # skips already-marked entries, so our axis of comparison is
         # "pin_caps.is_stale == True iff STALE marker present".
-        parts = []
-        for i in range(n_pins):
-            parts.append("<!-- pinned: 2026-04-20 -->")
-            parts.append(f"### Pin {i}")
-            if i in stale_indices:
-                parts.append("<!-- STALE: Last relevant 2026-01-01 -->")
-            parts.append("body")
-            parts.append("")
-        content = "\n".join(parts)
+        entries = [
+            make_pin_entry(
+                title=f"Pin {i}",
+                body_chars=4,
+                stale_date="2026-01-01" if i in stale_indices else None,
+            )
+            for i in range(n_pins)
+        ]
+        content = make_pinned_section(entries) if entries else ""
         pins = parse_pins(content)
         actual_stale = {i for i, p in enumerate(pins) if p.is_stale}
         assert actual_stale == stale_indices, (
