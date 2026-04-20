@@ -388,6 +388,49 @@ When a phase is skipped but a coder encounters a decision that would have been h
 
 ---
 
+## Per-Agent Variety Scoring (Dispatch-Time)
+
+Before each agent TaskCreate below, score the **agent-task's own variety** — not the feature variety inherited from the top-level assessment. An agent task frequently has variety different from the feature: a single-preparer research-only task within a high-variety feature may itself be medium variety; a single-architect design task within a low-variety feature may itself be high variety.
+
+**Imperative**: every agent TaskCreate at a dispatch site below MUST include `metadata.variety` + `metadata.required_scope_items` at creation. This propagates the feature-variety hard gate down to the agent level so that `task_schema_validator.py` (TaskCreated hook) and `teachback_gate.py` (PreToolUse) have the data they need. The rejection message from `task_schema_validator.py` will instruct corrections if any field is missing.
+
+**Score each dimension 1-4** using the same dimensions from the Task Variety Assessment above (Novelty, Scope, Uncertainty, Risk). Sum → `total`. Example invocation (inline Python):
+
+```bash
+python3 -c "
+from shared.variety_scorer import gates_for_score, teachback_mode_for_score
+import json
+variety = {'novelty': 2, 'scope': 2, 'uncertainty': 1, 'risk': 2, 'total': 7}
+print(json.dumps({
+    'mode': teachback_mode_for_score(variety['total']),
+    'gates': gates_for_score(variety['total']),
+}))
+"
+```
+
+**`required_scope_items`**: list of discrete scope items the agent must address in their teachback or handoff (each item is a short imperative phrase). For low-variety agent tasks, this may be a single-item list. For high-variety tasks, provide enough items (≥ 2) to trigger the full protocol in the gate — see TERMINOLOGY-LOCK.md and CONTENT-SCHEMAS.md for protocol-level semantics.
+
+**`phase`**: the PACT phase name (`PREPARE` | `ARCHITECT` | `CODE` | `TEST`). The gate reads this for Q1 citation-strictness decisions.
+
+**Carve-outs (do NOT write variety metadata)**:
+
+- **Auditor** (`metadata.completion_type = "signal"`) — signal tasks bypass the gate by carve-out predicate
+- **Secretary** (agent name in `_EXEMPT_AGENTS`) — exempt regardless of variety
+- **Signal tasks** (blocker, algedonic, skipped, stalled, terminated) — bypass by predicate
+
+The Per-Phase sections below call out each exception explicitly.
+
+### Imperative-with-Explanation Framing (Q5 Phase 1)
+
+The task description written into each agent TaskCreate MUST use imperative-with-explanation framing (NOT advisory "Please consider..." or "It would be helpful if..."). Open with the imperative verb, follow with the rationale.
+
+- **Do**: `"Research authentication options for the dashboard. Rationale: the plan's open questions include 3 research items requiring evidence before architect decisions."`
+- **Don't**: `"If you could look into authentication options, that would help us figure out the right approach."`
+
+Advisory framing softens the protocol requirement and has been empirically observed to produce discretionary teammate compliance (honest-but-careless drift — see pact-ct-teachback.md Honest-Reframe section). The teachback gate binds on metadata presence + content shape, so task-description wording is not gate-enforced; but consistent framing across commands keeps the ritual floor in place.
+
+---
+
 ### PREPARE Phase → `pact-preparer`
 
 **Phase skip decision flow passed (all 3 layers)?** → Mark PREPARE `completed` with skip metadata and proceed to ARCHITECT phase.
@@ -397,8 +440,9 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Open Questions > Require Further Research"
 
 **Dispatch `pact-preparer`**:
-1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "PREPARE"})`
    - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
+   - Score preparer variety per the Per-Agent Variety Scoring section above. Populate `required_scope_items` with the discrete research questions/items the preparer must address.
 2. `TaskUpdate(taskId, owner="preparer")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
@@ -485,11 +529,12 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Interface Contracts"
 
 **Dispatch `pact-architect`**:
-1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "ARCHITECT"})`
    - Include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), and plan reference.
    - Include upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
    - Do not read phase output files yourself or paste their content into the task description.
    - If PREPARE was skipped: pass the plan's Preparation Phase section instead.
+   - Score architect variety per the Per-Agent Variety Scoring section above. Populate `required_scope_items` with the discrete design decisions the architect must address.
 2. `TaskUpdate(taskId, owner="architect")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
@@ -606,13 +651,14 @@ JSON
 **Dispatch coder(s)**:
 
 For each coder needed:
-1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "CODE"})`
    - Include task description, where to find ARCHITECT outputs (e.g., "Read `docs/architecture/{feature}.md`"), plan sections (if any), plan reference.
    - Include upstream task references: "Architect task: #{taskId} — read via `TaskGet` for design decisions." If multiple coders are dispatched concurrently, include peer names: "Your peers on this phase: {other-coder-names}."
    - Do not read phase output files yourself or paste their content into the task description.
    - If ARCHITECT was skipped: pass the plan's Architecture Phase section instead.
    - If PREPARE/ARCHITECT were skipped, include: "PREPARE and/or ARCHITECT were skipped based on existing context. Minor decisions (naming, local structure) are yours to make. For moderate decisions (interface shape, error patterns), decide and implement but flag the decision with your rationale in the handoff so it can be validated. Major decisions affecting other components are blockers—don't implement, escalate."
    - Include: "Smoke Testing: Run the test suite before completing. If your changes break existing tests, fix them. Your tests are verification tests—enough to confirm your implementation works. Comprehensive coverage (edge cases, integration, E2E, adversarial) is TEST phase work."
+   - Score this coder's variety per the Per-Agent Variety Scoring section above (each coder in a parallel set gets its own score — their scopes differ). Populate `required_scope_items` with the discrete implementation items this coder must address.
 2. `TaskUpdate(taskId, owner="{coder-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning each coder:
    ```bash
@@ -735,9 +781,10 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - "Coverage Targets"
 
 **Dispatch `pact-test-engineer`**:
-1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
+1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "TEST"})`
    - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
    - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
+   - Score test-engineer variety per the Per-Agent Variety Scoring section above. Populate `required_scope_items` with the discrete test categories (unit/integration/E2E/edge/security) that must be addressed.
 2. `TaskUpdate(taskId, owner="test-engineer")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
