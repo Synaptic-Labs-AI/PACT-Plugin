@@ -16,7 +16,7 @@ These are orchestrator-side operations (agents report blockers via `SendMessage`
 1. `TaskGet(blocker_id)` — understand the blocker context
 2. Triage: redo prior phase? need specialist? need user?
 3. On resolution path chosen:
-   - If delegating: `TaskCreate` resolution agent task
+   - If delegating: `TaskCreate(subject="{agent}: resolve {blocker}", description="...", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": [...], "phase": "CODE"})` — resolution-agent tasks follow the same Per-Agent Variety Scoring contract as orchestrate.md agent dispatches. Score the resolution task (not the original blocked task); resolution scope may be narrower or wider depending on the triage outcome.
    - If self-resolving: proceed directly
 4. On resolution complete: `TaskUpdate(blocker_id, status="completed")`
 5. Blocked agent task is now unblocked
@@ -156,6 +156,6 @@ When imPACT decides to redo a prior phase (e.g., "redo ARCHITECT because the des
 2. **Create a new retry phase task**: `TaskCreate("ARCHITECT (retry): {feature-slug}")`
 3. **Set retry task to `in_progress`**
 4. **Block the current phase** (the one that hit the blocker): `TaskUpdate(currentPhaseId, addBlockedBy=[retryPhaseId])`
-5. **Dispatch agent(s)** for the retry phase
+5. **Dispatch agent(s)** for the retry phase via the same Per-Agent Variety Scoring contract from [orchestrate.md](orchestrate.md#per-agent-variety-scoring-dispatch-time): `TaskCreate(subject="{agent}: {retry-description}", description="...", metadata={"variety": {...}, "required_scope_items": [...], "phase": "<PHASE>"})`. Re-scored retry tasks often have higher uncertainty than the original (the blocker revealed an unknown) — score honestly.
 6. **On retry completion**: `TaskUpdate(retryPhaseId, status="completed")` — unblocks the current phase
 7. **Retry the current phase** with a new agent task using the updated outputs (re-dispatched agents will teachback their understanding before starting)

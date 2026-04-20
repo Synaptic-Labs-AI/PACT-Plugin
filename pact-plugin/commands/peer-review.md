@@ -143,7 +143,8 @@ Select the domain coder based on PR focus:
 **Dispatch reviewers**:
 
 For each reviewer:
-1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
+1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "TEST"})`
+   - Score this reviewer's variety per the [orchestrate.md Per-Agent Variety Scoring section](orchestrate.md#per-agent-variety-scoring-dispatch-time). Peer review is where "teachback OPTIONAL" softening has been empirically observed (RISK-MAP.md §F11) — the teachback gate enforces the ritual at metadata presence, not task-description wording. Score honestly; do NOT soften variety to bypass the gate. Use `phase: "TEST"` since review is quality-shaped.
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
 3. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line and include the `Skill("PACT:teammate-bootstrap")` YOUR FIRST ACTION directive so routing defense-in-depth delivers the teammate bootstrap at spawn:
 

@@ -214,7 +214,8 @@ Implement the sub-component:
 **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 
 For each specialist needed:
-1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]")`
+1. `TaskCreate(subject="{scope-prefixed-name}: implement {sub-task}", description="[full CONTEXT/MISSION/INSTRUCTIONS/GUIDELINES]", metadata={"variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}, "required_scope_items": ["item-1", "item-2", ...], "phase": "CODE"})`
+   - Score this specialist's variety per the [orchestrate.md Per-Agent Variety Scoring section](orchestrate.md#per-agent-variety-scoring-dispatch-time). Nested PACT sub-scopes typically score lower than the parent feature — score each specialist on its own sub-task, not the feature.
 2. `TaskUpdate(taskId, owner="{scope-prefixed-name}")`
 3. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line and include the `Skill("PACT:teammate-bootstrap")` YOUR FIRST ACTION directive:
 
