@@ -171,7 +171,19 @@ def check_pin_stale_block_directive() -> Optional[str]:
             marker = Path(session_dir) / PIN_STALENESS_MARKER_NAME
             if signal is not None:
                 marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch(exist_ok=True)
+                # Sec-M1: create the marker via os.open with O_NOFOLLOW so
+                # a planted symlink at the marker path cannot redirect the
+                # creation onto a sensitive file. O_NOFOLLOW is POSIX; fall
+                # back to Path.touch on platforms that lack it.
+                nofollow = getattr(os, "O_NOFOLLOW", 0)
+                flags = os.O_CREAT | os.O_WRONLY | nofollow
+                try:
+                    fd = os.open(str(marker), flags, 0o600)
+                    os.close(fd)
+                except OSError:
+                    # ELOOP (symlink encountered) or other failure — skip
+                    # the marker write rather than fall back unsafely.
+                    pass
             elif marker.exists():
                 try:
                     marker.unlink()
