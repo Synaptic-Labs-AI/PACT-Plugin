@@ -74,6 +74,23 @@ from .session_state import (
     is_safe_path_component,
 )
 
+# Pin caps constants + regex (semantic owner: hooks/pin_caps.py). Re-exported
+# here so hook consumers can `from shared import PIN_COUNT_CAP` rather than
+# reaching into the sibling module directly. pin_caps lives one directory
+# up (in hooks/), a sibling to the shared/ package. Every hook entrypoint
+# that imports `shared` already places hooks/ on sys.path (via the plugin
+# runner), so `import pin_caps` resolves cleanly at module-load time.
+# Skills-side twin copies live in skills/pact-memory/scripts/working_memory.py
+# (separate package boundary); the twin-copy drift test compares pin_caps
+# directly against working_memory.
+from pin_caps import (  # noqa: E402
+    PIN_COUNT_CAP,
+    PIN_SIZE_CAP,
+    PIN_STALE_BLOCK_THRESHOLD,
+    OVERRIDE_RATIONALE_MAX,
+    OVERRIDE_COMMENT_RE,
+)
+
 # Bootstrap gate marker — the session-scoped file whose presence signals that
 # Skill("PACT:bootstrap") has been invoked and the tool gate can self-disable.
 # Used by bootstrap_gate.py, bootstrap_prompt_gate.py, and session_init.py.
@@ -130,6 +147,11 @@ __all__ = [
     "wait_stale",
     "SAFE_PATH_COMPONENT_RE",
     "is_safe_path_component",
+    "PIN_COUNT_CAP",
+    "PIN_SIZE_CAP",
+    "PIN_STALE_BLOCK_THRESHOLD",
+    "OVERRIDE_RATIONALE_MAX",
+    "OVERRIDE_COMMENT_RE",
     "BOOTSTRAP_MARKER_NAME",
     "build_session_path",
     "get_pact_context",
