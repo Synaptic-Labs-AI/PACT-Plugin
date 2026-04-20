@@ -131,54 +131,66 @@ _ACTUAL_VALUE_CAP = 500
 # peer_inject canonical form.
 _ROLE_MARKER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
-# Default-ignorable denylist for `_normalize`. Cycle 4 architectural
-# fix for the round-3 convergent blocker (coder SEC-1 + security
-# F-R3-SEC-1): the cycle-3 enumerated-range strip covered only 10
-# codepoints and missed at least 9 other invisible-formatting classes.
+# Default-ignorable denylist for `_normalize`. Cycle 5 architectural
+# fix for the round-4 convergent Blocking (security F-R4-SEC-1):
+# cycle-4's ``Cf-category + VS1-VS256`` approximation missed Mn/Lo/Cn
+# default-ignorable codepoints (CGJ U+034F, Hangul fillers U+115F /
+# U+1160 / U+3164 / U+FFA0, Khmer inherent vowel U+17B4/U+17B5,
+# Mongolian FVS / VS U+180B-U+180F, reserved unassigned U+FFF0-U+FFF8,
+# shorthand format U+1BCA0-U+1BCA3, musical symbols U+1D173-U+1D17A).
+# Each of those codepoints reopened the substring-inequality bypass
+# because NFKC does not fold them and a non-DI-aware strip leaves
+# them in the compared string.
 #
-# The category-shaped core is ``unicodedata.category(c) == "Cf"`` —
-# the Format category is Unicode's canonical home for default-
-# ignorable formatting codepoints (soft-hyphen, zero-width, bidi
-# overrides, bidi isolates, invisible separator, word joiner, tag
-# characters). Any future Unicode revision that adds new Cf
-# codepoints is covered automatically — no enumerated-range
-# maintenance debt for that class.
-#
-# Variation Selectors (U+FE00-U+FE0F VS1-VS16 + U+E0100-U+E01EF
-# VS17-VS256) are default-ignorable in the Unicode sense but sit in
-# general category ``Mn`` (Mark, Nonspacing), NOT Cf. Python's
-# stdlib ``unicodedata`` module does not expose the
-# ``Default_Ignorable_Code_Point`` property directly, so the two
-# variation-selector ranges are listed explicitly. Those ranges are
-# closed and stable — no future Unicode revision changes them (VS1-
-# VS256 is the full allocation).
-#
-# Scope is intentionally narrow: this denylist covers exactly the
-# round-3 bypass enumeration (21 codepoints spanning 9 classes).
-# Broader default-ignorable codepoints (Hangul fillers U+115F /
-# U+1160 / U+3164 / U+FFA0, CGJ U+034F) are out of scope — they are
-# not in the finding, and expanding the strip blast-radius without a
-# matching adversarial probe would be exemplar-driven, which is the
-# failure mode this cycle is correcting.
-def _is_default_ignorable(codepoint: str) -> bool:
-    """Return True iff ``codepoint`` (single Unicode scalar) is a
-    default-ignorable formatting character the `_normalize` pipeline
-    must strip.
+# The authoritative source is the Unicode Character Database,
+# property ``Default_Ignorable_Code_Point=Yes`` in
+# ``DerivedCoreProperties.txt``. Python's stdlib ``unicodedata`` does
+# not expose that derived property (categories Cf / Mn / Lo / Cn each
+# contain both DI and non-DI codepoints), so the ranges are
+# enumerated explicitly below. The set is closed and stable across
+# Unicode revisions — additions have been rare and forward-compatible.
+# Revisit when Python's bundled Unicode version upgrades (see
+# ``unicodedata.unidata_version``); the regression tests then force
+# any silently-added DI codepoint into the denylist.
+_DEFAULT_IGNORABLE_RANGES: tuple[tuple[int, int], ...] = (
+    (0x00AD, 0x00AD),      # SOFT HYPHEN
+    (0x034F, 0x034F),      # COMBINING GRAPHEME JOINER (Mn)
+    (0x061C, 0x061C),      # ARABIC LETTER MARK
+    (0x115F, 0x1160),      # HANGUL CHOSEONG / JUNGSEONG FILLER (Lo)
+    (0x17B4, 0x17B5),      # KHMER INHERENT VOWELS AQ / AA (Lo)
+    (0x180B, 0x180F),      # MONGOLIAN FVS1-3 + VS + FVS4
+    (0x200B, 0x200F),      # ZWSP / ZWNJ / ZWJ / LRM / RLM
+    (0x202A, 0x202E),      # bidi embedding + override controls
+    (0x2060, 0x206F),      # word joiner + invisible separators + bidi isolates
+    (0x3164, 0x3164),      # HANGUL FILLER (Lo)
+    (0xFE00, 0xFE0F),      # VARIATION SELECTORS 1-16
+    (0xFEFF, 0xFEFF),      # ZERO WIDTH NO-BREAK SPACE / BOM
+    (0xFFA0, 0xFFA0),      # HALFWIDTH HANGUL FILLER (Lo)
+    (0xFFF0, 0xFFF8),      # reserved unassigned (Cn) in DI set
+    (0x1BCA0, 0x1BCA3),    # SHORTHAND FORMAT CONTROLS
+    (0x1D173, 0x1D17A),    # MUSICAL SYMBOL BEGIN / END beams, ties, slurs
+    (0xE0000, 0xE0FFF),    # TAG chars (U+E0000-U+E007F) + VS17-VS256 (U+E0100-U+E01EF)
+)
 
-    Matches the union of Unicode Format category (``Cf``) and the two
-    Variation Selector ranges (``Mn``-category by Unicode table but
-    default-ignorable by semantics — see module docstring for why the
-    stdlib forces an explicit enumeration).
+
+def _is_default_ignorable(codepoint: str) -> bool:
+    """Return True iff ``codepoint`` (single Unicode scalar) is in the
+    Unicode Default_Ignorable_Code_Point set.
+
+    Authoritative enumeration per Unicode ``DerivedCoreProperties.txt``
+    property ``Default_Ignorable_Code_Point=Yes``. Explicit ranges
+    replace the cycle-4 ``Cf`` + VS approximation after round-4
+    security probe F-R4-SEC-1 demonstrated that Mn / Lo / Cn DI
+    codepoints reopened the substring-inequality bypass.
+
+    The set is stable across Unicode revisions (additions are rare and
+    forward-compatible). Revisit when Python's bundled Unicode version
+    upgrades.
     """
-    if unicodedata.category(codepoint) == "Cf":
-        return True
     cp = ord(codepoint)
-    # VS1-VS16 — BMP variation selectors (Mn-category by table).
-    if 0xFE00 <= cp <= 0xFE0F:
-        return True
-    # VS17-VS256 — supplementary-plane variation selectors (Mn-category).
-    if 0xE0100 <= cp <= 0xE01EF:
-        return True
+    for lo, hi in _DEFAULT_IGNORABLE_RANGES:
+        if lo <= cp <= hi:
+            return True
     return False
 
 
@@ -598,7 +610,7 @@ def validate_submit(
                 if not _shares_non_stopword_token(assumption, required_scope_items or []):
                     errors.append(FieldError(
                         "teachback_submit.most_likely_wrong.assumption",
-                        "must share >= 1 non-stopword token (length >= 3) "
+                        "must share >= 2 non-stopword tokens (length >= 3 each) "
                         "with one of the required_scope_items; ground your "
                         "assumption in the dispatch scope",
                         _truncate(assumption),

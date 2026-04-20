@@ -412,6 +412,283 @@ class TestNormalizeCfCounterTestByRevert:
         )
 
 
+# Cycle 5 architectural tightening: round-4 security probe F-R4-SEC-1
+# demonstrated that cycle-4's ``Cf-category + VS1-VS256`` approximation
+# missed 11+ default-ignorable codepoints outside category Cf that
+# could still splice into a scanned_candidate and bypass the
+# substring-inequality check. The fix replaces the approximation with
+# an explicit enumeration of Unicode ``Default_Ignorable_Code_Point``
+# ranges per ``DerivedCoreProperties.txt``.
+#
+# Cases below cover every codepoint added to the enumeration that was
+# NOT covered by the cycle-4 predicate — CGJ (Mn), Hangul fillers
+# (Lo), Khmer inherent vowels (Lo), Mongolian FVS/VS (Mn), reserved
+# unassigned (Cn) — plus probes from new ranges (shorthand format,
+# musical symbols).
+_CYCLE5_MISSING_CASES = [
+    ("\u034f", "COMBINING GRAPHEME JOINER"),
+    ("\u115f", "HANGUL CHOSEONG FILLER"),
+    ("\u1160", "HANGUL JUNGSEONG FILLER"),
+    ("\u3164", "HANGUL FILLER"),
+    ("\uffa0", "HALFWIDTH HANGUL FILLER"),
+    ("\u17b4", "KHMER VOWEL INHERENT AQ"),
+    ("\u17b5", "KHMER VOWEL INHERENT AA"),
+    ("\u180b", "MONGOLIAN FREE VARIATION SELECTOR ONE"),
+    ("\u180c", "MONGOLIAN FREE VARIATION SELECTOR TWO"),
+    ("\u180d", "MONGOLIAN FREE VARIATION SELECTOR THREE"),
+    ("\u180f", "MONGOLIAN FREE VARIATION SELECTOR FOUR"),
+]
+
+
+# Additional new-range probes — codepoints inside ranges that cycle-4
+# did not enumerate at all. Each asserts the range-scan reaches the
+# interior, not just boundary codepoints.
+_CYCLE5_NEW_RANGE_CASES = [
+    ("\u061c", "ARABIC LETTER MARK"),
+    ("\ufff0", "reserved U+FFF0 (DI Cn)"),
+    ("\ufff8", "reserved U+FFF8 (DI Cn)"),
+    ("\U0001bca0", "SHORTHAND FORMAT LETTER OVERLAP"),
+    ("\U0001bca3", "SHORTHAND FORMAT UP STEP"),
+    ("\U0001d173", "MUSICAL SYMBOL BEGIN BEAM"),
+    ("\U0001d17a", "MUSICAL SYMBOL END PHRASE"),
+]
+
+
+class TestDefaultIgnorablePredicateCycle5:
+    """Cycle 5 architectural fix for round-4 convergent Blocking
+    (security F-R4-SEC-1): the definitive Unicode
+    ``Default_Ignorable_Code_Point`` enumeration replaces cycle-4's
+    ``Cf + VS`` approximation. These tests assert the predicate itself
+    recognizes every previously-missing codepoint, independent of the
+    `_normalize` pipeline.
+    """
+
+    @pytest.mark.parametrize("codepoint,label", _CYCLE5_MISSING_CASES)
+    def test_cycle4_gap_codepoint_is_default_ignorable(self, codepoint, label):
+        assert tv._is_default_ignorable(codepoint) is True, (
+            f"{label} ({codepoint!r} / U+{ord(codepoint):04X}) is NOT "
+            f"recognized as default-ignorable — this was the class of "
+            f"gap F-R4-SEC-1 exploited"
+        )
+
+    @pytest.mark.parametrize("codepoint,label", _CYCLE5_NEW_RANGE_CASES)
+    def test_newly_enumerated_range_codepoint_is_default_ignorable(
+        self, codepoint, label,
+    ):
+        assert tv._is_default_ignorable(codepoint) is True, (
+            f"{label} ({codepoint!r}) is not recognized by the range "
+            f"scanner — a new range is mis-enumerated"
+        )
+
+    def test_ranges_monotone_and_non_overlapping(self):
+        """Structural invariant on `_DEFAULT_IGNORABLE_RANGES`: each
+        tuple is (lo, hi) with lo <= hi, and the ranges are sorted by
+        lo with no overlap. A regression here would mean a future edit
+        broke the enumeration invariants quietly — the predicate would
+        still work but the data would be ambiguous."""
+        ranges = tv._DEFAULT_IGNORABLE_RANGES
+        assert len(ranges) > 0
+        prev_hi = -1
+        for lo, hi in ranges:
+            assert lo <= hi, f"inverted range ({lo:#x}, {hi:#x})"
+            assert lo > prev_hi, (
+                f"overlap or out-of-order: prev_hi={prev_hi:#x}, "
+                f"current lo={lo:#x}"
+            )
+            prev_hi = hi
+
+
+class TestNormalizeStripsCycle5Codepoints:
+    """Integration: every cycle-5 enumerated codepoint must be stripped
+    by `_normalize` — both interior and at string boundaries. Mirrors
+    the cycle-4 ``TestNormalizeCfCategoryDenylist`` shape so the same
+    discipline applies to the wider denylist.
+    """
+
+    @pytest.mark.parametrize(
+        "codepoint,label",
+        _CYCLE5_MISSING_CASES + _CYCLE5_NEW_RANGE_CASES,
+    )
+    def test_codepoint_stripped_by_normalize(self, codepoint, label):
+        baseline = "sessiontoken"
+        injected = f"session{codepoint}token"
+        assert _normalize(injected) == baseline, (
+            f"DI codepoint {codepoint!r} ({label}) was not stripped by "
+            f"_normalize — cycle-5 enumeration is incomplete"
+        )
+
+    @pytest.mark.parametrize(
+        "codepoint,label",
+        _CYCLE5_MISSING_CASES + _CYCLE5_NEW_RANGE_CASES,
+    )
+    def test_codepoint_stripped_at_boundaries(self, codepoint, label):
+        baseline = "session"
+        assert _normalize(f"{codepoint}session") == baseline
+        assert _normalize(f"session{codepoint}") == baseline
+        assert _normalize(f"{codepoint}session{codepoint}") == baseline
+
+
+class TestScannedCandidateDistinctCycle5Bypass:
+    """End-to-end adversarial live-repro of F-R4-SEC-1. The round-4
+    security finding showed that splicing any previously-missing DI
+    codepoint (CGJ, Hangul fillers, Mongolian VS, Khmer inherent
+    vowels) into a copied candidate rendered identically to the
+    teammate's assumption but substring-differed structurally — passing
+    the `_scanned_candidate_distinct` rubber-stamp blocker. This class
+    parametrizes the exact task-spec adversarial over every gap
+    codepoint + new-range probe to prove each is now blocked.
+    """
+
+    @pytest.mark.parametrize(
+        "codepoint,label",
+        _CYCLE5_MISSING_CASES + _CYCLE5_NEW_RANGE_CASES,
+    )
+    def test_di_injected_candidate_is_caught(self, codepoint, label):
+        victim = "the bug is in foo"
+        # Splice DI codepoint inside a word so the visual-identical
+        # rendering still holds (per task spec live-repro).
+        attacker = f"the bu{codepoint}g is in foo"
+        assert _scanned_candidate_distinct(attacker, victim) is False, (
+            f"{label} ({codepoint!r}) spliced into candidate did NOT "
+            f"trip the substring-inequality check — F-R4-SEC-1 bypass "
+            f"class still open"
+        )
+
+    def test_combined_cycle5_codepoints_caught(self):
+        """Multi-class splice: CGJ + Hangul filler + Mongolian FVS +
+        Khmer inherent vowel in a single candidate, one per previously
+        un-covered DI class. Ensures the strip survives composition."""
+        victim = "the session token middleware validates expiry"
+        attacker = (
+            f"the session\u034f token\u115f middleware\u180b "
+            f"validates\u17b4 expiry"
+        )
+        assert _scanned_candidate_distinct(attacker, victim) is False
+
+
+class TestNormalizeCycle5ForwardCompat:
+    """Forward-compat negative probes for the cycle-5 enumeration.
+    Characters that visually resemble invisibles or that sit near DI
+    ranges but are NOT in the DI set must survive normalization —
+    expanding the strip blast-radius is the failure mode this cycle
+    is correcting, not repeating.
+    """
+
+    def test_cyrillic_homoglyphs_still_distinct(self):
+        """Cyrillic 'е' (U+0435) is Ll — must NOT be stripped even
+        though it renders identically to Latin 'e'. The gate leaves
+        them distinguishable so `_scanned_candidate_distinct` correctly
+        flags a Cyrillic-mixed candidate as different from a pure-Latin
+        submit."""
+        assert _normalize("session") != _normalize("s\u0435ssion")
+
+    @pytest.mark.parametrize("codepoint,label", [
+        ("\u2010", "HYPHEN"),
+        ("\u2011", "NON-BREAKING HYPHEN (folds to U+2010 via NFKC)"),
+    ])
+    def test_hyphen_family_preserved(self, codepoint, label):
+        """U+2010 / U+2011 are Pd (Punctuation, Dash) — NOT in the DI
+        set. They survive the strip; NFKC folds U+2011 -> U+2010 by
+        canonical compatibility."""
+        out = _normalize(f"session{codepoint}token")
+        assert "\u2010" in out, (
+            f"{label} was unexpectedly stripped from _normalize output"
+        )
+
+    def test_mathematical_alphanumerics_fold_via_nfkc(self):
+        """MATHEMATICAL BOLD CAPITAL A (U+1D400) is Lu — NOT in the DI
+        set. NFKC folds it to ASCII 'a' (after lowercasing). The
+        observable result is the NFKC fold, not a DI strip."""
+        assert _normalize("\U0001d400") == "a"
+
+    def test_emoji_preserved(self):
+        """Rocket emoji (U+1F680) is So — not DI. Must survive."""
+        assert "\U0001f680" in _normalize("rocket \U0001f680 ship")
+
+    def test_non_di_codepoints_adjacent_to_ranges_preserved(self):
+        """Boundary-adjacent codepoints just outside each range must
+        NOT be stripped. Catches off-by-one errors in the enumeration.
+        """
+        # U+0350 is the codepoint after CGJ (U+034F). Category Mn but
+        # NOT in the DI set. The range scanner must not over-match.
+        assert tv._is_default_ignorable("\u0350") is False
+        # U+17B6 is just past the Khmer inherent-vowel range
+        # (U+17B4-U+17B5). Category Mc — not DI.
+        assert tv._is_default_ignorable("\u17b6") is False
+        # U+1BC9F is just before the SHORTHAND FORMAT range
+        # (U+1BCA0-U+1BCA3). Must not pre-match.
+        assert tv._is_default_ignorable("\U0001bc9f") is False
+        # U+E1000 is just past the TAG+VS block (U+E0000-U+E0FFF).
+        # Unassigned (Cn) but NOT in the DI set — scanner must not
+        # extend past the upper bound.
+        assert tv._is_default_ignorable("\U000e1000") is False
+
+
+class TestCycle5CounterTestByRevert:
+    """Counter-test-by-revert: if the cycle-5 enumeration is reverted
+    to the cycle-4 ``Cf + VS`` approximation, the newly-covered
+    codepoints MUST fail. Spot-check discipline — 2 representative
+    codepoints drawn from different Unicode categories (Mn + Lo)
+    prove the widening is load-bearing, without exploding the test
+    matrix by parameterizing over every range removal.
+    """
+
+    def test_revert_to_cycle4_approximation_fails_cgj(self, monkeypatch):
+        """CGJ (U+034F, Mn category) was missed by cycle-4's Cf-category
+        test. Monkeypatching the predicate back to the cycle-4 form
+        must let CGJ slip — proving the Mn widening is load-bearing.
+        """
+        import unicodedata as _ud
+
+        def cycle4_predicate(c: str) -> bool:
+            if _ud.category(c) == "Cf":
+                return True
+            cp = ord(c)
+            if 0xFE00 <= cp <= 0xFE0F:
+                return True
+            if 0xE0100 <= cp <= 0xE01EF:
+                return True
+            return False
+
+        monkeypatch.setattr(tv, "_is_default_ignorable", cycle4_predicate)
+
+        baseline = "sessiontoken"
+        injected = "session\u034ftoken"  # CGJ
+        assert _normalize(injected) != baseline, (
+            "Cycle-4 predicate unexpectedly stripped CGJ — test cannot "
+            "prove that CGJ's explicit inclusion is load-bearing"
+        )
+
+    def test_revert_to_cycle4_approximation_fails_hangul_filler(
+        self, monkeypatch,
+    ):
+        """U+3164 HANGUL FILLER is Lo (Letter, other) — neither Cf nor
+        a variation selector. Reverting the predicate to cycle-4 must
+        let HANGUL FILLER slip through, confirming the Lo widening is
+        load-bearing.
+        """
+        import unicodedata as _ud
+
+        def cycle4_predicate(c: str) -> bool:
+            if _ud.category(c) == "Cf":
+                return True
+            cp = ord(c)
+            if 0xFE00 <= cp <= 0xFE0F:
+                return True
+            if 0xE0100 <= cp <= 0xE01EF:
+                return True
+            return False
+
+        monkeypatch.setattr(tv, "_is_default_ignorable", cycle4_predicate)
+
+        baseline = "sessiontoken"
+        injected = "session\u3164token"  # HANGUL FILLER
+        assert _normalize(injected) != baseline, (
+            "Cycle-4 predicate unexpectedly stripped HANGUL FILLER — "
+            "test cannot prove Lo-category coverage is load-bearing"
+        )
+
+
 class TestScannedCandidateDistinctCfBypass:
     """End-to-end adversarial coverage: injecting a Cf-category
     codepoint into a copy-pasted candidate must NOT bypass the
