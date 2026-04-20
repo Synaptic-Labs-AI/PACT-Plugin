@@ -100,11 +100,31 @@ def _resolve_project_claude_md(file_path_str: str) -> Optional[Path]:
 def _count_pin_comments(text: str) -> int:
     """Count occurrences of the pin-comment marker `<!-- pinned:`.
 
+    Opportunistic managed-region bounding (Arch-M3): if `text` contains
+    PACT_MANAGED_START/END markers (i.e. it is a full CLAUDE.md file or
+    a Write payload), count only within the managed region. This closes
+    the bypass where decoy `<!-- pinned:` tokens in user-authored prose
+    or code blocks outside the managed region would inflate the count
+    and either falsely block (add-shape) or falsely allow (archival).
+
+    If no managed markers are present (fragment from Edit.old_string /
+    Edit.new_string), count on the full input — Edit fragments are
+    structurally inside the section being mutated, so bounding is
+    unnecessary and would miss legitimate pin comments.
+
     Conservative substring count — case-sensitive per the canonical
     CLAUDE.md form. Fail-open: non-str input returns 0.
     """
     if not isinstance(text, str):
         return 0
+    try:
+        from shared.claude_md_manager import extract_managed_region
+        region_result = extract_managed_region(text)
+        if region_result is not None:
+            region_text, _ = region_result
+            return region_text.count("<!-- pinned:")
+    except Exception:  # noqa: BLE001 — fail-open to full-text count
+        pass
     return text.count("<!-- pinned:")
 
 
