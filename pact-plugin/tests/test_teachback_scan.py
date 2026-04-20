@@ -169,12 +169,28 @@ class TestClassifyTaskState:
         assert reason == ""
         assert state == "active"
 
-    def test_approved_missing_conditions_met_active(self):
-        # approved present but no conditions_met key → treat as empty unaddressed → active
+    def test_approved_missing_conditions_met_invalid_submit(self):
+        # Cycle 2 F2 tightening: approved present but no conditions_met
+        # key (or non-dict conditions_met) classifies as invalid_submit,
+        # NOT silently-active. Malformed approved must fail the
+        # structural-triage check; the downstream full validator also
+        # catches this, but F2 restores scanner-layer fail-safe.
         meta = {"teachback_approved": {"verdict": "ok"}}
         reason, state = _classify_task_state(meta, "full")
-        assert reason == ""
-        assert state == "active"
+        assert reason == "invalid_submit"
+        assert state == "teachback_pending"
+
+    def test_approved_non_dict_conditions_met_invalid_submit(self):
+        # Cycle 2 F2: conditions_met present but non-dict type →
+        # invalid_submit. Covers list / string / None.
+        for non_dict in (None, [], "not-a-dict", 42):
+            meta = {"teachback_approved": {"conditions_met": non_dict}}
+            reason, state = _classify_task_state(meta, "full")
+            assert reason == "invalid_submit", (
+                f"non-dict conditions_met={non_dict!r} should classify as "
+                "invalid_submit, not active"
+            )
+            assert state == "teachback_pending"
 
     def test_approved_with_unaddressed_auto_downgrade(self):
         meta = {
@@ -274,13 +290,40 @@ class TestScanTeachbackStateCarveOuts:
         result = scan_teachback_state("coder-1", "pact-test", tasks_base_dir=str(tmp_path))
         assert result["all_active"] is True
 
-    def test_skipped_bypasses(self, tmp_path):
+    def test_completion_type_signal_bypasses(self, tmp_path):
+        # Parallels test_blocker_type_bypasses for the sibling carve-out
+        # branch at teachback_scan.py:222 (completion_type == "signal").
+        # Reverting that branch must break this test (counter-test-by-revert).
         team_dir = tmp_path / "pact-test"
         team_dir.mkdir(parents=True)
         _write_task(team_dir, "1", "coder-1",
-                     metadata={"skipped": True, "variety": _valid_variety()})
+                     metadata={"completion_type": "signal", "variety": _valid_variety()})
+        result = scan_teachback_state("coder-1", "pact-test", tasks_base_dir=str(tmp_path))
+        assert result["all_active"] is True
+
+    @pytest.mark.parametrize("metadata_key", ["skipped", "stalled", "terminated"])
+    def test_terminal_flag_bypasses(self, tmp_path, metadata_key):
+        # Each branch of the `skipped or stalled or terminated` predicate at
+        # teachback_scan.py:224 must independently trigger the carve-out.
+        # Reverting any single branch must break its parametrized case.
+        team_dir = tmp_path / "pact-test"
+        team_dir.mkdir(parents=True)
+        _write_task(team_dir, "1", "coder-1",
+                     metadata={metadata_key: True, "variety": _valid_variety()})
         assert scan_teachback_state("coder-1", "pact-test",
                                      tasks_base_dir=str(tmp_path))["all_active"] is True
+
+    def test_bare_teachback_state_field_is_ignored(self):
+        # F1 positive assertion: a self-attested `teachback_state` field
+        # without any teachback_submit / teachback_approved / teachback_corrections
+        # content must NOT short-circuit classification. Content-presence
+        # precedence (STATE-MACHINE.md invariant #1) wins. Adding a
+        # `metadata.teachback_state == "active"` short-circuit in
+        # _classify_task_state must break this test.
+        metadata = {"teachback_state": "active"}
+        reason, state = _classify_task_state(metadata, "simplified")
+        assert reason == "missing_submit"
+        assert state == "teachback_pending"
 
 
 class TestScanTeachbackStateAllMatch:
