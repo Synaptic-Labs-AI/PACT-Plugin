@@ -459,6 +459,21 @@ A list of things that include the following:
 
 When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
 
+**Structured `teachback_approved` at every dispatch.** Every teachback
+approval, regardless of task variety, produces the structured
+`teachback_approved` metadata via `TaskUpdate` (with `scanned_candidate`,
+`response_to_assumption`, `response_to_least_confident`, `first_action_check`,
+and `conditions_met` sub-fields). Writing the structured form is how you
+genuinely engage with the teammate's teachback — the substring-inequality,
+citation-shape, and grounding-reference requirements force actual reading
+rather than rubber-stamp approval. The variety-7 threshold means that below
+it, the structured form is not mechanically enforced; at or above it, the
+gate adds a second layer. In either regime, the structured form IS the
+canonical practice at every dispatch. If a teammate sent a bare-text
+teachback without the structured `teachback_submit` metadata, reply via
+`SendMessage` asking them to re-submit via `TaskUpdate` — the structured
+form is what you respond to.
+
 #### Expected Agent HANDOFF Format
 
 Every agent delivers a structured HANDOFF stored in task metadata. Read via `TaskGet(taskId).metadata.handoff` when needed:
