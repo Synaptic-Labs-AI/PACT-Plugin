@@ -174,6 +174,40 @@ class TestPinCapsAdversarial_RationaleUtf8Boundary:
         assert pins[0].override_rationale is None
 
 
+class TestPinCapsAdversarial_LineTerminatorInjection_SecF5b:
+    """Sec-F5b regression: U+2028, U+2029, U+0085, \\r in override_rationale
+    MUST be neutralized. These Unicode line terminators are latent risks
+    for prompt-injection and comment-boundary spoofing — a rationale
+    rendered into LLM context should never span logical lines.
+
+    Acceptance: sanitizer either STRIPS the terminators (keeping rationale
+    truthy, minus the forbidden chars) or REJECTS the entire rationale
+    (override_rationale is None). Both neutralize the risk; test asserts
+    the forbidden characters do NOT survive in the final rationale.
+    """
+
+    @pytest.mark.parametrize("forbidden_char,name", [
+        ("\u2028", "U+2028 line separator"),
+        ("\u2029", "U+2029 paragraph separator"),
+        ("\u0085", "U+0085 next line"),
+        ("\r", "carriage return"),
+    ])
+    def test_forbidden_line_terminator_neutralized(self, forbidden_char, name):
+        from pin_caps import parse_pins
+        payload = f"injected{forbidden_char}second line"
+        content = (
+            f"<!-- pinned: 2026-04-20, pin-size-override: {payload} -->\n"
+            "### Entry\nBody.\n"
+        )
+        pins = parse_pins(content)
+        rationale = pins[0].override_rationale
+        # Either rejected outright (None) or stripped of the forbidden char.
+        if rationale is not None:
+            assert forbidden_char not in rationale, (
+                f"{name} survived in override_rationale={rationale!r}"
+            )
+
+
 class TestPinCapsAdversarial_StalenessInline:
     """STALE marker embedded inline mid-body still detected."""
 
