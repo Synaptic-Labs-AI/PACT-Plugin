@@ -25,7 +25,7 @@ teammate_idle.py — where stdin is optimization-only and disk is the
 authoritative source.
 
 Rationale for the discipline (see full investigation at
-docs/investigations/2026-04-20-task-created-stdin-probe.md):
+pact-plugin/reference/task-created-stdin-investigation.md):
 
   1. Empirical probe observation of TaskCreated stdin shape was
      ATTEMPTED by backend-coder-1 (copied the Commit #0 probe to the
