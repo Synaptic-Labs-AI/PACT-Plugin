@@ -550,3 +550,159 @@ class TestPinStalenessGate_Archival:
             },
         })
         assert result is None
+
+
+class TestPinStalenessGate_DecoyBypass:
+    """Arch-M3 managed-region bounding of `_count_pin_comments`.
+
+    Load-bearing coverage for the bounded-count defense at
+    `pin_staleness_gate.py:120-127` (extract_managed_region import
+    block). Before this defense, a `<!-- pinned:` token appearing in
+    user-authored prose or a fenced code block OUTSIDE the managed
+    region would inflate the gate's count and either:
+      - falsely BLOCK a legitimate pin edit (add-shape), or
+      - falsely ALLOW a net-new pin while an outside decoy was
+        simultaneously archived (same full-text count, different
+        structural reality).
+
+    Counter-test-by-revert: commenting out the try-block at
+    `pin_staleness_gate.py:120-127` (so `_count_pin_comments` always
+    falls through to `text.count(...)`) MUST cause at least one test
+    here to fail. Without that proof, the defense is phantom-green.
+    """
+
+    def test_decoy_outside_region_does_not_inflate_count(self, gate_env):
+        """Write with same in-region pin count + new OUTSIDE decoy → allow.
+
+        Current on-disk file: 1 pin inside the managed region, 0 decoys
+        outside. Write payload: 1 pin inside the managed region, 1
+        decoy `<!-- pinned:` in user-authored prose AFTER
+        MANAGED_END_MARKER.
+
+        Arch-M3 bounded count: both current and new see exactly 1 pin
+        → no ADD → allow. Reverted (full-text) count: current=1,
+        new=2 → ADD → deny.
+
+        If this test fails after reverting the bounding, the defense
+        is load-bearing.
+        """
+        from shared.claude_md_manager import MANAGED_END_MARKER
+        env = gate_env(marker_present=True)
+        current = env["claude_md"].read_text(encoding="utf-8")
+        # Inject the decoy AFTER the managed-region end marker — this
+        # lives in user-authored prose territory where outside-region
+        # tokens must be ignored by the gate.
+        assert MANAGED_END_MARKER in current
+        decoy_outside = (
+            "\n## User Notes\n\n"
+            "Here is some prose explaining what `<!-- pinned: 2020-01-01 -->` "
+            "used to mean in the legacy format.\n"
+        )
+        replacement = current + decoy_outside
+        # Sanity: the decoy is structurally outside the managed region.
+        end_idx = replacement.find(MANAGED_END_MARKER)
+        decoy_idx = replacement.rfind("<!-- pinned:")
+        assert decoy_idx > end_idx, (
+            "decoy must be after MANAGED_END_MARKER for this test to exercise "
+            "the outside-region code path"
+        )
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": replacement,
+            },
+        })
+        assert result is None, (
+            "Outside-region decoy inflated count — Arch-M3 bounding bypassed. "
+            "If you see this failure after reverting pin_staleness_gate.py "
+            "lines 120-127, that is the counter-test proof the defense is "
+            "load-bearing."
+        )
+
+    def test_add_inside_while_removing_decoy_outside_still_denies(
+        self, gate_env
+    ):
+        """In-region ADD while outside decoy is removed → must DENY.
+
+        Symmetry probe: the full-text count is unchanged (1 → 1), but
+        the structural count inside the managed region goes 1 → 2.
+        Arch-M3 bounding detects the real ADD; the reverted full-text
+        count would see net-zero and allow (false-allow).
+
+        Current: 1 in-region pin + 1 outside decoy (total=2).
+        New:     2 in-region pins + 0 outside decoys (total=2).
+        """
+        from shared.claude_md_manager import MANAGED_END_MARKER
+        env = gate_env(marker_present=True)
+        original = env["claude_md"].read_text(encoding="utf-8")
+        assert MANAGED_END_MARKER in original
+        # Seed the current file with an outside-region decoy.
+        seeded = original + (
+            "\n## User Notes\n\n"
+            "Legacy reference: `<!-- pinned: 2020-01-01 -->` in prose.\n"
+        )
+        env["claude_md"].write_text(seeded, encoding="utf-8")
+        # Build replacement: add a second pin INSIDE the managed
+        # region, and drop the outside decoy entirely.
+        new_pin = "<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n\n"
+        replacement = original.replace(
+            "## Working Memory\n",
+            f"{new_pin}## Working Memory\n",
+        )
+        # Sanity: full-text counts unchanged across seeded vs replacement.
+        assert seeded.count("<!-- pinned:") == replacement.count(
+            "<!-- pinned:"
+        ), "full-text count must match so the revert sees no ADD"
+        # Sanity: bounded counts differ (1 → 2).
+        from shared.claude_md_manager import extract_managed_region
+        seeded_region_text, _ = extract_managed_region(seeded)
+        replacement_region_text, _ = extract_managed_region(replacement)
+        assert seeded_region_text.count("<!-- pinned:") == 1
+        assert replacement_region_text.count("<!-- pinned:") == 2
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": replacement,
+            },
+        })
+        assert result is not None, (
+            "In-region ADD masked by outside decoy removal — Arch-M3 bounding "
+            "bypassed. If you see this failure after reverting "
+            "pin_staleness_gate.py lines 120-127, that is the counter-test "
+            "proof the defense is load-bearing."
+        )
+        assert "stale pins" in result
+
+    def test_edit_fragment_without_markers_uses_full_text_count(
+        self, gate_env
+    ):
+        """Edit fragment (no markers) falls through to full-text count.
+
+        Edit.old_string and Edit.new_string are typically raw fragments
+        that do not carry the PACT_MANAGED_START/END markers — they are
+        structurally INSIDE the managed region by virtue of the section
+        being edited. `_count_pin_comments` must fall through to
+        `text.count(...)` on these, otherwise a net-new pin added via
+        Edit would be invisible (extract_managed_region returns None →
+        bounded count = 0 for both old and new → no ADD → phantom-allow).
+
+        This test pins the else-branch behavior of
+        `_count_pin_comments`: when MANAGED_START_MARKER is absent,
+        count the full input. Currently exercised via a direct
+        `_count_pin_comments` assertion (no gate call needed — the
+        Edit ADD path is covered by test_edit_adding_new_pin_denied).
+        """
+        import pin_staleness_gate
+        gate_env(marker_present=True)
+        old_fragment = "### Existing\nbody\n"
+        new_fragment = "<!-- pinned: 2026-04-20 -->\n### New\nbody\n"
+        # Neither fragment contains MANAGED_START_MARKER.
+        from shared.claude_md_manager import MANAGED_START_MARKER
+        assert MANAGED_START_MARKER not in old_fragment
+        assert MANAGED_START_MARKER not in new_fragment
+        # Fall-through to full-text count MUST return the literal
+        # count of `<!-- pinned:` in the fragment.
+        assert pin_staleness_gate._count_pin_comments(old_fragment) == 0
+        assert pin_staleness_gate._count_pin_comments(new_fragment) == 1
