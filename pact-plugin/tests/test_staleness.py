@@ -1178,3 +1178,50 @@ class TestPinCapsTwinCopyDrift:
             "skills/pact-memory/scripts/working_memory.py — update both "
             "in the same commit"
         )
+
+    def test_forbidden_line_terminator_chars_twins_match(self):
+        """Line-terminator char set MUST agree across the two gates.
+
+        Cycle-7 introduced a CLI-side refusal (check_pin_caps.py
+        `_FORBIDDEN_RATIONALE_CHARS`) that mirrors the parser-side
+        sanitization table (pin_caps.py `_FORBIDDEN_TERMINATOR_TABLE`).
+        Both represent the same logical char set (U+000A, U+000D,
+        U+0085, U+2028, U+2029) but are expressed in different forms:
+          - pin_caps: str.maketrans translate table (ordinal → None)
+          - check_pin_caps: plain string for `in` membership check
+
+        Drift risk: if a new line-terminator code point is added to
+        one side (e.g., U+000B VERTICAL TAB at the parser for defensive
+        cleanup) but NOT to the CLI, the asymmetry reopens the very
+        bypass surface Cycle-7 Commit 2 closed. The CLI would accept a
+        rationale containing the new terminator while the parser
+        silently strips it — back to the silent-mutation state.
+
+        Derivation: decode both to a common `set[str]` form and require
+        equality. The test fails loudly with both sides enumerated so a
+        drifter sees exactly what changed.
+        """
+        import pin_caps
+        # check_pin_caps lives under scripts/, not hooks/ — add to path
+        # locally so this test doesn't mutate module-level sys.path for
+        # other classes.
+        scripts_dir = Path(__file__).parent.parent / "scripts"
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            import check_pin_caps
+        finally:
+            # Leave sys.path tidy even if import fails.
+            sys.path.remove(str(scripts_dir))
+
+        parser_chars = set(chr(k) for k in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys())
+        cli_chars = set(check_pin_caps._FORBIDDEN_RATIONALE_CHARS)
+
+        assert parser_chars == cli_chars, (
+            "Line-terminator char-set drift between pin_caps."
+            "_FORBIDDEN_TERMINATOR_TABLE (parser sanitization) and "
+            "check_pin_caps._FORBIDDEN_RATIONALE_CHARS (CLI refusal). "
+            f"parser has: {sorted(parser_chars)!r} / "
+            f"CLI has: {sorted(cli_chars)!r}. Update both in the same "
+            "commit — asymmetric handling reopens the Cycle-7 bypass "
+            "(CLI accepts what parser silently strips)."
+        )
