@@ -31,6 +31,7 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -112,8 +113,13 @@ def _count_pin_comments(text: str) -> int:
     structurally inside the section being mutated, so bounding is
     unnecessary and would miss legitimate pin comments.
 
-    Conservative substring count — case-sensitive per the canonical
-    CLAUDE.md form. Fail-open: non-str input returns 0.
+    Case-insensitive (Test-F3): parse_pins and OVERRIDE_COMMENT_RE both
+    match with re.IGNORECASE, so `<!-- PINNED:` or `<!-- Pinned:` bodies
+    would parse as valid pins. A case-sensitive substring count here
+    would under-count those variants, letting the gate falsely allow an
+    ADD that drives true pin count above the cap. Use re.findall with an
+    inline (?i) flag on both branches to keep the count in lockstep with
+    the parser. Fail-open: non-str input returns 0.
     """
     if not isinstance(text, str):
         return 0
@@ -122,10 +128,10 @@ def _count_pin_comments(text: str) -> int:
         region_result = extract_managed_region(text)
         if region_result is not None:
             region_text, _ = region_result
-            return region_text.count("<!-- pinned:")
+            return len(re.findall(r"(?i)<!-- pinned:", region_text))
     except Exception:  # noqa: BLE001 — fail-open to full-text count
         pass
-    return text.count("<!-- pinned:")
+    return len(re.findall(r"(?i)<!-- pinned:", text))
 
 
 def _is_add_shaped_edit(tool_input: dict, claude_md_path: Path) -> bool:
