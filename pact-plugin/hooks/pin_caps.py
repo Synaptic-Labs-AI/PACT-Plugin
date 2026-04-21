@@ -95,7 +95,7 @@ class Pin(NamedTuple):
 class CapViolation(NamedTuple):
     """A cap-enforcement refusal result."""
 
-    kind: Literal["count", "size", "stale", "embedded_pin"]
+    kind: Literal["count", "size", "stale", "embedded_pin", "empty", "invalid_override"]
     detail: str
     offending_pin_chars: Optional[int]
     current_count: Optional[int]

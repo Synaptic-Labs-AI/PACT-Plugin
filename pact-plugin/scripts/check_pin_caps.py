@@ -227,8 +227,19 @@ def _main_inner(argv=None):
     # ingestion path: the script consumes sys.stdin.read() and treats it
     # as the pin body only — it is NEVER parsed as argv or evaluated.
     new_body = args.new_body
+    stdin_empty_refusal = False
     if args.body_from_stdin:
         new_body = sys.stdin.read()
+        # Refuse empty-or-whitespace stdin BEFORE running the cap check.
+        # A 0-char pin has no informational content and would collapse to
+        # empty under `_extract_body_chars` anyway; accepting it would
+        # burn a slot on nothing. `new_body.strip()` falsiness is the
+        # uniform predicate for "" and any all-whitespace variant.
+        # Defer the actual emission until after _resolve_pins so the
+        # refusal payload carries accurate slot_status + evictable_pins,
+        # matching the shape of the count/size/embedded_pin refusals.
+        if not new_body.strip():
+            stdin_empty_refusal = True
 
     pins, fail_reason = _resolve_pins()
     if fail_reason is not None:
@@ -241,6 +252,24 @@ def _main_inner(argv=None):
 
     slot_status = format_slot_status(pins)
     evictable_pins = _build_evictable_pins(pins)
+
+    if stdin_empty_refusal:
+        # Import CapViolation lazily to avoid module-level coupling: the
+        # type is imported only on this refusal path, not on every invocation.
+        from pin_caps import CapViolation  # noqa: WPS433
+        empty_violation = CapViolation(
+            kind="empty",
+            detail="body is empty or whitespace-only; refuse 0-char pin add",
+            offending_pin_chars=0,
+            current_count=len(pins),
+        )
+        _emit(
+            allowed=False,
+            violation=empty_violation,
+            slot_status=slot_status,
+            evictable_pins=evictable_pins,
+        )
+        return 1
 
     if args.status or new_body is None:
         # Status query or no body provided — emit current state, no check.

@@ -174,6 +174,12 @@ def check_pin_stale_block_directive() -> Optional[str]:
         return None
 
     try:
+        # Arch M3: do NOT hoist these imports to module top. pin_staleness_gate
+        # itself imports `from pin_caps import parse_pins` at its module top,
+        # and session_init already eagerly imports pin_caps. Hoisting here
+        # would force pin_staleness_gate to load on every SessionStart even
+        # when no stale-block signal fires — wasted work on the hot path.
+        # Keeping the import lazy scopes the cost to the post-signal branch.
         from shared.pact_context import get_session_dir
         from pin_staleness_gate import PIN_STALENESS_MARKER_NAME
         session_dir = get_session_dir()
