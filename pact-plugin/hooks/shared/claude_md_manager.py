@@ -1173,3 +1173,54 @@ def _build_migrated_content(content: str) -> str:
         parts.extend(["\n", user_text, "\n"])
 
     return "".join(parts)
+
+
+def match_project_claude_md(file_path_str: str) -> Path | None:
+    """Match a tool-input file_path against the canonical project CLAUDE.md.
+
+    Returns the canonical resolved path if `file_path_str` points at the
+    project's CLAUDE.md (either `.claude/CLAUDE.md` or the legacy
+    `./CLAUDE.md`), otherwise None. Intended for PreToolUse gates that
+    need to short-circuit on non-CLAUDE.md targets.
+
+    Relative `file_path_str` values are anchored against
+    CLAUDE_PROJECT_DIR (Back-M3/Sec-F4): `Path.resolve()` on a relative
+    path uses cwd, and a hook's cwd can drift (worktree switches,
+    subprocess invocations). The env var is the stable anchor the plugin
+    sets on every session. If CLAUDE_PROJECT_DIR is unset, relative
+    input returns None — safer than a silent cwd dependency.
+
+    Worktree-safe: imports `staleness.get_project_claude_md_path` lazily
+    to avoid circular-import and module-load cost on every Edit/Write.
+    That function already handles env-var / git-root / cwd fallbacks.
+
+    Fail-safe: any OSError / RuntimeError while resolving returns None.
+    Callers treat None as "not our target; let the tool through."
+    """
+    if not file_path_str:
+        return None
+
+    try:
+        from staleness import get_project_claude_md_path
+    except ImportError:
+        return None
+
+    project_md = get_project_claude_md_path()
+    if project_md is None:
+        return None
+
+    try:
+        target_path = Path(file_path_str)
+        if not target_path.is_absolute():
+            project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+            if not project_dir:
+                return None
+            target_path = Path(project_dir) / target_path
+        target = target_path.resolve()
+        canonical = project_md.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    if target != canonical:
+        return None
+    return canonical

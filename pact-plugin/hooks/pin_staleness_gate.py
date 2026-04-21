@@ -30,12 +30,11 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
 """
 
 import json
-import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import shared.pact_context as pact_context
+from shared import match_project_claude_md
 from pin_caps import parse_pins
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -52,50 +51,6 @@ _DENY_REASON = (
 )
 
 _GATED_TOOLS = frozenset({"Edit", "Write"})
-
-
-def _resolve_project_claude_md(file_path_str: str) -> Optional[Path]:
-    """Return the canonical project CLAUDE.md path if `file_path_str`
-    resolves to it, otherwise None.
-
-    Relative `file_path_str` values are resolved against CLAUDE_PROJECT_DIR
-    (Back-M3/Sec-F4): Path.resolve() on a relative path uses cwd, and the
-    hook's cwd can drift (worktree switches, subprocess invocations). The
-    env var is the stable anchor the plugin sets on every session.
-
-    Worktree-safe: imports staleness.get_project_claude_md_path lazily to
-    avoid module-level import cost on every Edit/Write call.
-    """
-    if not file_path_str:
-        return None
-
-    try:
-        from staleness import get_project_claude_md_path
-    except ImportError:
-        return None
-
-    project_md = get_project_claude_md_path()
-    if project_md is None:
-        return None
-
-    try:
-        target_path = Path(file_path_str)
-        if not target_path.is_absolute():
-            # Anchor relative paths to CLAUDE_PROJECT_DIR (Back-M3). Fall
-            # back to cwd only if env var is unset, and treat that as a
-            # no-match rather than a silent cwd dependency.
-            project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-            if not project_dir:
-                return None
-            target_path = Path(project_dir) / target_path
-        target = target_path.resolve()
-        canonical = project_md.resolve()
-    except (OSError, RuntimeError):
-        return None
-
-    if target != canonical:
-        return None
-    return canonical
 
 
 def _count_pin_comments(text: str) -> int:
@@ -228,7 +183,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
         return None
 
     file_path_str = tool_input.get("file_path", "")
-    claude_md_path = _resolve_project_claude_md(file_path_str)
+    claude_md_path = match_project_claude_md(file_path_str)
     if claude_md_path is None:
         return None
 
