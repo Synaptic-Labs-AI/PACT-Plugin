@@ -173,7 +173,9 @@ AskUserQuestion(questions=[{
 ```
 
 On "Compress": rewrite and re-run Step 1.
-On "Add override": re-run Step 1 with `--has-override`. The pin MUST be added with the extended comment form:
+On "Add override": re-run Step 1 with `--has-override --override-rationale "<rationale>"`. The CLI validates the rationale in-band against `OVERRIDE_COMMENT_RE` and refuses (`violation.kind == "invalid_override"`) if the rationale is empty, over `OVERRIDE_RATIONALE_MAX` (120 chars), or contains the HTML comment terminator `-->`. This catches malformed rationales at add-time rather than having the next-session parser silently downgrade them to no-override.
+
+The pin MUST be added with the extended comment form:
 
 ```markdown
 <!-- pinned: YYYY-MM-DD, pin-size-override: RATIONALE -->
@@ -182,6 +184,10 @@ On "Add override": re-run Step 1 with `--has-override`. The pin MUST be added wi
 ```
 
 Rationale is trimmed whitespace, non-empty, ≤ 120 chars. Strict parser: empty or malformed rationale → treated as no override.
+
+### Invalid-override refusal (`violation.kind == "invalid_override"`)
+
+The CLI refused the rationale (empty, oversize, or contains `-->`). Correct the rationale and re-run Step 1 with `--has-override --override-rationale "<fixed rationale>"`.
 
 On "Cancel add": report and exit.
 

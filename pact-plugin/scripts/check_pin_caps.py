@@ -98,6 +98,8 @@ _staleness = _load_hook_module("staleness")
 check_add_allowed = _pin_caps.check_add_allowed
 format_slot_status = _pin_caps.format_slot_status
 parse_pins = _pin_caps.parse_pins
+OVERRIDE_COMMENT_RE = _pin_caps.OVERRIDE_COMMENT_RE
+OVERRIDE_RATIONALE_MAX = _pin_caps.OVERRIDE_RATIONALE_MAX
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
 
@@ -221,6 +223,16 @@ def _main_inner(argv=None):
         action="store_true",
         help="Proposed pin carries a valid pin-size-override rationale",
     )
+    parser.add_argument(
+        "--override-rationale",
+        default=None,
+        help=(
+            "Optional rationale text for the pin-size-override comment. "
+            "When provided, the CLI validates it in-band against "
+            "OVERRIDE_COMMENT_RE and refuses if malformed or oversize. "
+            "Pass alongside --has-override."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Resolve the new body from stdin if requested. Stdin is a distinct
@@ -240,6 +252,40 @@ def _main_inner(argv=None):
         # matching the shape of the count/size/embedded_pin refusals.
         if not new_body.strip():
             stdin_empty_refusal = True
+
+    # Validate --override-rationale shape in-band via OVERRIDE_COMMENT_RE.
+    # Two-gate defense: (1) the parser strips invalid overrides at read
+    # time, but (2) catching malformed rationales at add time gives the
+    # curator a same-session error they can correct, instead of a silent
+    # downgrade to no-override on next session. Refuse if the constructed
+    # comment does not round-trip through OVERRIDE_COMMENT_RE.fullmatch
+    # OR if the rationale exceeds OVERRIDE_RATIONALE_MAX.
+    invalid_override_reason = None
+    if args.override_rationale is not None:
+        rationale = args.override_rationale.strip()
+        if not rationale:
+            invalid_override_reason = "rationale is empty or whitespace-only"
+        elif len(rationale) > OVERRIDE_RATIONALE_MAX:
+            invalid_override_reason = (
+                f"rationale is {len(rationale)} chars "
+                f"(max: {OVERRIDE_RATIONALE_MAX})"
+            )
+        else:
+            # Synthesize the full comment and round-trip through
+            # OVERRIDE_COMMENT_RE. A rationale containing `-->` would
+            # prematurely terminate the HTML comment AND fail this match
+            # (the rationale pattern refuses `-->` by construction), so
+            # an attempted injection is caught here rather than at parse
+            # time. Any ISO date is fine — we only care about the
+            # rationale slot validating.
+            synthetic = (
+                f"<!-- pinned: 2026-04-21, pin-size-override: {rationale} -->"
+            )
+            if OVERRIDE_COMMENT_RE.fullmatch(synthetic) is None:
+                invalid_override_reason = (
+                    "rationale contains disallowed characters "
+                    "(e.g. HTML comment terminator `-->`)"
+                )
 
     pins, fail_reason = _resolve_pins()
     if fail_reason is not None:
@@ -266,6 +312,23 @@ def _main_inner(argv=None):
         _emit(
             allowed=False,
             violation=empty_violation,
+            slot_status=slot_status,
+            evictable_pins=evictable_pins,
+        )
+        return 1
+
+    if invalid_override_reason is not None:
+        from pin_caps import CapViolation  # noqa: WPS433
+        _emit(
+            allowed=False,
+            violation=CapViolation(
+                kind="invalid_override",
+                detail=(
+                    f"--override-rationale refused: {invalid_override_reason}"
+                ),
+                offending_pin_chars=None,
+                current_count=len(pins),
+            ),
             slot_status=slot_status,
             evictable_pins=evictable_pins,
         )
