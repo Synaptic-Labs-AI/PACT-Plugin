@@ -155,19 +155,39 @@ class TestPinStalenessGate_MarkerPresent:
         assert "stale pins" in result
 
     def test_write_increasing_pin_count_denied(self, gate_env):
-        """Write replacement with MORE pin comments than current → deny."""
+        """Write replacement with MORE pin comments than current → deny.
+
+        The replacement injects the new pin comment INSIDE the managed
+        region (before `## Working Memory`) so the Arch-M3 bounding in
+        `_count_pin_comments` (via extract_managed_region) observes the
+        increase. Appending the pin AFTER `<!-- PACT_MANAGED_END -->`
+        would be ignored by the bounded count — the gate would allow
+        and this test would pass for the wrong reason (phantom-green).
+        """
         env = gate_env(marker_present=True)
         current = env["claude_md"].read_text(encoding="utf-8")
         # current has exactly 1 pin (from make_claude_md_with_pins in fixture);
-        # build a replacement with 2 pins.
+        # build a replacement with 2 pins INSIDE the managed region.
+        new_pin = "<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n\n"
+        replacement = current.replace(
+            "## Working Memory\n",
+            f"{new_pin}## Working Memory\n",
+        )
+        # Sanity: the replacement actually differs and the new pin is
+        # inside the managed region.
+        assert replacement != current
+        from shared.claude_md_manager import extract_managed_region
+        region_result = extract_managed_region(replacement)
+        assert region_result is not None, (
+            "phantom-green guard: factory must emit canonical markers"
+        )
+        region_text, _ = region_result
+        assert region_text.count("<!-- pinned:") == 2
         result = _call_gate({
             "tool_name": "Write",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "content": (
-                    current
-                    + "\n<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n"
-                ),
+                "content": replacement,
             },
         })
         assert result is not None
@@ -329,15 +349,21 @@ class TestPinStalenessGate_MainDenyPath:
         import pin_staleness_gate
         env = gate_env(marker_present=True)
         current = env["claude_md"].read_text(encoding="utf-8")
-        # Write adds a net-new pin comment → ADD shape → deny.
+        # Write adds a net-new pin comment INSIDE the managed region →
+        # ADD shape under Arch-M3 bounding → deny. Appending outside the
+        # managed region would be ignored by the bounded count (see
+        # test_write_increasing_pin_count_denied rationale).
+        new_pin = "<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n\n"
+        replacement = current.replace(
+            "## Working Memory\n",
+            f"{new_pin}## Working Memory\n",
+        )
+        assert replacement != current
         monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({
             "tool_name": "Write",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "content": (
-                    current
-                    + "\n<!-- pinned: 2026-04-20 -->\n### New Pin\nbody\n"
-                ),
+                "content": replacement,
             },
         })))
         with pytest.raises(SystemExit) as exc_info:

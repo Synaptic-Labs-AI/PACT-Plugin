@@ -651,17 +651,31 @@ def make_claude_md_with_pins(entries: list[str]) -> str:
     wraps all plugin-managed content. Pinned Context lives inside the
     managed region so pin_caps.parse_pins + staleness._parse_pinned_section
     both read it via _extract_managed_region.
+
+    Emits the canonical marker strings imported from
+    shared.claude_md_manager so future marker revisions propagate
+    automatically. A literal like `<!-- PACT_MANAGED_START -->` does NOT
+    match the canonical form (which carries the
+    `: Managed by pact-plugin - do not edit this block` suffix) and would
+    cause extract_managed_region() to return None — silently bypassing
+    the managed-region-bounding defense on every consumer.
     """
+    from shared.claude_md_manager import (
+        MANAGED_END_MARKER,
+        MANAGED_START_MARKER,
+        MEMORY_END_MARKER,
+        MEMORY_START_MARKER,
+    )
     pinned_body = make_pinned_section(entries)
     return (
         "# PACT Framework and Managed Project Memory\n"
         "\n"
-        "<!-- PACT_MANAGED_START -->\n"
-        "<!-- PACT_MEMORY_START -->\n"
+        f"{MANAGED_START_MARKER}\n"
+        f"{MEMORY_START_MARKER}\n"
         "## Pinned Context\n"
         "\n"
         f"{pinned_body}"
         "## Working Memory\n"
-        "<!-- PACT_MEMORY_END -->\n"
-        "<!-- PACT_MANAGED_END -->\n"
+        f"{MEMORY_END_MARKER}\n"
+        f"{MANAGED_END_MARKER}\n"
     )
