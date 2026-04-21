@@ -61,13 +61,13 @@ from .merge_guard_common import (
 from .error_output import hook_error_json
 from .gh_helpers import check_pr_state
 from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
+# Intentional-wait public API surface: only the two top-level predicates
+# most consumers need are re-exported. validate_wait, canonical_since,
+# KNOWN_REASONS, KNOWN_RESOLVERS, and DEFAULT_THRESHOLD_MINUTES remain
+# module-only — `from shared.intentional_wait import X` for those.
 from .intentional_wait import (
-    canonical_since,
-    validate_wait,
+    should_silence_stall_nag,
     wait_stale,
-    DEFAULT_THRESHOLD_MINUTES,
-    KNOWN_REASONS,
-    KNOWN_RESOLVERS,
 )
 from .session_state import (
     SAFE_PATH_COMPONENT_RE,
@@ -126,12 +126,8 @@ __all__ = [
     "check_pr_state",
     "PACT_AGENTS",
     "SYSTEM_TASK_PREFIXES",
-    "canonical_since",
-    "validate_wait",
+    "should_silence_stall_nag",
     "wait_stale",
-    "DEFAULT_THRESHOLD_MINUTES",
-    "KNOWN_REASONS",
-    "KNOWN_RESOLVERS",
     "SAFE_PATH_COMPONENT_RE",
     "is_safe_path_component",
     "BOOTSTRAP_MARKER_NAME",

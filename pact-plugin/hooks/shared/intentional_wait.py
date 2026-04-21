@@ -1,13 +1,22 @@
 """
 Location: pact-plugin/hooks/shared/intentional_wait.py
-Summary: Metadata schema and staleness predicate for the `intentional_wait`
-         task-metadata flag. Used by both TeammateIdle hooks to distinguish
-         protocol-defined waits from genuine stalls.
-Used by: teammate_completion_gate.py, teammate_idle.py (detect_stall)
+Summary: Unified silencer predicates for TeammateIdle hooks, plus the
+         `intentional_wait` metadata schema and staleness check.
+Used by: teammate_completion_gate.py, teammate_idle.py (detect_stall),
+         handoff_gate.py (is_signal_task only — handoff gating MUST NOT
+         honor intentional_wait; AC #8).
 
-Contract: pure functions; never raises. `wait_stale` returns True (stale /
-invalid) on any parse error so that a malformed flag fails open to the
-normal nag path — a broken flag must not silently suppress stall detection.
+Contract: pure functions; never raise. Malformed flags fail loud — e.g.
+`wait_stale` returns True on any parse error so a broken flag cannot
+silently suppress stall detection.
+
+Public predicates:
+- is_signal_task(task): True iff task is a blocker/algedonic signal task.
+- should_silence_stall_nag(task): True iff a TeammateIdle nag should be
+  suppressed for this task (signal-task OR stalled OR fresh intentional_wait).
+- wait_stale(wait_metadata): True iff an intentional_wait flag is stale.
+- validate_wait(wait_metadata): True iff the flag is well-formed.
+- canonical_since(): canonical ISO-8601 UTC timestamp for the `since` field.
 """
 
 from datetime import datetime, timezone
@@ -112,3 +121,67 @@ def wait_stale(
     now = _now or datetime.now(timezone.utc)
     age_minutes = (now - since).total_seconds() / 60
     return age_minutes >= threshold_minutes
+
+
+# Signal-task types. Single source of truth — the literal tuple must not
+# appear elsewhere in pact-plugin/hooks/ (enforced by
+# test_intentional_wait.py::test_signal_task_literal_lives_in_helper_only).
+_SIGNAL_TASK_TYPES = ("blocker", "algedonic")
+
+
+def is_signal_task(task: Any) -> bool:
+    """
+    Return True iff the task is a blocker/algedonic signal task.
+
+    Signal tasks are carve-outs across the hook surface: they bypass HANDOFF
+    validation (handoff_gate) and silence the TeammateIdle nag
+    (detect_stall, _scan_owned_tasks). Pure predicate on metadata.type —
+    does NOT consider `stalled` or `intentional_wait`.
+
+    Accepts any input and returns False on non-dict / missing metadata —
+    never raises.
+    """
+    if not isinstance(task, dict):
+        return False
+    metadata = task.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return metadata.get("type") in _SIGNAL_TASK_TYPES
+
+
+def should_silence_stall_nag(
+    task: Any,
+    threshold_minutes: int = DEFAULT_THRESHOLD_MINUTES,
+    _now: datetime | None = None,
+) -> bool:
+    """
+    Return True iff a TeammateIdle nag should be suppressed for this task.
+
+    Silenced when any of:
+    - task is a blocker/algedonic signal (is_signal_task), OR
+    - metadata.stalled is truthy (already-marked stall — don't re-alert), OR
+    - metadata.intentional_wait is set AND not stale (fresh protocol-defined wait).
+
+    Used by both TeammateIdle hooks (teammate_idle.py::detect_stall and
+    teammate_completion_gate.py::_scan_owned_tasks) as the single source of
+    truth for the nag-suppression predicate. handoff_gate.py must NOT call
+    this — AC #8 requires handoff validation to survive `intentional_wait`.
+
+    Accepts any input and returns False on non-dict / missing metadata —
+    never raises.
+    """
+    if is_signal_task(task):
+        return True
+    # is_signal_task validated isinstance(task, dict) and dict-metadata —
+    # safe to re-access.
+    if not isinstance(task, dict):
+        return False
+    metadata = task.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("stalled"):
+        return True
+    wait = metadata.get("intentional_wait")
+    if wait is not None and not wait_stale(wait, threshold_minutes, _now):
+        return True
+    return False

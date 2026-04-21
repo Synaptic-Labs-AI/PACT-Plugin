@@ -34,7 +34,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
-from shared.intentional_wait import wait_stale
+from shared.intentional_wait import should_silence_stall_nag
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.task_utils import get_task_list
@@ -118,18 +118,11 @@ def detect_stall(
     if task.get("status") != "in_progress":
         return None
 
-    # Check if this is a stalled task (not a signal/blocker task)
-    metadata = task.get("metadata", {})
-    if metadata.get("type") in ("blocker", "algedonic"):
-        return None
-    if metadata.get("stalled"):
-        # Already marked as stalled — don't re-alert
-        return None
-    # Protocol-defined wait (e.g., awaiting_teachback_approved): the nag
-    # would consume the idle slot the teammate needs for inbox delivery,
-    # livelocking the wait. Threshold-bounded — stale flag re-enables nag.
-    wait = metadata.get("intentional_wait")
-    if wait is not None and not wait_stale(wait):
+    # Unified silencer: signal-task carve-outs + already-stalled skip +
+    # protocol-defined wait (intentional_wait). Single source of truth in
+    # shared/intentional_wait.py; handoff_gate.py honors a narrower slice
+    # via is_signal_task (AC #8 — cannot honor intentional_wait).
+    if should_silence_stall_nag(task):
         return None
 
     task_id = task.get("id", "?")

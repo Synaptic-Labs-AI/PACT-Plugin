@@ -282,12 +282,238 @@ class TestModuleConstants:
         assert {"lead", "peer", "user", "external"} <= KNOWN_RESOLVERS
 
     def test_reexports_from_shared_package(self):
-        from shared import (
+        # Top-level re-exports are the minimal public API: the two predicates
+        # consumers need. Vocabulary + format helpers stay module-only to keep
+        # the shared package namespace small.
+        from shared import should_silence_stall_nag, wait_stale
+        from shared.intentional_wait import (
             canonical_since,
             validate_wait,
-            wait_stale,
             DEFAULT_THRESHOLD_MINUTES,
             KNOWN_REASONS,
             KNOWN_RESOLVERS,
         )
         assert DEFAULT_THRESHOLD_MINUTES == 30
+
+
+# --- prose-vs-code drift pin ----------------------------------------------
+
+class TestSkillMdProseSnippetConformance:
+    """Drift-pin: the SKILL.md prose snippet for `since` must stay in lockstep
+    with code semantics. If prose says "use datetime.now(timezone.utc).isoformat(
+    timespec='seconds')" but validate_wait later rejects that output (or
+    wait_stale classifies it stale), teammates will follow the prose and hit
+    silent nag-resume. Execute the prose snippet verbatim and assert.
+    """
+
+    def test_prose_snippet_output_is_fresh_and_valid(self):
+        from shared.intentional_wait import validate_wait, wait_stale
+
+        # Verbatim the SKILL.md "Protocol Waits" prose snippet:
+        since_value = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        payload = {
+            "reason": "awaiting_teachback_approved",
+            "expected_resolver": "lead",
+            "since": since_value,
+        }
+        assert validate_wait(payload) is True
+        assert wait_stale(payload) is False
+
+
+# --- is_signal_task -------------------------------------------------------
+
+class TestIsSignalTask:
+    def test_blocker_is_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task({"metadata": {"type": "blocker"}}) is True
+
+    def test_algedonic_is_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task({"metadata": {"type": "algedonic"}}) is True
+
+    def test_other_type_is_not_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task({"metadata": {"type": "handoff"}}) is False
+        assert is_signal_task({"metadata": {"type": "approval"}}) is False
+
+    def test_missing_type_is_not_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task({"metadata": {}}) is False
+
+    def test_missing_metadata_is_not_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task({}) is False
+
+    def test_non_dict_is_not_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task(None) is False
+        assert is_signal_task("blocker") is False
+        assert is_signal_task(42) is False
+        assert is_signal_task([]) is False
+
+    def test_non_dict_metadata_is_not_signal(self):
+        from shared.intentional_wait import is_signal_task
+
+        assert is_signal_task({"metadata": None}) is False
+        assert is_signal_task({"metadata": "blocker"}) is False
+
+
+# --- should_silence_stall_nag --------------------------------------------
+
+class TestShouldSilenceStallNag:
+    def test_signal_task_is_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag({"metadata": {"type": "blocker"}}) is True
+        assert should_silence_stall_nag({"metadata": {"type": "algedonic"}}) is True
+
+    def test_stalled_is_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag({"metadata": {"stalled": True}}) is True
+
+    def test_fresh_intentional_wait_is_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag(
+            {"metadata": {"intentional_wait": _fresh_wait()}}
+        ) is True
+
+    def test_stale_intentional_wait_is_not_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        now = datetime(2026, 4, 21, 16, 0, 0, tzinfo=timezone.utc)
+        stale_wait = _fresh_wait(
+            since=_iso(now - timedelta(minutes=31)),
+        )
+        assert should_silence_stall_nag(
+            {"metadata": {"intentional_wait": stale_wait}}, _now=now
+        ) is False
+
+    def test_malformed_intentional_wait_is_not_silenced(self):
+        # A malformed flag fails loud: wait_stale returns True → no silence
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag(
+            {"metadata": {"intentional_wait": {"reason": "x"}}}
+        ) is False
+
+    def test_empty_metadata_is_not_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag({"metadata": {}}) is False
+
+    def test_missing_metadata_is_not_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag({}) is False
+
+    def test_non_dict_is_not_silenced(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag(None) is False
+        assert should_silence_stall_nag("stalled") is False
+        assert should_silence_stall_nag([]) is False
+
+    def test_signal_takes_precedence_over_everything(self):
+        """Signal-task silences even if stalled=False and no intentional_wait."""
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag(
+            {"metadata": {"type": "blocker", "stalled": False}}
+        ) is True
+
+    def test_multiple_triggers_still_silences(self):
+        """Any one trigger is sufficient; multiple are fine."""
+        from shared.intentional_wait import should_silence_stall_nag
+
+        assert should_silence_stall_nag(
+            {"metadata": {"type": "algedonic", "stalled": True,
+                          "intentional_wait": _fresh_wait()}}
+        ) is True
+
+    def test_custom_threshold_respected(self):
+        from shared.intentional_wait import should_silence_stall_nag
+
+        now = datetime(2026, 4, 21, 16, 0, 0, tzinfo=timezone.utc)
+        wait = _fresh_wait(since=_iso(now - timedelta(minutes=10)))
+        # 10 min elapsed; threshold=5 → stale → not silenced;
+        # threshold=15 → fresh → silenced
+        assert should_silence_stall_nag(
+            {"metadata": {"intentional_wait": wait}},
+            threshold_minutes=5, _now=now,
+        ) is False
+        assert should_silence_stall_nag(
+            {"metadata": {"intentional_wait": wait}},
+            threshold_minutes=15, _now=now,
+        ) is True
+
+
+# --- structural drift-pin: signal-task literal lives in exactly one place --
+
+class TestSignalTaskLiteralPin:
+    """Structural guardrail: the `("blocker", "algedonic")` tuple-literal
+    (and its private module constant) must live only in
+    shared/intentional_wait.py. If a consumer file reintroduces the literal
+    inline, the cross-hook silencer asymmetry can silently return.
+
+    Scope: the three refactored hook files (detect_stall, _scan_owned_tasks,
+    handoff_gate). Out-of-scope for this PR: session_resume.py:525 and
+    task_utils.py:184 (preparer §2.7 inventory, follow-up refactor).
+    """
+
+    def test_signal_task_literal_lives_in_helper_only(self):
+        import re
+        from pathlib import Path
+
+        hooks_root = Path(__file__).parent.parent / "hooks"
+        # Literal tuple in code form — both single-quote and double-quote variants.
+        pattern = re.compile(
+            r"""\(\s*["']blocker["']\s*,\s*["']algedonic["']\s*\)"""
+        )
+
+        # Scope the scan to the three refactored hook files. Other sites
+        # (session_resume.py:525, task_utils.py:184) are out of scope per
+        # task #18 description and remain on the preparer §2.7 follow-up list.
+        refactored_files = [
+            hooks_root / "teammate_idle.py",
+            hooks_root / "teammate_completion_gate.py",
+            hooks_root / "handoff_gate.py",
+        ]
+
+        offenders = []
+        for path in refactored_files:
+            text = path.read_text(encoding="utf-8")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if pattern.search(line):
+                    offenders.append(f"{path.name}:{line_no}: {line.strip()}")
+
+        assert not offenders, (
+            "Signal-task literal tuple must not appear in refactored hook files. "
+            "Use shared.intentional_wait.is_signal_task instead.\n"
+            + "\n".join(offenders)
+        )
+
+    def test_signal_task_literal_present_in_helper_module(self):
+        """Complement: assert the literal IS present in the helper — a
+        pure removal test could pass after deletion of the helper logic.
+        """
+        from pathlib import Path
+        import re
+
+        helper = Path(__file__).parent.parent / "hooks" / "shared" / "intentional_wait.py"
+        text = helper.read_text(encoding="utf-8")
+        pattern = re.compile(
+            r"""\(\s*["']blocker["']\s*,\s*["']algedonic["']\s*\)"""
+        )
+        matches = pattern.findall(text)
+        assert len(matches) >= 1, (
+            "Expected the signal-task literal tuple in shared/intentional_wait.py "
+            "(as _SIGNAL_TASK_TYPES); found zero."
+        )

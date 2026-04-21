@@ -1229,22 +1229,28 @@ class TestIntentionalWaitAC11BlockedByStillNags:
 
 
 class TestIntentionalWaitSharedThresholdContract:
-    """Row 27: both hooks import wait_stale from the same shared module.
+    """Row 27: both hooks share the same silencer predicate.
 
     Regression guard against duplicate-constant drift. If someone later
-    inlines the threshold into one hook, the two hooks could diverge on
-    staleness cutoff — this test pins that they import the same symbol.
+    inlines the threshold or a skip condition into one hook, the two hooks
+    could diverge on silencer semantics — this test pins that they import
+    the same `should_silence_stall_nag` symbol. (Updated from pinning
+    `wait_stale` directly when F1 unified the three adjacent skips into a
+    single helper.)
     """
 
-    def test_both_hooks_share_wait_stale_import(self):
-        """Same wait_stale object reached via both hook modules' import graphs."""
+    def test_both_hooks_share_silencer_import(self):
+        """Same should_silence_stall_nag object reached via both hook modules."""
         import teammate_idle
         import teammate_completion_gate
 
-        # Both modules import the same function object
-        assert teammate_idle.wait_stale is teammate_completion_gate.wait_stale, (
-            "Row 27: hooks must share a single wait_stale — divergence creates "
-            "inconsistent staleness semantics across the parallel-fired hooks"
+        assert (
+            teammate_idle.should_silence_stall_nag
+            is teammate_completion_gate.should_silence_stall_nag
+        ), (
+            "Row 27: hooks must share a single should_silence_stall_nag — "
+            "divergence creates inconsistent silencer semantics across the "
+            "parallel-fired hooks"
         )
 
     def test_shared_default_threshold_is_30(self):
