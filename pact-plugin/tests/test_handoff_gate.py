@@ -927,3 +927,171 @@ class TestReadTaskOwnerCorruptedJson:
         result = read_task_owner("42", "pact-test", tasks_base_dir=str(tmp_path))
 
         assert result is None
+
+
+# =============================================================================
+# #497 AC #8 — handoff_gate MUST NOT honor intentional_wait
+# =============================================================================
+
+from datetime import datetime, timedelta, timezone
+
+
+def _iw_payload(fresh=True):
+    now = datetime.now(timezone.utc)
+    since = now - (timedelta(seconds=60) if fresh else timedelta(hours=2))
+    return {
+        "reason": "awaiting_teachback_approved",
+        "expected_resolver": "lead",
+        "since": since.isoformat(timespec="seconds"),
+    }
+
+
+class TestIntentionalWaitDoesNotBleedIntoHandoffGate:
+    """AC #8: handoff_gate enforces HANDOFF completeness regardless of any
+    intentional_wait flag. The wait flag is a TeammateIdle-hook concept,
+    not a TaskCompleted-hook concept — a teammate cannot escape HANDOFF
+    enforcement by setting intentional_wait before calling
+    TaskUpdate(status=completed).
+    """
+
+    def test_empty_metadata_plus_fresh_wait_still_blocked(self):
+        """Row 19: empty HANDOFF (dict lacks `handoff` key) + fresh wait
+        -> still blocked. Wait flag does not bypass HANDOFF enforcement."""
+        from handoff_gate import validate_task_handoff
+
+        result = validate_task_handoff(
+            task_metadata={"intentional_wait": _iw_payload(fresh=True)},
+            teammate_name="backend-coder",
+        )
+        assert result is not None, (
+            "AC #8: intentional_wait must NOT bleed into completion gating"
+        )
+        assert "handoff" in result.lower()
+
+    def test_stale_wait_plus_empty_handoff_also_blocked(self):
+        """Row 19 variant: stale wait doesn't change behavior either."""
+        from handoff_gate import validate_task_handoff
+
+        result = validate_task_handoff(
+            task_metadata={"intentional_wait": _iw_payload(fresh=False)},
+            teammate_name="backend-coder",
+        )
+        assert result is not None
+        assert "handoff" in result.lower()
+
+    def test_incomplete_handoff_plus_fresh_wait_still_blocked(self):
+        """Row 20: HANDOFF missing a required field + fresh wait -> blocked."""
+        from handoff_gate import validate_task_handoff
+
+        incomplete = {k: v for k, v in VALID_HANDOFF.items() if k != "produced"}
+        result = validate_task_handoff(
+            task_metadata={
+                "handoff": incomplete,
+                "intentional_wait": _iw_payload(fresh=True),
+            },
+            teammate_name="backend-coder",
+        )
+        assert result is not None
+        assert "produced" in result
+
+    def test_complete_handoff_plus_fresh_wait_allowed(self):
+        """Row 21: Complete HANDOFF allows completion regardless of wait state.
+
+        The wait flag has no effect on a correctly-completed task. This is
+        the intended behavior — intentional_wait lives on the idle/stall
+        axis, not the completion/handoff axis.
+        """
+        from handoff_gate import validate_task_handoff
+
+        result = validate_task_handoff(
+            task_metadata={
+                "handoff": VALID_HANDOFF,
+                "intentional_wait": _iw_payload(fresh=True),
+            },
+            teammate_name="backend-coder",
+        )
+        assert result is None
+
+    def test_handoff_gate_source_does_not_import_wait_stale(self):
+        """Row 22 (structural): handoff_gate.py does NOT import wait_stale.
+
+        Guards AC #8 at the module level — if someone later wires
+        intentional_wait awareness into handoff_gate, this test flips RED
+        and forces an explicit architecture review.
+        """
+        import handoff_gate
+
+        assert not hasattr(handoff_gate, "wait_stale"), (
+            "AC #8: handoff_gate must not reference wait_stale. Adding it "
+            "would let teammates bypass HANDOFF enforcement by setting "
+            "intentional_wait before completing the task."
+        )
+
+
+class TestHandoffGateMainBypassGuards:
+    """Main-entry integration: even a well-formed intentional_wait on a task
+    with no HANDOFF blocks completion at the hook boundary (exit 2).
+    """
+
+    def test_main_blocks_completion_with_wait_and_no_handoff(self, capsys):
+        """End-to-end AC #8: exit 2 when teammate tries to complete without HANDOFF
+        even with a fresh intentional_wait set."""
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "42",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+
+        # Owner present, only intentional_wait in metadata — no handoff key.
+        task_data = {
+            "owner": "backend-coder",
+            "metadata": {"intentional_wait": _iw_payload(fresh=True)},
+        }
+
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("sys.stdin", io.StringIO(input_data)):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2, (
+            "AC #8: handoff_gate must block completion without HANDOFF, "
+            "regardless of intentional_wait"
+        )
+        captured = capsys.readouterr()
+        assert "handoff" in captured.err.lower()
+
+    def test_main_allows_completion_with_handoff_and_wait(self, capsys):
+        """Complement: valid HANDOFF + memory_saved + wait -> exit 0 (allow).
+
+        Verifies the wait flag does NOT introduce any new failure path;
+        normal completion still works when all gates are satisfied.
+        """
+        from handoff_gate import main
+
+        input_data = json.dumps({
+            "task_id": "42",
+            "task_subject": "CODE: auth",
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+
+        task_data = {
+            "owner": "backend-coder",
+            "metadata": {
+                "handoff": VALID_HANDOFF,
+                "memory_saved": True,
+                "intentional_wait": _iw_payload(fresh=True),
+            },
+        }
+
+        with patch("handoff_gate._read_task_json", return_value=task_data), \
+             patch("sys.stdin", io.StringIO(input_data)), \
+             patch("handoff_gate.append_event") as mock_append:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_append.assert_called_once()
