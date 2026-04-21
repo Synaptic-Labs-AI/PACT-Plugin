@@ -50,23 +50,56 @@ Used by:
 """
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
-# Import from hooks/pin_caps and hooks/staleness (path resolution).
+# Load pin_caps and staleness from hooks/ via importlib spec-loading.
+# Historically this script did `sys.path.insert(0, hooks_dir)` which
+# prepends to sys.path, risking stdlib shadowing if a future file at
+# hooks/types.py / hooks/json.py / hooks/re.py etc. landed — a prepended
+# hooks dir would match BEFORE the stdlib, silently redirecting imports.
+# importlib spec-loading binds pin_caps + staleness by explicit file
+# path, not by name resolution against sys.path.
+#
+# staleness.py internally imports `from shared.claude_md_manager` and
+# `from pin_caps`. We handle both by:
+#   (a) loading pin_caps first and registering it in sys.modules so
+#       staleness's `from pin_caps` finds it without sys.path lookup;
+#   (b) APPENDING hooks_dir to sys.path (not prepending) so the `shared`
+#       subpackage resolves but stdlib retains priority on any name
+#       collision with a future hooks file.
 _HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
-sys.path.insert(0, str(_HOOKS_DIR))
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.append(str(_HOOKS_DIR))
 
-from pin_caps import (  # noqa: E402
-    check_add_allowed,
-    format_slot_status,
-    parse_pins,
-)
-from staleness import (  # noqa: E402
-    _parse_pinned_section,
-    get_project_claude_md_path,
-)
+
+def _load_hook_module(name: str):
+    """Load a module from hooks/ by explicit file path.
+
+    Registers the loaded module in sys.modules under `name` before
+    executing so that other modules loaded via this same helper can
+    resolve `from {name} import ...` against the already-loaded object.
+    """
+    module_path = _HOOKS_DIR / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, str(module_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {name} from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_pin_caps = _load_hook_module("pin_caps")
+_staleness = _load_hook_module("staleness")
+
+check_add_allowed = _pin_caps.check_add_allowed
+format_slot_status = _pin_caps.format_slot_status
+parse_pins = _pin_caps.parse_pins
+_parse_pinned_section = _staleness._parse_pinned_section
+get_project_claude_md_path = _staleness.get_project_claude_md_path
 
 
 def _build_evictable_pins(pins):
