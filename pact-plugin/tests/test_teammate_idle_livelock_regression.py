@@ -115,6 +115,8 @@ def _load_pre_fix_module(hook_name: str, tmp_path: Path) -> ModuleType:
 
     module_name = f"{hook_name}_prefix_v497"
     spec = importlib.util.spec_from_file_location(module_name, str(pre_fix_file))
+    assert spec is not None, f"Failed to create module spec for {pre_fix_file}"
+    assert spec.loader is not None, f"Module spec has no loader for {pre_fix_file}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
