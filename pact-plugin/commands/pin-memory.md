@@ -36,24 +36,41 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 ### Step 1 — Enforce caps (required, both modes)
 
 Before any pin add, MUST invoke the cap check CLI. Pass the candidate body
-via a **single-quoted heredoc** with `--body-from-stdin`. The
-single-quoted delimiter `<<'EOF_PIN_BODY'` is hard-rule mandatory — it
-disables ALL shell expansion inside the body (`$`, backticks, `$(...)`,
-`${...}`, `!` history substitution all remain literal). This is
-safe-by-construction regardless of whether the curator pre-assigns the
-body to a variable or inlines it directly in the heredoc, so it closes
-the inline-substitution RCE surface that `printf '%s' "$VAR"` leaves
-open when the body is inlined instead of variable-assigned:
+via a **single-quoted heredoc with a per-invocation random-suffix
+delimiter** and `--body-from-stdin`. Two defenses, both hard-rule mandatory:
+
+1. **Single-quoted delimiter** (`<<'...'`) disables ALL shell expansion
+   inside the body (`$`, backticks, `$(...)`, `${...}`, `!` history
+   substitution all remain literal). Closes the inline-substitution RCE
+   surface that `printf '%s' "$VAR"` leaves open when the body is
+   inlined instead of variable-assigned.
+2. **Per-invocation random suffix** on the delimiter name prevents
+   a candidate body containing the literal delimiter string from
+   terminating the heredoc early. A fixed `EOF_PIN_BODY` is a known,
+   grep-able token that an adversarial (or accidentally self-referential)
+   pin body could include verbatim, splitting the body into a truncated
+   prefix + post-heredoc shell command. A 4-byte hex nonce (32 bits,
+   ~1-in-4-billion collision per invocation) makes delimiter collision
+   infeasible:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override] <<'EOF_PIN_BODY'
+DELIM="EOF_PIN_BODY_$(openssl rand -hex 4)"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override] <<"${DELIM}"
 {candidate body literal text — no escaping, no substitution}
-EOF_PIN_BODY
+${DELIM}
 ```
 
-You MUST NOT drop the single quotes around `'EOF_PIN_BODY'`. An
-unquoted delimiter (`<<EOF_PIN_BODY`) re-enables shell expansion and
-reintroduces the injection surface.
+Note: the delimiter is quoted as `"${DELIM}"` on the opening line so the
+variable expands (to the random-suffixed name) BUT expansion inside the
+body is disabled because the delimiter ITSELF is quoted — bash checks
+for any quoting on the delimiter, not specifically single-quoting. Both
+`<<"${DELIM}"` and `<<'EOF_PIN_BODY'` suppress body expansion.
+
+You MUST NOT use an unquoted delimiter (`<<${DELIM}` or
+`<<EOF_PIN_BODY`) — that re-enables shell expansion and reintroduces the
+injection surface. You MUST NOT reuse a fixed delimiter across
+invocations — that reintroduces the literal-delimiter-in-body
+early-termination surface.
 
 The CLI emits JSON on stdout:
 
