@@ -392,6 +392,65 @@ class TestPinCapsGate_Matrix_Edit:
         )
         assert set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS) == set(parser_chars)
 
+    @pytest.mark.parametrize(
+        "terminator,ord_hex",
+        [
+            ("\n", "0x0a"),
+            ("\r", "0x0d"),
+            (" ", "0x2028"),
+            (" ", "0x2029"),
+            ("", "0x0085"),
+        ],
+    )
+    def test_splitlines_eats_forbidden_chars_before_validation(
+        self, terminator, ord_hex
+    ):
+        """Upstream-split invariant (per auditor-2 recommendation,
+        2026-04-21 consultant mode): Python's str.splitlines() recognizes
+        every char in `_FORBIDDEN_RATIONALE_CHARS` as a line boundary,
+        which is WHY the char check at `pin_caps_gate.py:148` is not
+        runtime-reachable in the current call graph.
+
+        `_extract_override_rationale` applies `splitlines()` and then
+        runs `OVERRIDE_COMMENT_RE.fullmatch` on each stripped line. A
+        forbidden char in the middle of what looks like a single override
+        comment splits the comment across two lines — neither line
+        fullmatches, so extraction returns None and
+        `_validate_override_rationale` is called with None (short-circuits
+        before reaching the char-check block).
+
+        This test asserts the load-bearing upstream-split behavior. If a
+        future refactor of `_extract_override_rationale` stops calling
+        splitlines (e.g., moves to a regex that scans the whole fragment
+        in one pass), this test fails loudly and the char-check block at
+        `pin_caps_gate.py:148` becomes the load-bearing defense. Converts
+        the latent dead-code tradeoff into a loud one.
+        """
+        # The canonical override-comment fragment, with a forbidden char
+        # injected mid-rationale.
+        candidate = (
+            f"<!-- pinned: 2026-04-20, "
+            f"pin-size-override: before{terminator}after -->"
+        )
+        parts = candidate.splitlines()
+        # At least two parts — splitlines recognized the terminator.
+        assert len(parts) >= 2, (
+            f"splitlines() did NOT split on {ord_hex} ({terminator!r}) — "
+            f"if this fails, the forbidden-char check at pin_caps_gate.py:148 "
+            f"has become runtime-reachable. Update the inline comment in "
+            f"that file and re-verify the char-check block is exercised."
+        )
+
+        # Downstream: the gate's extractor returns None (no override
+        # captured) because no single line fullmatches the OVERRIDE_COMMENT_RE.
+        from pin_caps_gate import _extract_override_rationale
+        result = _extract_override_rationale(candidate)
+        assert result is None, (
+            f"override extractor captured a rationale despite {ord_hex} "
+            f"splitting the line — extractor behavior has changed; "
+            f"review test_edit_override_with_line_terminator_never_accepted."
+        )
+
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
     def test_edit_teammate_bypass(self, gate_env, baseline):
         """Teammate session bypasses the gate regardless of baseline state."""
