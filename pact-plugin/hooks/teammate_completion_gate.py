@@ -87,6 +87,15 @@ def _scan_owned_tasks(
                 continue
 
             metadata = data.get("metadata", {})
+            # Mirror the metadata-keyed skips in teammate_idle.py::detect_stall
+            # (L122, L124): signal-task type, stalled flag. Without these,
+            # _scan_owned_tasks nagged on tasks the idle hook had correctly
+            # silenced — the cross-hook silencer asymmetry preparer flagged
+            # in §2.7 of the #497 preparation.
+            if metadata.get("type") in ("blocker", "algedonic"):
+                continue
+            if metadata.get("stalled"):
+                continue
             # Protocol-defined wait (e.g., awaiting_teachback_approved): the
             # completion-gate nag would consume the idle slot the teammate needs
             # for inbox delivery. Threshold-bounded — stale flag re-enables nag.
