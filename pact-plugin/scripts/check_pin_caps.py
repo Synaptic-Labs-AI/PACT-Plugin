@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
 """
-Check Pin Caps CLI Entry
+Check Pin Caps CLI Entry (advisory only — cycle-8 demotion)
 
 Location: pact-plugin/scripts/check_pin_caps.py
 
-Summary: Command-line entry point invoked by /PACT:pin-memory before any
-pin add or pin edit. Parses the project CLAUDE.md Pinned Context section
-via hooks/pin_caps.parse_pins, applies count + size cap predicates, and
-emits a JSON decision to stdout.
+Summary: Advisory CLI for the PACT pin-caps subsystem. Reports current
+slot status and the evictable-pin list so /PACT:prune-memory and status
+queries have a structured view of CLAUDE.md's pin state. This CLI does
+NOT enforce caps — enforcement lives in hooks/pin_caps_gate.py (cycle-8
+re-architecture #492). The curator sees cap violations as PreToolUse
+deny decisions, not exit codes from this script.
 
 Usage:
-  # Preferred — read pin body from stdin (shell-injection safe):
-  printf '%s' "$CANDIDATE_BODY" | python3 check_pin_caps.py --body-from-stdin [--has-override]
-
-  # Legacy — pass pin body as argv (retained for backward compatibility;
-  # callers SHOULD migrate to --body-from-stdin to avoid shell-quoting
-  # hazards on bodies containing control characters or shell metacharacters):
-  python3 check_pin_caps.py --new-body "pin body text" [--has-override]
-
-  # Status-only query (no add under consideration) — emits slot status
+  # Default (implicit --status)
+  python3 check_pin_caps.py
   python3 check_pin_caps.py --status
+  python3 check_pin_caps.py --list-evictable
 
-  --new-body, --body-from-stdin, and --status are mutually exclusive.
+All three forms emit the same JSON payload. `--list-evictable` is an
+alias carried for documentation clarity when a caller wants only the
+eviction list; callers should treat `--status` as the canonical name.
 
 JSON output contract (stdout):
   {
-    "allowed": bool,
-    "violation": {"kind": "count|size|stale|embedded_pin|empty|invalid_override",
-                  "detail": "...",
-                  "offending_pin_chars": int|null, "current_count": int|null}
-                 | null,
-    "slot_status": "Pin slots: N/12 used, ...",
+    "allowed": true,                       # always true (advisory only)
+    "violation": null,                     # always null (no enforcement)
+    "slot_status": "Pin slots: N/12 used, <N> chars remaining on largest pin",
     "evictable_pins": [
       {"index": int, "heading": str, "chars": int,
        "stale": bool, "override": bool}, ...
@@ -38,15 +33,28 @@ JSON output contract (stdout):
   }
 
 Exit codes:
-  0 — add allowed (or status query)
-  1 — add refused (cap violation)
-  2 — reserved: NEVER used by this CLI. Fail-open: any I/O or parse error
-      yields allowed=true with an informational slot_status so the
-      pin-memory flow degrades gracefully rather than DoS-ing the user.
+  0 — normal (status query or fail-open degradation)
+  2 — RESERVED: NEVER used. argparse's own internal `--help` / validation
+      errors exit 2 from inside argparse; we re-raise those but emit no
+      other exit-2 path. SACROSANCT fail-open: any read/parse fault
+      yields exit 0 with a "Pin slots: unknown (<reason>); proceeding"
+      slot_status so the user-facing /PACT:pin-memory command surfaces
+      the degradation reason instead of silently allowing.
+
+History: before cycle-8 this CLI was the primary cap enforcer, invoked
+via bash heredoc from /PACT:pin-memory. That surface had 7 cycles of
+shell-scaffolding hardening (heredoc quoting, nonce delimiters,
+argv-injection guards, override rationale in-band validation). Cycle-8
+moved enforcement to a PreToolUse hook, eliminating the shell-scaffolding
+surface by construction. The CLI retains the read-only status/listing
+role because /PACT:prune-memory and diagnostic tooling still need
+structured evictable-pin data without firing the hook gate.
 
 Used by:
-  - commands/pin-memory.md: bash step before pin add; branches on exit code
-  - Test files: tests/test_check_pin_caps.py
+  - commands/prune-memory.md (cycle-8): reads --status to paginate
+    evictable pins into AskUserQuestion options
+  - Diagnostic inspection during debugging
+  - Test files: tests/test_check_pin_caps.py (advisory-path coverage)
 """
 
 import argparse
@@ -95,28 +103,17 @@ def _load_hook_module(name: str):
 _pin_caps = _load_hook_module("pin_caps")
 _staleness = _load_hook_module("staleness")
 
-check_add_allowed = _pin_caps.check_add_allowed
 format_slot_status = _pin_caps.format_slot_status
 parse_pins = _pin_caps.parse_pins
-OVERRIDE_COMMENT_RE = _pin_caps.OVERRIDE_COMMENT_RE
-OVERRIDE_RATIONALE_MAX = _pin_caps.OVERRIDE_RATIONALE_MAX
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
-
-# Cycle-7 Gate 2: line-terminator chars the CLI refuses in
-# --override-rationale. Mirrors pin_caps._FORBIDDEN_TERMINATOR_TABLE:
-# U+000A LINE FEED, U+000D CARRIAGE RETURN, U+0085 NEXT LINE,
-# U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR. Any of these can
-# split a single-line HTML comment into a multi-line block and escape
-# the parser's per-line comment expectations.
-_FORBIDDEN_RATIONALE_CHARS = "\n\r\u0085\u2028\u2029" 
 
 
 def _build_evictable_pins(pins):
     """Transform parsed pins into the evictable_pins JSON shape.
 
     Order is presentation order (top-to-bottom in CLAUDE.md). Caller
-    (pin-memory.md) paginates 4-at-a-time into AskUserQuestion options.
+    (prune-memory.md) paginates 4-at-a-time into AskUserQuestion options.
     """
     evictable = []
     for idx, pin in enumerate(pins):
@@ -137,8 +134,8 @@ def _resolve_pins():
     """Resolve CLAUDE.md and return parsed pins, or ([], reason_str) on failure.
 
     Fail-open: any resolution / read / parse failure yields an empty pin
-    list and a short reason string. Callers treat empty + reason as
-    "unknown state, allow the add".
+    list and a short reason string. Callers surface the reason in
+    slot_status so the user sees "unknown (...)" instead of a fake "0/12".
     """
     claude_md = get_project_claude_md_path()
     if claude_md is None:
@@ -162,232 +159,79 @@ def _resolve_pins():
     return pins, None
 
 
-def _emit(
-    allowed,
-    violation=None,
-    slot_status="",
-    evictable_pins=None,
-):
+def _emit(slot_status, evictable_pins):
+    """Write the advisory JSON payload to stdout.
+
+    Shape preserved from the pre-demotion contract so any callers reading
+    `allowed`/`violation` keys continue to parse cleanly — they'll just
+    always see `true`/`null` now that enforcement lives in the hook.
+    """
     payload = {
-        "allowed": bool(allowed),
+        "allowed": True,
         "violation": None,
         "slot_status": slot_status,
-        "evictable_pins": evictable_pins or [],
+        "evictable_pins": evictable_pins,
     }
-    if violation is not None:
-        payload["violation"] = {
-            "kind": violation.kind,
-            "detail": violation.detail,
-            "offending_pin_chars": violation.offending_pin_chars,
-            "current_count": violation.current_count,
-        }
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
 
 
 def _fail_open(reason):
-    """Emit an allow decision when we cannot determine cap state.
+    """Emit an advisory payload with the degradation reason in slot_status.
 
-    Slot status carries the reason so the user-facing command still
-    renders something actionable rather than silently allowing.
+    Callers see "Pin slots: unknown (<reason>); proceeding" — identical
+    to the pre-demotion shape, so /PACT:prune-memory and any diagnostic
+    consumers render the same "unknown; proceeding" text on resolution
+    failure.
     """
     slot_status = f"Pin slots: unknown ({reason}); proceeding"
-    _emit(allowed=True, violation=None, slot_status=slot_status, evictable_pins=[])
+    _emit(slot_status=slot_status, evictable_pins=[])
     return 0
 
 
 def _main_inner(argv=None):
     parser = argparse.ArgumentParser(
         prog="check_pin_caps",
-        description="Enforce pin count + size caps on project CLAUDE.md",
-    )
-    # Mutually-exclusive body sources: shell-safe stdin (preferred),
-    # legacy argv (backward compat), or status-only (no body).
-    body_group = parser.add_mutually_exclusive_group()
-    body_group.add_argument(
-        "--new-body",
-        default=None,
-        help=(
-            "Body text of the proposed new pin (triggers cap check). "
-            "Legacy argv path — prefer --body-from-stdin for bodies "
-            "containing shell metacharacters or control chars."
+        description=(
+            "Advisory-only pin-caps status CLI. Enforcement lives in the "
+            "pin_caps_gate PreToolUse hook (cycle-8); this CLI reports "
+            "current state and the evictable-pin list."
         ),
     )
-    body_group.add_argument(
-        "--body-from-stdin",
-        action="store_true",
-        help=(
-            "Read proposed pin body from stdin (preferred). Reads exactly "
-            "what the pipe provides; no shell-quoting hazards."
-        ),
-    )
-    body_group.add_argument(
+    # Both flags are kept for documentation clarity. Semantics are identical
+    # — either flag (or no flag at all) emits the same JSON payload. Not
+    # mutually-exclusive because there's nothing to conflict on.
+    parser.add_argument(
         "--status",
         action="store_true",
-        help="Status-only query: emit slot status, no add check",
-    )
-    parser.add_argument(
-        "--has-override",
-        action="store_true",
-        help="Proposed pin carries a valid pin-size-override rationale",
-    )
-    parser.add_argument(
-        "--override-rationale",
-        default=None,
         help=(
-            "Optional rationale text for the pin-size-override comment. "
-            "When provided, the CLI validates it in-band against "
-            "OVERRIDE_COMMENT_RE and refuses if malformed or oversize. "
-            "Pass alongside --has-override."
+            "Status-only query (default behavior): emit slot status + "
+            "evictable pins."
         ),
     )
-    args = parser.parse_args(argv)
-
-    # Resolve the new body from stdin if requested. Stdin is a distinct
-    # ingestion path: the script consumes sys.stdin.read() and treats it
-    # as the pin body only — it is NEVER parsed as argv or evaluated.
-    new_body = args.new_body
-    stdin_empty_refusal = False
-    if args.body_from_stdin:
-        new_body = sys.stdin.read()
-        # Refuse empty-or-whitespace stdin BEFORE running the cap check.
-        # A 0-char pin has no informational content and would collapse to
-        # empty under `_extract_body_chars` anyway; accepting it would
-        # burn a slot on nothing. `new_body.strip()` falsiness is the
-        # uniform predicate for "" and any all-whitespace variant.
-        # Defer the actual emission until after _resolve_pins so the
-        # refusal payload carries accurate slot_status + evictable_pins,
-        # matching the shape of the count/size/embedded_pin refusals.
-        if not new_body.strip():
-            stdin_empty_refusal = True
-
-    # Validate --override-rationale shape in-band via OVERRIDE_COMMENT_RE.
-    # Two-gate defense: (1) the parser strips invalid overrides at read
-    # time, but (2) catching malformed rationales at add time gives the
-    # curator a same-session error they can correct, instead of a silent
-    # downgrade to no-override on next session. Refuse if the constructed
-    # comment does not round-trip through OVERRIDE_COMMENT_RE.fullmatch
-    # OR if the rationale exceeds OVERRIDE_RATIONALE_MAX.
-    invalid_override_reason = None
-    if args.override_rationale is not None:
-        rationale = args.override_rationale.strip()
-        if not rationale:
-            invalid_override_reason = "rationale is empty or whitespace-only"
-        elif len(rationale) > OVERRIDE_RATIONALE_MAX:
-            invalid_override_reason = (
-                f"rationale is {len(rationale)} chars "
-                f"(max: {OVERRIDE_RATIONALE_MAX})"
-            )
-        elif any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS):
-            # Cycle-7 Gate 2: reject line terminators BEFORE the regex
-            # round-trip so the refusal message is specific. Mirrors the
-            # character set in pin_caps._FORBIDDEN_TERMINATOR_TABLE so a
-            # rationale that would be silently mutated by parse_pins on
-            # reload is refused up-front instead. Any of \n, \r, U+0085,
-            # U+2028, U+2029 can split a single-line HTML comment across
-            # logical lines, breaking the parser's per-line comment
-            # expectations and enabling prompt-injection / comment-
-            # boundary spoofing.
-            invalid_override_reason = (
-                "rationale contains a line terminator "
-                "(newline, carriage return, or Unicode line separator)"
-            )
-        else:
-            # Synthesize the full comment and round-trip through
-            # OVERRIDE_COMMENT_RE. A rationale containing `-->` would
-            # prematurely terminate the HTML comment AND fail this match
-            # (the rationale pattern refuses `-->` by construction), so
-            # an attempted injection is caught here rather than at parse
-            # time. Any ISO date is fine — we only care about the
-            # rationale slot validating.
-            synthetic = (
-                f"<!-- pinned: 2026-04-21, pin-size-override: {rationale} -->"
-            )
-            if OVERRIDE_COMMENT_RE.fullmatch(synthetic) is None:
-                invalid_override_reason = (
-                    "rationale contains disallowed characters "
-                    "(e.g. HTML comment terminator `-->`)"
-                )
+    parser.add_argument(
+        "--list-evictable",
+        action="store_true",
+        help=(
+            "Alias for --status, for callers that want to signal intent "
+            "to consume only the evictable_pins field."
+        ),
+    )
+    # parse_args accepts unknown flags silently via parse_known_args so a
+    # caller passing a retired cycle-7 flag (e.g. --new-body, --has-override)
+    # does not crash with argparse-exit-2 — the retired flags are ignored
+    # and the advisory payload still emits. SACROSANCT fail-open carries to
+    # the argv shape: no new exit-2 surface for mistyped or retired flags.
+    parser.parse_known_args(argv)
 
     pins, fail_reason = _resolve_pins()
     if fail_reason is not None:
-        # Fail-open: unknown state, allow the add rather than block the user.
-        # Uniformly emit the "Pin slots: unknown (...); proceeding" line for
-        # ALL invocations (including --status) so the user-facing command
-        # surfaces the degradation reason instead of silently returning a
-        # plausible-looking 0-used status.
         return _fail_open(fail_reason)
 
     slot_status = format_slot_status(pins)
     evictable_pins = _build_evictable_pins(pins)
-
-    if stdin_empty_refusal:
-        # Import CapViolation lazily to avoid module-level coupling: the
-        # type is imported only on this refusal path, not on every invocation.
-        from pin_caps import CapViolation  # noqa: WPS433
-        empty_violation = CapViolation(
-            kind="empty",
-            detail="body is empty or whitespace-only; refuse 0-char pin add",
-            offending_pin_chars=0,
-            current_count=len(pins),
-        )
-        _emit(
-            allowed=False,
-            violation=empty_violation,
-            slot_status=slot_status,
-            evictable_pins=evictable_pins,
-        )
-        return 1
-
-    if invalid_override_reason is not None:
-        from pin_caps import CapViolation  # noqa: WPS433
-        _emit(
-            allowed=False,
-            violation=CapViolation(
-                kind="invalid_override",
-                detail=(
-                    f"--override-rationale refused: {invalid_override_reason}"
-                ),
-                offending_pin_chars=None,
-                current_count=len(pins),
-            ),
-            slot_status=slot_status,
-            evictable_pins=evictable_pins,
-        )
-        return 1
-
-    if args.status or new_body is None:
-        # Status query or no body provided — emit current state, no check.
-        _emit(
-            allowed=True,
-            violation=None,
-            slot_status=slot_status,
-            evictable_pins=evictable_pins,
-        )
-        return 0
-
-    violation = check_add_allowed(
-        existing=pins,
-        new_body=new_body,
-        new_has_override=args.has_override,
-    )
-
-    if violation is None:
-        _emit(
-            allowed=True,
-            violation=None,
-            slot_status=slot_status,
-            evictable_pins=evictable_pins,
-        )
-        return 0
-
-    _emit(
-        allowed=False,
-        violation=violation,
-        slot_status=slot_status,
-        evictable_pins=evictable_pins,
-    )
-    return 1
+    _emit(slot_status=slot_status, evictable_pins=evictable_pins)
+    return 0
 
 
 def main(argv=None):
@@ -395,18 +239,16 @@ def main(argv=None):
 
     Any uncaught exception from `_main_inner` (including argparse bugs,
     future refactors raising unexpected types, or downstream helper
-    regressions) is converted to an allow decision with a diagnostic
+    regressions) is converted to a fail-open advisory with a diagnostic
     slot_status. This preserves the fail-open invariant under any
     future regression that would otherwise crash with exit 1 or (worse)
     a Python traceback to exit code 2.
 
-    Note: argparse `--help` and argparse validation errors call
-    `sys.exit()` directly from inside argparse, which raises SystemExit.
-    We explicitly DO NOT catch SystemExit — `--help` (exit 0) and
-    argparse error (exit 2) are argparse-controlled exits, not runtime
-    faults. Re-raising preserves argparse's built-in UX; a genuine
-    argparse internal-error crash would surface as a plain Exception
-    and be caught by the fail-open branch below.
+    Note: argparse `--help` calls `sys.exit()` directly from inside
+    argparse, which raises SystemExit. We explicitly DO NOT catch
+    SystemExit — `--help` (exit 0) is argparse-controlled. `parse_known_args`
+    means stray flags don't trigger argparse's own exit-2 validation,
+    so this branch is practically only `--help`.
     """
     try:
         return _main_inner(argv)

@@ -1180,58 +1180,36 @@ class TestPinCapsTwinCopyDrift:
         )
 
     def test_forbidden_line_terminator_chars_twins_match(self):
-        """Line-terminator char set MUST agree across the two gates.
+        """Line-terminator char set MUST agree across parser and hook.
 
-        Cycle-7 introduced a CLI-side refusal (check_pin_caps.py
-        `_FORBIDDEN_RATIONALE_CHARS`) that mirrors the parser-side
-        sanitization table (pin_caps.py `_FORBIDDEN_TERMINATOR_TABLE`).
-        Both represent the same logical char set (U+000A, U+000D,
-        U+0085, U+2028, U+2029) but are expressed in different forms:
-          - pin_caps: str.maketrans translate table (ordinal → None)
-          - check_pin_caps: plain string for `in` membership check
+        Cycle-7 introduced a CLI-side refusal for line terminators in
+        override rationales. Cycle-8 demoted the CLI to advisory-only;
+        rationale validation moved to the PreToolUse hook
+        (hooks/pin_caps_gate.py). The CLI no longer carries its own
+        forbidden-char set, so this test compares parser ↔ hook only.
 
-        Drift risk: if a new line-terminator code point is added to
-        one side (e.g., U+000B VERTICAL TAB at the parser for defensive
-        cleanup) but NOT to the CLI, the asymmetry reopens the very
-        bypass surface Cycle-7 Commit 2 closed. The CLI would accept a
-        rationale containing the new terminator while the parser
-        silently strips it — back to the silent-mutation state.
-
-        Derivation: decode both to a common `set[str]` form and require
-        equality. The test fails loudly with both sides enumerated so a
-        drifter sees exactly what changed.
+        Drift guard: the hook DERIVES its forbidden-char set from
+        `pin_caps._FORBIDDEN_TERMINATOR_TABLE` at module load (single
+        source of truth). In a correctly wired repo the equality always
+        holds because the hook's set is literally `chr(k) for k in the
+        parser table`. This test catches the regression of someone
+        reverting the derivation to a hand-maintained literal — if that
+        happens, drift is possible, and this assertion fires with both
+        sides enumerated.
         """
         import pin_caps
-        # check_pin_caps lives under scripts/, not hooks/ — add to path
-        # locally so this test doesn't mutate module-level sys.path for
-        # other classes.
-        scripts_dir = Path(__file__).parent.parent / "scripts"
-        sys.path.insert(0, str(scripts_dir))
-        try:
-            import check_pin_caps
-        finally:
-            # Leave sys.path tidy even if import fails.
-            sys.path.remove(str(scripts_dir))
-
-        # Cycle-8 added a third consumer: the pin_caps_gate PreToolUse hook.
-        # To prevent triple-twin drift, the hook DERIVES its set from
-        # pin_caps._FORBIDDEN_TERMINATOR_TABLE at module load (single source
-        # of truth). Include it in the equality check so any accidental
-        # regression to a hand-maintained literal is caught here.
         import pin_caps_gate
 
         parser_chars = set(chr(k) for k in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys())
-        cli_chars = set(check_pin_caps._FORBIDDEN_RATIONALE_CHARS)
         hook_chars = set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS)
 
-        assert parser_chars == cli_chars == hook_chars, (
-            "Line-terminator char-set drift across the three consumers:\n"
+        assert parser_chars == hook_chars, (
+            "Line-terminator char-set drift between parser and hook:\n"
             f"  pin_caps._FORBIDDEN_TERMINATOR_TABLE (parser):   {sorted(parser_chars)!r}\n"
-            f"  check_pin_caps._FORBIDDEN_RATIONALE_CHARS (CLI): {sorted(cli_chars)!r}\n"
             f"  pin_caps_gate._FORBIDDEN_RATIONALE_CHARS (hook): {sorted(hook_chars)!r}\n"
-            "All three must agree. The hook SHOULD derive from the parser "
-            "table at module load (see pin_caps_gate.py) so it cannot drift; "
-            "the CLI is hand-maintained and must be updated in the same "
-            "commit as the parser table. Asymmetry reopens the Cycle-7 "
-            "bypass (accept what parser silently strips)."
+            "The hook SHOULD derive from the parser table at module load "
+            "(see pin_caps_gate.py) so it cannot drift. If you see this "
+            "failure, someone reverted the derivation to a hand-maintained "
+            "literal. Fix by restoring the `chr(k) for k in "
+            "pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()` form."
         )
