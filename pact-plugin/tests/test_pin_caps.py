@@ -481,3 +481,225 @@ class TestConstants:
     def test_override_rationale_max_is_120(self):
         from pin_caps import OVERRIDE_RATIONALE_MAX
         assert OVERRIDE_RATIONALE_MAX == 120
+
+
+# ---------------------------------------------------------------------------
+# Phase A smoke coverage for hook-primary cap helpers (cycle-8).
+#
+# Exhaustive matrix (count ladder, size ladder, Unicode, replace_all variants,
+# counter-test-by-revert) lives in TEST phase via test_pin_caps_gate.py.
+# These tests verify the helpers' contracts at the unit-function level so the
+# suite stays green at HEAD across the phase sequence.
+# ---------------------------------------------------------------------------
+
+
+def _make_pin(heading="### X", body_chars=100, override=False):
+    from pin_caps import Pin
+    return Pin(
+        heading=heading,
+        body="x" * body_chars,
+        body_chars=body_chars,
+        date_comment=None,
+        override_rationale="load-bearing" if override else None,
+        is_stale=False,
+    )
+
+
+def _managed_content(pinned_section_body: str) -> str:
+    """Wrap pinned-section body in the PACT_MANAGED region so
+    _parse_pinned_section can extract it. Matches the structure produced
+    by claude_md_manager.
+    """
+    return (
+        "# PACT\n\n"
+        "<!-- PACT_MANAGED_START -->\n"
+        "## Pinned Context\n"
+        f"{pinned_section_body}"
+        "<!-- PACT_MANAGED_END -->\n"
+    )
+
+
+class TestEvaluateFullState_Smoke:
+    """evaluate_full_state — post-state (>, strict) cap predicate."""
+
+    def test_empty_pins_allows(self):
+        from pin_caps import evaluate_full_state
+        assert evaluate_full_state([]) is None
+
+    def test_at_count_cap_allows(self):
+        from pin_caps import PIN_COUNT_CAP, evaluate_full_state
+        pins = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP)]
+        # > is strict — count == cap is NOT a violation at post-state.
+        assert evaluate_full_state(pins) is None
+
+    def test_over_count_cap_denies(self):
+        from pin_caps import PIN_COUNT_CAP, evaluate_full_state
+        pins = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 1)]
+        violation = evaluate_full_state(pins)
+        assert violation is not None
+        assert violation.kind == "count"
+        assert violation.current_count == PIN_COUNT_CAP + 1
+
+    def test_at_size_cap_allows(self):
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        pins = [_make_pin(body_chars=PIN_SIZE_CAP)]
+        assert evaluate_full_state(pins) is None
+
+    def test_over_size_cap_without_override_denies(self):
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        pins = [_make_pin(body_chars=PIN_SIZE_CAP + 1, override=False)]
+        violation = evaluate_full_state(pins)
+        assert violation is not None
+        assert violation.kind == "size"
+        assert violation.offending_pin_chars == PIN_SIZE_CAP + 1
+
+    def test_over_size_cap_with_override_allows(self):
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        pins = [_make_pin(body_chars=PIN_SIZE_CAP + 500, override=True)]
+        assert evaluate_full_state(pins) is None
+
+
+class TestApplyEditAndParse_Smoke:
+    """apply_edit_and_parse — Edit/Write simulation + section-bounded parse."""
+
+    def test_write_full_replacement_parses_pins(self):
+        from pin_caps import apply_edit_and_parse
+        new = _managed_content(
+            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
+        )
+        pins = apply_edit_and_parse(current_content="", tool_input={"content": new})
+        assert len(pins) == 1
+        assert pins[0].heading == "### A"
+
+    def test_edit_single_match_adds_pin(self):
+        from pin_caps import apply_edit_and_parse
+        before = _managed_content("<!-- pinned: 2026-04-21 -->\n### A\nBody.\n\n")
+        tool_input = {
+            "old_string": "### A\nBody.\n",
+            "new_string": "### A\nBody.\n\n<!-- pinned: 2026-04-21 -->\n### B\nBody B.\n",
+            "replace_all": False,
+        }
+        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
+        assert [p.heading for p in pins] == ["### A", "### B"]
+
+    def test_edit_replace_all_applies_all_matches(self):
+        from pin_caps import apply_edit_and_parse
+        before = _managed_content(
+            "<!-- pinned: 2026-04-21 -->\n### A\nKEEP.\n\n"
+            "<!-- pinned: 2026-04-21 -->\n### B\nKEEP.\n\n"
+        )
+        tool_input = {
+            "old_string": "KEEP.",
+            "new_string": "REPLACED.",
+            "replace_all": True,
+        }
+        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
+        assert all("REPLACED" in p.body for p in pins)
+
+    def test_missing_pinned_section_returns_empty(self):
+        from pin_caps import apply_edit_and_parse
+        # No Pinned Context section at all.
+        pins = apply_edit_and_parse(
+            current_content="",
+            tool_input={"content": "# Some\nRandom content.\n"},
+        )
+        assert pins == []
+
+    def test_write_non_string_content_raises(self):
+        from pin_caps import apply_edit_and_parse
+        with pytest.raises(TypeError):
+            apply_edit_and_parse(
+                current_content="", tool_input={"content": 42},
+            )
+
+    def test_edit_non_string_strings_raise(self):
+        from pin_caps import apply_edit_and_parse
+        with pytest.raises(TypeError):
+            apply_edit_and_parse(
+                current_content="x",
+                tool_input={"old_string": 1, "new_string": "y"},
+            )
+
+
+class TestComputeDenyReason_Smoke:
+    """compute_deny_reason — net-worse predicate over pre/post pin states."""
+
+    def test_pre_clean_post_clean_allows(self):
+        from pin_caps import compute_deny_reason
+        pre = [_make_pin() for _ in range(3)]
+        post = [_make_pin() for _ in range(4)]
+        assert compute_deny_reason(pre, post, new_body="") is None
+
+    def test_pre_clean_post_count_violation_denies(self):
+        from pin_caps import PIN_COUNT_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP)]
+        post = pre + [_make_pin(heading="### Extra")]
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None
+        assert "Pin count cap" in reason
+        assert "prune-memory" in reason
+
+    def test_pre_over_cap_post_same_count_allows(self):
+        # F1 livelock precedent — pre-malformed state must not block remediation.
+        from pin_caps import PIN_COUNT_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 3)]
+        post = list(pre)  # Refactor Edit — count unchanged.
+        assert compute_deny_reason(pre, post, new_body="") is None
+
+    def test_pre_over_cap_post_decreases_allows(self):
+        from pin_caps import PIN_COUNT_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 3)]
+        post = pre[:-1]  # Archival Edit — count down by 1.
+        assert compute_deny_reason(pre, post, new_body="") is None
+
+    def test_pre_over_cap_post_even_worse_denies(self):
+        from pin_caps import PIN_COUNT_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 1)]
+        post = pre + [_make_pin(heading="### MoreWorse")]
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None
+        assert "Pin count cap" in reason
+
+    def test_embedded_pin_in_body_denies_regardless_of_state(self):
+        from pin_caps import compute_deny_reason
+        pre = []
+        post = [_make_pin()]
+        reason = compute_deny_reason(
+            pre, post, new_body="### Sneaky Heading\nBody.\n"
+        )
+        assert reason is not None
+        assert "embedded pin structure" in reason
+
+    def test_pre_clean_post_size_violation_denies(self):
+        from pin_caps import PIN_SIZE_CAP, compute_deny_reason
+        pre = [_make_pin(body_chars=100)]
+        post = [_make_pin(body_chars=PIN_SIZE_CAP + 50, override=False)]
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None
+        assert "New pin body" in reason
+
+
+class TestDenyReasonTemplates_Constants:
+    """Deny-reason templates are shared; test they render with expected shape."""
+
+    def test_count_template_renders(self):
+        from pin_caps import DENY_REASON_COUNT, PIN_COUNT_CAP
+        rendered = DENY_REASON_COUNT.format(count=PIN_COUNT_CAP + 1, cap=PIN_COUNT_CAP)
+        assert str(PIN_COUNT_CAP) in rendered
+        assert "prune-memory" in rendered
+
+    def test_size_template_renders(self):
+        from pin_caps import DENY_REASON_SIZE, PIN_SIZE_CAP
+        rendered = DENY_REASON_SIZE.format(chars=PIN_SIZE_CAP + 100, cap=PIN_SIZE_CAP)
+        assert str(PIN_SIZE_CAP) in rendered
+
+    def test_embedded_pin_template_is_static(self):
+        from pin_caps import DENY_REASON_EMBEDDED_PIN
+        assert "### " in DENY_REASON_EMBEDDED_PIN
+
+    def test_override_missing_template_renders(self):
+        from pin_caps import DENY_REASON_OVERRIDE_MISSING, PIN_SIZE_CAP
+        rendered = DENY_REASON_OVERRIDE_MISSING.format(
+            chars=PIN_SIZE_CAP + 10, cap=PIN_SIZE_CAP
+        )
+        assert "pin-size-override" in rendered

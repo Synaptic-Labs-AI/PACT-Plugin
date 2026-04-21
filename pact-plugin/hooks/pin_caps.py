@@ -304,6 +304,257 @@ def check_stale_block(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Hook-primary cap enforcement helpers (cycle-8).
+#
+# These extend pin_caps's pure-helper surface with post-state predicates used
+# by the PreToolUse gate (pin_caps_gate.py). They are additive — nothing here
+# changes existing `check_add_allowed` semantics. Shared between the gate and
+# the advisory CLI (check_pin_caps.py) so deny-reason phrasing stays in one
+# place (Risk R9 — phrasing drift).
+#
+# Key semantic differences vs. `check_add_allowed`:
+#   - `>`  (strict), not `>=`  — this is a POST-state check, not a pre-add gate.
+#   - No new_body param at predicate layer — the post-state pin list already
+#     reflects any simulated add.
+# ---------------------------------------------------------------------------
+
+
+# Shared deny-reason templates. Plain instructional text aimed at the curator
+# (the LLM driving Edit/Write). Rendered verbatim into permissionDecisionReason
+# so the curator sees the next-step action.
+DENY_REASON_COUNT = (
+    "Pin count cap reached ({count}/{cap}). "
+    "Run /PACT:prune-memory to evict an existing pin before adding."
+)
+
+DENY_REASON_SIZE = (
+    "New pin body is {chars} chars (cap: {cap}). "
+    "Compress the body, or add a pin-size-override rationale "
+    "if the content is verbatim load-bearing."
+)
+
+DENY_REASON_EMBEDDED_PIN = (
+    "Candidate body contains an embedded pin structure "
+    "(a `### ` heading). On reload this would be counted as an extra pin "
+    "and defeat the count cap. Use `#### ` or bold for in-body structure."
+)
+
+DENY_REASON_OVERRIDE_MISSING = (
+    "New pin exceeds the size cap ({chars} > {cap}) and carries no valid "
+    "pin-size-override rationale. Add a rationale or compress the body."
+)
+
+
+def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
+    """Check cap violations on a parsed post-edit pin list.
+
+    POST-state predicate: `>` (strict), not `>=`. A state at the cap
+    exactly (e.g. 12/12) is NOT a violation here — only a strict
+    overshoot is. Compared to `check_add_allowed` which is pre-add
+    (`>=` refuses the 12th add), `evaluate_full_state` refuses only the
+    13th+ slot. The gate (pin_caps_gate.py) then layers a net-worse
+    predicate on top of this to prevent pre-malformed livelock.
+
+    Checks, in order of precedence:
+      1. count:   len(pins) > PIN_COUNT_CAP
+      2. size:    any pin has body_chars > PIN_SIZE_CAP AND no valid override
+
+    Embedded-pin smuggle is not re-checked here — by the time `pins`
+    exists, parse_pins has already visited the structure; the bypass
+    either inflated count (caught by 1) or is benign.
+
+    Returns None when no violation, otherwise the first violation found.
+    """
+    count = len(pins)
+    if count > PIN_COUNT_CAP:
+        return CapViolation(
+            kind="count",
+            detail=(
+                f"post-edit pin count {count} exceeds cap {PIN_COUNT_CAP}"
+            ),
+            offending_pin_chars=None,
+            current_count=count,
+        )
+
+    for pin in pins:
+        if pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin):
+            return CapViolation(
+                kind="size",
+                detail=(
+                    f"pin '{pin.heading}' body is {pin.body_chars} chars "
+                    f"(cap: {PIN_SIZE_CAP})"
+                ),
+                offending_pin_chars=pin.body_chars,
+                current_count=count,
+            )
+
+    return None
+
+
+def apply_edit_and_parse(current_content: str, tool_input: dict) -> List[Pin]:
+    """Simulate the post-tool CLAUDE.md state and return parsed pins.
+
+    For Edit:
+      Applies `old_string → new_string` via `str.replace(...)`. When
+      `replace_all` is true, Python's no-count str.replace matches the
+      tool's actual apply behavior (PREPARE task #41 confirmed byte-
+      identical). When `replace_all` is false, replaces only the first
+      occurrence (`count=1`), matching the tool's single-match semantics.
+
+    For Write:
+      Uses `tool_input['content']` directly as the full new file content.
+      `current_content` is ignored in that path — Write is a full-file
+      replacement.
+
+    After producing the simulated post-edit content, extracts the
+    Pinned Context section via `_parse_pinned_section` and returns
+    `parse_pins(pinned_content)`. Section-bounded by construction so
+    `### ` headings elsewhere (Working Memory, user prose) do NOT
+    inflate the count. If the post-edit content has no Pinned Context
+    section, returns [] (no pins → below every cap).
+
+    Raises on malformed tool_input (missing required keys, non-string
+    values). The caller (pin_caps_gate.main) is responsible for wrapping
+    the exception in the gate's outer fail-open. Embedding try/except
+    inside this helper would hide input corruption from the gate, which
+    needs to emit a failure_log entry on that path.
+    """
+    # Lazy import to avoid module-level coupling between pin_caps (pure
+    # helpers) and staleness (has CLAUDE.md resolution logic). The
+    # section-bounding contract lives in staleness._parse_pinned_section.
+    from staleness import _parse_pinned_section
+
+    if "content" in tool_input:
+        # Write path — full-file replacement.
+        new_content = tool_input["content"]
+        if not isinstance(new_content, str):
+            raise TypeError(
+                f"Write tool_input.content must be str, got "
+                f"{type(new_content).__name__}"
+            )
+        simulated = new_content
+    else:
+        # Edit path — old_string / new_string with replace_all.
+        old_string = tool_input.get("old_string")
+        new_string = tool_input.get("new_string")
+        if not isinstance(old_string, str) or not isinstance(new_string, str):
+            raise TypeError(
+                "Edit tool_input.old_string and .new_string must both be str"
+            )
+        replace_all = bool(tool_input.get("replace_all", False))
+        if replace_all:
+            simulated = current_content.replace(old_string, new_string)
+        else:
+            simulated = current_content.replace(old_string, new_string, 1)
+
+    parsed = _parse_pinned_section(simulated)
+    if parsed is None:
+        # No Pinned Context section in the post-edit state. Treat as
+        # "no pins" — caps cannot be violated when the section is absent.
+        return []
+
+    _, _, pinned_content = parsed
+    return parse_pins(pinned_content)
+
+
+def compute_deny_reason(
+    pre_pins: List[Pin],
+    post_pins: List[Pin],
+    new_body: str,
+) -> Optional[str]:
+    """Net-worse deny predicate: return a rendered deny-reason or None.
+
+    Compares `evaluate_full_state` on pre vs post. Denies ONLY when the
+    post state is strictly worse than pre — i.e., a violation appears
+    (or worsens) that didn't exist before. Pre-malformed state alone
+    never denies: if the user already has 14 pins from a manual paste,
+    every subsequent Edit would loop in deny (F1 livelock precedent).
+
+    Rules:
+      - Pre OK,   post OK   → allow (None)
+      - Pre OK,   post bad  → deny, render the post-state violation
+      - Pre bad,  post same kind → allow unless strictly worse numerically
+      - Pre bad,  post different kind → deny (introduced a NEW violation)
+
+    Embedded-pin smuggle is a separate check — if `new_body` itself parses
+    as a pin structure, deny with DENY_REASON_EMBEDDED_PIN even when
+    post_pins look fine (the new pin may not have been added yet at the
+    Edit-simulation granularity).
+
+    Args:
+        pre_pins: Parsed pins from the pre-edit CLAUDE.md state.
+        post_pins: Parsed pins from the simulated post-edit state.
+        new_body: The candidate body text that is about to be added,
+            for embedded-pin detection. "" when not applicable (Write
+            full-file replacement or refactor Edit).
+
+    Returns:
+        Rendered deny-reason string if the edit should be denied, else None.
+    """
+    # Embedded-pin smuggle: check the candidate body independently. A
+    # curator's new pin body containing `### ` would inflate count on
+    # next parse. Conservative check — rejects H3 in bodies regardless
+    # of whether the candidate has yet been added to post_pins.
+    if new_body and parse_pins(new_body):
+        return DENY_REASON_EMBEDDED_PIN
+
+    pre_violation = evaluate_full_state(pre_pins)
+    post_violation = evaluate_full_state(post_pins)
+
+    if post_violation is None:
+        return None
+
+    # Post has a violation. Decide whether it's strictly worse than pre.
+    if pre_violation is None:
+        # Pre clean, post bad → strictly worse; deny with templated reason.
+        return _render_deny_reason(post_violation)
+
+    # Both bad. Deny only if post is strictly worse than pre:
+    #   - different kind (e.g., was size, now count+size) → worse
+    #   - same kind but larger numeric overshoot → worse
+    if post_violation.kind != pre_violation.kind:
+        return _render_deny_reason(post_violation)
+
+    if post_violation.kind == "count":
+        pre_count = pre_violation.current_count or 0
+        post_count = post_violation.current_count or 0
+        if post_count > pre_count:
+            return _render_deny_reason(post_violation)
+        return None
+
+    if post_violation.kind == "size":
+        pre_chars = pre_violation.offending_pin_chars or 0
+        post_chars = post_violation.offending_pin_chars or 0
+        if post_chars > pre_chars:
+            return _render_deny_reason(post_violation)
+        return None
+
+    # Unknown kind — conservative: deny (safer than silent allow).
+    return _render_deny_reason(post_violation)
+
+
+def _render_deny_reason(violation: CapViolation) -> str:
+    """Render a CapViolation into a curator-facing deny-reason string."""
+    if violation.kind == "count":
+        return DENY_REASON_COUNT.format(
+            count=violation.current_count or 0,
+            cap=PIN_COUNT_CAP,
+        )
+    if violation.kind == "size":
+        chars = violation.offending_pin_chars or 0
+        return DENY_REASON_SIZE.format(chars=chars, cap=PIN_SIZE_CAP)
+    if violation.kind == "embedded_pin":
+        return DENY_REASON_EMBEDDED_PIN
+    if violation.kind == "invalid_override":
+        return DENY_REASON_OVERRIDE_MISSING.format(
+            chars=violation.offending_pin_chars or 0,
+            cap=PIN_SIZE_CAP,
+        )
+    # Fallback: surface the violation detail verbatim rather than drop it.
+    return f"Pin cap violation: {violation.detail}"
+
+
 def format_slot_status(pins: List[Pin]) -> str:
     """Format a concise slot-status string for additionalContext surfacing.
 
