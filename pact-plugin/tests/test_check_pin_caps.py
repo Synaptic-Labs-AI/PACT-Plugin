@@ -86,7 +86,7 @@ def _make_pinned_content(n_pins=0, pin_body_chars=100, stale_indices=()):
     return make_claude_md_with_pins(entries)
 
 
-class TestCheckPinCapsCli_StatusQuery:
+class TestCheckPinCaps_Advisory_StatusQuery:
     """--status emits current slot state. Post-demotion, this is also the
     default (no-flag) behavior — the CLI has no add-time flags to select."""
 
@@ -135,7 +135,7 @@ class TestCheckPinCapsCli_StatusQuery:
         assert payload_list == payload_status
 
 
-class TestCheckPinCapsCli_FailOpen:
+class TestCheckPinCaps_Advisory_FailOpen:
     """Resolution / read / parse failures yield allowed=true + exit 0.
 
     Post-demotion every code path is advisory; fail-open is the universal
@@ -192,7 +192,7 @@ class TestCheckPinCapsCli_FailOpen:
         assert "parse error" in payload["slot_status"]
 
 
-class TestCheckPinCapsCli_EvictablePins:
+class TestCheckPinCaps_Advisory_EvictablePins:
     """evictable_pins surface — ordering, stale/override flags, heading strip."""
 
     def test_evictable_includes_stale_flag(self, patched_claude_md):
@@ -223,7 +223,7 @@ class TestCheckPinCapsCli_EvictablePins:
             assert not entry["heading"].startswith("### ")
 
 
-class TestCheckPinCapsCli_NeverExit2:
+class TestCheckPinCaps_Advisory_NeverExit2:
     """SACROSANCT: exit code 2 is reserved; advisory CLI MUST never emit it.
 
     argparse `--help` uses SystemExit(0); argparse validation uses
