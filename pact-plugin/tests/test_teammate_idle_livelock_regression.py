@@ -5,8 +5,9 @@ Plan row 25 / AC #10 — reproduces the multi-commit stage->notify->lead-commits
 workflow that produced 100+ Holding.-pattern nag loops in PR #477 round-8
 dogfooding. Asserts:
 
-  - Against pre-fix source (HEAD~N before bef7f24): the nag DOES fire on
-    every idle tick during a protocol-defined wait, demonstrating the bug.
+  - Against pre-fix source (SHA 1922c64, one commit before bef7f24): the
+    nag DOES fire on every idle tick during a protocol-defined wait,
+    demonstrating the bug.
   - Against current source (post-bef7f24/7ed354e): the nag is SUPPRESSED
     when intentional_wait is set, and re-enables only on staleness or
     flag-clear.
@@ -27,7 +28,7 @@ Harness shape (pytest-native, no tmp-worktree required):
   The pre-fix-loaded modules depend on `shared.*` modules; those resolve to
   the currently-checked-out versions via the existing hooks path on sys.path.
   This is safe because the shared modules did not change between pre-fix and
-  post-fix (verified: `git diff bef7f24~1 HEAD -- pact-plugin/hooks/shared/`
+  post-fix (verified: `git diff 1922c64 HEAD -- pact-plugin/hooks/shared/`
   only adds `shared/intentional_wait.py` — never a breaking edit to an
   existing shared module).
 
@@ -52,11 +53,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-# Commit SHA immediately before bef7f24 — state of both TeammateIdle hooks
-# before the intentional_wait skips were added. git log --oneline on
-# pact-plugin/hooks/teammate_idle.py shows bef7f24 as the first fix commit
-# and the parent (87f3369) as the last pre-fix state.
-PRE_FIX_COMMIT = "bef7f24~1"
+# Absolute SHA of the last pre-fix state for both TeammateIdle hooks.
+# `1922c64` added shared/intentional_wait.py but did NOT yet modify either
+# hook to call it — so at this commit both hooks are in their pre-fix
+# shape (verified: `git show 1922c64:pact-plugin/hooks/teammate_{idle,
+# completion_gate}.py` contains neither "intentional_wait" nor "wait_stale"
+# nor the type/stalled metadata skips in completion_gate).
+#
+# SHA-pinned rather than relative (`1922c64`, `HEAD~N`) so the harness
+# survives history rewrites — a later squash or rebase that renumbers the
+# topology would silently change a relative reference; the SHA stays
+# valid as long as the object is reachable from any ref.
+PRE_FIX_COMMIT = "1922c64"
 
 
 def _iso_seconds(dt: datetime) -> str:
@@ -83,7 +91,7 @@ def _load_pre_fix_module(hook_name: str, tmp_path: Path) -> ModuleType:
     shared.* imports inside the pre-fix module resolve normally because
     (a) they are path-agnostic top-level imports and (b) the shared
     modules themselves were not breakingly changed between pre-fix and
-    post-fix (verified via `git diff bef7f24~1 HEAD -- hooks/shared/`).
+    post-fix (verified via `git diff 1922c64 HEAD -- hooks/shared/`).
     """
     repo_root = Path(__file__).parent.parent.parent
     relative_path = f"pact-plugin/hooks/{hook_name}.py"
