@@ -1213,15 +1213,25 @@ class TestPinCapsTwinCopyDrift:
             # Leave sys.path tidy even if import fails.
             sys.path.remove(str(scripts_dir))
 
+        # Cycle-8 added a third consumer: the pin_caps_gate PreToolUse hook.
+        # To prevent triple-twin drift, the hook DERIVES its set from
+        # pin_caps._FORBIDDEN_TERMINATOR_TABLE at module load (single source
+        # of truth). Include it in the equality check so any accidental
+        # regression to a hand-maintained literal is caught here.
+        import pin_caps_gate
+
         parser_chars = set(chr(k) for k in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys())
         cli_chars = set(check_pin_caps._FORBIDDEN_RATIONALE_CHARS)
+        hook_chars = set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS)
 
-        assert parser_chars == cli_chars, (
-            "Line-terminator char-set drift between pin_caps."
-            "_FORBIDDEN_TERMINATOR_TABLE (parser sanitization) and "
-            "check_pin_caps._FORBIDDEN_RATIONALE_CHARS (CLI refusal). "
-            f"parser has: {sorted(parser_chars)!r} / "
-            f"CLI has: {sorted(cli_chars)!r}. Update both in the same "
-            "commit — asymmetric handling reopens the Cycle-7 bypass "
-            "(CLI accepts what parser silently strips)."
+        assert parser_chars == cli_chars == hook_chars, (
+            "Line-terminator char-set drift across the three consumers:\n"
+            f"  pin_caps._FORBIDDEN_TERMINATOR_TABLE (parser):   {sorted(parser_chars)!r}\n"
+            f"  check_pin_caps._FORBIDDEN_RATIONALE_CHARS (CLI): {sorted(cli_chars)!r}\n"
+            f"  pin_caps_gate._FORBIDDEN_RATIONALE_CHARS (hook): {sorted(hook_chars)!r}\n"
+            "All three must agree. The hook SHOULD derive from the parser "
+            "table at module load (see pin_caps_gate.py) so it cannot drift; "
+            "the CLI is hand-maintained and must be updated in the same "
+            "commit as the parser table. Asymmetry reopens the Cycle-7 "
+            "bypass (accept what parser silently strips)."
         )
