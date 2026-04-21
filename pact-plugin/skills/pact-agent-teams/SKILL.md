@@ -172,6 +172,74 @@ Keep messages actionable — state what you did/found, what they need to know, a
 any action needed from them.
 Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the lead.
 
+## Protocol Waits — `intentional_wait`
+
+Sometimes your task is `in_progress` but you are legitimately idle, awaiting a message
+from the lead, a peer, or the user (teachback approval, inter-commit hold, post-HANDOFF
+decision, peer reply, blocker resolution, user decision). Without a signal, the
+`TeammateIdle` hooks (`teammate_completion_gate.py`, `teammate_idle.py::detect_stall`)
+cannot distinguish "intentional wait" from "stuck" — they nag every tick, and the
+nag consumes the idle slot the orchestrator needs to deliver the message that would
+end the wait. That's the nag-loop livelock.
+
+**Signal an intentional wait** by setting the `intentional_wait` task metadata
+BEFORE going idle. Both TeammateIdle hooks honor it via `shared.intentional_wait.wait_stale`
+until the 30-minute staleness threshold expires.
+
+### SET — before going idle
+
+```python
+from datetime import datetime, timezone
+TaskUpdate(taskId=taskId, metadata={
+    "intentional_wait": {
+        "reason": "awaiting_teachback_approved",
+        "expected_resolver": "lead",
+        "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+})
+```
+
+The `since` value MUST be tz-aware ISO-8601 (`datetime.now(timezone.utc).isoformat(timespec="seconds")`).
+A naive timestamp is rejected and re-enables the nag — that's intentional fail-loud
+behavior so format bugs surface to the lead.
+
+### CLEAR — when the wait resolves
+
+```python
+TaskUpdate(taskId=taskId, metadata={"intentional_wait": None})
+```
+
+Clear on the same turn you take the action that advances state: when a teachback
+approval, commit confirmation, peer reply, or user decision arrives, call CLEAR
+before taking the next substantive action.
+
+### Vocabulary
+
+| Field | Required | Accepted values |
+|-------|----------|-----------------|
+| `reason` | yes | Non-empty string. Prefer `KNOWN_REASONS` from `shared.intentional_wait`: `awaiting_teachback_approved`, `awaiting_lead_commit`, `awaiting_amendment_review`, `awaiting_post_handoff_decision`, `awaiting_peer_response`, `awaiting_user_decision`, `awaiting_blocker_resolution`. Free-form permitted. |
+| `expected_resolver` | yes | Non-empty string. Prefer `KNOWN_RESOLVERS`: `lead`, `peer`, `user`, `external`. Free-form permitted (e.g., a specific teammate name). |
+| `since` | yes | tz-aware ISO-8601 UTC timestamp at seconds precision. |
+
+Unknown keys are preserved (forward-compat) — add `correlation_id`, `peer_name`, etc.
+as needed.
+
+### Staleness safeguard
+
+The flag auto-expires after 30 minutes. If you forget to CLEAR or the wait takes
+longer than expected, the nag re-enables — that's the backstop, not a primary silencer.
+Re-SET with a fresh `since` if the wait is still legitimate.
+
+### When NOT to set
+
+- You have no owned `in_progress` task (consultant mode): the TeammateIdle hooks
+  already skip you via the owner/status filters.
+- Your wait is < 30 seconds: the cost of a SET+CLEAR round-trip isn't worth the
+  bookkeeping; idle ticks are not that frequent.
+- `handoff_gate.py` (TaskCompleted event) does **not** honor this flag — completion
+  validation is orthogonal. If you have an empty HANDOFF, you cannot complete
+  regardless of `intentional_wait`. Store your HANDOFF first.
+
 ## Consultant Mode
 
 When your active task is done and no follow-up tasks are available:

@@ -113,6 +113,8 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 
 > **Worktree scope reminder**: When reusing a reviewer as a fixer or spawning a new fixer, include the worktree path and `CLAUDE.md` scope note in the fix task: "`CLAUDE.md` is gitignored and does not exist in worktrees — do not edit it. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
 
+> **Remediation stage-ready wait**: Reviewers acting as fixers stage remediation changes and notify the lead, then wait for the lead to commit the fix. Instruct the reviewer to SET `intentional_wait` (reason `awaiting_amendment_review`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag through the fix→commit→re-review cycle; CLEAR when the lead acknowledges the commit. See the "Protocol Waits" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
+
 ---
 
 **PR Review Workflow**
