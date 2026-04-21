@@ -401,6 +401,92 @@ class TestPinMemoryCommand_Grammar:
             )
 
 
+class TestPruneMemoryCommand_Grammar:
+    """/PACT:prune-memory contract assertions (cycle-8 commit 7).
+
+    The prune flow that pin-memory.md previously embedded now lives in
+    a dedicated command. prune-memory.md describes a 4-step interactive
+    flow:
+        1. Invoke check_pin_caps.py --status to get evictable_pins
+        2. AskUserQuestion (paginated) on the list
+        3. Edit CLAUDE.md to remove the selected block
+        4. Report + commit
+
+    Tests here pin the informational contract (CLI invocation shape,
+    pagination structure, cross-references) so structural refactors
+    are caught.
+    """
+
+    @pytest.fixture(scope="class")
+    def prune_memory_content(self):
+        path = (
+            Path(__file__).parent.parent / "commands" / "prune-memory.md"
+        )
+        return path.read_text(encoding="utf-8")
+
+    def test_documents_status_cli_invocation(self, prune_memory_content):
+        """prune-memory.md drives the interactive flow from the advisory
+        CLI's --status output. The command must name the CLI + flag so
+        readers know the JSON source."""
+        assert "check_pin_caps.py" in prune_memory_content
+        assert "--status" in prune_memory_content
+
+    def test_documents_askuserquestion_flow(self, prune_memory_content):
+        """The core UX is paginated AskUserQuestion over evictable_pins."""
+        assert "AskUserQuestion" in prune_memory_content
+        assert "evictable_pins" in prune_memory_content
+
+    def test_documents_pagination_three_plus_one(self, prune_memory_content):
+        """Pagination is 3 pins + 1 navigation slot per page (the platform
+        caps AskUserQuestion at 4 options per call)."""
+        assert "3 candidate pins" in prune_memory_content or "3 pins" in prune_memory_content
+        assert "Show more" in prune_memory_content
+
+    def test_documents_cancel_path(self, prune_memory_content):
+        """A Cancel option is always presented so the curator can back
+        out without modifying CLAUDE.md."""
+        assert "Cancel" in prune_memory_content
+        assert "unchanged" in prune_memory_content
+
+    def test_documents_net_worse_allows_evict(self, prune_memory_content):
+        """The hook ALLOWS the prune edit because count strictly
+        decreases (net-worse predicate). This must be called out so
+        curators understand why the same hook that denies adds allows
+        evicts."""
+        assert "net-worse" in prune_memory_content
+        assert "pin_caps_gate" in prune_memory_content
+
+    def test_documents_stale_preference(self, prune_memory_content):
+        """Stale pins are surfaced first in the pagination order — they
+        are the safest to evict. This is an explicit UX rule."""
+        assert "STALE" in prune_memory_content
+        assert (
+            "Prefer" in prune_memory_content
+            or "stale first" in prune_memory_content.lower()
+            or "stale pins first" in prune_memory_content.lower()
+        )
+
+    def test_references_pin_memory(self, prune_memory_content):
+        """Cross-reference to /PACT:pin-memory so the two-command
+        workflow is discoverable from either direction."""
+        assert "/PACT:pin-memory" in prune_memory_content
+
+    def test_no_shell_scaffolding_heredoc(self, prune_memory_content):
+        """Regression guard: prune-memory.md MUST NOT introduce the
+        shell-scaffolding surface that pin-memory.md shed in cycle-8.
+        The `check_pin_caps.py --status` invocation is pure (no body
+        input required) so no heredoc is needed."""
+        assert "<<'" not in prune_memory_content
+        assert '<<"' not in prune_memory_content
+        # One `bash` fence is allowed (the plain CLI invocation); it
+        # takes no stdin, so no heredoc form should appear.
+        heredoc_markers = prune_memory_content.count("<<")
+        assert heredoc_markers == 0, (
+            "prune-memory.md contains heredoc marker(s); the advisory "
+            "CLI reads no stdin, so heredoc forms should not appear here."
+        )
+
+
 class TestParsePinsVsDetectStaleEntries_Agreement:
     """Property-test: parse_pins.is_stale agrees with detect_stale_entries
     on shared fixtures.
