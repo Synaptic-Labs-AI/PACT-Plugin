@@ -10,11 +10,18 @@ via hooks/pin_caps.parse_pins, applies count + size cap predicates, and
 emits a JSON decision to stdout.
 
 Usage:
-  # Check whether adding a new pin with given body is allowed
+  # Preferred — read pin body from stdin (shell-injection safe):
+  printf '%s' "$CANDIDATE_BODY" | python3 check_pin_caps.py --body-from-stdin [--has-override]
+
+  # Legacy — pass pin body as argv (retained for backward compatibility;
+  # callers SHOULD migrate to --body-from-stdin to avoid shell-quoting
+  # hazards on bodies containing control characters or shell metacharacters):
   python3 check_pin_caps.py --new-body "pin body text" [--has-override]
 
   # Status-only query (no add under consideration) — emits slot status
   python3 check_pin_caps.py --status
+
+  --new-body, --body-from-stdin, and --status are mutually exclusive.
 
 JSON output contract (stdout):
   {
@@ -150,32 +157,58 @@ def main(argv=None):
         prog="check_pin_caps",
         description="Enforce pin count + size caps on project CLAUDE.md",
     )
-    parser.add_argument(
+    # Mutually-exclusive body sources: shell-safe stdin (preferred),
+    # legacy argv (backward compat), or status-only (no body).
+    body_group = parser.add_mutually_exclusive_group()
+    body_group.add_argument(
         "--new-body",
         default=None,
-        help="Body text of the proposed new pin (triggers cap check)",
+        help=(
+            "Body text of the proposed new pin (triggers cap check). "
+            "Legacy argv path — prefer --body-from-stdin for bodies "
+            "containing shell metacharacters or control chars."
+        ),
+    )
+    body_group.add_argument(
+        "--body-from-stdin",
+        action="store_true",
+        help=(
+            "Read proposed pin body from stdin (preferred). Reads exactly "
+            "what the pipe provides; no shell-quoting hazards."
+        ),
+    )
+    body_group.add_argument(
+        "--status",
+        action="store_true",
+        help="Status-only query: emit slot status, no add check",
     )
     parser.add_argument(
         "--has-override",
         action="store_true",
         help="Proposed pin carries a valid pin-size-override rationale",
     )
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Status-only query: emit slot status, no add check",
-    )
     args = parser.parse_args(argv)
 
+    # Resolve the new body from stdin if requested. Stdin is a distinct
+    # ingestion path: the script consumes sys.stdin.read() and treats it
+    # as the pin body only — it is NEVER parsed as argv or evaluated.
+    new_body = args.new_body
+    if args.body_from_stdin:
+        new_body = sys.stdin.read()
+
     pins, fail_reason = _resolve_pins()
-    if fail_reason is not None and not args.status:
+    if fail_reason is not None:
         # Fail-open: unknown state, allow the add rather than block the user.
+        # Uniformly emit the "Pin slots: unknown (...); proceeding" line for
+        # ALL invocations (including --status) so the user-facing command
+        # surfaces the degradation reason instead of silently returning a
+        # plausible-looking 0-used status.
         return _fail_open(fail_reason)
 
     slot_status = format_slot_status(pins)
     evictable_pins = _build_evictable_pins(pins)
 
-    if args.status or args.new_body is None:
+    if args.status or new_body is None:
         # Status query or no body provided — emit current state, no check.
         _emit(
             allowed=True,
@@ -187,7 +220,7 @@ def main(argv=None):
 
     violation = check_add_allowed(
         existing=pins,
-        new_body=args.new_body,
+        new_body=new_body,
         new_has_override=args.has_override,
     )
 

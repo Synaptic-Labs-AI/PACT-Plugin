@@ -706,3 +706,81 @@ class TestPinStalenessGate_DecoyBypass:
         # count of `<!-- pinned:` in the fragment.
         assert pin_staleness_gate._count_pin_comments(old_fragment) == 0
         assert pin_staleness_gate._count_pin_comments(new_fragment) == 1
+
+
+class TestPinStalenessGate_CaseInsensitivity:
+    """`_count_pin_comments` must match pin-comment markers case-insensitively.
+
+    Asymmetry guard: `pin_caps.OVERRIDE_COMMENT_RE` and the sibling
+    pin-comment regexes in pin_caps.py use `re.IGNORECASE`, so
+    `parse_pins` treats `<!-- PINNED:`, `<!-- Pinned:`, and
+    `<!-- pInNeD:` as valid pin comments. A case-sensitive
+    `.count("<!-- pinned:")` in the gate under-counts against what
+    parse_pins produces, letting a user slip past the gate with an
+    upper-case marker while the cap check still sees the pin.
+
+    Counter-test-by-revert: reverting the case-insensitive count in
+    `_count_pin_comments` (line 125 / 128) to `text.count("<!-- pinned:")`
+    causes these tests to fail because mixed-case markers are not
+    matched.
+    """
+
+    def test_count_pin_comments_matches_uppercase_marker(self):
+        """`<!-- PINNED:` in a fragment → counted as 1."""
+        import pin_staleness_gate
+        fragment = "<!-- PINNED: 2026-04-20 -->\n### X\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(fragment) == 1
+
+    def test_count_pin_comments_matches_titlecase_marker(self):
+        """`<!-- Pinned:` in a fragment → counted as 1."""
+        import pin_staleness_gate
+        fragment = "<!-- Pinned: 2026-04-20 -->\n### X\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(fragment) == 1
+
+    def test_count_pin_comments_matches_mixed_case_marker(self):
+        """`<!-- pInNeD:` (alternating case) → counted as 1."""
+        import pin_staleness_gate
+        fragment = "<!-- pInNeD: 2026-04-20 -->\n### X\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(fragment) == 1
+
+    def test_count_pin_comments_sums_mixed_case_markers(self):
+        """Lowercase + uppercase + mixed in one text → counted as 3."""
+        import pin_staleness_gate
+        fragment = (
+            "<!-- pinned: 2026-01-01 -->\n### A\n"
+            "<!-- PINNED: 2026-02-01 -->\n### B\n"
+            "<!-- pInNeD: 2026-03-01 -->\n### C\n"
+        )
+        assert pin_staleness_gate._count_pin_comments(fragment) == 3
+
+    def test_gate_denies_write_adding_uppercase_pin(self, gate_env):
+        """End-to-end: Write adding an uppercase `<!-- PINNED:` → deny.
+
+        With the case-sensitive bug, the gate's bounded count would see
+        current=1 and new=1 (upper-case pin invisible) → no ADD → allow.
+        With the case-insensitive fix, the gate sees current=1 and
+        new=2 → ADD → deny. This probes the pin_caps ↔ gate asymmetry
+        through the real decision path.
+        """
+        env = gate_env(marker_present=True)
+        current = env["claude_md"].read_text(encoding="utf-8")
+        new_pin = "<!-- PINNED: 2026-04-20 -->\n### Loud Pin\nbody\n\n"
+        replacement = current.replace(
+            "## Working Memory\n",
+            f"{new_pin}## Working Memory\n",
+        )
+        assert replacement != current
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": replacement,
+            },
+        })
+        assert result is not None, (
+            "Upper-case `<!-- PINNED:` slipped past the gate — the "
+            "case-sensitive `.count(\"<!-- pinned:\")` under-counts "
+            "vs parse_pins (which is IGNORECASE). Fix in "
+            "pin_staleness_gate.py:_count_pin_comments."
+        )
+        assert "stale pins" in result

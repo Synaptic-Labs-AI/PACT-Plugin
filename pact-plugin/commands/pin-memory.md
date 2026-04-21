@@ -35,10 +35,13 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ### Step 1 — Enforce caps (required, both modes)
 
-Before any pin add, MUST invoke the cap check CLI:
+Before any pin add, MUST invoke the cap check CLI. Pipe the candidate body
+via stdin using `--body-from-stdin` — `printf '%s'` preserves the body
+verbatim and avoids shell-quoting pitfalls when the body contains special
+characters:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --new-body "$CANDIDATE_BODY" [--has-override]
+printf '%s' "$CANDIDATE_BODY" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override]
 ```
 
 The CLI emits JSON on stdout:

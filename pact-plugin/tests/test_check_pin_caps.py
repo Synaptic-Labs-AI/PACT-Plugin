@@ -68,12 +68,18 @@ class TestCheckPinCapsCli_StatusQuery:
     """--status emits current slot state without checking any add."""
 
     def test_status_zero_pins(self, patched_claude_md):
+        """Empty Pinned Context body routes through fail-open in _resolve_pins
+        (parsed is None → reason='no pinned section'). Back-M1: --status
+        uniformly surfaces the fail-open signal rather than a fake 0/12
+        slot state.
+        """
         patched_claude_md(_make_pinned_content(0))
         rc, payload = _run_cli(["--status"])
         assert rc == 0
         assert payload["allowed"] is True
         assert payload["violation"] is None
-        assert "0/12" in payload["slot_status"]
+        assert "unknown" in payload["slot_status"]
+        assert "proceeding" in payload["slot_status"]
         assert payload["evictable_pins"] == []
 
     def test_status_with_pins(self, patched_claude_md):

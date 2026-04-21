@@ -322,7 +322,8 @@ class TestPinMemoryCommand_Grammar:
 
     def test_documents_check_cli_invocation(self, pin_memory_content):
         assert "check_pin_caps.py" in pin_memory_content
-        assert "--new-body" in pin_memory_content
+        # Sec-MEDIUM: command documents the shell-injection-safe stdin path.
+        assert "--body-from-stdin" in pin_memory_content
         assert "--has-override" in pin_memory_content
 
     def test_documents_step_a_three_options(self, pin_memory_content):
