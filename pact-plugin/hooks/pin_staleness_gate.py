@@ -31,12 +31,12 @@ Output: JSON with hookSpecificOutput.permissionDecision (deny case)
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Optional
 
 import shared.pact_context as pact_context
+from pin_caps import parse_pins
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
@@ -99,27 +99,34 @@ def _resolve_project_claude_md(file_path_str: str) -> Optional[Path]:
 
 
 def _count_pin_comments(text: str) -> int:
-    """Count occurrences of the pin-comment marker `<!-- pinned:`.
+    """Count pins using `parse_pins` as the canonical oracle.
+
+    Symmetric-oracle invariant (closes 2 HIGH bypasses): the gate MUST
+    count pins using the same parser that enforces the count cap at
+    add-time (`pin_caps.parse_pins`). A regex substring count of
+    `<!-- pinned:` is asymmetric with `parse_pins`, which:
+      (a) recognizes a bare `### Heading` (no date comment) as a Pin,
+      (b) tolerates arbitrary whitespace between `<!--` and `pinned:`
+          via its `\\s*` patterns (e.g. `<!--  pinned:` double-space),
+      (c) matches case-insensitively.
+    Substring counts undercount (a) and (b), letting an adversarial ADD
+    slip past the ADD-shape gate while still landing in CLAUDE.md as a
+    parse_pins-visible pin.
 
     Opportunistic managed-region bounding (Arch-M3): if `text` contains
-    PACT_MANAGED_START/END markers (i.e. it is a full CLAUDE.md file or
-    a Write payload), count only within the managed region. This closes
-    the bypass where decoy `<!-- pinned:` tokens in user-authored prose
-    or code blocks outside the managed region would inflate the count
-    and either falsely block (add-shape) or falsely allow (archival).
+    PACT_MANAGED_START/END markers (full CLAUDE.md or Write payload),
+    count only within the managed region. This closes the decoy-bypass
+    where pin-shaped tokens in user-authored prose or code blocks
+    outside the managed region would inflate the count and either
+    falsely block (add-shape) or falsely allow (archival).
 
     If no managed markers are present (fragment from Edit.old_string /
     Edit.new_string), count on the full input — Edit fragments are
     structurally inside the section being mutated, so bounding is
-    unnecessary and would miss legitimate pin comments.
+    unnecessary and would miss legitimate pins.
 
-    Case-insensitive (Test-F3): parse_pins and OVERRIDE_COMMENT_RE both
-    match with re.IGNORECASE, so `<!-- PINNED:` or `<!-- Pinned:` bodies
-    would parse as valid pins. A case-sensitive substring count here
-    would under-count those variants, letting the gate falsely allow an
-    ADD that drives true pin count above the cap. Use re.findall with an
-    inline (?i) flag on both branches to keep the count in lockstep with
-    the parser. Fail-open: non-str input returns 0.
+    Fail-open: non-str input returns 0. Any parse_pins failure (should
+    not raise by its own contract, but defense-in-depth) returns 0.
     """
     if not isinstance(text, str):
         return 0
@@ -128,10 +135,16 @@ def _count_pin_comments(text: str) -> int:
         region_result = extract_managed_region(text)
         if region_result is not None:
             region_text, _ = region_result
-            return len(re.findall(r"(?i)<!-- pinned:", region_text))
+            try:
+                return len(parse_pins(region_text))
+            except Exception:  # noqa: BLE001 — fail-open
+                return 0
     except Exception:  # noqa: BLE001 — fail-open to full-text count
         pass
-    return len(re.findall(r"(?i)<!-- pinned:", text))
+    try:
+        return len(parse_pins(text))
+    except Exception:  # noqa: BLE001 — fail-open
+        return 0
 
 
 def _is_add_shaped_edit(tool_input: dict, claude_md_path: Path) -> bool:
