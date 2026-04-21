@@ -35,14 +35,25 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ### Step 1 — Enforce caps (required, both modes)
 
-Before any pin add, MUST invoke the cap check CLI. Pipe the candidate body
-via stdin using `--body-from-stdin` — `printf '%s'` preserves the body
-verbatim and avoids shell-quoting pitfalls when the body contains special
-characters:
+Before any pin add, MUST invoke the cap check CLI. Pass the candidate body
+via a **single-quoted heredoc** with `--body-from-stdin`. The
+single-quoted delimiter `<<'EOF_PIN_BODY'` is hard-rule mandatory — it
+disables ALL shell expansion inside the body (`$`, backticks, `$(...)`,
+`${...}`, `!` history substitution all remain literal). This is
+safe-by-construction regardless of whether the curator pre-assigns the
+body to a variable or inlines it directly in the heredoc, so it closes
+the inline-substitution RCE surface that `printf '%s' "$VAR"` leaves
+open when the body is inlined instead of variable-assigned:
 
 ```bash
-printf '%s' "$CANDIDATE_BODY" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override]
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override] <<'EOF_PIN_BODY'
+{candidate body literal text — no escaping, no substitution}
+EOF_PIN_BODY
 ```
+
+You MUST NOT drop the single quotes around `'EOF_PIN_BODY'`. An
+unquoted delimiter (`<<EOF_PIN_BODY`) re-enables shell expansion and
+reintroduces the injection surface.
 
 The CLI emits JSON on stdout:
 
