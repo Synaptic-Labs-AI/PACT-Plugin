@@ -10,8 +10,7 @@ Covers:
   detect_stale_entries walker on shared fixtures
 - Boundary-agreement: live CLAUDE.md:68 override line round-trips
 
-Risk tier: CRITICAL. Counter-test-by-revert done in
-test_pin_caps_counter_test.py.
+Risk tier: CRITICAL.
 """
 
 import re
