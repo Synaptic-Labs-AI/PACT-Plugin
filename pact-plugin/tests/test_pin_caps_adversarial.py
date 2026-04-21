@@ -320,14 +320,10 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
         from pin_caps import parse_pins
         content = "#### Not a pin\nbody\n"
         pins = parse_pins(content)
-        # Four-hash heading: _PIN_HEADING_RE is "^### " — matches inside
-        # "#### " because "### " is a prefix of "#### " at position 1.
-        # Actually `^### ` won't match at position 1 (line start only).
-        # But regex `^### ` with MULTILINE DOES match `### ` starting at
-        # any line start, regardless of what follows. So `#### ` starts
-        # with `#### ` not `### `. First four chars are `####`; `### ` at
-        # index 0 requires chars 0-3 to be `###[space]`. Here chars 0-3
-        # are `####`. So NO match.
+        # `_PIN_HEADING_RE` is `^### ` with re.MULTILINE, requiring
+        # exactly three `#` followed by a space at a line start.
+        # `#### Not a pin` has four `#`, so chars 0-3 are `####` — the
+        # required space at index 3 is absent — no match.
         assert pins == []
 
     def test_two_hash_heading_not_parsed_as_pin(self):
