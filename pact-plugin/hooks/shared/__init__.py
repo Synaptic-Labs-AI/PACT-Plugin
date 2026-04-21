@@ -61,6 +61,14 @@ from .merge_guard_common import (
 from .error_output import hook_error_json
 from .gh_helpers import check_pr_state
 from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
+from .intentional_wait import (
+    canonical_since,
+    validate_wait,
+    wait_stale,
+    DEFAULT_THRESHOLD_MINUTES,
+    KNOWN_REASONS,
+    KNOWN_RESOLVERS,
+)
 from .session_state import (
     SAFE_PATH_COMPONENT_RE,
     is_safe_path_component,
@@ -118,6 +126,12 @@ __all__ = [
     "check_pr_state",
     "PACT_AGENTS",
     "SYSTEM_TASK_PREFIXES",
+    "canonical_since",
+    "validate_wait",
+    "wait_stale",
+    "DEFAULT_THRESHOLD_MINUTES",
+    "KNOWN_REASONS",
+    "KNOWN_RESOLVERS",
     "SAFE_PATH_COMPONENT_RE",
     "is_safe_path_component",
     "BOOTSTRAP_MARKER_NAME",
