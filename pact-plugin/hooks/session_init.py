@@ -115,29 +115,39 @@ def check_pin_slot_status() -> Optional[str]:
     pin_caps.format_slot_status. Fail-open: any resolution/read/parse
     error returns None so the SessionStart flow degrades to existing
     behavior rather than DoS.
+
+    Defense-in-depth (Back-M2): the inner branches each handle their own
+    failure modes, but the SessionStart hot path cannot afford an
+    uncaught exception from a downstream helper (e.g., format_slot_status
+    regression, future parser change that raises outside parse_pins).
+    Wrap the full body in a blanket try/except — mirrors the sibling
+    check_pin_stale_block_directive pattern above.
     """
-    path = _get_project_claude_md_path()
-    if path is None:
-        return None
-
     try:
-        content = path.read_text(encoding="utf-8")
-    except (IOError, OSError, UnicodeDecodeError):
+        path = _get_project_claude_md_path()
+        if path is None:
+            return None
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (IOError, OSError, UnicodeDecodeError):
+            return None
+
+        parsed = _parse_pinned_section(content)
+        if parsed is None:
+            # Empty or missing Pinned Context section — surface 0-used state
+            # so the orchestrator sees pin headroom from session start.
+            return format_slot_status([])
+
+        _, _, pinned_content = parsed
+        try:
+            pins = parse_pins(pinned_content)
+        except Exception:  # noqa: BLE001 — fail-open by construction
+            return None
+
+        return format_slot_status(pins)
+    except Exception:  # noqa: BLE001 — outer fail-open
         return None
-
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
-        # Empty or missing Pinned Context section — surface 0-used state
-        # so the orchestrator sees pin headroom from session start.
-        return format_slot_status([])
-
-    _, _, pinned_content = parsed
-    try:
-        pins = parse_pins(pinned_content)
-    except Exception:  # noqa: BLE001 — fail-open by construction
-        return None
-
-    return format_slot_status(pins)
 
 
 def check_pin_stale_block_directive() -> Optional[str]:
