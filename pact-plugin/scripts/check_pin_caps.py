@@ -103,6 +103,14 @@ OVERRIDE_RATIONALE_MAX = _pin_caps.OVERRIDE_RATIONALE_MAX
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
 
+# Cycle-7 Gate 2: line-terminator chars the CLI refuses in
+# --override-rationale. Mirrors pin_caps._FORBIDDEN_TERMINATOR_TABLE:
+# U+000A LINE FEED, U+000D CARRIAGE RETURN, U+0085 NEXT LINE,
+# U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR. Any of these can
+# split a single-line HTML comment into a multi-line block and escape
+# the parser's per-line comment expectations.
+_FORBIDDEN_RATIONALE_CHARS = "\n\r\u0085\u2028\u2029" 
+
 
 def _build_evictable_pins(pins):
     """Transform parsed pins into the evictable_pins JSON shape.
@@ -269,6 +277,20 @@ def _main_inner(argv=None):
             invalid_override_reason = (
                 f"rationale is {len(rationale)} chars "
                 f"(max: {OVERRIDE_RATIONALE_MAX})"
+            )
+        elif any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS):
+            # Cycle-7 Gate 2: reject line terminators BEFORE the regex
+            # round-trip so the refusal message is specific. Mirrors the
+            # character set in pin_caps._FORBIDDEN_TERMINATOR_TABLE so a
+            # rationale that would be silently mutated by parse_pins on
+            # reload is refused up-front instead. Any of \n, \r, U+0085,
+            # U+2028, U+2029 can split a single-line HTML comment across
+            # logical lines, breaking the parser's per-line comment
+            # expectations and enabling prompt-injection / comment-
+            # boundary spoofing.
+            invalid_override_reason = (
+                "rationale contains a line terminator "
+                "(newline, carriage return, or Unicode line separator)"
             )
         else:
             # Synthesize the full comment and round-trip through

@@ -73,12 +73,16 @@ _STALE_MARKER_RE = re.compile(
 # Pin heading anchor — "### " at start of line.
 _PIN_HEADING_RE = re.compile(r'^### ', re.MULTILINE)
 
-# Sec-F5b: Unicode line terminators that must not survive inside an
+# Sec-F5b / cycle-7: Line terminators that must not survive inside an
 # override rationale. Stripped via str.translate in parse_pins.
 # U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE,
-# U+000D CARRIAGE RETURN — any of these can span logical lines in some
-# renderers, enabling prompt-injection or comment-boundary spoofing.
-_FORBIDDEN_TERMINATOR_TABLE = str.maketrans("", "", "\u2028\u2029\u0085\r")
+# U+000D CARRIAGE RETURN, U+000A LINE FEED (ASCII newline) — any of
+# these can span logical lines in some renderers or split a
+# single-line HTML comment across multiple lines, enabling
+# prompt-injection or comment-boundary spoofing. ASCII newline was
+# the Sec residual added in cycle-7: the original table covered
+# Unicode variants but missed the most common terminator.
+_FORBIDDEN_TERMINATOR_TABLE = str.maketrans("", "", "\u2028\u2029\u0085\r\n")
 
 
 class Pin(NamedTuple):
