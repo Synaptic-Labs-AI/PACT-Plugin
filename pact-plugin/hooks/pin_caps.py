@@ -95,7 +95,7 @@ class Pin(NamedTuple):
 class CapViolation(NamedTuple):
     """A cap-enforcement refusal result."""
 
-    kind: Literal["count", "size", "stale"]
+    kind: Literal["count", "size", "stale", "embedded_pin"]
     detail: str
     offending_pin_chars: Optional[int]
     current_count: Optional[int]
@@ -248,6 +248,28 @@ def check_add_allowed(
                 f"compress or add pin-size-override rationale"
             ),
             offending_pin_chars=new_chars,
+            current_count=current_count,
+        )
+
+    # Embedded-pin cap-bypass defense: a candidate body containing a
+    # level-3 heading (`### `) would be counted as an additional pin by
+    # parse_pins on reload, defeating the count cap. Detect by running
+    # the candidate body through parse_pins directly — any non-empty
+    # result means the body smuggles at least one pin structure (either
+    # a full `<!-- pinned:...-->\n### Heading` pair OR a lone heading,
+    # both of which parse_pins treats as a Pin on reload). Conservative
+    # by design: curators can structure pin bodies with H4+ (`#### `)
+    # or bold/italic instead of H3 — rejecting H3 in bodies closes the
+    # smuggle vector regardless of whether a date-comment accompanies it.
+    if parse_pins(new_body):
+        return CapViolation(
+            kind="embedded_pin",
+            detail=(
+                "candidate body contains an embedded pin structure "
+                "(a `### ` heading); would smuggle past the count cap "
+                "on reload. Use `#### ` or bold for in-body structure."
+            ),
+            offending_pin_chars=None,
             current_count=current_count,
         )
 

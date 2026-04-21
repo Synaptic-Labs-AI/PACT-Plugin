@@ -244,6 +244,79 @@ class TestPinSizeCap_Gate:
         assert "2000" in result.detail
 
 
+class TestCheckAddAllowed_EmbeddedHeading:
+    """Embedded-pin cap-bypass defense: candidate bodies containing a
+    level-3 heading (`### `) are rejected because parse_pins on reload
+    would count them as additional pins, defeating the count cap.
+
+    Conservative by design (per lead direction 2026-04-21): rejects ANY
+    embedded pin structure detected by parse_pins, whether accompanied
+    by a date-comment or not. Legitimate pin bodies can use `#### ` or
+    bold/italic for in-body structure.
+
+    Counter-test-by-revert: remove the `if parse_pins(new_body): ...`
+    branch and the `test_embedded_pin_structure_rejected` +
+    `test_lone_heading_rejected_conservative` cases go red.
+    """
+
+    def test_normal_body_allowed(self):
+        """Plain body with no heading or pin-comment — allowed."""
+        from pin_caps import check_add_allowed
+        assert check_add_allowed([], "regular content with no headings", False) is None
+
+    def test_embedded_pin_structure_rejected(self):
+        """Body smuggling a full `<!-- pinned:-->\\n### Heading` pair — rejected."""
+        from pin_caps import check_add_allowed
+        body = "<!-- pinned: 2026-04-21 -->\n### Embedded Pin\nbody"
+        result = check_add_allowed([], body, False)
+        assert result is not None
+        assert result.kind == "embedded_pin"
+        assert "smuggle" in result.detail.lower()
+
+    def test_prose_mentioning_pin_syntax_allowed(self):
+        """Body referencing pin comment inline with no `### ` heading — allowed."""
+        from pin_caps import check_add_allowed
+        body = "Look at the <!-- pinned: x --> line in CLAUDE.md for the canonical form"
+        assert check_add_allowed([], body, False) is None
+
+    def test_lone_heading_rejected_conservative(self):
+        """Body with lone `### ` heading (no preceding date-comment) — REJECTED.
+
+        parse_pins returns a Pin for heading-only entries (date_comment=None),
+        and that Pin counts toward the cap on reload. Conservative check
+        closes the smuggle vector regardless of date-comment presence.
+        """
+        from pin_caps import check_add_allowed
+        body = "### Just a heading\nbody content"
+        result = check_add_allowed([], body, False)
+        assert result is not None
+        assert result.kind == "embedded_pin"
+
+    def test_h4_heading_in_body_allowed(self):
+        """`#### ` (H4) does not match the `^### ` pin-heading pattern — allowed."""
+        from pin_caps import check_add_allowed
+        body = "Body with subsection:\n#### H4 Title\nnested content"
+        assert check_add_allowed([], body, False) is None
+
+    def test_embedded_pin_ignores_other_cap_paths(self):
+        """Embedded-pin check fires after count + size caps; fresh state passes those."""
+        from pin_caps import check_add_allowed
+        # Zero existing pins, small body, but contains embedded structure.
+        body = "### Smuggle\nx"
+        result = check_add_allowed([], body, False)
+        assert result is not None
+        assert result.kind == "embedded_pin"
+        assert result.current_count == 0
+
+    def test_embedded_pin_not_bypassed_by_override(self):
+        """Override flag is a SIZE-cap bypass only — must not bypass embedded check."""
+        from pin_caps import check_add_allowed
+        body = "<!-- pinned: 2026-04-21 -->\n### Embedded\nbody"
+        result = check_add_allowed([], body, True)
+        assert result is not None
+        assert result.kind == "embedded_pin"
+
+
 class TestExtractBodyChars:
     """body_chars excludes auto-generated markers (date comment, STALE marker)."""
 
