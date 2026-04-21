@@ -51,10 +51,17 @@ delimiter** and `--body-from-stdin`. Two defenses, both hard-rule mandatory:
    pin body could include verbatim, splitting the body into a truncated
    prefix + post-heredoc shell command. A 4-byte hex nonce (32 bits,
    ~1-in-4-billion collision per invocation) makes delimiter collision
-   infeasible:
+   infeasible. The nonce is generated via `python3 -c 'import
+   secrets; print(secrets.token_hex(4))'` — stdlib CSPRNG, zero new
+   dependency (python3 is already required by the very next line of
+   this bash block). Do NOT use `openssl rand -hex 4`: openssl can be
+   missing from minimal base images, and a missing-binary invocation
+   in command substitution silently produces empty stdout, collapsing
+   the delimiter to the fixed `EOF_PIN_BODY_` suffix — the exact
+   predictable form this defense exists to prevent:
 
 ```bash
-DELIM="EOF_PIN_BODY_$(openssl rand -hex 4)"
+DELIM="EOF_PIN_BODY_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override] <<"${DELIM}"
 {candidate body literal text — no escaping, no substitution}
 ${DELIM}
