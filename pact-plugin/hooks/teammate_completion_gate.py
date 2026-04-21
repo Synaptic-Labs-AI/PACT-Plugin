@@ -27,6 +27,7 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 from shared.handoff_example import format_handoff_example
+from shared.intentional_wait import wait_stale
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 
@@ -85,9 +86,16 @@ def _scan_owned_tasks(
             if data.get("status") != "in_progress":
                 continue
 
+            metadata = data.get("metadata", {})
+            # Protocol-defined wait (e.g., awaiting_teachback_approved): the
+            # completion-gate nag would consume the idle slot the teammate needs
+            # for inbox delivery. Threshold-bounded — stale flag re-enables nag.
+            wait = metadata.get("intentional_wait")
+            if wait is not None and not wait_stale(wait):
+                continue
+
             task_id = task_file.stem  # filename without .json
             subject = data.get("subject", "unknown")
-            metadata = data.get("metadata", {})
 
             # Semantic dispatch: branch on what the completion IS,
             # not who the agent IS (extensible to any signal-only agent)

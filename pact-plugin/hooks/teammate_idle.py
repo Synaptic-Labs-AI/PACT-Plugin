@@ -34,6 +34,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
+from shared.intentional_wait import wait_stale
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.task_utils import get_task_list
@@ -123,6 +124,12 @@ def detect_stall(
         return None
     if metadata.get("stalled"):
         # Already marked as stalled — don't re-alert
+        return None
+    # Protocol-defined wait (e.g., awaiting_teachback_approved): the nag
+    # would consume the idle slot the teammate needs for inbox delivery,
+    # livelocking the wait. Threshold-bounded — stale flag re-enables nag.
+    wait = metadata.get("intentional_wait")
+    if wait is not None and not wait_stale(wait):
         return None
 
     task_id = task.get("id", "?")
