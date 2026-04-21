@@ -683,16 +683,20 @@ class TestPinStalenessGate_DecoyBypass:
         Edit.old_string and Edit.new_string are typically raw fragments
         that do not carry the PACT_MANAGED_START/END markers — they are
         structurally INSIDE the managed region by virtue of the section
-        being edited. `_count_pin_comments` must fall through to
-        `text.count(...)` on these, otherwise a net-new pin added via
-        Edit would be invisible (extract_managed_region returns None →
-        bounded count = 0 for both old and new → no ADD → phantom-allow).
+        being edited. `_count_pin_comments` must fall through to full-text
+        parse_pins on these, otherwise a net-new pin added via Edit would
+        be invisible (extract_managed_region returns None → bounded count
+        fails → else-branch must cover it).
 
-        This test pins the else-branch behavior of
-        `_count_pin_comments`: when MANAGED_START_MARKER is absent,
-        count the full input. Currently exercised via a direct
-        `_count_pin_comments` assertion (no gate call needed — the
-        Edit ADD path is covered by test_edit_adding_new_pin_denied).
+        Post-symmetric-oracle (Commit 1): fragment counts now use
+        `len(parse_pins(text))` directly. Since parse_pins treats bare
+        `### Heading` as a Pin, `### Existing\\nbody\\n` parses as 1
+        pin (not 0). The gate still denies net-new adds because the
+        OLD fragment and NEW fragment both parse consistently: a fragment
+        with ONLY a bare `### Existing` counts 1; a fragment with a
+        `<!-- pinned: -->\\n### New` ALSO counts 1 (comment + heading
+        form one Pin). Adding a net-new heading anywhere raises the
+        count symmetrically.
         """
         import pin_staleness_gate
         gate_env(marker_present=True)
@@ -702,9 +706,13 @@ class TestPinStalenessGate_DecoyBypass:
         from shared.claude_md_manager import MANAGED_START_MARKER
         assert MANAGED_START_MARKER not in old_fragment
         assert MANAGED_START_MARKER not in new_fragment
-        # Fall-through to full-text count MUST return the literal
-        # count of `<!-- pinned:` in the fragment.
-        assert pin_staleness_gate._count_pin_comments(old_fragment) == 0
+        # Fall-through to full-text parse_pins MUST return the parse_pins
+        # count on the fragment. Both fragments parse as 1 pin: a bare
+        # `### Heading` and a `<!-- pinned: -->\n### Heading` are both
+        # valid Pin shapes under parse_pins (this is the symmetric-oracle
+        # property — BareHeadingBypass and WhitespaceVariant tests below
+        # exercise the cross-fragment delta that matters for the gate).
+        assert pin_staleness_gate._count_pin_comments(old_fragment) == 1
         assert pin_staleness_gate._count_pin_comments(new_fragment) == 1
 
 
@@ -784,3 +792,196 @@ class TestPinStalenessGate_CaseInsensitivity:
             "pin_staleness_gate.py:_count_pin_comments."
         )
         assert "stale pins" in result
+
+
+class TestPinStalenessGate_BareHeadingBypass:
+    """Symmetric-oracle defense (backend-coder-5 Commit 1): bare `### Heading`
+    adds with no preceding date comment MUST DENY.
+
+    Before Commit 1, `_count_pin_comments` used a regex substring count
+    of `<!-- pinned:` tokens. This was asymmetric with `parse_pins`,
+    which recognizes a bare `### Heading` (no preceding date comment)
+    as a Pin. An adversarial ADD of a level-3 heading-only pin landed
+    as a parse_pins-visible pin on reload — yet the gate saw zero
+    `<!-- pinned:` tokens and let the ADD through while the cap-check
+    CLI simultaneously counted the pin against the 12-pin quota.
+
+    Fix: `_count_pin_comments` now calls `parse_pins` directly, so the
+    gate and the cap-check share one oracle. ADDing a bare `### Heading`
+    raises the parse_pins count by 1 → gate denies.
+
+    Counter-test-by-revert: reverting Commit 1 (restoring the regex
+    substring count) MUST cause these tests to FAIL. A revert that
+    leaves them passing is phantom-green coverage.
+    """
+
+    def test_edit_adding_bare_heading_without_comment_denied(self, gate_env):
+        """Edit: old_string has no pin comment, new_string adds bare `### Smuggled`
+        with body → gate DENIES (parse_pins sees +1 pin).
+
+        This is the load-bearing bypass: a curator with the
+        stale-pins-pending marker armed could previously smuggle a
+        net-new pin past the gate by skipping the date comment line.
+        """
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "## Working Memory\n",
+                "new_string": "### Smuggled Pin\nsmuggled body\n\n## Working Memory\n",
+            },
+        })
+        assert result is not None, (
+            "Bare `### Heading` ADD slipped past the gate — the "
+            "pre-symmetric-oracle regex substring count missed bare "
+            "headings. If you see this failure after reverting "
+            "backend-coder-5 Commit 1 (restoring the substring count), "
+            "that is counter-test proof the symmetric-oracle defense "
+            "is load-bearing."
+        )
+        assert "stale pins" in result
+
+    def test_write_adding_bare_heading_without_comment_denied(self, gate_env):
+        """Write: full-file replacement adds a bare `### Smuggled` in the
+        managed region → gate DENIES (parse_pins sees +1 pin).
+
+        Write-path twin of the Edit case above. Exercises the same
+        asymmetry via the Write-shape branch of `_is_add_shaped_edit`.
+        """
+        env = gate_env(marker_present=True)
+        current = env["claude_md"].read_text(encoding="utf-8")
+        # Inject a bare heading inside the managed region.
+        bare_pin = "### Smuggled Pin\nsmuggled body\n\n"
+        replacement = current.replace(
+            "## Working Memory\n",
+            f"{bare_pin}## Working Memory\n",
+        )
+        assert replacement != current
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": replacement,
+            },
+        })
+        assert result is not None, (
+            "Write-path bare-heading ADD bypassed the gate. "
+            "Revert-counter-test on backend-coder-5 Commit 1 must fail."
+        )
+        assert "stale pins" in result
+
+    def test_count_pin_comments_counts_bare_heading_as_pin(self):
+        """Direct oracle assertion: `### Heading\\nbody` counts as 1 pin.
+
+        Parses the new oracle behavior in isolation — independent of the
+        gate decision path. If this assertion fails, the test above will
+        fail too (cause vs. effect); this test isolates the cause.
+        """
+        import pin_staleness_gate
+        fragment = "### Smuggled\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(fragment) == 1, (
+            "parse_pins treats a bare `### Heading` as a Pin; "
+            "_count_pin_comments must agree (symmetric oracle). Under "
+            "the pre-Commit-1 regex substring count, this returned 0."
+        )
+
+
+class TestPinStalenessGate_WhitespaceVariant:
+    """Symmetric-oracle defense (backend-coder-5 Commit 1): whitespace-tolerant
+    pin markers (`<!--  pinned:` with double-space, tabs, leading spaces)
+    MUST count toward the gate as parse_pins counts them.
+
+    Before Commit 1, `_count_pin_comments` used a literal substring
+    count of `<!-- pinned:` (case-insensitive via regex flag, but with
+    EXACTLY one space before `pinned:`). parse_pins tolerates
+    `<!--\\s*pinned:` — two spaces, a tab, any whitespace run. A
+    curator smuggling a pin with `<!--  pinned: 2026-04-20 -->` (double
+    space) landed as a parse_pins-visible pin on reload but was invisible
+    to the substring-count gate.
+
+    Fix: _count_pin_comments delegates to parse_pins, which uses the
+    whitespace-tolerant regex. Gate + cap-check now agree.
+
+    Counter-test-by-revert: reverting Commit 1 MUST cause these tests
+    to FAIL. If they pass after a revert, the defense is phantom-green.
+    """
+
+    def test_edit_adding_double_space_marker_denied(self, gate_env):
+        """Edit: adding `<!--  pinned:` (double space) → DENIES.
+
+        parse_pins matches `<!--\\s*pinned:` → 1 new pin. Old substring
+        count of `<!-- pinned:` (single space) → 0 new pins → bypass.
+        """
+        env = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "## Working Memory\n",
+                "new_string": (
+                    "<!--  pinned: 2026-04-20 -->\n"  # double-space bypass
+                    "### Smuggled Pin\nbody\n\n"
+                    "## Working Memory\n"
+                ),
+            },
+        })
+        assert result is not None, (
+            "Double-space `<!--  pinned:` ADD slipped past the gate — "
+            "the pre-symmetric-oracle substring count required exactly "
+            "one space. If you see this failure after reverting "
+            "backend-coder-5 Commit 1, the defense is load-bearing."
+        )
+        assert "stale pins" in result
+
+    def test_write_adding_double_space_marker_denied(self, gate_env):
+        """Write: adding `<!--  pinned:` in the managed region → DENIES."""
+        env = gate_env(marker_present=True)
+        current = env["claude_md"].read_text(encoding="utf-8")
+        # Double-space marker — bypass under old oracle.
+        new_pin = (
+            "<!--  pinned: 2026-04-20 -->\n"
+            "### Smuggled\nbody\n\n"
+        )
+        replacement = current.replace(
+            "## Working Memory\n",
+            f"{new_pin}## Working Memory\n",
+        )
+        assert replacement != current
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": replacement,
+            },
+        })
+        assert result is not None, (
+            "Double-space `<!--  pinned:` ADD via Write bypassed the "
+            "gate. Revert-counter-test on Commit 1 must fail here."
+        )
+        assert "stale pins" in result
+
+    def test_count_pin_comments_counts_whitespace_variants(self):
+        """Direct oracle assertion: whitespace-variant markers count as pins.
+
+        Isolates the cause from the effect: if parse_pins tolerates
+        `<!--  pinned:`, `<!--\\tpinned:` and so on, the gate must see
+        the same count. Independent of the gate decision path.
+        """
+        import pin_staleness_gate
+        # Double-space preceding `pinned:`
+        double_space = "<!--  pinned: 2026-04-20 -->\n### X\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(double_space) == 1, (
+            "Double-space `<!--  pinned:` did not count. "
+            "Pre-Commit-1 substring count required exactly one space."
+        )
+        # Tab after `<!--`
+        tab_sep = "<!--\tpinned: 2026-04-20 -->\n### Y\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(tab_sep) == 1, (
+            "Tab-separated `<!--\\tpinned:` did not count."
+        )
+        # No space at all (parse_pins \s* permits zero whitespace too)
+        no_space = "<!--pinned: 2026-04-20 -->\n### Z\nbody\n"
+        assert pin_staleness_gate._count_pin_comments(no_space) == 1, (
+            "Zero-space `<!--pinned:` did not count."
+        )

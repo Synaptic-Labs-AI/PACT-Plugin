@@ -375,6 +375,155 @@ class TestPinMemoryCommand_Grammar:
             "for LLM readers"
         ) in pin_memory_content
 
+    def test_heredoc_opener_is_always_quoted_in_code_fences(
+        self, pin_memory_content
+    ):
+        """Every heredoc opener inside a ```bash fenced code block MUST be
+        quoted (either `<<'DELIM'` or `<<"DELIM"`).
+
+        Quoted heredocs disable shell expansion inside the body — the
+        load-bearing security property that `--body-from-stdin` was
+        redesigned around. Unquoted openers (`<<DELIM`, `<<${DELIM}`)
+        re-enable `$(...)`, backticks, `$VAR`, and history substitution,
+        reopening the injection surface.
+
+        Scope-bounded: we inspect openers INSIDE ```bash fences only.
+        Prose-body references to the unquoted form (e.g., a "MUST NOT use
+        `<<EOF_PIN_BODY`" warning) are legitimate teaching examples and
+        must not trigger the gate. Treating the whole doc text as one
+        surface would false-positive on such warnings.
+
+        Dual assertion:
+          1. At least one quoted heredoc opener exists (positive presence
+             — the documented enforcement path).
+          2. Zero unquoted heredoc openers exist inside ```bash fences
+             (typo-safety — catches a curator dropping an unquoted form).
+
+        Counter-test-by-revert: flipping the `<<"${DELIM}"` in the bash
+        fence to `<<${DELIM}` (unquoted) MUST cause assertion (2) to
+        fail. Flipping it to `<<DELIM` (still unquoted, different form)
+        must also fail. If both still pass after a revert, the defense
+        is phantom-green.
+
+        Forward-looking: backend-coder-5's Commit 3 introduced the
+        random-suffix delimiter form (`<<"${DELIM}"`); the quoting
+        convention is what matters, not the specific delimiter name.
+        """
+        # Extract all ```bash ... ``` fenced code blocks.
+        bash_fences = re.findall(
+            r"```bash\n(.*?)```", pin_memory_content, flags=re.DOTALL
+        )
+        assert bash_fences, (
+            "pin-memory.md has no ```bash``` fenced code blocks — the "
+            "heredoc contract presumes at least one bash fence. If the "
+            "doc moved to a different fence language, update this test."
+        )
+        joined_bash = "\n".join(bash_fences)
+
+        # Assertion 1: quoted heredoc opener present (positive).
+        # Both single- and double-quoted forms disable body expansion;
+        # backend-coder-5 Commit 3 uses `<<"${DELIM}"`, earlier form was
+        # `<<'EOF_PIN_BODY'`. Either satisfies the contract.
+        has_quoted_heredoc = (
+            re.search(r"<<'[^']+'", joined_bash) is not None
+            or re.search(r'<<"[^"]+"', joined_bash) is not None
+        )
+        assert has_quoted_heredoc, (
+            "No quoted heredoc opener found inside ```bash``` fences. "
+            "pin-memory.md must use `<<'DELIM'` or `<<\"DELIM\"` to "
+            "disable shell expansion inside pin bodies. Unquoted "
+            "heredocs reopen the shell-injection surface that "
+            "--body-from-stdin was redesigned around."
+        )
+
+        # Assertion 2: NO unquoted heredoc opener in bash fences.
+        # A heredoc opener is `<<` followed by a word char, `$`, or a
+        # variable expansion — without a leading quote. The anchor
+        # `(?<![<'"])` rejects `<<<` here-strings and pre-quoted forms.
+        # Inside our extracted bash fences only; prose warnings that
+        # reference unquoted forms (e.g., a "MUST NOT use `<<EOF`" note
+        # in plain markdown) remain outside scope.
+        unquoted_openers = re.findall(
+            r"<<(?![<'\"])[\w\$]", joined_bash
+        )
+        assert not unquoted_openers, (
+            "pin-memory.md contains unquoted heredoc opener(s) inside a "
+            f"```bash``` code fence: {unquoted_openers!r}. Each one "
+            "re-enables $(...), backticks, and $VAR expansion — "
+            "reopening the shell-injection surface. Use `<<'DELIM'` or "
+            "`<<\"DELIM\"` instead."
+        )
+
+    def test_heredoc_nonce_uses_python3_secrets_not_openssl(
+        self, pin_memory_content
+    ):
+        """DELIM nonce MUST be generated via `python3 -c 'import secrets;
+        print(secrets.token_hex(4))'`, NOT via `openssl rand`.
+
+        Load-bearing: openssl can be missing from minimal base images
+        (Alpine, some distroless variants). A missing-binary invocation
+        inside `$(...)` command substitution SILENTLY produces empty
+        stdout — collapsing the DELIM assignment to the fixed
+        `EOF_PIN_BODY_` suffix. That is the EXACT predictable-delimiter
+        shape the random-suffix defense exists to prevent: an attacker-
+        influenced pin body containing `EOF_PIN_BODY_` on its own line
+        would terminate the heredoc early, splitting the body into a
+        truncated prefix + post-heredoc shell command.
+
+        python3 is already a hard dependency of the enclosing bash
+        block (the very next line invokes `python3 ... check_pin_caps.py`),
+        so there is zero new dependency cost. If python3 itself is
+        missing, the ENTIRE command fails loudly at check_pin_caps.py
+        — no silent degradation path remains. `secrets.token_hex(4)` is
+        the CSPRNG stdlib equivalent of `openssl rand -hex 4` (32 bits
+        of entropy, 8 hex chars).
+
+        Counter-test-by-revert: flipping the DELIM line from the python3
+        form back to `$(openssl rand -hex 4)` MUST cause both assertions
+        here to fail (positive presence → RED on missing python3 form;
+        negative absence → RED on present openssl rand).
+
+        Scope-bounded to ```bash fences only. A prose negative example
+        that quotes `openssl rand -hex 4` as a don't-do-this form would
+        live in markdown body text, not in a bash fence, and remain
+        outside this assertion's scope.
+        """
+        bash_fences = re.findall(
+            r"```bash\n(.*?)```", pin_memory_content, flags=re.DOTALL
+        )
+        assert bash_fences, "no ```bash``` fences to inspect"
+        joined_bash = "\n".join(bash_fences)
+
+        # Assertion 1: python3 secrets.token_hex nonce present.
+        # Tolerant to whitespace variations (`import secrets; print(...)`
+        # vs `import secrets;print(...)`), but pins the two load-bearing
+        # tokens: `import secrets` and `secrets.token_hex(4)`. If either
+        # is missing the nonce is not the CSPRNG form.
+        nonce_form_present = (
+            re.search(r"python3\s+-c", joined_bash) is not None
+            and "import secrets" in joined_bash
+            and "secrets.token_hex(4)" in joined_bash
+        )
+        assert nonce_form_present, (
+            "No `python3 -c 'import secrets; print(secrets.token_hex(4))'` "
+            "nonce generator found inside ```bash``` fences. The cycle-7 "
+            "fix requires the stdlib CSPRNG form — openssl-based nonce "
+            "fails silently on minimal images and reintroduces the "
+            "predictable-delimiter surface."
+        )
+
+        # Assertion 2: openssl rand MUST NOT appear inside bash fences.
+        # Prose warnings that mention `openssl rand -hex 4` as a
+        # forbidden form live in markdown body, outside this scope.
+        assert "openssl rand" not in joined_bash, (
+            "pin-memory.md contains `openssl rand` inside a ```bash``` "
+            "code fence. openssl-based nonce fails silently on minimal "
+            "images (Alpine, distroless) where openssl is absent — "
+            "collapsing DELIM to the fixed `EOF_PIN_BODY_` suffix and "
+            "reopening the early-termination bypass. Use `python3 -c "
+            "'import secrets; print(secrets.token_hex(4))'` instead."
+        )
+
 
 class TestParsePinsVsDetectStaleEntries_Agreement:
     """Property-test: parse_pins.is_stale agrees with detect_stale_entries
