@@ -5,16 +5,16 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ## Mode
 
-- **With arguments** (`/PACT:pin-memory <content>`): Pin the specified content directly.
-- **Without arguments** (`/PACT:pin-memory`): Review the session for pin-worthy context, pin what matters, and prune stale entries.
+- **With arguments** (`/PACT:pin-memory <content>`): Pin the specified content.
+- **Without arguments** (`/PACT:pin-memory`): Review the session for pin-worthy context and pin what matters.
 
-## Caps (hard rules)
+## Caps (enforced mechanically)
 
-**You MUST NOT bypass these. Run `scripts/check_pin_caps.py` BEFORE any pin add, no exceptions.**
+Cap violations are denied by `hooks/pin_caps_gate.py` when the Edit/Write tool call lands. You do NOT need to invoke a CLI check before adding — the hook is authoritative.
 
-- **Count cap**: 12 pins maximum.
-- **Size cap**: 1500 characters per pin body (excludes `<!-- pinned: ... -->` and `<!-- STALE: ... -->` auto-markers).
-- **Override**: verbatim load-bearing content (e.g., canonical protocol forms) MAY carry a `pin-size-override` rationale — see [Size Override](#size-override). Curator discretion; no hard override count sub-cap.
+- **Count**: 12 pins maximum.
+- **Size**: 1500 characters per pin body (excludes `<!-- pinned: ... -->` and `<!-- STALE: ... -->` auto-markers).
+- **Override**: verbatim load-bearing content MAY carry a `pin-size-override` rationale (≤ 120 chars, single line) — see [Size Override](#size-override). The hook validates the rationale in-band.
 
 ## When to Pin
 
@@ -31,198 +31,45 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ## Process
 
-**Target file**: The project CLAUDE.md may be at either `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Use `.claude/CLAUDE.md` if it exists, otherwise use `./CLAUDE.md`. If neither exists, create at `.claude/CLAUDE.md`.
+**Target file**: The project CLAUDE.md may be at either `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Use `.claude/CLAUDE.md` if it exists, otherwise `./CLAUDE.md`. If neither exists, create at `.claude/CLAUDE.md`.
 
-### Step 1 — Enforce caps (required, both modes)
+### Adding a pin
 
-Before any pin add, MUST invoke the cap check CLI. Pass the candidate body
-via a **single-quoted heredoc with a per-invocation random-suffix
-delimiter** and `--body-from-stdin`. Two defenses, both hard-rule mandatory:
-
-1. **Single-quoted delimiter** (`<<'...'`) disables ALL shell expansion
-   inside the body (`$`, backticks, `$(...)`, `${...}`, `!` history
-   substitution all remain literal). Closes the inline-substitution RCE
-   surface that `printf '%s' "$VAR"` leaves open when the body is
-   inlined instead of variable-assigned.
-2. **Per-invocation random suffix** on the delimiter name prevents
-   a candidate body containing the literal delimiter string from
-   terminating the heredoc early. A fixed `EOF_PIN_BODY` is a known,
-   grep-able token that an adversarial (or accidentally self-referential)
-   pin body could include verbatim, splitting the body into a truncated
-   prefix + post-heredoc shell command. A 4-byte hex nonce (32 bits,
-   ~1-in-4-billion collision per invocation) makes delimiter collision
-   infeasible. The nonce is generated via `python3 -c 'import
-   secrets; print(secrets.token_hex(4))'` — stdlib CSPRNG, zero new
-   dependency (python3 is already required by the very next line of
-   this bash block). Do NOT use `openssl rand -hex 4`: openssl can be
-   missing from minimal base images, and a missing-binary invocation
-   in command substitution silently produces empty stdout, collapsing
-   the delimiter to the fixed `EOF_PIN_BODY_` suffix — the exact
-   predictable form this defense exists to prevent:
-
-```bash
-DELIM="EOF_PIN_BODY_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_pin_caps.py --body-from-stdin [--has-override] <<"${DELIM}"
-{candidate body literal text — no escaping, no substitution}
-${DELIM}
-```
-
-Note: the delimiter is quoted as `"${DELIM}"` on the opening line so the
-variable expands (to the random-suffixed name) BUT expansion inside the
-body is disabled because the delimiter ITSELF is quoted — bash checks
-for any quoting on the delimiter, not specifically single-quoting. Both
-`<<"${DELIM}"` and `<<'EOF_PIN_BODY'` suppress body expansion.
-
-You MUST NOT use an unquoted delimiter (`<<${DELIM}` or
-`<<EOF_PIN_BODY`) — that re-enables shell expansion and reintroduces the
-injection surface. You MUST NOT reuse a fixed delimiter across
-invocations — that reintroduces the literal-delimiter-in-body
-early-termination surface.
-
-The CLI emits JSON on stdout:
-
-```json
-{
-  "allowed": true,
-  "violation": null,
-  "slot_status": "Pin slots: 11/12 used, 340 chars remaining on largest pin",
-  "evictable_pins": [...]
-}
-```
-
-- `allowed: true` (exit 0) → proceed to Step 2.
-- `allowed: false` (exit 1) → run the [Refusal Flow](#refusal-flow). MUST NOT bypass.
-- Fail-open: if slot_status starts with `Pin slots: unknown (...)`, the CLI could not parse state — proceed, but report the reason to the user.
-
-### Step 2 — Add the pin
-
-#### With Arguments (targeted pin)
-
-1. Read existing CLAUDE.md
-2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`)
+1. Read existing CLAUDE.md.
+2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`).
 3. Add the new entry with a date tag:
    ```markdown
    <!-- pinned: YYYY-MM-DD -->
    ### Entry Title
    Content here (~5-10 lines max)
    ```
-4. Run the pruning process (see [Pruning Pinned Entries](#pruning-pinned-entries) below)
-5. Commit changes
+4. Commit.
 
-#### Without Arguments (session review)
+### Without arguments — session review
 
-1. Read existing CLAUDE.md
-2. Review the session for pin-worthy context — scan for significant decisions, architectural changes, gotchas discovered, or patterns established. Apply the "When to Pin" criteria above.
-3. For each pin-worthy entry, run Step 1 with its candidate body BEFORE adding.
-4. If nothing is pin-worthy, report "No new context to pin."
-5. Run the pruning process (see [Pruning Pinned Entries](#pruning-pinned-entries) below)
-6. Commit changes if any were made
+1. Read existing CLAUDE.md.
+2. Review the session for pin-worthy context. Apply the "When to Pin" criteria above.
+3. For each pin-worthy entry, add it as in "Adding a pin." If nothing is pin-worthy, report "No new context to pin."
+4. Commit changes if any were made.
 
-## Refusal Flow
+## Refusal flow (hook-denied edits)
 
-When `check_pin_caps.py` returns `allowed: false`:
+If the pin_caps_gate hook denies the Edit/Write, the deny reason tells you which cap fired. You MUST NOT bypass.
 
-### Count refusal (`violation.kind == "count"`)
-
-You MUST prompt the user to evict before the new pin can be added. Use `AskUserQuestion` with a two-step flow — the flat-list approach fails because 12 eviction candidates + cancel exceeds the 4-option platform cap.
-
-**Step A — choose category**:
-
-```
-AskUserQuestion(questions=[{
-  header: "Pin evict",
-  question: "Pin slots full (12/12). Which category to evict?",
-  options: [
-    {label: "Evict stale pin",    description: "Evict a pin already marked <!-- STALE: ... -->"},
-    {label: "Evict non-stale pin", description: "Evict a load-bearing pin — requires justification"},
-    {label: "Cancel add",          description: "Abandon this pin; CLAUDE.md is unchanged"}
-  ]
-}])
-```
-
-**Step B — choose pin** (only after Step A is answered):
-
-Render the filtered `evictable_pins` from the CLI output, 4-at-a-time (pagination). The first 3 are candidate evictions; the 4th is always "Show more".
-
-```
-AskUserQuestion(questions=[{
-  header: "Pin index",
-  question: "Which pin to evict? (<stale|non-stale> pins, page N of M)",
-  options: [
-    {label: "Pin 0 — <heading>", description: "<chars> chars, <age indicator>"},
-    {label: "Pin 1 — <heading>", description: "<chars> chars, <age indicator>"},
-    {label: "Pin 2 — <heading>", description: "<chars> chars, <age indicator>"},
-    {label: "Show more",         description: "Next page of eviction candidates"}
-  ]
-}])
-```
-
-On eviction:
-- Remove the pin block AND its `<!-- pinned: ... -->` comment line entirely.
-- Then re-run Step 1 with the new body. MUST re-check — a stale-pin eviction may leave room; a non-stale eviction MUST still respect the size cap.
-
-On "Cancel add": report "Pin add cancelled; CLAUDE.md unchanged." and exit.
-
-### Size refusal (`violation.kind == "size"`)
-
-The new pin body exceeds 1500 chars. Prompt the user:
-
-```
-AskUserQuestion(questions=[{
-  header: "Size cap",
-  question: "New pin is <N> chars (cap: 1500). How to proceed?",
-  options: [
-    {label: "Compress",         description: "Rewrite content more concisely and retry"},
-    {label: "Add override",     description: "Add pin-size-override rationale — use ONLY for verbatim load-bearing content"},
-    {label: "Cancel add",       description: "Abandon this pin; CLAUDE.md is unchanged"}
-  ]
-}])
-```
-
-On "Compress": rewrite and re-run Step 1.
-On "Add override": re-run Step 1 with `--has-override --override-rationale "<rationale>"`. The CLI validates the rationale in-band against `OVERRIDE_COMMENT_RE` and refuses (`violation.kind == "invalid_override"`) if the rationale is empty, over `OVERRIDE_RATIONALE_MAX` (120 chars), or contains the HTML comment terminator `-->`. This catches malformed rationales at add-time rather than having the next-session parser silently downgrade them to no-override.
-
-The pin MUST be added with the extended comment form:
-
-```markdown
-<!-- pinned: YYYY-MM-DD, pin-size-override: RATIONALE -->
-### Entry Title
-<verbatim content>
-```
-
-Rationale is trimmed whitespace, non-empty, ≤ 120 chars. Strict parser: empty or malformed rationale → treated as no override.
-
-### Invalid-override refusal (`violation.kind == "invalid_override"`)
-
-The CLI refused the rationale (empty, oversize, or contains `-->`). Correct the rationale and re-run Step 1 with `--has-override --override-rationale "<fixed rationale>"`.
-
-On "Cancel add": report and exit.
+- **Pin count cap reached (12/12)**: Run `/PACT:prune-memory` to evict an existing pin, then retry the add.
+- **New pin body is N chars (cap: 1500)**: Compress the body, or add a `pin-size-override` rationale if the content is verbatim load-bearing.
+- **Embedded pin structure in body**: Your new pin body contains a `### ` heading, which would be counted as an additional pin on reload. Use `#### ` or bold for in-body structure instead.
+- **Override rationale malformed**: The rationale is empty, exceeds 120 chars, or contains a line terminator (`\n`, `\r`, or a Unicode line separator). Fix the rationale and retry.
 
 ## Size Override
 
-Use `pin-size-override` ONLY when the pin body is **verbatim** content whose exact form is load-bearing for downstream LLM readers (canonical dispatch strings, protocol templates, regex literals). Rationale MUST state *why* splitting or compressing would lose correctness — not merely "this is important".
+Use `pin-size-override` ONLY when the pin body is **verbatim** content whose exact form is load-bearing for downstream LLM readers (canonical dispatch strings, protocol templates, regex literals). Rationale MUST state *why* splitting or compressing would lose correctness — not merely "this is important". Rationale is single-line, ≤ 120 chars.
 
 Example (live on CLAUDE.md):
 ```markdown
 <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form is load-bearing for LLM readers -->
 ```
 
-## Pruning Pinned Entries
+## See also
 
-Run this whenever pin-memory is invoked (both modes). Review each entry in the `## Pinned Context` section.
-
-**Prune when:**
-- The entry references files, patterns, or architecture that no longer exists in the codebase
-- The entry was pinned for a specific feature or task that has been completed and merged
-- The information is now documented elsewhere (CLAUDE.md sections, README, code comments)
-- The entry has been superseded by a newer pinned entry covering the same topic
-
-**Keep when:**
-- The entry is old but still accurate and actionable (age alone is not a reason to prune)
-- The entry documents a gotcha or pitfall that could recur
-- You are unsure whether it is still relevant — keep it and flag for user review
-
-**How to prune:**
-- Remove the entry AND its `<!-- pinned: YYYY-MM-DD -->` tag entirely
-- If unsure about a specific entry, ask the user via `AskUserQuestion` before removing
-- Report what was pruned: "Pruned N stale entries: [titles]"
+- `/PACT:prune-memory` — interactive pruning of existing pins (paginated AskUserQuestion over evictable entries).

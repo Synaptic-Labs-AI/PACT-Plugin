@@ -52,14 +52,24 @@ def patched_claude_md(tmp_path, monkeypatch):
     return _write
 
 
-def _run_cli(argv):
-    """Invoke check_pin_caps.main and capture stdout + return code."""
+def _run_cli(argv) -> tuple[int, dict]:
+    """Invoke check_pin_caps.main and capture stdout + return code.
+
+    Contract: the demoted CLI always emits a JSON payload (advisory
+    or fail-open both write to stdout) — an empty stdout would be a
+    CLI bug. We assert on that invariant so downstream tests can
+    subscript the payload dict without Optional-narrowing noise.
+    """
     import check_pin_caps
     buf = io.StringIO()
     with patch.object(sys, "stdout", buf):
         rc = check_pin_caps.main(argv)
     out = buf.getvalue().strip()
-    payload = json.loads(out) if out else None
+    assert out, "CLI produced no stdout — advisory payload is always required"
+    payload = json.loads(out)
+    assert isinstance(payload, dict), (
+        f"CLI payload must be a JSON object, got {type(payload).__name__}"
+    )
     return rc, payload
 
 

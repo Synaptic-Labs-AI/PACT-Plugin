@@ -301,11 +301,24 @@ class TestCheckPinStaleBlockDirective_MarkerLifecycle:
 
 
 class TestPinMemoryCommand_Grammar:
-    """pin-memory.md contract assertions — two-step AskUserQuestion grammar.
+    """pin-memory.md contract assertions (cycle-8 demoted scope).
 
-    The two-step flow is prose-documented. Treat pin-memory.md as a
-    contract surface: grammar changes in the flow require explicit test
-    updates (HIGH uncertainty from coder handoff).
+    Post-cycle-8, pin-memory.md is a thin pin-add guide. Cap enforcement
+    lives in hooks/pin_caps_gate.py; interactive eviction lives in
+    /PACT:prune-memory. The bulky two-step AskUserQuestion eviction flow
+    and the shell-scaffolding heredoc+nonce surface are GONE. Tests here
+    cover the residual informational surface: caps mentioned, refusal
+    flow enumerated, hook-as-enforcer called out, cross-reference to
+    prune-memory present.
+
+    DELETED in cycle-8 commit 6 alongside the pin-memory.md rewrite:
+    - test_documents_check_cli_invocation (CLI no longer invoked)
+    - test_documents_step_a_three_options / test_documents_step_b_pagination_cap
+      (eviction moved to /PACT:prune-memory)
+    - test_documents_size_refusal_three_options (size refusal is now a
+      hook deny-reason + plain-text remediation, not an AskUserQuestion)
+    - test_heredoc_opener_is_always_quoted_in_code_fences (no heredoc)
+    - test_heredoc_nonce_uses_python3_secrets_not_openssl (no nonce)
     """
 
     @pytest.fixture(scope="class")
@@ -315,214 +328,77 @@ class TestPinMemoryCommand_Grammar:
         )
         return path.read_text(encoding="utf-8")
 
-    def test_documents_hard_cap_rule(self, pin_memory_content):
-        assert "MUST NOT bypass" in pin_memory_content
+    def test_documents_caps(self, pin_memory_content):
+        """Cap numbers remain informational for curator awareness."""
         assert "12 pins maximum" in pin_memory_content
         assert "1500 characters" in pin_memory_content
+        # Cycle-8: the hook is the authoritative enforcer. Command text
+        # MUST direct curators away from manual bypass attempts.
+        assert "MUST NOT bypass" in pin_memory_content
 
-    def test_documents_check_cli_invocation(self, pin_memory_content):
-        assert "check_pin_caps.py" in pin_memory_content
-        # Sec-MEDIUM: command documents the shell-injection-safe stdin path.
-        assert "--body-from-stdin" in pin_memory_content
-        assert "--has-override" in pin_memory_content
+    def test_documents_hook_as_enforcer(self, pin_memory_content):
+        """pin-memory.md must name the hook so curators know where denies
+        come from (they appear as PreToolUse permissionDecision: deny,
+        not as a CLI exit code)."""
+        assert "pin_caps_gate" in pin_memory_content
 
-    def test_documents_step_a_three_options(self, pin_memory_content):
-        """Step A category picker has exactly 3 options (under platform cap)."""
-        # Slice Step A section
-        step_a_start = pin_memory_content.index("**Step A")
-        step_a_end = pin_memory_content.index("**Step B")
-        step_a = pin_memory_content[step_a_start:step_a_end]
-        labels = re.findall(r"\{label:\s*\"([^\"]+)\"", step_a)
-        assert len(labels) == 3, (
-            f"Step A must have exactly 3 options (stale/non-stale/cancel); "
-            f"found {len(labels)}: {labels}"
-        )
-        assert "Evict stale pin" in labels
-        assert "Evict non-stale pin" in labels
-        assert "Cancel add" in labels
-
-    def test_documents_step_b_pagination_cap(self, pin_memory_content):
-        """Step B pagination is 4-at-a-time (3 candidates + Show more)."""
-        step_b_start = pin_memory_content.index("**Step B")
-        step_b_end = pin_memory_content.index("On eviction:")
-        step_b = pin_memory_content[step_b_start:step_b_end]
-        labels = re.findall(r"\{label:\s*\"([^\"]+)\"", step_b)
-        assert len(labels) == 4, (
-            f"Step B must have exactly 4 options (3 pins + Show more); "
-            f"found {len(labels)}: {labels}"
-        )
-        assert "Show more" in labels
-
-    def test_documents_size_refusal_three_options(self, pin_memory_content):
-        """Size refusal has 3 options: compress, override, cancel."""
-        size_start = pin_memory_content.index("### Size refusal")
-        size_end = pin_memory_content.index("## Size Override")
-        size_block = pin_memory_content[size_start:size_end]
-        labels = re.findall(r"\{label:\s*\"([^\"]+)\"", size_block)
-        # Ignore any non-option labels that might appear
-        assert len(labels) == 3
-        assert "Compress" in labels
-        assert "Add override" in labels
-        assert "Cancel add" in labels
+    def test_documents_refusal_flow(self, pin_memory_content):
+        """Hook deny-reasons are enumerated so curators see the exact
+        actionable next step without leaving the command text."""
+        assert "Pin count cap reached" in pin_memory_content
+        assert "New pin body is" in pin_memory_content
+        assert "Embedded pin structure" in pin_memory_content
+        assert "Override rationale malformed" in pin_memory_content
 
     def test_documents_rationale_120_char_limit(self, pin_memory_content):
+        """The 120-char rationale cap remains informational so curators
+        self-limit before the hook denies."""
         assert "120 chars" in pin_memory_content
 
     def test_documents_override_grammar_example(self, pin_memory_content):
-        """Exact override comment form (live CLAUDE.md:68) is documented."""
+        """Exact override comment form (live CLAUDE.md:68) is preserved
+        as a verbatim example. parse_pins round-trips this exact line;
+        drift would break the live CLAUDE.md round-trip (see
+        TestLiveClaudeMdOverrideLine_RoundTrip below)."""
         assert (
             "pin-size-override: verbatim dispatch form is load-bearing "
             "for LLM readers"
         ) in pin_memory_content
 
-    def test_heredoc_opener_is_always_quoted_in_code_fences(
-        self, pin_memory_content
-    ):
-        """Every heredoc opener inside a ```bash fenced code block MUST be
-        quoted (either `<<'DELIM'` or `<<"DELIM"`).
+    def test_references_prune_memory_for_eviction(self, pin_memory_content):
+        """Cap-count refusal must direct the curator to /PACT:prune-memory
+        for interactive eviction — the command that owns that flow
+        post-demotion."""
+        assert "/PACT:prune-memory" in pin_memory_content
 
-        Quoted heredocs disable shell expansion inside the body — the
-        load-bearing security property that `--body-from-stdin` was
-        redesigned around. Unquoted openers (`<<DELIM`, `<<${DELIM}`)
-        re-enable `$(...)`, backticks, `$VAR`, and history substitution,
-        reopening the injection surface.
-
-        Scope-bounded: we inspect openers INSIDE ```bash fences only.
-        Prose-body references to the unquoted form (e.g., a "MUST NOT use
-        `<<EOF_PIN_BODY`" warning) are legitimate teaching examples and
-        must not trigger the gate. Treating the whole doc text as one
-        surface would false-positive on such warnings.
-
-        Dual assertion:
-          1. At least one quoted heredoc opener exists (positive presence
-             — the documented enforcement path).
-          2. Zero unquoted heredoc openers exist inside ```bash fences
-             (typo-safety — catches a curator dropping an unquoted form).
-
-        Counter-test-by-revert: flipping the `<<"${DELIM}"` in the bash
-        fence to `<<${DELIM}` (unquoted) MUST cause assertion (2) to
-        fail. Flipping it to `<<DELIM` (still unquoted, different form)
-        must also fail. If both still pass after a revert, the defense
-        is phantom-green.
-
-        Forward-looking: backend-coder-5's Commit 3 introduced the
-        random-suffix delimiter form (`<<"${DELIM}"`); the quoting
-        convention is what matters, not the specific delimiter name.
+    def test_no_heredoc_scaffolding(self, pin_memory_content):
+        """Regression guard: the shell-scaffolding heredoc+nonce surface
+        MUST NOT reappear in pin-memory.md. Cycle-8 eliminated it by
+        construction — any re-introduction (perhaps by a well-meaning
+        future commit adding a "before add" validation step) would
+        reopen the shell-injection surface cycle-7 hardened against.
         """
-        # Extract all ```bash ... ``` fenced code blocks.
-        bash_fences = re.findall(
-            r"```bash\n(.*?)```", pin_memory_content, flags=re.DOTALL
-        )
-        assert bash_fences, (
-            "pin-memory.md has no ```bash``` fenced code blocks — the "
-            "heredoc contract presumes at least one bash fence. If the "
-            "doc moved to a different fence language, update this test."
-        )
-        joined_bash = "\n".join(bash_fences)
-
-        # Assertion 1: quoted heredoc opener present (positive).
-        # Both single- and double-quoted forms disable body expansion;
-        # backend-coder-5 Commit 3 uses `<<"${DELIM}"`, earlier form was
-        # `<<'EOF_PIN_BODY'`. Either satisfies the contract.
-        has_quoted_heredoc = (
-            re.search(r"<<'[^']+'", joined_bash) is not None
-            or re.search(r'<<"[^"]+"', joined_bash) is not None
-        )
-        assert has_quoted_heredoc, (
-            "No quoted heredoc opener found inside ```bash``` fences. "
-            "pin-memory.md must use `<<'DELIM'` or `<<\"DELIM\"` to "
-            "disable shell expansion inside pin bodies. Unquoted "
-            "heredocs reopen the shell-injection surface that "
-            "--body-from-stdin was redesigned around."
-        )
-
-        # Assertion 2: NO unquoted heredoc opener in bash fences.
-        # A heredoc opener is `<<` followed by a word char, `$`, or a
-        # variable expansion — without a leading quote. The anchor
-        # `(?<![<'"])` rejects `<<<` here-strings and pre-quoted forms.
-        # Inside our extracted bash fences only; prose warnings that
-        # reference unquoted forms (e.g., a "MUST NOT use `<<EOF`" note
-        # in plain markdown) remain outside scope.
-        unquoted_openers = re.findall(
-            r"<<(?![<'\"])[\w\$]", joined_bash
-        )
-        assert not unquoted_openers, (
-            "pin-memory.md contains unquoted heredoc opener(s) inside a "
-            f"```bash``` code fence: {unquoted_openers!r}. Each one "
-            "re-enables $(...), backticks, and $VAR expansion — "
-            "reopening the shell-injection surface. Use `<<'DELIM'` or "
-            "`<<\"DELIM\"` instead."
-        )
-
-    def test_heredoc_nonce_uses_python3_secrets_not_openssl(
-        self, pin_memory_content
-    ):
-        """DELIM nonce MUST be generated via `python3 -c 'import secrets;
-        print(secrets.token_hex(4))'`, NOT via `openssl rand`.
-
-        Load-bearing: openssl can be missing from minimal base images
-        (Alpine, some distroless variants). A missing-binary invocation
-        inside `$(...)` command substitution SILENTLY produces empty
-        stdout — collapsing the DELIM assignment to the fixed
-        `EOF_PIN_BODY_` suffix. That is the EXACT predictable-delimiter
-        shape the random-suffix defense exists to prevent: an attacker-
-        influenced pin body containing `EOF_PIN_BODY_` on its own line
-        would terminate the heredoc early, splitting the body into a
-        truncated prefix + post-heredoc shell command.
-
-        python3 is already a hard dependency of the enclosing bash
-        block (the very next line invokes `python3 ... check_pin_caps.py`),
-        so there is zero new dependency cost. If python3 itself is
-        missing, the ENTIRE command fails loudly at check_pin_caps.py
-        — no silent degradation path remains. `secrets.token_hex(4)` is
-        the CSPRNG stdlib equivalent of `openssl rand -hex 4` (32 bits
-        of entropy, 8 hex chars).
-
-        Counter-test-by-revert: flipping the DELIM line from the python3
-        form back to `$(openssl rand -hex 4)` MUST cause both assertions
-        here to fail (positive presence → RED on missing python3 form;
-        negative absence → RED on present openssl rand).
-
-        Scope-bounded to ```bash fences only. A prose negative example
-        that quotes `openssl rand -hex 4` as a don't-do-this form would
-        live in markdown body text, not in a bash fence, and remain
-        outside this assertion's scope.
-        """
-        bash_fences = re.findall(
-            r"```bash\n(.*?)```", pin_memory_content, flags=re.DOTALL
-        )
-        assert bash_fences, "no ```bash``` fences to inspect"
-        joined_bash = "\n".join(bash_fences)
-
-        # Assertion 1: python3 secrets.token_hex nonce present.
-        # Tolerant to whitespace variations (`import secrets; print(...)`
-        # vs `import secrets;print(...)`), but pins the two load-bearing
-        # tokens: `import secrets` and `secrets.token_hex(4)`. If either
-        # is missing the nonce is not the CSPRNG form.
-        nonce_form_present = (
-            re.search(r"python3\s+-c", joined_bash) is not None
-            and "import secrets" in joined_bash
-            and "secrets.token_hex(4)" in joined_bash
-        )
-        assert nonce_form_present, (
-            "No `python3 -c 'import secrets; print(secrets.token_hex(4))'` "
-            "nonce generator found inside ```bash``` fences. The cycle-7 "
-            "fix requires the stdlib CSPRNG form — openssl-based nonce "
-            "fails silently on minimal images and reintroduces the "
-            "predictable-delimiter surface."
-        )
-
-        # Assertion 2: openssl rand MUST NOT appear inside bash fences.
-        # Prose warnings that mention `openssl rand -hex 4` as a
-        # forbidden form live in markdown body, outside this scope.
-        assert "openssl rand" not in joined_bash, (
-            "pin-memory.md contains `openssl rand` inside a ```bash``` "
-            "code fence. openssl-based nonce fails silently on minimal "
-            "images (Alpine, distroless) where openssl is absent — "
-            "collapsing DELIM to the fixed `EOF_PIN_BODY_` suffix and "
-            "reopening the early-termination bypass. Use `python3 -c "
-            "'import secrets; print(secrets.token_hex(4))'` instead."
-        )
+        # No heredoc markers.
+        assert "<<'" not in pin_memory_content
+        assert '<<"' not in pin_memory_content
+        # No bash fences at all (pin-memory.md became a plain-text guide).
+        assert "```bash" not in pin_memory_content
+        # No CLI invocation of check_pin_caps — that's now hook-only.
+        # (The CLI still exists as /PACT:prune-memory's backing, but
+        # pin-memory.md does not invoke it.)
+        assert "check_pin_caps.py" not in pin_memory_content
+        # No retired flags.
+        for flag in [
+            "--new-body",
+            "--body-from-stdin",
+            "--has-override",
+            "--override-rationale",
+        ]:
+            assert flag not in pin_memory_content, (
+                f"Retired cycle-7 flag {flag} reappeared in pin-memory.md; "
+                "cap enforcement is now hook-authoritative and the CLI is "
+                "advisory-only. Remove the reference."
+            )
 
 
 class TestParsePinsVsDetectStaleEntries_Agreement:
