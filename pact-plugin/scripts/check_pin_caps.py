@@ -26,7 +26,8 @@ Usage:
 JSON output contract (stdout):
   {
     "allowed": bool,
-    "violation": {"kind": "count|size|stale", "detail": "...",
+    "violation": {"kind": "count|size|stale|embedded_pin|empty|invalid_override",
+                  "detail": "...",
                   "offending_pin_chars": int|null, "current_count": int|null}
                  | null,
     "slot_status": "Pin slots: N/12 used, ...",
@@ -152,7 +153,7 @@ def _fail_open(reason):
     return 0
 
 
-def main(argv=None):
+def _main_inner(argv=None):
     parser = argparse.ArgumentParser(
         prog="check_pin_caps",
         description="Enforce pin count + size caps on project CLAUDE.md",
@@ -240,6 +241,32 @@ def main(argv=None):
         evictable_pins=evictable_pins,
     )
     return 1
+
+
+def main(argv=None):
+    """Outer fail-open wrapper — SACROSANCT "NEVER exit 2" contract.
+
+    Any uncaught exception from `_main_inner` (including argparse bugs,
+    future refactors raising unexpected types, or downstream helper
+    regressions) is converted to an allow decision with a diagnostic
+    slot_status. This preserves the fail-open invariant under any
+    future regression that would otherwise crash with exit 1 or (worse)
+    a Python traceback to exit code 2.
+
+    Note: argparse `--help` and argparse validation errors call
+    `sys.exit()` directly from inside argparse, which raises SystemExit.
+    We explicitly DO NOT catch SystemExit — `--help` (exit 0) and
+    argparse error (exit 2) are argparse-controlled exits, not runtime
+    faults. Re-raising preserves argparse's built-in UX; a genuine
+    argparse internal-error crash would surface as a plain Exception
+    and be caught by the fail-open branch below.
+    """
+    try:
+        return _main_inner(argv)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — SACROSANCT fail-open
+        return _fail_open(f"internal error: {type(exc).__name__}")
 
 
 if __name__ == "__main__":
