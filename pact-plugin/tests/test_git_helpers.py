@@ -113,3 +113,46 @@ def test_run_git_does_not_swallow_unexpected_exceptions():
         except UnexpectedError:
             return
     raise AssertionError("run_git should not swallow unexpected exception classes")
+
+
+def test_run_git_propagates_unicode_decode_error():
+    """UnicodeDecodeError MUST propagate — the posture-distinguishing invariant.
+
+    Arch §8 deliberately picks NARROW (TimeoutExpired, FileNotFoundError) for
+    run_git so decoding failures surface as bugs rather than being silently
+    swallowed to None. run_gh's broad `except Exception` swallows
+    UnicodeDecodeError; run_git must NOT. This asserts the positive of that
+    distinction — a future refactor that widens run_git's catch to match
+    run_gh would regress the documented two-posture design.
+    """
+    from shared.git_helpers import run_git
+
+    with patch(
+        "shared.git_helpers.subprocess.run",
+        side_effect=UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "bad byte"),
+    ):
+        import pytest
+        with pytest.raises(UnicodeDecodeError):
+            run_git(["status"])
+
+
+def test_run_git_passes_empty_args():
+    """Empty args list still produces a valid `["git"]` argv.
+
+    Pins the `["git", *args]` unpack: an empty `args=[]` results in exactly
+    `["git"]` being passed to subprocess.run — a boundary case that would
+    silently break if someone changed the unpack to `["git"] + list(args)`
+    with a faulty conditional, or if `args` got concatenated incorrectly.
+    """
+    from shared.git_helpers import run_git
+
+    mock_result = MagicMock(spec=subprocess.CompletedProcess)
+    mock_result.returncode = 1  # git with no args prints usage, rc=1
+    with patch(
+        "shared.git_helpers.subprocess.run", return_value=mock_result
+    ) as mock_run:
+        result = run_git([])
+
+    assert result is mock_result
+    argv = mock_run.call_args[0][0]
+    assert argv == ["git"]

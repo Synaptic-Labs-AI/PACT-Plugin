@@ -538,6 +538,70 @@ class TestCheckEnvFileInGitignore:
 
 
 # ---------------------------------------------------------------------------
+# Security residual E2E (arch §8 — git rm --cached .env must not block)
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityResidualE2E:
+    """End-to-end verification that untracking a previously-tracked .env is
+    not flagged as a violation.
+
+    The argv-level pin `test_get_staged_files_excludes_deletions` asserts the
+    `--diff-filter=d` flag is on the argv; this class closes the semantic
+    loop by driving `main()` end-to-end through a real git repo in the
+    remediation state a user would be in (`.env` historically tracked, then
+    `git rm --cached .env` staged alongside `.gitignore` updates). Asserts
+    exit 0 with no VIOLATION on stderr.
+    """
+
+    def test_git_rm_cached_env_does_not_block_commit(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        if shutil.which("git") is None:
+            pytest.skip("git not available on PATH")
+        from git_commit_check import main
+
+        _isolated_git_env(tmp_path, monkeypatch)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        # Set a committer identity so the initial commit succeeds under our
+        # isolated HOME (no user.name/user.email in the fake global config).
+        env_cmd_args = {"cwd": repo, "check": True}
+        subprocess.run(["git", "init", "--quiet"], **env_cmd_args)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], **env_cmd_args)
+        subprocess.run(["git", "config", "user.name", "Test"], **env_cmd_args)
+
+        # Stage 1: track .env historically (pre-remediation state).
+        (repo / ".env").write_text("SECRET=sentinel\n")
+        subprocess.run(["git", "add", ".env"], **env_cmd_args)
+        subprocess.run(["git", "commit", "-m", "initial", "--quiet"], **env_cmd_args)
+
+        # Stage 2: the user's remediation — ignore + untrack .env.
+        (repo / ".gitignore").write_text(".env\n")
+        subprocess.run(["git", "add", ".gitignore"], **env_cmd_args)
+        subprocess.run(["git", "rm", "--cached", ".env", "--quiet"], **env_cmd_args)
+
+        monkeypatch.chdir(repo)
+
+        # Drive main() with a plausible `git commit` stdin payload.
+        input_data = {"tool_input": {"command": "git commit -m 'remove .env'"}}
+        with patch("sys.stdin", io.StringIO(json.dumps(input_data))):
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        # Exit 0 = commit allowed. Exit 2 would mean VIOLATION fired.
+        assert exc.value.code == 0, (
+            "git rm --cached .env staged alongside a new .gitignore must not "
+            "block the commit — the deletion has no staged content and .env is "
+            "now ignored."
+        )
+        # Defense in depth: even if exit 0, confirm no VIOLATION string surfaced.
+        captured = capsys.readouterr()
+        assert "VIOLATION" not in captured.err
+
+
+# ---------------------------------------------------------------------------
 # check_hardcoded_secrets
 # ---------------------------------------------------------------------------
 
