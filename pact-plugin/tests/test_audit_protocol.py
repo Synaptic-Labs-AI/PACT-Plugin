@@ -295,7 +295,7 @@ class TestCompletionLifecycle:
         }
         (task_dir / "42.json").write_text(json.dumps(task_data), encoding="utf-8")
 
-        completable, _missing = _scan_owned_tasks("coder", "pact-test", str(tmp_path))
+        completable, _ = _scan_owned_tasks("coder", "pact-test", str(tmp_path))
         assert len(completable) == 1
         assert completable[0]["completion_type"] == "handoff"
 
