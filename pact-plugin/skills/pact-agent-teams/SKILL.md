@@ -240,6 +240,32 @@ Re-SET with a fresh `since` if the wait is still legitimate.
   validation is orthogonal. If you have an empty HANDOFF, you cannot complete
   regardless of `intentional_wait`. Store your HANDOFF first.
 
+## Idle Discipline
+
+When the platform wakes you but there is no new work to do, return to idle silently
+rather than emitting acknowledgment. Wake-ups without new mailbox messages or
+dispatch-implied work can come from many sources (hook events, platform keep-alives,
+peer status signals). Responding to each with a "standing by" or "still waiting" turn
+consumes tokens without progress and — crucially — prevents the next legitimate
+message from being delivered on the next idle tick.
+
+Concretely:
+- **No new `SendMessage` in your inbox?** Do not emit a turn. Let the harness idle
+  you again.
+- **No new instructions in the dispatch prompt you haven't already executed?** Do
+  not emit a turn.
+- **You are idle-waiting for a protocol-defined resolution** (teachback approval,
+  lead commit, peer response, user decision)? Use `intentional_wait` per the
+  Protocol Waits section above — that is the designed channel. Do not improvise
+  with no-op acknowledgments.
+- **You are genuinely stuck** (blocker)? Follow the On Blocker section — do not
+  sit in a polling loop.
+
+The first-order reason this matters: the idle state IS the message-delivery channel.
+A teammate that keeps producing output — even zero-content output — cannot receive
+inbox deliveries. Rule: if you have nothing to say that advances the work, say
+nothing.
+
 ## Consultant Mode
 
 When your active task is done and no follow-up tasks are available:
