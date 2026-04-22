@@ -15,42 +15,38 @@ Output: Exit code 2 to block, 0 to allow; errors to stderr
 
 import sys
 import json
-import subprocess
 import re
 
 from shared.error_output import hook_error_json
+from shared.git_helpers import run_git
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def get_staged_files():
-    """Returns a list of staged files. Fail-open empty list on any subprocess failure."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "--cached"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-        return result.stdout.strip().splitlines()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    """Returns a list of staged files, EXCLUDING deletions.
+
+    `--diff-filter=d` excludes deletion-only stagings so security scans (which
+    inspect staged content for secrets / .env paths) do not flag a user's
+    `git rm --cached <file>` remediation. The deleted path has no staged
+    content to scan and no new secret to leak — excluding at the source of
+    truth keeps downstream checks (check_security, check_hardcoded_secrets,
+    check_frontend_credentials, check_direct_api_calls) correct by default.
+
+    Fail-open empty list on any subprocess failure.
+    """
+    result = run_git(["diff", "--name-only", "--cached", "--diff-filter=d"])
+    if result is None or result.returncode != 0:
         return []
+    return result.stdout.strip().splitlines()
 
 
 def get_staged_file_content(filename):
     """Returns the content of a staged file. Fail-open empty string on any subprocess failure."""
-    try:
-        result = subprocess.run(
-            ["git", "show", f":{filename}"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-        return result.stdout
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    result = run_git(["show", f":{filename}"])
+    if result is None or result.returncode != 0:
         return ""
+    return result.stdout
 
 
 def check_security(staged_files):
@@ -227,21 +223,15 @@ def check_env_file_in_gitignore():
     Returns:
         Tuple of (is_protected, error_message or None)
     """
-    try:
-        result = subprocess.run(
-            ["git", "check-ignore", "-q", ".env"],
-            capture_output=True,
-            timeout=5,
-        )
-    except subprocess.TimeoutExpired:
+    result = run_git(["check-ignore", "-q", ".env"])
+    if result is None:
+        # run_git collapses TimeoutExpired and FileNotFoundError into None.
+        # Both resolve to the same user-actionable remediation
+        # ("make sure git is installed and functional"), so a single merged
+        # WARNING covers both cases. See arch §8 (wording-merge decision).
         return False, (
-            "SACROSANCT WARNING: 'git check-ignore' timed out; "
-            "cannot verify .env protection."
-        )
-    except FileNotFoundError:
-        return False, (
-            "SACROSANCT WARNING: git binary not found on PATH; "
-            "cannot verify .env protection."
+            "SACROSANCT WARNING: 'git check-ignore' could not be invoked "
+            "(timeout or git binary missing); cannot verify .env protection."
         )
 
     if result.returncode == 0:

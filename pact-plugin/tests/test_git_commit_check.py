@@ -393,7 +393,7 @@ class TestCheckEnvFileInGitignore:
         from git_commit_check import check_env_file_in_gitignore
         mock_result = MagicMock()
         mock_result.returncode = 128
-        with patch("git_commit_check.subprocess.run", return_value=mock_result):
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             is_protected, error = check_env_file_in_gitignore()
         assert is_protected is False
         assert error is not None
@@ -407,7 +407,7 @@ class TestCheckEnvFileInGitignore:
         from git_commit_check import check_env_file_in_gitignore
         mock_result = MagicMock()
         mock_result.returncode = 2
-        with patch("git_commit_check.subprocess.run", return_value=mock_result):
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             is_protected, error = check_env_file_in_gitignore()
         assert is_protected is False
         assert error is not None
@@ -417,10 +417,13 @@ class TestCheckEnvFileInGitignore:
         # Shared log-grep invariant across every WARNING string (arch §5).
         assert "cannot verify .env protection" in error
 
-    def test_handles_timeout_expired(self):
+    def test_handles_run_git_failure(self):
+        """Merged: TimeoutExpired and FileNotFoundError collapse into one
+        "could not be invoked" WARNING after run_git extraction (arch §8)."""
         from git_commit_check import check_env_file_in_gitignore
+        # TimeoutExpired path
         with patch(
-            "git_commit_check.subprocess.run",
+            "shared.git_helpers.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=5),
         ):
             is_protected, error = check_env_file_in_gitignore()
@@ -428,14 +431,12 @@ class TestCheckEnvFileInGitignore:
         assert error is not None
         assert "WARNING" in error
         assert "VIOLATION" not in error
-        assert "timed out" in error
-        # Shared log-grep invariant across every WARNING string (arch §5).
+        assert "could not be invoked" in error
         assert "cannot verify .env protection" in error
 
-    def test_handles_git_not_installed(self):
-        from git_commit_check import check_env_file_in_gitignore
+        # FileNotFoundError path
         with patch(
-            "git_commit_check.subprocess.run",
+            "shared.git_helpers.subprocess.run",
             side_effect=FileNotFoundError("git"),
         ):
             is_protected, error = check_env_file_in_gitignore()
@@ -443,21 +444,21 @@ class TestCheckEnvFileInGitignore:
         assert error is not None
         assert "WARNING" in error
         assert "VIOLATION" not in error
-        assert "git binary not found" in error
-        # Shared log-grep invariant across every WARNING string (arch §5).
+        assert "could not be invoked" in error
         assert "cannot verify .env protection" in error
 
     def test_invokes_git_check_ignore_with_correct_args(self):
         """Wrapper-shape invariant: argv + capture_output + timeout are frozen.
 
-        Also pins `check=True` is NOT passed — exit 1 is the VIOLATION branch,
-        which would raise CalledProcessError and skip the return if check=True.
+        After F4 extraction, the subprocess.run call lives in shared.git_helpers.run_git;
+        the caller's intent (no check=True, since exit 1 is the VIOLATION branch) is
+        preserved structurally by run_git's signature (it does not pass check=True).
         """
         from git_commit_check import check_env_file_in_gitignore
         mock_result = MagicMock()
         mock_result.returncode = 0
         with patch(
-            "git_commit_check.subprocess.run", return_value=mock_result
+            "shared.git_helpers.subprocess.run", return_value=mock_result
         ) as mock_run:
             check_env_file_in_gitignore()
         mock_run.assert_called_once()
@@ -730,38 +731,41 @@ class TestGitHelpers:
     def test_get_staged_files_success(self):
         from git_commit_check import get_staged_files
         mock_result = MagicMock()
+        mock_result.returncode = 0
         mock_result.stdout = "file1.py\nfile2.js\n"
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             files = get_staged_files()
         assert files == ["file1.py", "file2.js"]
 
     def test_get_staged_files_empty(self):
         from git_commit_check import get_staged_files
         mock_result = MagicMock()
+        mock_result.returncode = 0
         mock_result.stdout = ""
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             files = get_staged_files()
         assert files == []
 
-    def test_get_staged_files_error(self):
+    def test_get_staged_files_non_zero_returncode(self):
+        """Post-F4: non-zero returncode is the fail-open path (no CalledProcessError)."""
         from git_commit_check import get_staged_files
-        import subprocess
-        with patch("subprocess.run",
-                   side_effect=subprocess.CalledProcessError(1, "git")):
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             files = get_staged_files()
         assert files == []
 
     def test_get_staged_files_timeout(self):
         from git_commit_check import get_staged_files
         import subprocess
-        with patch("subprocess.run",
+        with patch("shared.git_helpers.subprocess.run",
                    side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=5)):
             files = get_staged_files()
         assert files == []
 
     def test_get_staged_files_git_not_installed(self):
         from git_commit_check import get_staged_files
-        with patch("subprocess.run", side_effect=FileNotFoundError("git")):
+        with patch("shared.git_helpers.subprocess.run", side_effect=FileNotFoundError("git")):
             files = get_staged_files()
         assert files == []
 
@@ -769,40 +773,59 @@ class TestGitHelpers:
         """Wrapper-args invariant: timeout=5 must be passed to subprocess.run."""
         from git_commit_check import get_staged_files
         mock_result = MagicMock()
+        mock_result.returncode = 0
         mock_result.stdout = ""
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result) as mock_run:
             get_staged_files()
         assert mock_run.called
         _, kwargs = mock_run.call_args
         assert kwargs.get("timeout") == 5
 
+    def test_get_staged_files_excludes_deletions(self):
+        """Security residual: `git rm --cached .env` deletion must not be
+        scanned as an added file. Argv passed to git MUST include
+        `--diff-filter=d` so deletion-only stagings are filtered out before
+        the downstream security checks run."""
+        from git_commit_check import get_staged_files
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result) as mock_run:
+            get_staged_files()
+        args, _ = mock_run.call_args
+        assert args[0] == [
+            "git", "diff", "--name-only", "--cached", "--diff-filter=d"
+        ]
+
     def test_get_staged_file_content_success(self):
         from git_commit_check import get_staged_file_content
         mock_result = MagicMock()
+        mock_result.returncode = 0
         mock_result.stdout = "file content here"
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             content = get_staged_file_content("test.py")
         assert content == "file content here"
 
-    def test_get_staged_file_content_error(self):
+    def test_get_staged_file_content_non_zero_returncode(self):
+        """Post-F4: non-zero returncode is the fail-open path (no CalledProcessError)."""
         from git_commit_check import get_staged_file_content
-        import subprocess
-        with patch("subprocess.run",
-                   side_effect=subprocess.CalledProcessError(1, "git")):
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             content = get_staged_file_content("missing.py")
         assert content == ""
 
     def test_get_staged_file_content_timeout(self):
         from git_commit_check import get_staged_file_content
         import subprocess
-        with patch("subprocess.run",
+        with patch("shared.git_helpers.subprocess.run",
                    side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=5)):
             content = get_staged_file_content("missing.py")
         assert content == ""
 
     def test_get_staged_file_content_git_not_installed(self):
         from git_commit_check import get_staged_file_content
-        with patch("subprocess.run", side_effect=FileNotFoundError("git")):
+        with patch("shared.git_helpers.subprocess.run", side_effect=FileNotFoundError("git")):
             content = get_staged_file_content("missing.py")
         assert content == ""
 
@@ -810,8 +833,9 @@ class TestGitHelpers:
         """Wrapper-args invariant: timeout=5 must be passed to subprocess.run."""
         from git_commit_check import get_staged_file_content
         mock_result = MagicMock()
+        mock_result.returncode = 0
         mock_result.stdout = ""
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("shared.git_helpers.subprocess.run", return_value=mock_result) as mock_run:
             get_staged_file_content("any.py")
         assert mock_run.called
         _, kwargs = mock_run.call_args
