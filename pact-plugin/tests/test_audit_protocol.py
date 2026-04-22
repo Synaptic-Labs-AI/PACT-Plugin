@@ -354,6 +354,36 @@ class TestStructuralVerificationDiscipline:
         assert "VAGUE-DIFF-CITATION" in section
         assert "STRUCTURAL-DRESSING-ON-JUDGMENT-CALL" in section
 
+    def test_phantom_symmetric_claim_bullet_enumerates_all_layers(self, agent_content):
+        """PHANTOM-SYMMETRIC-CLAIM bullet enumerates all four canonical layers.
+
+        The bullet asserts "all four can propagate the same fabrication" — the
+        enumeration that precedes that claim must list four named layers, not
+        three. Arithmetic inconsistency here (3 listed, "all four" claimed) is
+        the same failure shape the rule is installed to prevent: prose that
+        self-contradicts on a countable fact. Without this guard, a future edit
+        that drops a layer from the bullet stays green on
+        test_agent_names_failure_modes (which only checks the failure-mode
+        NAMES, not their body text) — the exact under-propagation pattern T1
+        corrected.
+        """
+        failure_modes_start = agent_content.index("### Failure modes to avoid")
+        phantom_start = agent_content.index("PHANTOM-SYMMETRIC-CLAIM", failure_modes_start)
+        # The bullet ends at the next list item (VAGUE-DIFF-CITATION).
+        bullet_end = agent_content.index("VAGUE-DIFF-CITATION", phantom_start)
+        bullet = agent_content[phantom_start:bullet_end]
+        for layer in (
+            "HANDOFF prose",
+            "commit message",
+            "coder self-attestation",
+            "audit signal",
+        ):
+            assert layer in bullet, (
+                f"PHANTOM-SYMMETRIC-CLAIM bullet missing canonical layer "
+                f"'{layer}' — bullet claims 'all four can propagate' but "
+                f"enumeration must list all four (see #502 T1)"
+            )
+
     def test_agent_cites_prior_art(self, agent_content):
         """Discipline cites file inspection beats HANDOFF inference rationale."""
         start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")

@@ -154,7 +154,7 @@ For every structural AC that factors into a GREEN or YELLOW signal:
 
 ### Failure modes to avoid
 
-- **PHANTOM-SYMMETRIC-CLAIM** (the PR #501 `bef7f24` shape): HANDOFF prose, commit message, and coder self-attestation all agree on a specific structural claim. Agreement across layers is cheap — all four can propagate the same fabrication. If you find yourself citing "the coder's HANDOFF states…" as evidence for a structural AC, stop; go read the diff.
+- **PHANTOM-SYMMETRIC-CLAIM** (the PR #501 `bef7f24` shape): HANDOFF prose, commit message, coder self-attestation, and audit signal all agree on a specific structural claim. Agreement across layers is cheap — all four can propagate the same fabrication. If you find yourself citing "the coder's HANDOFF states…" as evidence for a structural AC, stop; go read the diff.
 - **VAGUE-DIFF-CITATION**: Evidence field contains "`git diff` excerpt" or "see diff" with no specific path, hunk, or line range. This is not reproducible and is indistinguishable from pattern-matching on prose. Required format: exact command + path + hunk or line range.
 - **STRUCTURAL-DRESSING-ON-JUDGMENT-CALL**: auditor signals GREEN on a judgment-call AC ("clean error handling") with a fabricated-looking Evidence field ("git diff shows idiomatic handling"). If the AC is a judgment call, name it as such.
 
