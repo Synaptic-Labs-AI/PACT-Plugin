@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from shared.handoff_example import format_handoff_example
+from shared.intentional_wait import is_signal_task
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.session_journal import append_event, make_event
@@ -53,8 +54,11 @@ def validate_task_handoff(
     if task_metadata.get("skipped"):
         return None
 
-    # Bypass: signal tasks (blocker, algedonic)
-    if task_metadata.get("type") in ("blocker", "algedonic"):
+    # Bypass: signal tasks (blocker, algedonic). Shared predicate with the
+    # TeammateIdle hooks; handoff_gate honors ONLY this narrow carve-out
+    # and MUST NOT honor `stalled` or `intentional_wait` (AC #8 — empty-
+    # handoff completions stay blocked regardless of wait state).
+    if is_signal_task({"metadata": task_metadata}):
         return None
 
     # Check: handoff exists
@@ -273,11 +277,11 @@ def main():
         print(memory_feedback, file=sys.stderr)
         sys.exit(2)  # Block completion — feedback goes to agent
 
-    # Signal-task carve-out: blocker/algedonic completions bypass handoff
-    # validation (lines 56-58) and must NOT emit a phantom agent_handoff event.
+    # Signal-task carve-out: blocker/algedonic completions bypassed handoff
+    # validation above and must NOT emit a phantom agent_handoff event.
     # Writing one would pollute `read_events("agent_handoff")` and mis-route
     # secretary harvest + memory_adhoc_reminder gating with empty handoff dicts.
-    if task_metadata.get("type") in ("blocker", "algedonic"):
+    if is_signal_task({"metadata": task_metadata}):
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 

@@ -172,6 +172,71 @@ Keep messages actionable — state what you did/found, what they need to know, a
 any action needed from them.
 Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the lead.
 
+## Idle Discipline
+
+When you wake with no new work, return to idle silently — no "standing by" or
+"still waiting" acknowledgments. The idle state is the message-delivery channel;
+output (even zero-content) blocks the next inbox delivery.
+
+- **No new `SendMessage` and no new dispatch instructions?** Do not emit.
+- **Idle-waiting for a protocol-defined resolution** (teachback, lead commit,
+  peer reply, user decision)? Use the `intentional_wait` task metadata per
+  the Intentional Waiting section below.
+- **Genuinely stuck**? Follow the On Blocker section.
+
+If you have nothing to say that advances the work, say nothing.
+
+## Intentional Waiting
+
+When your task is `in_progress` but you are legitimately idle awaiting a message
+(teachback approval, inter-commit hold, peer reply, user decision, blocker
+resolution), signal it via the `intentional_wait` task metadata BEFORE going idle. Both
+TeammateIdle hooks honor it for 30 minutes via `shared.intentional_wait.wait_stale`;
+without the signal, they nag every tick — the livelock Idle Discipline warns about.
+
+### SET — before going idle
+
+```python
+from datetime import datetime, timezone
+TaskUpdate(taskId=taskId, metadata={
+    "intentional_wait": {
+        "reason": "awaiting_teachback_approved",
+        "expected_resolver": "lead",
+        "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+})
+```
+
+`since` must be tz-aware ISO-8601. A naive timestamp re-enables the nag (fail-loud).
+
+### CLEAR — when the wait resolves
+
+```python
+TaskUpdate(taskId=taskId, metadata={"intentional_wait": None})
+```
+
+Clear on the same turn you take the action that advances state (e.g., when the approval / commit confirmation / peer reply / user decision arrives).
+
+### Vocabulary
+
+| Field | Required | Accepted values |
+|-------|----------|-----------------|
+| `reason` | yes | Non-empty string. Prefer `KNOWN_REASONS` from `shared.intentional_wait`: `awaiting_teachback_approved`, `awaiting_lead_commit`, `awaiting_amendment_review`, `awaiting_post_handoff_decision`, `awaiting_peer_response`, `awaiting_user_decision`, `awaiting_blocker_resolution`. Free-form permitted. |
+| `expected_resolver` | yes | Non-empty string. Prefer `KNOWN_RESOLVERS`: `lead`, `peer`, `user`, `external`. Free-form permitted. |
+| `since` | yes | tz-aware ISO-8601 UTC timestamp, seconds precision. |
+
+Unknown keys are preserved (forward-compat).
+
+### Staleness safeguard
+
+Auto-expires after 30 minutes. If the wait takes longer, re-SET with a fresh `since`.
+
+### When NOT to set
+
+- **Consultant mode** (no owned `in_progress` task): hooks already skip you via owner/status filters.
+- **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it.
+- **Completion gating**: `handoff_gate.py` does NOT honor this flag. Empty HANDOFF still blocks completion — store your HANDOFF first.
+
 ## Consultant Mode
 
 When your active task is done and no follow-up tasks are available:

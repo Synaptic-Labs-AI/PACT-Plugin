@@ -841,3 +841,605 @@ class TestMain:
                 main()
 
         assert exc_info.value.code == 0
+
+
+# =============================================================================
+# #497 — _scan_owned_tasks honors metadata.intentional_wait
+# =============================================================================
+
+from datetime import datetime, timedelta, timezone
+
+
+def _iso_seconds(dt):
+    return dt.isoformat(timespec="seconds")
+
+
+def _fresh_wait_payload(reason="awaiting_teachback_approved",
+                       resolver="lead",
+                       since_offset_seconds=-60):
+    return {
+        "reason": reason,
+        "expected_resolver": resolver,
+        "since": _iso_seconds(
+            datetime.now(timezone.utc) + timedelta(seconds=since_offset_seconds)
+        ),
+    }
+
+
+def _stale_wait_payload(minutes=60):
+    return {
+        "reason": "awaiting_teachback_approved",
+        "expected_resolver": "lead",
+        "since": _iso_seconds(datetime.now(timezone.utc) - timedelta(minutes=minutes)),
+    }
+
+
+def _make_task_dir(tmp_path, team_name="pact-test"):
+    task_dir = tmp_path / ".claude" / "tasks" / team_name
+    task_dir.mkdir(parents=True)
+    return task_dir
+
+
+class TestIntentionalWaitCompletionGatePredicate:
+    """_scan_owned_tasks honors a fresh intentional_wait in BOTH branches:
+    completable (has HANDOFF) and missing_handoff (no HANDOFF).
+
+    Plan rows 13-16. Suppression in BOTH branches is load-bearing because
+    the root livelock path is the missing-handoff branch (teammate waiting
+    on teachback_approved BEFORE producing HANDOFF) — but the completable
+    branch must also suppress for symmetric reasons (teammate waiting on
+    lead commit AFTER producing HANDOFF).
+    """
+
+    def test_fresh_wait_suppresses_completable_branch(self, tmp_path):
+        """Row 13: in_progress + HANDOFF + fresh intentional_wait -> NOT completable.
+
+        Typical shape: teammate finished work, stored HANDOFF, and is now
+        waiting for lead commit before calling TaskUpdate(status=completed).
+        """
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "handoff": VALID_HANDOFF,
+            "intentional_wait": _fresh_wait_payload(
+                reason="awaiting_lead_commit",
+                resolver="lead",
+            ),
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+    def test_fresh_wait_suppresses_missing_handoff_branch(self, tmp_path):
+        """Row 14: in_progress + no HANDOFF + fresh intentional_wait -> NOT missing.
+
+        Typical shape: teammate has sent teachback and is waiting on approval
+        before starting implementation work. No HANDOFF yet, but the nag would
+        livelock the wait.
+        """
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "intentional_wait": _fresh_wait_payload(),
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+    def test_stale_wait_re_surfaces_completable(self, tmp_path):
+        """Row 15a: stale intentional_wait + HANDOFF -> completable re-appears."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "handoff": VALID_HANDOFF,
+            "intentional_wait": _stale_wait_payload(minutes=60),
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(completable) == 1
+        assert completable[0]["id"] == "5"
+
+    def test_stale_wait_re_surfaces_missing(self, tmp_path):
+        """Row 15b: stale intentional_wait + no HANDOFF -> missing re-appears."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "intentional_wait": _stale_wait_payload(minutes=60),
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(missing) == 1
+        assert missing[0]["id"] == "5"
+
+    def test_missing_wait_completes_normally(self, tmp_path):
+        """Row 16: no intentional_wait -> pre-fix behavior unchanged."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"handoff": VALID_HANDOFF})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(completable) == 1
+
+    def test_malformed_wait_fails_loud(self, tmp_path):
+        """Malformed intentional_wait -> nag path re-enables (fail-loud)."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "handoff": VALID_HANDOFF,
+            "intentional_wait": {"reason": "x"},  # missing resolver + since
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(completable) == 1, (
+            "Malformed flag must NOT silently suppress — nag re-enables"
+        )
+
+    def test_none_wait_value_treated_as_absent(self, tmp_path):
+        """intentional_wait explicitly None behaves like the key is absent."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "handoff": VALID_HANDOFF,
+            "intentional_wait": None,  # explicit cleared state
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(completable) == 1, (
+            "intentional_wait=None is the explicit-cleared form; must not silence"
+        )
+
+    def test_signal_type_audit_task_with_fresh_wait_suppresses(self, tmp_path):
+        """Row 13 variant: signal-type task (auditor) + fresh wait still suppresses.
+
+        Signal-type has its own completion_type branch in _scan_owned_tasks
+        but the intentional_wait skip runs BEFORE that branch — so signal
+        tasks get the same suppression treatment.
+        """
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "42", "auditor", "in_progress", {
+            "completion_type": "signal",
+            "audit_summary": {"signal": "GREEN", "findings": []},
+            "intentional_wait": _fresh_wait_payload(resolver="lead"),
+        })
+        completable, missing = _scan_owned_tasks(
+            "auditor", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+    def test_only_in_progress_tasks_checked(self, tmp_path):
+        """completed + fresh wait -> already filtered by status check; wait
+        not even consulted."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "completed", {
+            "handoff": VALID_HANDOFF,
+            "intentional_wait": _fresh_wait_payload(),
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+
+class TestIntentionalWaitCompletionGateCardinality:
+    """Parametrized cardinality pin for counter-test-by-revert.
+
+    Reverting the intentional_wait skip in _scan_owned_tasks flips the fresh
+    rows (2 of 5) RED. Stale/malformed/missing rows stay GREEN either way
+    (because they are already expected to surface).
+    """
+
+    @pytest.mark.parametrize("wait_payload,handoff_present,expected_completable,expected_missing", [
+        # Fresh wait suppresses BOTH branches
+        ("fresh", True, 0, 0),
+        ("fresh", False, 0, 0),
+        # Stale wait does not suppress
+        ("stale", True, 1, 0),
+        ("stale", False, 0, 1),
+        # Missing wait -> unchanged pre-fix behavior
+        ("absent", True, 1, 0),
+        ("absent", False, 0, 1),
+    ])
+    def test_branch_matrix(self, tmp_path, wait_payload, handoff_present,
+                           expected_completable, expected_missing):
+        from teammate_completion_gate import _scan_owned_tasks
+
+        metadata = {}
+        if handoff_present:
+            metadata["handoff"] = VALID_HANDOFF
+        if wait_payload == "fresh":
+            metadata["intentional_wait"] = _fresh_wait_payload()
+        elif wait_payload == "stale":
+            metadata["intentional_wait"] = _stale_wait_payload()
+        # "absent" -> no key
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", metadata)
+
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert len(completable) == expected_completable, (
+            f"wait={wait_payload}, handoff={handoff_present} "
+            f"-> completable expected {expected_completable}"
+        )
+        assert len(missing) == expected_missing, (
+            f"wait={wait_payload}, handoff={handoff_present} "
+            f"-> missing expected {expected_missing}"
+        )
+
+
+class TestIntentionalWaitCompletionGateMain:
+    """Row 17 (hook integration at main-entry level): main() exits 0 with
+    suppressOutput for a fresh intentional_wait on a missing-handoff task.
+
+    This is the load-bearing path for the livelock — the teammate is idle
+    without HANDOFF during a teachback wait; pre-fix main() would exit 2
+    and nag.
+    """
+
+    def test_main_exits_0_for_fresh_wait_missing_handoff(self, tmp_path, capsys):
+        from teammate_completion_gate import main
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "intentional_wait": _fresh_wait_payload(),
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("teammate_completion_gate.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0, (
+            "Fresh intentional_wait must allow idle (exit 0), not block"
+        )
+        captured = capsys.readouterr()
+        # stderr should NOT contain block feedback
+        assert "HANDOFF" not in captured.err
+        assert "completed" not in captured.err
+
+    def test_main_exits_2_for_stale_wait_missing_handoff(self, tmp_path, capsys):
+        """Stale wait -> nag path re-enables via the missing-handoff branch."""
+        from teammate_completion_gate import main
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "intentional_wait": _stale_wait_payload(),
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("teammate_completion_gate.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "HANDOFF" in captured.err
+
+    def test_main_exits_0_for_fresh_wait_with_handoff(self, tmp_path, capsys):
+        """Completable branch: fresh wait + HANDOFF -> still suppress."""
+        from teammate_completion_gate import main
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "handoff": VALID_HANDOFF,
+            "intentional_wait": _fresh_wait_payload(reason="awaiting_lead_commit"),
+        })
+
+        input_data = json.dumps({
+            "teammate_name": "backend-coder",
+            "team_name": "pact-test",
+        })
+        with patch("sys.stdin", io.StringIO(input_data)), \
+             patch("teammate_completion_gate.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+
+
+class TestIntentionalWaitAC11BlockedByStillNags:
+    """Row 23: blockedBy without intentional_wait still nags.
+
+    Documents the empirical NO-GO for Option 4 (blockedBy hook-awareness)
+    as a standalone fix. Preparer verified that neither TeammateIdle hook
+    reads blockedBy — so a teammate whose task is blocked but lacks an
+    intentional_wait flag still triggers the nag. This test pins that
+    behavior as a regression guard: if someone adds blockedBy awareness
+    later, they must also consider intentional_wait interaction.
+    """
+
+    def test_blockedby_alone_does_not_silence(self, tmp_path):
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        # blockedBy set but no intentional_wait flag
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "blockedBy": ["3"],
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        # No HANDOFF + no wait flag -> surfaces as missing (nag path)
+        assert len(missing) == 1, (
+            "AC #11: blockedBy without intentional_wait must still nag — "
+            "Option 4 is deferred as standalone fix. Add intentional_wait "
+            "to skip."
+        )
+
+    def test_blockedby_with_fresh_wait_silences(self, tmp_path):
+        """The fix (Option 1): blockedBy + fresh intentional_wait -> silenced."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {
+            "blockedBy": ["3"],
+            "intentional_wait": _fresh_wait_payload(
+                reason="awaiting_blocker_resolution",
+                resolver="peer",
+            ),
+        })
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert missing == []
+
+
+class TestIntentionalWaitSharedThresholdContract:
+    """Row 27: both hooks share the same silencer predicate.
+
+    Regression guard against duplicate-constant drift. If someone later
+    inlines the threshold or a skip condition into one hook, the two hooks
+    could diverge on silencer semantics — this test pins that they import
+    the same `should_silence_stall_nag` symbol. (Updated from pinning
+    `wait_stale` directly when F1 unified the three adjacent skips into a
+    single helper.)
+    """
+
+    def test_both_hooks_share_silencer_import(self):
+        """Same should_silence_stall_nag object reached via both hook modules."""
+        import teammate_idle
+        import teammate_completion_gate
+
+        assert (
+            teammate_idle.should_silence_stall_nag
+            is teammate_completion_gate.should_silence_stall_nag
+        ), (
+            "Row 27: hooks must share a single should_silence_stall_nag — "
+            "divergence creates inconsistent silencer semantics across the "
+            "parallel-fired hooks"
+        )
+
+    def test_shared_default_threshold_is_30(self):
+        """DEFAULT_THRESHOLD_MINUTES remains 30 (AC #1)."""
+        from shared.intentional_wait import DEFAULT_THRESHOLD_MINUTES
+        assert DEFAULT_THRESHOLD_MINUTES == 30
+
+
+class TestCompletionGateAsymmetryFix:
+    """Rows 28-30: completion_gate mirror-adds the type + stalled skips that
+    teammate_idle.py::detect_stall already honored (L122, L124).
+
+    Root cause preparer surfaced: _scan_owned_tasks nagged on tasks that
+    detect_stall silently skipped — cross-hook silencer asymmetry. These
+    tests pin the fix as load-bearing.
+    """
+
+    def test_type_blocker_is_skipped(self, tmp_path):
+        """Row 28: metadata.type='blocker' -> skip (no completable, no missing)."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        # No HANDOFF; pre-asymmetry-fix would surface this as missing_handoff
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"type": "blocker"})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == [], "blocker-type task must not surface as completable"
+        assert missing == [], "blocker-type task must not surface as missing_handoff"
+
+    def test_type_algedonic_is_skipped(self, tmp_path):
+        """Row 29: metadata.type='algedonic' -> skip."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"type": "algedonic"})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+    def test_stalled_true_is_skipped(self, tmp_path):
+        """Row 30: metadata.stalled=true -> skip."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"stalled": True})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+    def test_stalled_true_with_handoff_also_skipped(self, tmp_path):
+        """Row 30 variant: stalled=true silences even when HANDOFF is present."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"stalled": True, "handoff": VALID_HANDOFF})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        assert completable == []
+        assert missing == []
+
+    def test_type_other_random_string_not_skipped(self, tmp_path):
+        """Guardrail: only 'blocker' and 'algedonic' are skip-types.
+
+        Arbitrary type values (including unrecognized ones) must NOT be
+        treated as silencers; otherwise a typo could silently disable
+        the gate.
+        """
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"type": "handoff", "handoff": VALID_HANDOFF})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        # type='handoff' is not a silencer; handoff is present -> completable
+        assert len(completable) == 1
+
+    def test_stalled_false_not_skipped(self, tmp_path):
+        """stalled=False (explicit) must not silence — only truthy value does."""
+        from teammate_completion_gate import _scan_owned_tasks
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        {"stalled": False})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        # stalled=False -> task surfaces as missing_handoff (no HANDOFF, no wait)
+        assert len(missing) == 1
+
+
+class TestDualHookParityAllFourSkips:
+    """Row 31: dual-hook parity across all four metadata-keyed skips.
+
+    Parametrized: for each of {type=blocker, type=algedonic, stalled=true,
+    intentional_wait=fresh}, both hooks must produce identical
+    suppress decisions. This is the structural enforcement of AC #6 at
+    the behavioral level — if one hook diverges from the other, a
+    teammate's idle event will see asymmetric nagging across the parallel
+    hook fires.
+
+    The test intentionally covers ONLY the silencing cases (fresh wait)
+    and the always-silence cases (blocker/algedonic/stalled); the parity
+    for non-silencing cases is implicit (both will nag).
+    """
+
+    @pytest.mark.parametrize("metadata_key,metadata_value", [
+        ("type_blocker", {"type": "blocker"}),
+        ("type_algedonic", {"type": "algedonic"}),
+        ("stalled_true", {"stalled": True}),
+        ("intentional_wait_fresh", {"intentional_wait": _fresh_wait_payload()}),
+    ])
+    def test_both_hooks_silence_for_metadata_skip(self, tmp_path,
+                                                   metadata_key, metadata_value):
+        """Both TeammateIdle hooks must suppress for each metadata-keyed skip."""
+        # completion_gate path
+        from teammate_completion_gate import _scan_owned_tasks
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress",
+                        metadata_value)
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        cg_silenced = (completable == [] and missing == [])
+
+        # idle hook path (via detect_stall on in-memory tasks)
+        from teammate_idle import detect_stall
+        tasks = [{
+            "id": "5",
+            "subject": "Task 5",
+            "status": "in_progress",
+            "owner": "backend-coder",
+            "metadata": metadata_value,
+        }]
+        idle_silenced = detect_stall(tasks, "backend-coder") is None
+
+        assert cg_silenced == idle_silenced, (
+            f"Dual-hook parity failure for {metadata_key}: "
+            f"completion_gate silenced={cg_silenced}, "
+            f"detect_stall silenced={idle_silenced}. AC #6 requires "
+            f"both hooks to produce identical suppress decisions for each "
+            f"metadata-keyed skip; divergence re-creates the cross-hook "
+            f"silencer asymmetry that #497 fixes."
+        )
+        # And specifically: they must BOTH silence
+        assert cg_silenced, (
+            f"{metadata_key} must silence completion_gate"
+        )
+        assert idle_silenced, (
+            f"{metadata_key} must silence detect_stall"
+        )
+
+    def test_nag_path_also_symmetric(self, tmp_path):
+        """Complement: missing-wait tasks nag in both hooks."""
+        from teammate_completion_gate import _scan_owned_tasks
+        from teammate_idle import detect_stall
+
+        task_dir = _make_task_dir(tmp_path)
+        _make_task_file(task_dir, "5", "backend-coder", "in_progress", {})
+        completable, missing = _scan_owned_tasks(
+            "backend-coder", "pact-test",
+            tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+        )
+        tasks = [{
+            "id": "5",
+            "subject": "Task 5",
+            "status": "in_progress",
+            "owner": "backend-coder",
+            "metadata": {},
+        }]
+        assert len(missing) == 1, "completion_gate must surface missing-handoff"
+        assert detect_stall(tasks, "backend-coder") is not None, (
+            "detect_stall must fire stall"
+        )

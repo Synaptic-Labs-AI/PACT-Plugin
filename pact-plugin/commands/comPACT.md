@@ -280,7 +280,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] Agent tasks marked `completed` (agents self-manage their task status via `TaskUpdate`)
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
-- [ ] **Create atomic commit(s)** — stage and commit before proceeding
+- [ ] **Create atomic commit(s)** — stage and commit before proceeding. Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the lead works through the commit sequence; CLEAR on the lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal events**: After each commit, write a `commit` event:
   ```bash
   set -e

@@ -27,6 +27,7 @@ from pathlib import Path
 
 from shared.error_output import hook_error_json
 from shared.handoff_example import format_handoff_example
+from shared.intentional_wait import should_silence_stall_nag
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 
@@ -83,6 +84,14 @@ def _scan_owned_tasks(
             if data.get("owner") != teammate_name:
                 continue
             if data.get("status") != "in_progress":
+                continue
+
+            # Unified silencer: signal-task carve-outs + already-stalled skip +
+            # protocol-defined wait (intentional_wait). Same predicate used by
+            # teammate_idle.py::detect_stall — single source of truth in
+            # shared/intentional_wait.py eliminates the cross-hook asymmetry
+            # preparer flagged in §2.7 of the #497 preparation.
+            if should_silence_stall_nag(data):
                 continue
 
             task_id = task_file.stem  # filename without .json
