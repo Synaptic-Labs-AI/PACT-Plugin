@@ -231,3 +231,161 @@ class TestSSOTReferences:
 
     def test_audit_protocol_referenced(self, ssot_content):
         assert "pact-audit" in ssot_content or "Concurrent Audit" in ssot_content
+
+
+# =============================================================================
+# Structural Verification Discipline (#502) — cross-file cascade
+# =============================================================================
+
+
+class TestStructuralVerificationDisciplineConsistency:
+    """Verify the STRUCTURAL VERIFICATION DISCIPLINE terminology cascades to every
+    auditor-touching file: dispatch sites, protocol anchor, SSOT, and agent body.
+
+    Reuses `TestAuditorDispatchConsistency.DISPATCH_FILES` via dict-spread so this
+    inventory cannot drift from the dispatch-consistency inventory. Adds
+    `pact-auditor.md` (the agent body) which is not a dispatch site but is the
+    primary rule-carrying surface at auditor execution time.
+
+    A failing parametrized case names the specific file where the cascade broke —
+    localizing future regressions to the exact drop site.
+    """
+
+    # Rule-carrying surfaces only. The agent body, the protocol anchor, and
+    # its SSOT carry the full rule; orchestrate.md carries the dispatch-primer
+    # pointer (it is the sole Task() dispatch site for the auditor, per
+    # preparer §a). comPACT.md + pact-workflows.md are `see-X-for-details`
+    # cross-refs, not dispatch primers, so they do NOT carry the discipline
+    # phrase — the cascade invariant does not apply to them.
+    DISCIPLINE_FILES = {
+        "pact-audit.md": PROTOCOLS_DIR / "pact-audit.md",
+        "pact-protocols.md": PROTOCOLS_DIR / "pact-protocols.md",
+        "orchestrate.md": COMMANDS_DIR / "orchestrate.md",
+        "pact-auditor.md": AGENTS_DIR / "pact-auditor.md",
+    }
+
+    @pytest.fixture
+    def discipline_contents(self):
+        return {
+            name: path.read_text(encoding="utf-8")
+            for name, path in self.DISCIPLINE_FILES.items()
+        }
+
+    @pytest.mark.parametrize("filename", sorted(DISCIPLINE_FILES.keys()))
+    def test_all_files_reference_structural_verification_discipline(
+        self, discipline_contents, filename
+    ):
+        """Every auditor-touching file carries the discipline terminology.
+
+        Agent body and pact-audit.md / pact-protocols.md use the full discipline
+        name as a section heading; dispatch-site files use a one-line pointer.
+        All must mention 'Structural Verification Discipline' (case-insensitive).
+        """
+        content = discipline_contents[filename]
+        lower = content.lower()
+        assert "structural verification discipline" in lower, (
+            f"{filename} missing 'Structural Verification Discipline' — "
+            f"discipline terminology must cascade to all auditor-touching files "
+            f"(see #502)"
+        )
+
+    @pytest.mark.parametrize("filename", sorted(DISCIPLINE_FILES.keys()))
+    def test_discipline_reference_colocated_with_git_diff(
+        self, discipline_contents, filename
+    ):
+        """Each file pairs the discipline terminology with 'git diff' as its substrate.
+
+        Proximity check: within a 500-char window of every 'structural verification
+        discipline' occurrence, 'git diff' MUST also appear. Catches the
+        degenerate case where the discipline name is mentioned but its ground-truth
+        requirement (git diff as substrate) is disconnected — rule carried by name
+        without its substrate. A blunt file-wide 'git diff' check passes on
+        pre-#502 baseline because pre-#502 SIGNAL FORMAT already contained 'git diff
+        excerpt' as a vague alternate; only colocation with the discipline name is
+        a #502-specific invariant.
+        """
+        content = discipline_contents[filename]
+        lower = content.lower()
+        idx = lower.find("structural verification discipline")
+        assert idx != -1, (
+            f"{filename} missing discipline terminology — "
+            f"upstream cascade test should have caught this"
+        )
+        # Scan every discipline mention; at least one must be within 500 chars
+        # of a 'git diff' reference.
+        window = 500
+        found_pairing = False
+        while idx != -1:
+            start = max(0, idx - window)
+            end = min(len(lower), idx + len("structural verification discipline") + window)
+            if "git diff" in lower[start:end]:
+                found_pairing = True
+                break
+            idx = lower.find("structural verification discipline", idx + 1)
+        assert found_pairing, (
+            f"{filename} mentions 'Structural Verification Discipline' but no "
+            f"'git diff' reference within {window} chars — rule name is carried "
+            f"without its ground-truth substrate (see #502)"
+        )
+
+    # Dispatch-primer consumer files only. orchestrate.md is the sole auditor
+    # Task() spawn site (preparer §a); its bullet-list dispatch payload is
+    # read at spawn time by the auditor and carries a brief discipline primer
+    # next to the 'Auditor skipped' anchor. comPACT.md + pact-workflows.md
+    # contain `Auditor skipped` in cross-ref documentation blocks that are
+    # NOT interpolated into the dispatch prompt, so the proximity invariant
+    # does not apply there.
+    DISPATCH_POINTER_FILES = [
+        "orchestrate.md",
+    ]
+
+    @pytest.mark.parametrize("filename", DISPATCH_POINTER_FILES)
+    def test_discipline_pointer_near_auditor_dispatch_anchor(
+        self, discipline_contents, filename
+    ):
+        """Discipline phrase sits within the auditor-dispatch block.
+
+        Proximity check: at each dispatch-pointer consumer file, the
+        'Structural Verification Discipline' phrase MUST appear within 2000
+        chars of an 'Auditor skipped' anchor. The anchor is the shared
+        opt-out marker at the top of every auditor-dispatch block; proximity
+        to it is what makes the phrase act as dispatch priming rather than
+        incidental mention elsewhere in the file.
+
+        A refactor that moves the discipline phrase to an unrelated section
+        (e.g., a 'Principles' appendix) would still pass
+        `test_all_files_reference_structural_verification_discipline` but
+        silently break the property that the phrase is read by the auditor
+        as part of its dispatch payload at spawn time — not merely present
+        somewhere in the file.
+
+        Window sized at ~3x the maximum measured actual (610 chars in
+        orchestrate.md at time of landing); leaves headroom for dispatch-block
+        expansion without false failures.
+        """
+        content = discipline_contents[filename]
+        lower = content.lower()
+        window = 2000
+
+        anchor_idx = 0
+        found_pairing = False
+        while True:
+            anchor_idx = lower.find("auditor skipped", anchor_idx)
+            if anchor_idx < 0:
+                break
+            start = max(0, anchor_idx - window)
+            end = min(
+                len(lower),
+                anchor_idx + len("auditor skipped") + window,
+            )
+            if "structural verification discipline" in lower[start:end]:
+                found_pairing = True
+                break
+            anchor_idx += 1
+
+        assert found_pairing, (
+            f"{filename} contains 'Auditor skipped' anchor but no "
+            f"'Structural Verification Discipline' phrase within {window} "
+            f"chars — dispatch-priming property broken. A future refactor "
+            f"may have moved the phrase out of the dispatch block (see #502 F7)."
+        )

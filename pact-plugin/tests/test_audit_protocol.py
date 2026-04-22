@@ -295,6 +295,269 @@ class TestCompletionLifecycle:
         }
         (task_dir / "42.json").write_text(json.dumps(task_data), encoding="utf-8")
 
-        completable, missing = _scan_owned_tasks("coder", "pact-test", str(tmp_path))
+        completable, _ = _scan_owned_tasks("coder", "pact-test", str(tmp_path))
         assert len(completable) == 1
         assert completable[0]["completion_type"] == "handoff"
+
+
+# =============================================================================
+# Structural Verification Discipline (#502)
+# =============================================================================
+
+
+class TestStructuralVerificationDiscipline:
+    """Verify STRUCTURAL VERIFICATION DISCIPLINE is present in agent body and protocol.
+
+    Each assertion targets a specific load-bearing property of the discipline
+    (canonical term, MUST voice, named failure modes, prior-art citation, incident
+    citation, Evidence-field upgrade, BEHAVIORAL RULES integration). A failing
+    assertion names the specific erosion shape rather than a generic "rule missing".
+    Baseline-fail on b0e3f7e is required — these tests do not pass on pre-#502 HEAD.
+    """
+
+    @pytest.fixture
+    def agent_content(self):
+        return AUDITOR_AGENT.read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def audit_content(self):
+        return AUDIT_PROTOCOL.read_text(encoding="utf-8")
+
+    def test_agent_has_discipline_section(self, agent_content):
+        """Agent body declares the discipline section by canonical name."""
+        assert "STRUCTURAL VERIFICATION DISCIPLINE" in agent_content
+
+    def test_protocol_has_discipline_section(self, audit_content):
+        """Protocol anchor mirrors the discipline section (H3-cased)."""
+        assert "Structural Verification Discipline" in audit_content
+
+    def test_agent_uses_must_voice(self, agent_content):
+        """Discipline section uses MUST voice, not 'should' or 'recommended'."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "MUST" in section, "Discipline section must use MUST voice"
+
+    def test_agent_references_git_diff_verification(self, agent_content):
+        """Discipline requires git diff as the verification substrate."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "git diff" in section
+
+    def test_agent_names_failure_modes(self, agent_content):
+        """Discipline names the canonical failure modes for LLM-reader at execution time."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "PHANTOM-SYMMETRIC-CLAIM" in section
+        assert "VAGUE-DIFF-CITATION" in section
+        assert "STRUCTURAL-DRESSING-ON-JUDGMENT-CALL" in section
+
+    @pytest.mark.parametrize(
+        "filename,path",
+        [
+            ("pact-auditor.md", AUDITOR_AGENT),
+            ("pact-audit.md", AUDIT_PROTOCOL),
+            ("pact-protocols.md", PROTOCOLS_DIR / "pact-protocols.md"),
+        ],
+    )
+    def test_phantom_symmetric_claim_bullet_enumerates_all_layers(
+        self, filename, path
+    ):
+        """PHANTOM-SYMMETRIC-CLAIM bullet enumerates all four canonical layers
+        in every rule-carrying surface.
+
+        Each of the three rule carriers (agent body, protocol anchor, SSOT) has
+        a section that asserts "Four internally-consistent layers of prose can
+        all be wrong together" in its preamble. The PHANTOM-SYMMETRIC-CLAIM
+        bullet in that section must enumerate four named layers, not three.
+        Arithmetic inconsistency here (3 enumerated, 4 claimed by the
+        preamble) is the same failure shape the rule is installed to prevent:
+        prose that self-contradicts on a countable fact. Without this guard,
+        a future edit that drops a layer from the bullet on any one carrier
+        would stay green on `test_agent_names_failure_modes` (which only
+        checks the failure-mode NAMES, not their body text) and survive to
+        a blind review — the exact under-propagation pattern #502 B1 caught
+        across the protocol mirrors after T1 only fixed the agent body.
+        """
+        content = path.read_text(encoding="utf-8")
+        # Section header form differs across files:
+        #   pact-auditor.md uses "### Failure modes to avoid" (H3)
+        #   pact-audit.md / pact-protocols.md use "**Failure modes to avoid**:"
+        # The bare phrase is present in all three; use it as a uniform marker.
+        # Guarded lookup: if a heading is renamed, fail with a pointed
+        # diagnostic instead of an uncaught ValueError.
+        for marker in (
+            "Failure modes to avoid",
+            "PHANTOM-SYMMETRIC-CLAIM",
+            "VAGUE-DIFF-CITATION",
+        ):
+            if marker not in content:
+                pytest.fail(
+                    f"{filename}: section marker '{marker}' missing — "
+                    f"heading may have been renamed or section deleted"
+                )
+        failure_modes_start = content.index("Failure modes to avoid")
+        phantom_start = content.index("PHANTOM-SYMMETRIC-CLAIM", failure_modes_start)
+        # The bullet ends at the next list item (VAGUE-DIFF-CITATION).
+        bullet_end = content.index("VAGUE-DIFF-CITATION", phantom_start)
+        bullet = content[phantom_start:bullet_end]
+        for layer in (
+            "HANDOFF prose",
+            "commit message",
+            "coder self-attestation",
+            "audit signal",
+        ):
+            assert layer in bullet, (
+                f"{filename}: PHANTOM-SYMMETRIC-CLAIM bullet missing canonical "
+                f"layer '{layer}' — bullet's section preamble claims 'four "
+                f"layers' but enumeration must list all four (see #502 T1/B1)"
+            )
+
+    def test_discipline_section_has_structural_ac_table(self, agent_content):
+        """The 'What counts as a structural AC' disambiguation table is present.
+
+        A future edit that deletes or drastically trims this table (e.g.,
+        below 4 yes-rows / 4 no-rows) leaves the MUST rule without its
+        disambiguation substrate. The auditor at execution time needs
+        concrete examples for each side to classify a novel AC.
+        """
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "### What counts as a structural acceptance criterion" in section, (
+            "Disambiguation table subsection missing"
+        )
+        # The table uses "| yes |" / "| **no** |" cells. Count presence as a
+        # structural-erosion guard: at least 4 of each required.
+        assert section.count("| yes |") >= 4, (
+            "Disambiguation table has fewer than 4 structural-yes example rows"
+        )
+        assert section.count("| **no** |") >= 4, (
+            "Disambiguation table has fewer than 4 non-structural example rows"
+        )
+
+    def test_discipline_section_has_five_step_verification_procedure(
+        self, agent_content
+    ):
+        """The Verification procedure is a numbered 5-step list, not prose.
+
+        Dropping the numbered-list structure or reducing the step count
+        erodes the procedure's operational teeth. Step 4 in particular
+        ('If count/location does NOT match → RED, not GREEN') is the
+        enforcement hinge the rule is installed around.
+        """
+        import re
+
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "### Verification procedure" in section, (
+            "Verification procedure subsection missing"
+        )
+        proc_start = section.index("### Verification procedure")
+        proc_end = section.index("### Failure modes to avoid", proc_start)
+        procedure = section[proc_start:proc_end]
+        step_count = len(re.findall(r"^\d+\. ", procedure, re.MULTILINE))
+        assert step_count == 5, (
+            f"Verification procedure must be exactly 5 numbered steps; "
+            f"found {step_count}"
+        )
+
+    def test_step_4_requires_red_on_count_mismatch(self, agent_content):
+        """Step 4 prose requires RED on count mismatch, not YELLOW.
+
+        The RED-vs-YELLOW disambiguation was added by M5 (cycle 1) to close
+        a severity-assignment escape hatch — an auditor under coordination
+        pressure could silently downgrade a clear count violation to YELLOW.
+        Step 4 must name both 'RED' and 'count mismatch' explicitly so the
+        disambiguation is load-bearing at the decision point.
+        """
+        import re
+
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        proc_start = section.index("### Verification procedure")
+        proc_end = section.index("### Failure modes to avoid", proc_start)
+        procedure = section[proc_start:proc_end]
+        # Extract step 4: from "^4\. " to "^5\. " or end of procedure.
+        step4_match = re.search(
+            r"^4\. .*?(?=^5\. |\Z)", procedure, re.MULTILINE | re.DOTALL
+        )
+        assert step4_match is not None, "Step 4 not found in Verification procedure"
+        step4 = step4_match.group(0)
+        assert "RED" in step4 and "count mismatch" in step4, (
+            "Step 4 must name both 'RED' and 'count mismatch' to carry the "
+            "RED-vs-YELLOW disambiguation (see #502 M5)"
+        )
+
+    def test_agent_cites_prior_art(self, agent_content):
+        """Discipline cites file inspection beats HANDOFF inference rationale."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "file inspection beats HANDOFF inference" in section
+
+    def test_agent_cites_pr_501_incident(self, agent_content):
+        """Discipline cites the triggering incident so the rule's context survives compaction."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "bef7f24" in section or "PR #501" in section
+
+    def test_agent_signal_format_evidence_field_upgraded(self, agent_content):
+        """Agent's Evidence field requires structural ACs be cited via git diff."""
+        start = agent_content.index("## SIGNAL FORMAT")
+        end = agent_content.index("## SIGNAL LEVELS", start)
+        section = agent_content[start:end]
+        assert "structural" in section.lower()
+        assert "git diff" in section
+
+    def test_protocol_signal_format_evidence_field_upgraded(self, audit_content):
+        """Protocol's Evidence field requires structural ACs be cited via git diff."""
+        start = audit_content.index("### Signal Format")
+        end = audit_content.index("### Signal Levels", start)
+        section = audit_content[start:end]
+        assert "structural" in section.lower()
+        assert "git diff" in section
+
+    def test_agent_has_behavioral_rule_for_structural_verification(self, agent_content):
+        """BEHAVIORAL RULES table references the discipline."""
+        start = agent_content.index("## BEHAVIORAL RULES")
+        end = agent_content.index("## AUDIT CRITERIA", start)
+        section = agent_content[start:end]
+        assert "STRUCTURAL VERIFICATION DISCIPLINE" in section
+
+    def test_verify_protocol_extracts_concurrent_audit_still_matches(self):
+        """verify-protocol-extracts.sh exits 0 with every extract pair MATCH.
+
+        Strict-pass semantics: asserts exit-code 0 from the verify script. Every
+        extract pair — including Concurrent Audit (edited by #502) and State
+        Recovery (re-extracted by #505) — must be in sync with its SSOT region.
+        This test fails deterministically if any future edit to pact-protocols.md
+        or any extract file desyncs the pair without bumping the script's
+        line-ranges, or if the cascade-delta rule is violated when inserting
+        content into the SSOT.
+        """
+        import subprocess
+
+        repo_root = Path(__file__).parent.parent.parent
+        script = repo_root / "scripts" / "verify-protocol-extracts.sh"
+        if not script.exists():
+            pytest.skip("verify-protocol-extracts.sh not present")
+
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, (
+            f"verify-protocol-extracts.sh exited {result.returncode}; expected 0. "
+            f"One or more extract pairs have desynced from their SSOT region.\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
