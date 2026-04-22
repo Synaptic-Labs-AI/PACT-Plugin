@@ -12,6 +12,8 @@ Tests cover:
 """
 import io
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -260,40 +262,36 @@ class TestCheckDirectApiCalls:
 # ---------------------------------------------------------------------------
 
 class TestCheckEnvFileInGitignore:
-    """Tests for check_env_file_in_gitignore() — .gitignore validation."""
+    """CODE-phase smoke for check_env_file_in_gitignore() — delegates to `git check-ignore`.
 
-    def test_returns_true_when_env_in_gitignore(self, tmp_path, monkeypatch):
+    Covers the happy path on the per-repo-exclude channel (a false-negative the
+    old substring-read implementation could not see). Full per-channel fixture
+    + parametrized matrix + error-path mocks are TEST-phase deliverables — see
+    docs/architecture/fix-511-git-check-ignore.md §1 for the fixture spec that
+    TEST phase will author.
+    """
+
+    def test_returns_true_when_env_ignored_via_per_repo_exclude(self, tmp_path, monkeypatch):
+        if shutil.which("git") is None:
+            pytest.skip("git not available on PATH")
         from git_commit_check import check_env_file_in_gitignore
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".gitignore").write_text(".env\n.env.*\n")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+        monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+        (repo / ".git" / "info" / "exclude").write_text(".env\n")
+        monkeypatch.chdir(repo)
+
         is_protected, error = check_env_file_in_gitignore()
         assert is_protected is True
         assert error is None
-
-    def test_returns_false_when_no_gitignore(self, tmp_path, monkeypatch):
-        from git_commit_check import check_env_file_in_gitignore
-        monkeypatch.chdir(tmp_path)
-        is_protected, error = check_env_file_in_gitignore()
-        assert is_protected is False
-        assert "no .gitignore" in error.lower()
-
-    def test_returns_false_when_env_missing_from_gitignore(self, tmp_path, monkeypatch):
-        from git_commit_check import check_env_file_in_gitignore
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".gitignore").write_text("*.pyc\nnode_modules/\n")
-        is_protected, error = check_env_file_in_gitignore()
-        assert is_protected is False
-        assert "VIOLATION" in error
-
-    def test_handles_io_error(self, tmp_path, monkeypatch):
-        from git_commit_check import check_env_file_in_gitignore
-        monkeypatch.chdir(tmp_path)
-        gitignore = tmp_path / ".gitignore"
-        gitignore.write_text(".env\n")
-        with patch.object(Path, "read_text", side_effect=IOError("Permission denied")):
-            is_protected, error = check_env_file_in_gitignore()
-        assert is_protected is False
-        assert "could not read" in error.lower()
 
 
 # ---------------------------------------------------------------------------

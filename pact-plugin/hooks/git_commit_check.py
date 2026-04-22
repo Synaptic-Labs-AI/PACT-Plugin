@@ -210,34 +210,56 @@ def check_direct_api_calls(staged_files):
 
 def check_env_file_in_gitignore():
     """
-    Verify .env files are listed in .gitignore.
+    Verify .env is ignored by git's full ignore chain (global excludes,
+    per-repo excludes, parent-dir .gitignores, repo-root .gitignore).
+
+    Delegates to `git check-ignore -q .env` rather than reading .gitignore
+    directly, which closes ignore-chain false negatives (global excludes,
+    .git/info/exclude, parent .gitignores) and `!.env` false positives.
+
+    Fail-open posture on detection-mechanism errors: returns
+    (False, "SACROSANCT WARNING: ..."). The WARNING substring routes to
+    main()'s warnings list (non-blocking). The complementary staged-file
+    check (check_security) independently blocks .env committed files, so
+    a warning here is safe.
 
     Returns:
         Tuple of (is_protected, error_message or None)
     """
-    gitignore_path = Path('.gitignore')
-
-    if not gitignore_path.exists():
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", ".env"],
+            capture_output=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
         return False, (
-            "SACROSANCT WARNING: No .gitignore file found. "
-            "Create one with '.env' and '.env.*' entries."
+            "SACROSANCT WARNING: 'git check-ignore' timed out; "
+            "cannot verify .env protection."
+        )
+    except FileNotFoundError:
+        return False, (
+            "SACROSANCT WARNING: git binary not found on PATH; "
+            "cannot verify .env protection."
         )
 
-    try:
-        gitignore_content = gitignore_path.read_text(encoding='utf-8')
-        env_patterns = ['.env', '.env.*', '.env.local', '.env.production']
-
-        # Check if at least the base .env is protected
-        if '.env' not in gitignore_content:
-            return False, (
-                "SACROSANCT VIOLATION: .env not found in .gitignore. "
-                "Environment files must be excluded from version control."
-            )
-
+    if result.returncode == 0:
         return True, None
-
-    except IOError:
-        return False, "Warning: Could not read .gitignore file."
+    if result.returncode == 1:
+        return False, (
+            "SACROSANCT VIOLATION: .env is not ignored by git. "
+            "Add '.env' to .gitignore (repo), ~/.config/git/ignore (global), "
+            "or .git/info/exclude (per-repo private)."
+        )
+    if result.returncode == 128:
+        return False, (
+            "SACROSANCT WARNING: 'git check-ignore' reports not in a git repo "
+            "(exit 128); cannot verify .env protection."
+        )
+    return False, (
+        f"SACROSANCT WARNING: 'git check-ignore' exited {result.returncode}; "
+        "cannot verify .env protection."
+    )
 
 
 def check_hardcoded_secrets(staged_files):
