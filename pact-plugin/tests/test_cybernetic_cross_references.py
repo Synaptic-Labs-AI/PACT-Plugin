@@ -251,10 +251,16 @@ class TestStructuralVerificationDisciplineConsistency:
     localizing future regressions to the exact drop site.
     """
 
-    # Extends the dispatch inventory with the agent body (rule-carrying surface).
-    # Dict-spread keeps DISPATCH_FILES as the single source of truth.
+    # Rule-carrying surfaces only. The agent body, the protocol anchor, and
+    # its SSOT carry the full rule; orchestrate.md carries the dispatch-primer
+    # pointer (it is the sole Task() dispatch site for the auditor, per
+    # preparer §a). comPACT.md + pact-workflows.md are `see-X-for-details`
+    # cross-refs, not dispatch primers, so they do NOT carry the discipline
+    # phrase — the cascade invariant does not apply to them.
     DISCIPLINE_FILES = {
-        **TestAuditorDispatchConsistency.DISPATCH_FILES,
+        "pact-audit.md": PROTOCOLS_DIR / "pact-audit.md",
+        "pact-protocols.md": PROTOCOLS_DIR / "pact-protocols.md",
+        "orchestrate.md": COMMANDS_DIR / "orchestrate.md",
         "pact-auditor.md": AGENTS_DIR / "pact-auditor.md",
     }
 
@@ -322,15 +328,15 @@ class TestStructuralVerificationDisciplineConsistency:
             f"without its ground-truth substrate (see #502)"
         )
 
-    # Dispatch-pointer consumer files only. Rule-bearing files (pact-audit.md,
-    # pact-auditor.md, pact-protocols.md) are excluded — the dispatch-anchor
-    # proximity invariant is only meaningful where the discipline phrase is
-    # delivering spawn-time priming within an auditor-dispatch block, not
-    # where it is the rule body itself or the SSOT of the rule body.
+    # Dispatch-primer consumer files only. orchestrate.md is the sole auditor
+    # Task() spawn site (preparer §a); its bullet-list dispatch payload is
+    # read at spawn time by the auditor and carries a brief discipline primer
+    # next to the 'Auditor skipped' anchor. comPACT.md + pact-workflows.md
+    # contain `Auditor skipped` in cross-ref documentation blocks that are
+    # NOT interpolated into the dispatch prompt, so the proximity invariant
+    # does not apply there.
     DISPATCH_POINTER_FILES = [
         "orchestrate.md",
-        "comPACT.md",
-        "pact-workflows.md",
     ]
 
     @pytest.mark.parametrize("filename", DISPATCH_POINTER_FILES)
