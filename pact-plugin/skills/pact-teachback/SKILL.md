@@ -44,7 +44,7 @@ TaskUpdate(taskId, metadata={"teachback_sent": true})
 
 If you will idle-wait for the lead's correction, SET `intentional_wait`
 (reason `awaiting_teachback_approved`, resolver `lead`) before going idle and
-CLEAR it on resume. See "Protocol Waits" in `pact-agent-teams` for the
+CLEAR it on resume. See "Intentional Waiting" in `pact-agent-teams` for the
 SET/CLEAR snippets and full contract.
 
 ## Ordering rule

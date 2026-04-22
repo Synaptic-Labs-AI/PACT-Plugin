@@ -309,7 +309,7 @@ class TestSkillMdProseSnippetConformance:
     def test_prose_snippet_output_is_fresh_and_valid(self):
         from shared.intentional_wait import validate_wait, wait_stale
 
-        # Verbatim the SKILL.md "Protocol Waits" prose snippet:
+        # Verbatim the SKILL.md "Intentional Waiting" prose snippet:
         since_value = datetime.now(timezone.utc).isoformat(timespec="seconds")
         payload = {
             "reason": "awaiting_teachback_approved",
