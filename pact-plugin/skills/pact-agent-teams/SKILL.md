@@ -182,7 +182,7 @@ output (even zero-content) blocks the next inbox delivery.
 - **Idle-waiting for a protocol-defined resolution** (teachback, lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
-- **Genuinely stuck**? Follow On Blocker.
+- **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.
 
@@ -215,7 +215,7 @@ TaskUpdate(taskId=taskId, metadata={
 TaskUpdate(taskId=taskId, metadata={"intentional_wait": None})
 ```
 
-Clear on the same turn you take the action that advances state.
+Clear on the same turn you take the action that advances state (e.g., when the approval / commit confirmation / peer reply / user decision arrives).
 
 ### Vocabulary
 
