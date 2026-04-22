@@ -260,7 +260,7 @@ An auditor is dispatched alongside coders unless explicitly skipped. To skip, ou
 
 > **Auditor skipped**: [justification]
 
-See the [Concurrent Audit Protocol](../protocols/pact-audit.md) for full details.
+See the [Concurrent Audit Protocol](../protocols/pact-audit.md) for full details, including the Structural Verification Discipline (auditor MUST verify structural acceptance criteria — file counts, line ranges, touched/untouched paths — against `git diff` output; HANDOFF prose is not ground truth).
 
 **Dispatch is mandatory when**:
 - Variety score >= 7 (Medium or higher)

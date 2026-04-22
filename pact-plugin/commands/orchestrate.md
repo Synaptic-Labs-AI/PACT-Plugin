@@ -649,6 +649,7 @@ Valid skip reasons: single coder on familiar pattern, variety reassessed below 7
 1. `TaskCreate(subject="auditor: concurrent quality observation", metadata={"completion_type": "signal"})`
    - Include: architecture doc path, plan path, coder task IDs and scope boundaries
    - Include: "Your observation targets: {coder-names}. Reference chain: architecture doc > plan > dispatch context."
+   - Include: "Structural Verification Discipline applies: for any countable or locatable acceptance criterion (file counts, line ranges, touched/untouched paths), verify the claim against `git diff` output before emitting GREEN. HANDOFF prose and commit messages are not ground truth. See STRUCTURAL VERIFICATION DISCIPLINE in your agent body."
 2. `TaskUpdate(taskId, owner="auditor")`
 3. Spawn the auditor with the canonical dispatch form:
 
