@@ -354,24 +354,43 @@ class TestStructuralVerificationDiscipline:
         assert "VAGUE-DIFF-CITATION" in section
         assert "STRUCTURAL-DRESSING-ON-JUDGMENT-CALL" in section
 
-    def test_phantom_symmetric_claim_bullet_enumerates_all_layers(self, agent_content):
-        """PHANTOM-SYMMETRIC-CLAIM bullet enumerates all four canonical layers.
+    @pytest.mark.parametrize(
+        "filename,path",
+        [
+            ("pact-auditor.md", AUDITOR_AGENT),
+            ("pact-audit.md", AUDIT_PROTOCOL),
+            ("pact-protocols.md", PROTOCOLS_DIR / "pact-protocols.md"),
+        ],
+    )
+    def test_phantom_symmetric_claim_bullet_enumerates_all_layers(
+        self, filename, path
+    ):
+        """PHANTOM-SYMMETRIC-CLAIM bullet enumerates all four canonical layers
+        in every rule-carrying surface.
 
-        The bullet asserts "all four can propagate the same fabrication" — the
-        enumeration that precedes that claim must list four named layers, not
-        three. Arithmetic inconsistency here (3 listed, "all four" claimed) is
-        the same failure shape the rule is installed to prevent: prose that
-        self-contradicts on a countable fact. Without this guard, a future edit
-        that drops a layer from the bullet stays green on
-        test_agent_names_failure_modes (which only checks the failure-mode
-        NAMES, not their body text) — the exact under-propagation pattern T1
-        corrected.
+        Each of the three rule carriers (agent body, protocol anchor, SSOT) has
+        a section that asserts "Four internally-consistent layers of prose can
+        all be wrong together" in its preamble. The PHANTOM-SYMMETRIC-CLAIM
+        bullet in that section must enumerate four named layers, not three.
+        Arithmetic inconsistency here (3 enumerated, 4 claimed by the
+        preamble) is the same failure shape the rule is installed to prevent:
+        prose that self-contradicts on a countable fact. Without this guard,
+        a future edit that drops a layer from the bullet on any one carrier
+        would stay green on `test_agent_names_failure_modes` (which only
+        checks the failure-mode NAMES, not their body text) and survive to
+        a blind review — the exact under-propagation pattern #502 B1 caught
+        across the protocol mirrors after T1 only fixed the agent body.
         """
-        failure_modes_start = agent_content.index("### Failure modes to avoid")
-        phantom_start = agent_content.index("PHANTOM-SYMMETRIC-CLAIM", failure_modes_start)
+        content = path.read_text(encoding="utf-8")
+        # Section header form differs across files:
+        #   pact-auditor.md uses "### Failure modes to avoid" (H3)
+        #   pact-audit.md / pact-protocols.md use "**Failure modes to avoid**:"
+        # The bare phrase is present in all three; use it as a uniform marker.
+        failure_modes_start = content.index("Failure modes to avoid")
+        phantom_start = content.index("PHANTOM-SYMMETRIC-CLAIM", failure_modes_start)
         # The bullet ends at the next list item (VAGUE-DIFF-CITATION).
-        bullet_end = agent_content.index("VAGUE-DIFF-CITATION", phantom_start)
-        bullet = agent_content[phantom_start:bullet_end]
+        bullet_end = content.index("VAGUE-DIFF-CITATION", phantom_start)
+        bullet = content[phantom_start:bullet_end]
         for layer in (
             "HANDOFF prose",
             "commit message",
@@ -379,9 +398,9 @@ class TestStructuralVerificationDiscipline:
             "audit signal",
         ):
             assert layer in bullet, (
-                f"PHANTOM-SYMMETRIC-CLAIM bullet missing canonical layer "
-                f"'{layer}' — bullet claims 'all four can propagate' but "
-                f"enumeration must list all four (see #502 T1)"
+                f"{filename}: PHANTOM-SYMMETRIC-CLAIM bullet missing canonical "
+                f"layer '{layer}' — bullet's section preamble claims 'four "
+                f"layers' but enumeration must list all four (see #502 T1/B1)"
             )
 
     def test_agent_cites_prior_art(self, agent_content):

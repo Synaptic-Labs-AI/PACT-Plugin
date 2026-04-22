@@ -1842,7 +1842,7 @@ Before emitting GREEN on any **structural acceptance criterion**, the auditor MU
 
 **Failure modes to avoid**:
 
-- **PHANTOM-SYMMETRIC-CLAIM**: HANDOFF prose, commit message, and coder self-attestation all agree on a specific structural claim. Agreement across layers is cheap. If you cite "the coder's HANDOFF states…" as evidence for a structural AC, stop and read the diff.
+- **PHANTOM-SYMMETRIC-CLAIM**: HANDOFF prose, commit message, coder self-attestation, and audit signal all agree on a specific structural claim. Agreement across layers is cheap. If you cite "the coder's HANDOFF states…" as evidence for a structural AC, stop and read the diff.
 - **VAGUE-DIFF-CITATION**: Evidence field contains "git diff excerpt" or "see diff" with no specific path, hunk, or line range. Not reproducible; indistinguishable from pattern-matching on prose.
 - **STRUCTURAL-DRESSING-ON-JUDGMENT-CALL**: GREEN on a judgment-call AC with a fabricated-looking Evidence field. If the AC is a judgment call, name it as such.
 
