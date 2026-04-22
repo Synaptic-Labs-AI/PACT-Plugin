@@ -298,3 +298,150 @@ class TestCompletionLifecycle:
         completable, missing = _scan_owned_tasks("coder", "pact-test", str(tmp_path))
         assert len(completable) == 1
         assert completable[0]["completion_type"] == "handoff"
+
+
+# =============================================================================
+# Structural Verification Discipline (#502)
+# =============================================================================
+
+
+class TestStructuralVerificationDiscipline:
+    """Verify STRUCTURAL VERIFICATION DISCIPLINE is present in agent body and protocol.
+
+    Each assertion targets a specific load-bearing property of the discipline
+    (canonical term, MUST voice, named failure modes, prior-art citation, incident
+    citation, Evidence-field upgrade, BEHAVIORAL RULES integration). A failing
+    assertion names the specific erosion shape rather than a generic "rule missing".
+    Baseline-fail on b0e3f7e is required — these tests do not pass on pre-#502 HEAD.
+    """
+
+    @pytest.fixture
+    def agent_content(self):
+        return AUDITOR_AGENT.read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def audit_content(self):
+        return AUDIT_PROTOCOL.read_text(encoding="utf-8")
+
+    def test_agent_has_discipline_section(self, agent_content):
+        """Agent body declares the discipline section by canonical name."""
+        assert "STRUCTURAL VERIFICATION DISCIPLINE" in agent_content
+
+    def test_protocol_has_discipline_section(self, audit_content):
+        """Protocol anchor mirrors the discipline section (H3-cased)."""
+        assert "Structural Verification Discipline" in audit_content
+
+    def test_agent_uses_must_voice(self, agent_content):
+        """Discipline section uses MUST voice, not 'should' or 'recommended'."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "MUST" in section, "Discipline section must use MUST voice"
+
+    def test_agent_references_git_diff_verification(self, agent_content):
+        """Discipline requires git diff as the verification substrate."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "git diff" in section
+
+    def test_agent_names_failure_modes(self, agent_content):
+        """Discipline names the canonical failure modes for LLM-reader at execution time."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "PHANTOM-SYMMETRIC-CLAIM" in section
+        assert "VAGUE-DIFF-CITATION" in section
+
+    def test_agent_cites_prior_art(self, agent_content):
+        """Discipline cites file inspection beats HANDOFF inference rationale."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "file inspection beats HANDOFF inference" in section
+
+    def test_agent_cites_pr_501_incident(self, agent_content):
+        """Discipline cites the triggering incident so the rule's context survives compaction."""
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "bef7f24" in section or "PR #501" in section
+
+    def test_agent_signal_format_evidence_field_upgraded(self, agent_content):
+        """Agent's Evidence field requires structural ACs be cited via git diff."""
+        start = agent_content.index("## SIGNAL FORMAT")
+        end = agent_content.index("## SIGNAL LEVELS", start)
+        section = agent_content[start:end]
+        assert "structural" in section.lower()
+        assert "git diff" in section
+
+    def test_protocol_signal_format_evidence_field_upgraded(self, audit_content):
+        """Protocol's Evidence field requires structural ACs be cited via git diff."""
+        start = audit_content.index("### Signal Format")
+        end = audit_content.index("### Signal Levels", start)
+        section = audit_content[start:end]
+        assert "structural" in section.lower()
+        assert "git diff" in section
+
+    def test_agent_has_behavioral_rule_for_structural_verification(self, agent_content):
+        """BEHAVIORAL RULES table references the discipline."""
+        start = agent_content.index("## BEHAVIORAL RULES")
+        end = agent_content.index("## AUDIT CRITERIA", start)
+        section = agent_content[start:end]
+        assert "STRUCTURAL VERIFICATION DISCIPLINE" in section
+
+    def test_verify_protocol_extracts_concurrent_audit_still_matches(self):
+        """verify-protocol-extracts.sh reports the Concurrent Audit extract as MATCH.
+
+        Subset-pass semantics: asserts the specific extract #502 touches (Concurrent
+        Audit) is in sync between pact-audit.md and pact-protocols.md, plus an
+        unchanged neighbor (Scoped Phases) as regression canary. Does NOT assert
+        overall exit-code 0 because a known pre-existing drift on the unrelated
+        State Recovery extract (tracked as #505) is out of scope for #502 and would
+        make this test brittle to unrelated work. This test fails deterministically
+        if a future edit to pact-audit.md or pact-protocols.md desyncs the
+        Concurrent Audit pair — the exact regression #502's edit order (architect
+        doc §6) warns against.
+        """
+        import subprocess
+
+        repo_root = Path(__file__).parent.parent.parent
+        script = repo_root / "scripts" / "verify-protocol-extracts.sh"
+        if not script.exists():
+            pytest.skip("verify-protocol-extracts.sh not present")
+
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+
+        # Concurrent Audit extract MUST match — this is what #502 edited.
+        assert "Concurrent Audit" in result.stdout and "MATCH" in result.stdout, (
+            f"verify-protocol-extracts.sh did not report the Concurrent Audit "
+            f"extract as MATCH. SSOT/extract pair may be desynced.\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+        # The Concurrent Audit line itself must show MATCH, not DIFFERS.
+        for line in result.stdout.splitlines():
+            if "Concurrent Audit" in line:
+                assert "MATCH" in line and "DIFFERS" not in line, (
+                    f"Concurrent Audit extract is out of sync:\n{line}\n"
+                    f"Full stdout:\n{result.stdout}"
+                )
+                break
+        else:
+            pytest.fail(
+                f"verify-protocol-extracts.sh output contained no "
+                f"'Concurrent Audit' line:\n{result.stdout}"
+            )
+
+        # Regression canary: the adjacent Scoped Phases extract must also match.
+        for line in result.stdout.splitlines():
+            if "Scoped Phases" in line:
+                assert "MATCH" in line and "DIFFERS" not in line, (
+                    f"Scoped Phases regression canary out of sync:\n{line}"
+                )
+                break
