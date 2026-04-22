@@ -180,8 +180,8 @@ output (even zero-content) blocks the next inbox delivery.
 
 - **No new `SendMessage` and no new dispatch instructions?** Do not emit.
 - **Idle-waiting for a protocol-defined resolution** (teachback, lead commit,
-  peer reply, user decision)? Use `intentional_wait` per the Intentional Waiting
-  section below.
+  peer reply, user decision)? Use the `intentional_wait` task metadata per
+  the Intentional Waiting section below.
 - **Genuinely stuck**? Follow On Blocker.
 
 If you have nothing to say that advances the work, say nothing.
@@ -190,7 +190,7 @@ If you have nothing to say that advances the work, say nothing.
 
 When your task is `in_progress` but you are legitimately idle awaiting a message
 (teachback approval, inter-commit hold, peer reply, user decision, blocker
-resolution), signal it via `intentional_wait` metadata BEFORE going idle. Both
+resolution), signal it via the `intentional_wait` task metadata BEFORE going idle. Both
 TeammateIdle hooks honor it for 30 minutes via `shared.intentional_wait.wait_stale`;
 without the signal, they nag every tick — the livelock Idle Discipline warns about.
 

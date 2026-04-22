@@ -668,7 +668,7 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET `intentional_wait` (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the lead works through the commit sequence; CLEAR on the lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
+- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the lead works through the commit sequence; CLEAR on the lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal event**: After each commit, write a `commit` event:
   ```bash
   set -e
