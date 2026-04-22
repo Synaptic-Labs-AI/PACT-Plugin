@@ -261,17 +261,102 @@ class TestCheckDirectApiCalls:
 # check_env_file_in_gitignore
 # ---------------------------------------------------------------------------
 
-class TestCheckEnvFileInGitignore:
-    """CODE-phase smoke for check_env_file_in_gitignore() — delegates to `git check-ignore`.
+IGNORE_CHANNELS = ["repo_gitignore", "parent_gitignore", "per_repo_exclude", "global_excludesfile"]
 
-    Covers the happy path on the per-repo-exclude channel (a false-negative the
-    old substring-read implementation could not see). Full per-channel fixture
-    + parametrized matrix + error-path mocks are TEST-phase deliverables — see
-    docs/architecture/fix-511-git-check-ignore.md §1 for the fixture spec that
-    TEST phase will author.
+
+@pytest.fixture
+def git_repo_with_env_ignored(tmp_path, monkeypatch, request):
+    """
+    Create a tmp_path git repo where `.env` is ignored via ONE of four channels.
+    Parametrize with `IGNORE_CHANNELS` to cover all four.
+
+    Isolates user-level git config via HOME / XDG_CONFIG_HOME / GIT_CONFIG_GLOBAL /
+    GIT_CONFIG_SYSTEM overrides so tests neither read from nor write to the
+    developer's real global git config. chdirs into the appropriate subdirectory
+    for each channel. Returns the cwd path.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git not available on PATH")
+
+    channel = request.param
+
+    # Isolate user-level git config — critical for the global_excludesfile
+    # channel, and cheap defense-in-depth for the others. Prevents the
+    # developer's real ~/.config/git/ignore from affecting test outcomes
+    # (false positives) and prevents tests from writing into real config
+    # (side-effect leakage).
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+
+    if channel == "repo_gitignore":
+        (repo / ".gitignore").write_text(".env\n")
+        cwd = repo
+    elif channel == "parent_gitignore":
+        # .env ignored by PARENT's .gitignore; commit happens in subdir.
+        (repo / ".gitignore").write_text(".env\n")
+        subdir = repo / "subpkg"
+        subdir.mkdir()
+        cwd = subdir
+    elif channel == "per_repo_exclude":
+        (repo / ".git" / "info" / "exclude").write_text(".env\n")
+        cwd = repo
+    elif channel == "global_excludesfile":
+        global_ignore = fake_home / ".config" / "git" / "ignore"
+        global_ignore.parent.mkdir(parents=True)
+        global_ignore.write_text(".env\n")
+        # XDG default location; git check-ignore picks it up automatically
+        # when XDG_CONFIG_HOME is set.
+        cwd = repo
+    else:
+        raise ValueError(f"unknown channel: {channel}")
+
+    monkeypatch.chdir(cwd)
+    return cwd
+
+
+class TestCheckEnvFileInGitignore:
+    """Tests for check_env_file_in_gitignore() — delegates to `git check-ignore`.
+
+    Shape per docs/architecture/fix-511-git-check-ignore.md §1:
+      - 4 E2E positive (parametrized across ignore channels) — real git repo,
+        `.env` ignored via each channel, assert `(True, None)`.
+      - 1 E2E negative — real git repo, no ignore anywhere, assert VIOLATION
+        with all three destinations named.
+      - 5 mocked — branch matrix (exit 128, other non-zero, TimeoutExpired,
+        FileNotFoundError, wrapper-args invariant).
+      - 2 adversarial — `!.env` negation pattern (the false-positive the fix
+        closes per arch §309) and Unicode-path cwd (cheap regression insurance
+        for a SACROSANCT-surface hook).
+
+    Assertion token contract (arch §0): the `VIOLATION` / `WARNING` substrings
+    are the block/allow signal that `main()` triages on. Tests assert on these
+    tokens, not on exit codes or blocking behavior at the function level.
     """
 
-    def test_returns_true_when_env_ignored_via_per_repo_exclude(self, tmp_path, monkeypatch):
+    # -------- E2E positive: parametrized per-channel --------
+
+    @pytest.mark.parametrize(
+        "git_repo_with_env_ignored", IGNORE_CHANNELS, indirect=True
+    )
+    def test_detects_env_ignored_across_all_channels(self, git_repo_with_env_ignored):
+        from git_commit_check import check_env_file_in_gitignore
+        is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is True
+        assert error is None
+
+    # -------- E2E negative --------
+
+    def test_returns_violation_when_env_not_ignored_anywhere(
+        self, tmp_path, monkeypatch
+    ):
         if shutil.which("git") is None:
             pytest.skip("git not available on PATH")
         from git_commit_check import check_env_file_in_gitignore
@@ -286,7 +371,165 @@ class TestCheckEnvFileInGitignore:
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
-        (repo / ".git" / "info" / "exclude").write_text(".env\n")
+        monkeypatch.chdir(repo)
+
+        is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is False
+        assert error is not None
+        assert "VIOLATION" in error
+        # All three destinations named per arch §5.
+        assert ".gitignore" in error
+        assert "~/.config/git/ignore" in error
+        assert ".git/info/exclude" in error
+
+    # -------- Mocked branch matrix --------
+
+    def test_returns_warning_on_exit_128(self):
+        from git_commit_check import check_env_file_in_gitignore
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+        with patch("git_commit_check.subprocess.run", return_value=mock_result):
+            is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is False
+        assert error is not None
+        assert "WARNING" in error
+        assert "VIOLATION" not in error
+        assert "exit 128" in error
+        assert "cannot verify" in error
+
+    def test_returns_warning_on_unexpected_exit(self):
+        from git_commit_check import check_env_file_in_gitignore
+        mock_result = MagicMock()
+        mock_result.returncode = 2
+        with patch("git_commit_check.subprocess.run", return_value=mock_result):
+            is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is False
+        assert error is not None
+        assert "WARNING" in error
+        assert "VIOLATION" not in error
+        assert "exited 2" in error
+        assert "cannot verify" in error
+
+    def test_handles_timeout_expired(self):
+        from git_commit_check import check_env_file_in_gitignore
+        with patch(
+            "git_commit_check.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=5),
+        ):
+            is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is False
+        assert error is not None
+        assert "WARNING" in error
+        assert "VIOLATION" not in error
+        assert "timed out" in error
+        assert "cannot verify" in error
+
+    def test_handles_git_not_installed(self):
+        from git_commit_check import check_env_file_in_gitignore
+        with patch(
+            "git_commit_check.subprocess.run",
+            side_effect=FileNotFoundError("git"),
+        ):
+            is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is False
+        assert error is not None
+        assert "WARNING" in error
+        assert "VIOLATION" not in error
+        assert "git binary not found" in error
+        assert "cannot verify" in error
+
+    def test_invokes_git_check_ignore_with_correct_args(self):
+        """Wrapper-shape invariant: argv + capture_output + timeout are frozen.
+
+        Also pins `check=True` is NOT passed — exit 1 is the VIOLATION branch,
+        which would raise CalledProcessError and skip the return if check=True.
+        """
+        from git_commit_check import check_env_file_in_gitignore
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch(
+            "git_commit_check.subprocess.run", return_value=mock_result
+        ) as mock_run:
+            check_env_file_in_gitignore()
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["git", "check-ignore", "-q", ".env"]
+        assert kwargs.get("capture_output") is True
+        assert kwargs.get("timeout") == 5
+        # check=True would raise on exit 1, swallowing the VIOLATION return.
+        assert kwargs.get("check", False) is False
+
+    # -------- Adversarial --------
+
+    def test_negation_pattern_unignores_env_and_returns_violation(
+        self, tmp_path, monkeypatch
+    ):
+        """`!.env` in a higher-priority source unignores `.env` from a lower one.
+
+        Arch §309 names this as one of the false-positives the fix closes: the
+        old substring read would see `.env` in some ignore file and approve
+        the commit, missing a later `!.env` re-inclusion. Per gitignore(5),
+        priority order is: command-line patterns > per-directory `.gitignore`
+        (nearest wins) > `.git/info/exclude` > `core.excludesFile` (global).
+        So `.env` in global ignore + `!.env` in repo `.gitignore` = not ignored.
+
+        `git check-ignore -q` returns exit 1 when the final resolution is
+        "not ignored," even via a negation pattern — the hook must surface
+        that as a VIOLATION.
+        """
+        if shutil.which("git") is None:
+            pytest.skip("git not available on PATH")
+        from git_commit_check import check_env_file_in_gitignore
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+        monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+        # Global ignore says "ignore .env"; repo-local .gitignore overrides.
+        global_ignore = fake_home / ".config" / "git" / "ignore"
+        global_ignore.parent.mkdir(parents=True)
+        global_ignore.write_text(".env\n")
+        (repo / ".gitignore").write_text("!.env\n")
+        monkeypatch.chdir(repo)
+
+        is_protected, error = check_env_file_in_gitignore()
+        assert is_protected is False
+        assert error is not None
+        assert "VIOLATION" in error
+
+    def test_unicode_and_space_in_cwd_path_does_not_break_invocation(
+        self, tmp_path, monkeypatch
+    ):
+        """cwd containing Unicode/space characters must not break subprocess call.
+
+        The subprocess argv passes `.env` literally (no path interpolation), so
+        this test is currently a no-op regression guard. If a future refactor
+        adds a path argument, this catches the breakage for a SACROSANCT-surface
+        hook where subtle invocation bugs are silent-failure-prone.
+        """
+        if shutil.which("git") is None:
+            pytest.skip("git not available on PATH")
+        from git_commit_check import check_env_file_in_gitignore
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+        monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+
+        # Unicode + space in directory name — the ancestor cwd that
+        # git check-ignore resolves `.env` relative to.
+        repo = tmp_path / "rép o"
+        repo.mkdir()
+        subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+        (repo / ".gitignore").write_text(".env\n")
         monkeypatch.chdir(repo)
 
         is_protected, error = check_env_file_in_gitignore()
