@@ -53,18 +53,20 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-# Absolute SHA of the last pre-fix state for both TeammateIdle hooks.
-# `1922c64` added shared/intentional_wait.py but did NOT yet modify either
-# hook to call it — so at this commit both hooks are in their pre-fix
-# shape (verified: `git show 1922c64:pact-plugin/hooks/teammate_{idle,
-# completion_gate}.py` contains neither "intentional_wait" nor "wait_stale"
-# nor the type/stalled metadata skips in completion_gate).
+# Git ref to the pre-fix state of both TeammateIdle hooks. The tag
+# `test-fixture/pre-497-fix` is created pre-merge and pushed to origin,
+# pointing at SHA 1922c64 — the commit that added shared/intentional_wait.py
+# but did NOT yet modify either hook to call it. At that commit both hooks
+# are in their pre-fix shape (verified: `git show test-fixture/pre-497-fix:
+# pact-plugin/hooks/teammate_{idle,completion_gate}.py` contains neither
+# "intentional_wait" nor "wait_stale" nor the type/stalled metadata skips
+# in completion_gate).
 #
-# SHA-pinned rather than relative (`1922c64`, `HEAD~N`) so the harness
-# survives history rewrites — a later squash or rebase that renumbers the
-# topology would silently change a relative reference; the SHA stays
-# valid as long as the object is reachable from any ref.
-PRE_FIX_COMMIT = "1922c64"
+# Tag-pinned rather than SHA-pinned so the harness survives squash-merge:
+# if the PR squash-merges, commit 1922c64 becomes unreachable from main
+# and is eventually reclaimed — a bare SHA reference would then fail.
+# The tag keeps 1922c64 alive regardless of branch history changes.
+PRE_FIX_COMMIT = "test-fixture/pre-497-fix"
 
 
 def _iso_seconds(dt: datetime) -> str:

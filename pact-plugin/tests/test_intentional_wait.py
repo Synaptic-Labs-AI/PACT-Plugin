@@ -503,6 +503,14 @@ class TestSignalTaskLiteralPin:
     def test_signal_task_literal_present_in_helper_module(self):
         """Complement: assert the literal IS present in the helper — a
         pure removal test could pass after deletion of the helper logic.
+
+        Style coupling (intentional): the regex matches the parenthesized
+        tuple form `("blocker", "algedonic")`. If a future refactor replaces
+        the tuple with a frozenset, set literal, or Enum, this test will
+        flip RED despite semantically identical behavior. When changing the
+        sentinel form, update this test's regex in the same commit —
+        mechanically pinning the tuple IS the invariant, not the exact
+        syntax.
         """
         from pathlib import Path
         import re

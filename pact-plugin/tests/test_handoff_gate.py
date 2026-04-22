@@ -1012,12 +1012,18 @@ class TestIntentionalWaitDoesNotBleedIntoHandoffGate:
         )
         assert result is None
 
-    def test_handoff_gate_source_does_not_import_wait_stale(self):
-        """Row 22 (structural): handoff_gate.py does NOT import wait_stale.
+    def test_handoff_gate_source_does_not_import_silencer_symbols(self):
+        """Row 22 (structural): handoff_gate.py does NOT import wait_stale
+        or should_silence_stall_nag.
 
         Guards AC #8 at the module level — if someone later wires
-        intentional_wait awareness into handoff_gate, this test flips RED
-        and forces an explicit architecture review.
+        intentional_wait or stalled awareness into handoff_gate, this test
+        flips RED and forces an explicit architecture review. Both symbols
+        are covered because the F1 refactor (commit 1defa39) made
+        should_silence_stall_nag the real composite surface — a post-F1
+        import of should_silence_stall_nag would give handoff_gate the same
+        wait+stalled awareness the original wait_stale check was guarding
+        against.
         """
         import handoff_gate
 
@@ -1025,6 +1031,12 @@ class TestIntentionalWaitDoesNotBleedIntoHandoffGate:
             "AC #8: handoff_gate must not reference wait_stale. Adding it "
             "would let teammates bypass HANDOFF enforcement by setting "
             "intentional_wait before completing the task."
+        )
+        assert not hasattr(handoff_gate, "should_silence_stall_nag"), (
+            "AC #8: handoff_gate must not reference should_silence_stall_nag. "
+            "Post-F1 that helper wraps intentional_wait AND stalled awareness "
+            "— importing it into handoff_gate would silently re-introduce the "
+            "violation wait_stale absence was guarding against."
         )
 
 

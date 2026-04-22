@@ -441,8 +441,9 @@ resolves — no nag reminders. Your responsibilities:
   `/PACT:imPACT`.
 
 - **Drive resolution on your own cadence.** Track outstanding waits across
-  your teammates; send the resolving message (approval / commit confirmation /
-  peer reply routed / user decision) when appropriate.
+  your teammates (use the Reading the flag pattern below); send the resolving
+  message (approval / commit confirmation / peer reply routed / user decision)
+  when appropriate.
 
 - **Reading the flag**: `TaskGet` does NOT surface task metadata. Read the
   task file directly: `cat ~/.claude/tasks/{team}/{taskId}.json | jq .metadata.intentional_wait`.
