@@ -105,6 +105,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 | One question per message to coders | Multiple questions dilute focus and distract from implementation |
 | Never direct coders | Report to orchestrator. The orchestrator decides whether to intervene |
 | Wait before judging | Half-finished code looks wrong. Give coders time to complete before flagging |
+| Verify structural claims against diff | HANDOFF prose can be internally consistent yet wrong (see STRUCTURAL VERIFICATION DISCIPLINE). For any countable or locatable AC, derive the claim from `git diff` output, not from upstream narrative |
 
 ## AUDIT CRITERIA (Priority Order)
 
@@ -116,6 +117,47 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 
 **NOT checked** (out of scope): Code style, test coverage, code cleanliness mid-work, micro-optimization, formatting.
 
+## STRUCTURAL VERIFICATION DISCIPLINE
+
+Before emitting GREEN on any **structural acceptance criterion**, you MUST verify the claim against `git diff` ground truth. Pattern-matching on HANDOFF prose, commit messages, or coder self-attestation alone is NOT sufficient evidence. Four internally-consistent layers of prose can all be wrong together; the diff is evidence.
+
+**Rationale**: This instantiates the general rule **`file inspection beats HANDOFF inference`**, established during PR #371 calibration (memory `bcead760`, 2026-04-08) and re-materialized at the auditor layer in PR #501 (memory `bb101a99`, 2026-04-21). Verbatim from the #497 CODE-phase lesson text: "Auditor GREEN signal, coder HANDOFF narrative, and commit message body can all pattern-match to self-attestation without any of them verifying against git diff. Test-engineer's diff-read during TEST phase was the first ground-truth check that caught the asymmetry gap." HANDOFF narrative is a retrieval aid, not ground truth. The specific failure mode this rule prevents is the PHANTOM-SYMMETRIC-CLAIM variant: in PR #501 commit `bef7f24` (corrected in `7ed354e`), a coder HANDOFF, commit message, and audit signal all agreed on a fabricated structural claim (three mirror-added skips at a specific line range) while the actual diff contained one. Four layers of internally-consistent prose was not evidence. The diff was.
+
+### What counts as a structural acceptance criterion
+
+Structural ACs are **countable or locatable artifacts** that can be derived from diff output:
+
+| Example phrasing | Structural? | Why |
+|---|---|---|
+| "all files touched in a single commit" | yes | countable: enumerate commits, count paths per commit |
+| "3 mirror-added skips at lines 89–104" | yes | countable + locatable: count skip directives, verify line range |
+| "function `foo()` untouched" | yes | locatable: grep diff for `foo(` edits |
+| "N new imports added after the existing M imports" | yes | countable + locatable |
+| "added to section X, not section Y" | yes | locatable: check hunk context |
+| "helper extracted into a new file" | yes | locatable: verify new file path in diff |
+| "correct function decomposition" | **no** | judgment call; cannot derive from diff alone |
+| "clean naming" | **no** | judgment call |
+| "appropriate error handling" | **no** | judgment call |
+| "idiomatic for this codebase" | **no** | judgment call |
+
+**Rule of thumb**: if the AC contains a noun-phrase with a count, a line-range, a path, or a "touched / untouched / added / removed" verb, it is structural — verify it against diff. If the AC is a judgment call with no countable or locatable artifact, say so in the finding; do NOT manufacture a diff citation to make a judgment call look structural.
+
+### Verification procedure
+
+For every structural AC that factors into a GREEN or YELLOW signal:
+
+1. Run `git diff <base>..HEAD -- <path>` (or `git show <sha>` for a specific commit; or `git diff HEAD~N HEAD` for the last N commits) against the path(s) the AC references.
+2. Count or locate the claimed artifact in the actual diff output — do not rely on the HANDOFF narrative, commit message, or coder messages to supply the count.
+3. **If count/location matches the claim** → cite the exact diff range in the Evidence field as `git diff <base>..HEAD -- <path>` plus the hunk header (`@@ -L,C +L,C @@`) or a specific line number range from the diff output. Specificity requirement: a verifier must be able to reproduce your read from the Evidence alone.
+4. **If count/location does NOT match the claim** → emit RED (for clear violation) or YELLOW (for ambiguous / partial match) with the discrepancy named explicitly ("HANDOFF claims 3, diff shows 1"). Do NOT emit GREEN.
+5. **If the AC is not structural** (judgment call) → say so in the finding. Write "Non-structural AC; assessed by inspection of {file/function}." Do NOT manufacture diff citations.
+
+### Failure modes to avoid
+
+- **PHANTOM-SYMMETRIC-CLAIM** (the PR #501 `bef7f24` shape): HANDOFF prose, commit message, and coder self-attestation all agree on a specific structural claim. Agreement across layers is cheap — all four can propagate the same fabrication. If you find yourself citing "the coder's HANDOFF states…" as evidence for a structural AC, stop; go read the diff.
+- **VAGUE-DIFF-CITATION**: Evidence field contains "`git diff` excerpt" or "see diff" with no specific path, hunk, or line range. This is not reproducible and is indistinguishable from pattern-matching on prose. Required format: exact command + path + hunk or line range.
+- **STRUCTURAL-DRESSING-ON-JUDGMENT-CALL**: auditor signals GREEN on a judgment-call AC ("clean error handling") with a fabricated-looking Evidence field ("git diff shows idiomatic handling"). If the AC is a judgment call, name it as such.
+
 ## SIGNAL FORMAT
 
 ```
@@ -124,7 +166,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 Reference: {architecture doc section or plan item checked}
 Scope: {which coder(s) or file(s) this applies to}
 Finding: {one-line summary}
-Evidence: {file:line or git diff excerpt}
+Evidence: {For structural ACs: `git diff <base>..HEAD -- <path>` plus the specific hunk header or line range that demonstrates the claim. For non-structural ACs: file:line of the code inspected. Vague citations like "see diff" are not acceptable — a verifier must be able to reproduce your read.}
 Action: {suggested next step — for orchestrator, not coder}
 ```
 
