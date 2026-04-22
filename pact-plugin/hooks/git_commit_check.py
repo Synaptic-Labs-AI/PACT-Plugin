@@ -17,7 +17,6 @@ import sys
 import json
 import subprocess
 import re
-from pathlib import Path
 
 from shared.error_output import hook_error_json
 
@@ -25,30 +24,32 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def get_staged_files():
-    """Returns a list of staged files."""
+    """Returns a list of staged files. Fail-open empty list on any subprocess failure."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", "--cached"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=5,
         )
         return result.stdout.strip().splitlines()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return []
 
 
 def get_staged_file_content(filename):
-    """Returns the content of a staged file."""
+    """Returns the content of a staged file. Fail-open empty string on any subprocess failure."""
     try:
         result = subprocess.run(
             ["git", "show", f":{filename}"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=5,
         )
         return result.stdout
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
 
@@ -249,7 +250,9 @@ def check_env_file_in_gitignore():
         return False, (
             "SACROSANCT VIOLATION: .env is not ignored by git. "
             "Add '.env' to .gitignore (repo), ~/.config/git/ignore (global), "
-            "or .git/info/exclude (per-repo private)."
+            "or .git/info/exclude (per-repo private). "
+            "If .env already appears in .gitignore, you may have tracked it "
+            "previously; run 'git rm --cached .env' to untrack."
         )
     if result.returncode == 128:
         return False, (

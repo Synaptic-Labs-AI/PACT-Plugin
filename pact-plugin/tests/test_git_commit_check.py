@@ -264,6 +264,26 @@ class TestCheckDirectApiCalls:
 IGNORE_CHANNELS = ["repo_gitignore", "parent_gitignore", "per_repo_exclude", "global_excludesfile"]
 
 
+def _isolated_git_env(tmp_path, monkeypatch):
+    """Apply the HOME/XDG/GIT_CONFIG_* overrides that isolate user-level git config.
+
+    Prevents the developer's real `~/.config/git/ignore` or `core.excludesFile`
+    from affecting test outcomes (false positives) and prevents tests from
+    writing into real config (side-effect leakage). Critical for the
+    `global_excludesfile` channel; cheap defense-in-depth for the others.
+
+    Returns the `fake_home` path so the caller can place a global ignore file
+    under `$fake_home/.config/git/ignore` when needed.
+    """
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+    return fake_home
+
+
 @pytest.fixture
 def git_repo_with_env_ignored(tmp_path, monkeypatch, request):
     """
@@ -280,17 +300,7 @@ def git_repo_with_env_ignored(tmp_path, monkeypatch, request):
 
     channel = request.param
 
-    # Isolate user-level git config — critical for the global_excludesfile
-    # channel, and cheap defense-in-depth for the others. Prevents the
-    # developer's real ~/.config/git/ignore from affecting test outcomes
-    # (false positives) and prevents tests from writing into real config
-    # (side-effect leakage).
-    fake_home = tmp_path / "fake_home"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
-    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
-    monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+    fake_home = _isolated_git_env(tmp_path, monkeypatch)
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -361,12 +371,7 @@ class TestCheckEnvFileInGitignore:
             pytest.skip("git not available on PATH")
         from git_commit_check import check_env_file_in_gitignore
 
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
-        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
-        monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+        _isolated_git_env(tmp_path, monkeypatch)
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -395,7 +400,8 @@ class TestCheckEnvFileInGitignore:
         assert "WARNING" in error
         assert "VIOLATION" not in error
         assert "exit 128" in error
-        assert "cannot verify" in error
+        # Shared log-grep invariant across every WARNING string (arch §5).
+        assert "cannot verify .env protection" in error
 
     def test_returns_warning_on_unexpected_exit(self):
         from git_commit_check import check_env_file_in_gitignore
@@ -408,7 +414,8 @@ class TestCheckEnvFileInGitignore:
         assert "WARNING" in error
         assert "VIOLATION" not in error
         assert "exited 2" in error
-        assert "cannot verify" in error
+        # Shared log-grep invariant across every WARNING string (arch §5).
+        assert "cannot verify .env protection" in error
 
     def test_handles_timeout_expired(self):
         from git_commit_check import check_env_file_in_gitignore
@@ -422,7 +429,8 @@ class TestCheckEnvFileInGitignore:
         assert "WARNING" in error
         assert "VIOLATION" not in error
         assert "timed out" in error
-        assert "cannot verify" in error
+        # Shared log-grep invariant across every WARNING string (arch §5).
+        assert "cannot verify .env protection" in error
 
     def test_handles_git_not_installed(self):
         from git_commit_check import check_env_file_in_gitignore
@@ -436,7 +444,8 @@ class TestCheckEnvFileInGitignore:
         assert "WARNING" in error
         assert "VIOLATION" not in error
         assert "git binary not found" in error
-        assert "cannot verify" in error
+        # Shared log-grep invariant across every WARNING string (arch §5).
+        assert "cannot verify .env protection" in error
 
     def test_invokes_git_check_ignore_with_correct_args(self):
         """Wrapper-shape invariant: argv + capture_output + timeout are frozen.
@@ -481,12 +490,7 @@ class TestCheckEnvFileInGitignore:
             pytest.skip("git not available on PATH")
         from git_commit_check import check_env_file_in_gitignore
 
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
-        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
-        monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+        fake_home = _isolated_git_env(tmp_path, monkeypatch)
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -517,12 +521,7 @@ class TestCheckEnvFileInGitignore:
             pytest.skip("git not available on PATH")
         from git_commit_check import check_env_file_in_gitignore
 
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
-        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
-        monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+        _isolated_git_env(tmp_path, monkeypatch)
 
         # Unicode + space in directory name — the ancestor cwd that
         # git check-ignore resolves `.env` relative to.
@@ -752,6 +751,31 @@ class TestGitHelpers:
             files = get_staged_files()
         assert files == []
 
+    def test_get_staged_files_timeout(self):
+        from git_commit_check import get_staged_files
+        import subprocess
+        with patch("subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=5)):
+            files = get_staged_files()
+        assert files == []
+
+    def test_get_staged_files_git_not_installed(self):
+        from git_commit_check import get_staged_files
+        with patch("subprocess.run", side_effect=FileNotFoundError("git")):
+            files = get_staged_files()
+        assert files == []
+
+    def test_get_staged_files_invokes_with_timeout(self):
+        """Wrapper-args invariant: timeout=5 must be passed to subprocess.run."""
+        from git_commit_check import get_staged_files
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            get_staged_files()
+        assert mock_run.called
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("timeout") == 5
+
     def test_get_staged_file_content_success(self):
         from git_commit_check import get_staged_file_content
         mock_result = MagicMock()
@@ -767,6 +791,31 @@ class TestGitHelpers:
                    side_effect=subprocess.CalledProcessError(1, "git")):
             content = get_staged_file_content("missing.py")
         assert content == ""
+
+    def test_get_staged_file_content_timeout(self):
+        from git_commit_check import get_staged_file_content
+        import subprocess
+        with patch("subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=5)):
+            content = get_staged_file_content("missing.py")
+        assert content == ""
+
+    def test_get_staged_file_content_git_not_installed(self):
+        from git_commit_check import get_staged_file_content
+        with patch("subprocess.run", side_effect=FileNotFoundError("git")):
+            content = get_staged_file_content("missing.py")
+        assert content == ""
+
+    def test_get_staged_file_content_invokes_with_timeout(self):
+        """Wrapper-args invariant: timeout=5 must be passed to subprocess.run."""
+        from git_commit_check import get_staged_file_content
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            get_staged_file_content("any.py")
+        assert mock_run.called
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("timeout") == 5
 
 
 # ---------------------------------------------------------------------------
