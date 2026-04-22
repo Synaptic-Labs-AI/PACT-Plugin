@@ -174,43 +174,25 @@ Message each peer at most once per task — share your output when complete, not
 
 ## Idle Discipline
 
-When the platform wakes you but there is no new work to do, return to idle silently
-rather than emitting acknowledgment. Wake-ups without new mailbox messages or
-dispatch-implied work can come from many sources (hook events, platform keep-alives,
-peer status signals). Responding to each with a "standing by" or "still waiting" turn
-consumes tokens without progress and — crucially — prevents the next legitimate
-message from being delivered on the next idle tick.
+When you wake with no new work, return to idle silently — no "standing by" or
+"still waiting" acknowledgments. The idle state is the message-delivery channel;
+output (even zero-content) blocks the next inbox delivery.
 
-Concretely:
-- **No new `SendMessage` in your inbox?** Do not emit a turn. Let the harness idle
-  you again.
-- **No new instructions in the dispatch prompt you haven't already executed?** Do
-  not emit a turn.
-- **You are idle-waiting for a protocol-defined resolution** (teachback approval,
-  lead commit, peer response, user decision)? Use `intentional_wait` per the
-  Intentional Waiting section below — that is the designed channel. Do not improvise
-  with no-op acknowledgments.
-- **You are genuinely stuck** (blocker)? Follow the On Blocker section — do not
-  sit in a polling loop.
+- **No new `SendMessage` and no new dispatch instructions?** Do not emit.
+- **Idle-waiting for a protocol-defined resolution** (teachback, lead commit,
+  peer reply, user decision)? Use `intentional_wait` per the Intentional Waiting
+  section below.
+- **Genuinely stuck**? Follow On Blocker.
 
-The first-order reason this matters: the idle state IS the message-delivery channel.
-A teammate that keeps producing output — even zero-content output — cannot receive
-inbox deliveries. Rule: if you have nothing to say that advances the work, say
-nothing.
+If you have nothing to say that advances the work, say nothing.
 
 ## Intentional Waiting
 
-Sometimes your task is `in_progress` but you are legitimately idle, awaiting a message
-from the lead, a peer, or the user (teachback approval, inter-commit hold, post-HANDOFF
-decision, peer reply, blocker resolution, user decision). Without a signal, the
-`TeammateIdle` hooks (`teammate_completion_gate.py`, `teammate_idle.py::detect_stall`)
-cannot distinguish "intentional wait" from "stuck" — they nag every tick, and the
-nag consumes the idle slot the orchestrator needs to deliver the message that would
-end the wait. That's the nag-loop livelock.
-
-**Signal an intentional wait** by setting the `intentional_wait` task metadata
-BEFORE going idle. Both TeammateIdle hooks honor it via `shared.intentional_wait.wait_stale`
-until the 30-minute staleness threshold expires.
+When your task is `in_progress` but you are legitimately idle awaiting a message
+(teachback approval, inter-commit hold, peer reply, user decision, blocker
+resolution), signal it via `intentional_wait` metadata BEFORE going idle. Both
+TeammateIdle hooks honor it for 30 minutes via `shared.intentional_wait.wait_stale`;
+without the signal, they nag every tick — the livelock Idle Discipline warns about.
 
 ### SET — before going idle
 
@@ -225,9 +207,7 @@ TaskUpdate(taskId=taskId, metadata={
 })
 ```
 
-The `since` value MUST be tz-aware ISO-8601 (`datetime.now(timezone.utc).isoformat(timespec="seconds")`).
-A naive timestamp is rejected and re-enables the nag — that's intentional fail-loud
-behavior so format bugs surface to the lead.
+`since` must be tz-aware ISO-8601. A naive timestamp re-enables the nag (fail-loud).
 
 ### CLEAR — when the wait resolves
 
@@ -235,36 +215,27 @@ behavior so format bugs surface to the lead.
 TaskUpdate(taskId=taskId, metadata={"intentional_wait": None})
 ```
 
-Clear on the same turn you take the action that advances state: when a teachback
-approval, commit confirmation, peer reply, or user decision arrives, call CLEAR
-before taking the next substantive action.
+Clear on the same turn you take the action that advances state.
 
 ### Vocabulary
 
 | Field | Required | Accepted values |
 |-------|----------|-----------------|
 | `reason` | yes | Non-empty string. Prefer `KNOWN_REASONS` from `shared.intentional_wait`: `awaiting_teachback_approved`, `awaiting_lead_commit`, `awaiting_amendment_review`, `awaiting_post_handoff_decision`, `awaiting_peer_response`, `awaiting_user_decision`, `awaiting_blocker_resolution`. Free-form permitted. |
-| `expected_resolver` | yes | Non-empty string. Prefer `KNOWN_RESOLVERS`: `lead`, `peer`, `user`, `external`. Free-form permitted (e.g., a specific teammate name). |
-| `since` | yes | tz-aware ISO-8601 UTC timestamp at seconds precision. |
+| `expected_resolver` | yes | Non-empty string. Prefer `KNOWN_RESOLVERS`: `lead`, `peer`, `user`, `external`. Free-form permitted. |
+| `since` | yes | tz-aware ISO-8601 UTC timestamp, seconds precision. |
 
-Unknown keys are preserved (forward-compat) — add `correlation_id`, `peer_name`, etc.
-as needed.
+Unknown keys are preserved (forward-compat).
 
 ### Staleness safeguard
 
-The flag auto-expires after 30 minutes. If you forget to CLEAR or the wait takes
-longer than expected, the nag re-enables — that's the backstop, not a primary silencer.
-Re-SET with a fresh `since` if the wait is still legitimate.
+Auto-expires after 30 minutes. If the wait takes longer, re-SET with a fresh `since`.
 
 ### When NOT to set
 
-- You have no owned `in_progress` task (consultant mode): the TeammateIdle hooks
-  already skip you via the owner/status filters.
-- Your wait is < 30 seconds: the cost of a SET+CLEAR round-trip isn't worth the
-  bookkeeping; idle ticks are not that frequent.
-- `handoff_gate.py` (TaskCompleted event) does **not** honor this flag — completion
-  validation is orthogonal. If you have an empty HANDOFF, you cannot complete
-  regardless of `intentional_wait`. Store your HANDOFF first.
+- **Consultant mode** (no owned `in_progress` task): hooks already skip you via owner/status filters.
+- **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it.
+- **Completion gating**: `handoff_gate.py` does NOT honor this flag. Empty HANDOFF still blocks completion — store your HANDOFF first.
 
 ## Consultant Mode
 
