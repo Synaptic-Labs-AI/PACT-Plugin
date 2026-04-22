@@ -121,7 +121,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 
 Before emitting GREEN on any **structural acceptance criterion**, you MUST verify the claim against `git diff` ground truth. Pattern-matching on HANDOFF prose, commit messages, or coder self-attestation alone is NOT sufficient evidence. Four internally-consistent layers of prose can all be wrong together; the diff is evidence.
 
-**Rationale**: This instantiates the general rule **`file inspection beats HANDOFF inference`**, established during PR #371 calibration (memory `bcead760`, 2026-04-08) and re-materialized at the auditor layer in PR #501 (memory `bb101a99`, 2026-04-21). Verbatim from the #497 CODE-phase lesson text: "Auditor GREEN signal, coder HANDOFF narrative, and commit message body can all pattern-match to self-attestation without any of them verifying against git diff. Test-engineer's diff-read during TEST phase was the first ground-truth check that caught the asymmetry gap." HANDOFF narrative is a retrieval aid, not ground truth. The specific failure mode this rule prevents is the PHANTOM-SYMMETRIC-CLAIM variant: in PR #501 commit `bef7f24` (corrected in `7ed354e`), a coder HANDOFF, commit message, and audit signal all agreed on a fabricated structural claim (three mirror-added skips at a specific line range) while the actual diff contained one. Four layers of internally-consistent prose was not evidence. The diff was.
+**Rationale**: This instantiates the general rule **`file inspection beats HANDOFF inference`**, established during PR #371 calibration (memory `bcead760`, 2026-04-08) and re-materialized at the auditor layer in PR #501 (memory `bb101a99`, 2026-04-21). Verbatim from the #497 CODE-phase lesson text: "Auditor GREEN signal, coder HANDOFF narrative, and commit message body can all pattern-match to self-attestation without any of them verifying against git diff. Test-engineer's diff-read during TEST phase was the first ground-truth check that caught the asymmetry gap." HANDOFF narrative is a retrieval aid, not ground truth. The specific failure mode this rule prevents is the PHANTOM-SYMMETRIC-CLAIM variant: in PR #501 commit `bef7f24` (corrected in `7ed354e`), four layers — the coder's HANDOFF prose, the commit message body, the coder's self-attestation messages, and the audit signal — all agreed on a fabricated structural claim (three mirror-added skips at a specific line range) while the actual diff contained one. Four layers of internally-consistent prose was not evidence. The diff was.
 
 ### What counts as a structural acceptance criterion
 
@@ -149,7 +149,7 @@ For every structural AC that factors into a GREEN or YELLOW signal:
 1. Run `git diff <base>..HEAD -- <path>` (or `git show <sha>` for a specific commit; or `git diff HEAD~N HEAD` for the last N commits) against the path(s) the AC references.
 2. Count or locate the claimed artifact in the actual diff output — do not rely on the HANDOFF narrative, commit message, or coder messages to supply the count.
 3. **If count/location matches the claim** → cite the exact diff range in the Evidence field as `git diff <base>..HEAD -- <path>` plus the hunk header (`@@ -L,C +L,C @@`) or a specific line number range from the diff output. Specificity requirement: a verifier must be able to reproduce your read from the Evidence alone.
-4. **If count/location does NOT match the claim** → emit RED (for clear violation) or YELLOW (for ambiguous / partial match) with the discrepancy named explicitly ("HANDOFF claims 3, diff shows 1"). Do NOT emit GREEN.
+4. **If count/location does NOT match the claim** → emit RED (for clear violation) or YELLOW (for ambiguous / partial match) with the discrepancy named explicitly ("HANDOFF claims 3, diff shows 1"). Do NOT emit GREEN. A count mismatch (HANDOFF says N, diff shows M, M ≠ N) is a clear violation — RED. Reserve YELLOW for cases where the count matches but the location or context is partially off.
 5. **If the AC is not structural** (judgment call) → say so in the finding. Write "Non-structural AC; assessed by inspection of {file/function}." Do NOT manufacture diff citations.
 
 ### Failure modes to avoid
@@ -166,7 +166,7 @@ For every structural AC that factors into a GREEN or YELLOW signal:
 Reference: {architecture doc section or plan item checked}
 Scope: {which coder(s) or file(s) this applies to}
 Finding: {one-line summary}
-Evidence: {For structural ACs: `git diff <base>..HEAD -- <path>` plus the specific hunk header or line range that demonstrates the claim. For non-structural ACs: file:line of the code inspected. Vague citations like "see diff" are not acceptable — a verifier must be able to reproduce your read.}
+Evidence: {For structural ACs: `git diff <base>..HEAD -- <path>` plus the specific hunk header or line range that demonstrates the claim. For non-structural ACs: specific file:line of the code inspected. Vague citations like "see diff" are not acceptable — a verifier must be able to reproduce the read.}
 Action: {suggested next step — for orchestrator, not coder}
 ```
 

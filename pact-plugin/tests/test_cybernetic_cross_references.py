@@ -321,3 +321,64 @@ class TestStructuralVerificationDisciplineConsistency:
             f"'git diff' reference within {window} chars — rule name is carried "
             f"without its ground-truth substrate (see #502)"
         )
+
+    # Dispatch-pointer consumer files only. Rule-bearing files (pact-audit.md,
+    # pact-auditor.md, pact-protocols.md) are excluded — the dispatch-anchor
+    # proximity invariant is only meaningful where the discipline phrase is
+    # delivering spawn-time priming within an auditor-dispatch block, not
+    # where it is the rule body itself or the SSOT of the rule body.
+    DISPATCH_POINTER_FILES = [
+        "orchestrate.md",
+        "comPACT.md",
+        "pact-workflows.md",
+    ]
+
+    @pytest.mark.parametrize("filename", DISPATCH_POINTER_FILES)
+    def test_discipline_pointer_near_auditor_dispatch_anchor(
+        self, discipline_contents, filename
+    ):
+        """Discipline phrase sits within the auditor-dispatch block.
+
+        Proximity check: at each dispatch-pointer consumer file, the
+        'Structural Verification Discipline' phrase MUST appear within 2000
+        chars of an 'Auditor skipped' anchor. The anchor is the shared
+        opt-out marker at the top of every auditor-dispatch block; proximity
+        to it is what makes the phrase act as dispatch priming rather than
+        incidental mention elsewhere in the file.
+
+        A refactor that moves the discipline phrase to an unrelated section
+        (e.g., a 'Principles' appendix) would still pass
+        `test_all_files_reference_structural_verification_discipline` but
+        silently break the dispatch-priming property the runtime-behavior
+        trace in docs/review/502-backend-coder.md depends on.
+
+        Window sized at ~3x the maximum measured actual (610 chars in
+        orchestrate.md at time of landing); leaves headroom for dispatch-block
+        expansion without false failures.
+        """
+        content = discipline_contents[filename]
+        lower = content.lower()
+        window = 2000
+
+        anchor_idx = 0
+        found_pairing = False
+        while True:
+            anchor_idx = lower.find("auditor skipped", anchor_idx)
+            if anchor_idx < 0:
+                break
+            start = max(0, anchor_idx - window)
+            end = min(
+                len(lower),
+                anchor_idx + len("auditor skipped") + window,
+            )
+            if "structural verification discipline" in lower[start:end]:
+                found_pairing = True
+                break
+            anchor_idx += 1
+
+        assert found_pairing, (
+            f"{filename} contains 'Auditor skipped' anchor but no "
+            f"'Structural Verification Discipline' phrase within {window} "
+            f"chars — dispatch-priming property broken. A future refactor "
+            f"may have moved the phrase out of the dispatch block (see #502 F7)."
+        )

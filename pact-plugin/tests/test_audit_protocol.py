@@ -352,6 +352,7 @@ class TestStructuralVerificationDiscipline:
         section = agent_content[start:end]
         assert "PHANTOM-SYMMETRIC-CLAIM" in section
         assert "VAGUE-DIFF-CITATION" in section
+        assert "STRUCTURAL-DRESSING-ON-JUDGMENT-CALL" in section
 
     def test_agent_cites_prior_art(self, agent_content):
         """Discipline cites file inspection beats HANDOFF inference rationale."""
@@ -391,17 +392,15 @@ class TestStructuralVerificationDiscipline:
         assert "STRUCTURAL VERIFICATION DISCIPLINE" in section
 
     def test_verify_protocol_extracts_concurrent_audit_still_matches(self):
-        """verify-protocol-extracts.sh reports the Concurrent Audit extract as MATCH.
+        """verify-protocol-extracts.sh exits 0 with every extract pair MATCH.
 
-        Subset-pass semantics: asserts the specific extract #502 touches (Concurrent
-        Audit) is in sync between pact-audit.md and pact-protocols.md, plus an
-        unchanged neighbor (Scoped Phases) as regression canary. Does NOT assert
-        overall exit-code 0 because a known pre-existing drift on the unrelated
-        State Recovery extract (tracked as #505) is out of scope for #502 and would
-        make this test brittle to unrelated work. This test fails deterministically
-        if a future edit to pact-audit.md or pact-protocols.md desyncs the
-        Concurrent Audit pair — the exact regression #502's edit order (architect
-        doc §6) warns against.
+        Strict-pass semantics: asserts exit-code 0 from the verify script. Every
+        extract pair — including Concurrent Audit (edited by #502) and State
+        Recovery (re-extracted by #505) — must be in sync with its SSOT region.
+        This test fails deterministically if any future edit to pact-protocols.md
+        or any extract file desyncs the pair without bumping the script's
+        line-ranges, or if the cascade-delta rule is violated when inserting
+        content into the SSOT.
         """
         import subprocess
 
@@ -417,31 +416,9 @@ class TestStructuralVerificationDiscipline:
             text=True,
         )
 
-        # Concurrent Audit extract MUST match — this is what #502 edited.
-        assert "Concurrent Audit" in result.stdout and "MATCH" in result.stdout, (
-            f"verify-protocol-extracts.sh did not report the Concurrent Audit "
-            f"extract as MATCH. SSOT/extract pair may be desynced.\n"
+        assert result.returncode == 0, (
+            f"verify-protocol-extracts.sh exited {result.returncode}; expected 0. "
+            f"One or more extract pairs have desynced from their SSOT region.\n"
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
-        # The Concurrent Audit line itself must show MATCH, not DIFFERS.
-        for line in result.stdout.splitlines():
-            if "Concurrent Audit" in line:
-                assert "MATCH" in line and "DIFFERS" not in line, (
-                    f"Concurrent Audit extract is out of sync:\n{line}\n"
-                    f"Full stdout:\n{result.stdout}"
-                )
-                break
-        else:
-            pytest.fail(
-                f"verify-protocol-extracts.sh output contained no "
-                f"'Concurrent Audit' line:\n{result.stdout}"
-            )
-
-        # Regression canary: the adjacent Scoped Phases extract must also match.
-        for line in result.stdout.splitlines():
-            if "Scoped Phases" in line:
-                assert "MATCH" in line and "DIFFERS" not in line, (
-                    f"Scoped Phases regression canary out of sync:\n{line}"
-                )
-                break
