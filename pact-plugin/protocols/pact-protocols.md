@@ -1040,7 +1040,7 @@ An auditor is dispatched alongside coders unless explicitly skipped. To skip, ou
 
 > **Auditor skipped**: [justification]
 
-See the [Concurrent Audit Protocol](pact-audit.md) for full details.
+See the [Concurrent Audit Protocol](pact-audit.md) for full details, including the Structural Verification Discipline (auditor MUST verify structural acceptance criteria against `git diff` output before emitting GREEN).
 
 **Dispatch is mandatory when**:
 - Variety score >= 7 (Medium or higher)
@@ -1822,6 +1822,30 @@ The auditor operates primarily through file observation, not messaging. This min
 
 **NOT audited**: Code style, test coverage (TEST phase), code cleanliness mid-work, micro-optimization.
 
+### Structural Verification Discipline
+
+Before emitting GREEN on any **structural acceptance criterion**, the auditor MUST verify the claim against `git diff` ground truth. Pattern-matching on HANDOFF prose, commit messages, or coder self-attestation alone is NOT sufficient evidence. Four internally-consistent layers of prose can all be wrong together; the diff is evidence.
+
+**Rationale**: This instantiates the general rule **`file inspection beats HANDOFF inference`**, established during PR #371 calibration (memory `bcead760`, 2026-04-08) and re-materialized at the auditor layer in PR #501 (memory `bb101a99`, 2026-04-21): "Auditor GREEN signal, coder HANDOFF narrative, and commit message body can all pattern-match to self-attestation without any of them verifying against git diff." HANDOFF narrative is a retrieval aid, not ground truth. The specific failure mode this rule prevents is the PHANTOM-SYMMETRIC-CLAIM variant: in PR #501 commit `bef7f24` (corrected in `7ed354e`), a coder HANDOFF, commit message, and audit signal all agreed on a fabricated structural claim (three mirror-added skips at a specific line range) while the actual diff contained one.
+
+**Structural ACs** (diff-verifiable): countable or locatable artifacts — "all files in one commit", "N skips at lines Y–Z", "function `foo` untouched", "helper extracted into a new file", "added after the existing imports block". If the AC contains a count, a line range, a path, or a touched/untouched/added/removed verb, it is structural.
+
+**Non-structural ACs** (judgment calls): "correct function separation", "clean naming", "appropriate error handling", "idiomatic for this codebase". Cannot be derived from diff alone; the auditor should inspect the relevant code and say so in the finding.
+
+**Verification procedure**:
+
+1. Run `git diff <base>..HEAD -- <path>` (or `git show <sha>`) against the path(s) the structural AC references.
+2. Count or locate the claimed artifact in the actual diff output — not in the HANDOFF, commit message, or coder messages.
+3. If count/location matches the claim → cite the exact diff range in the Evidence field (command + path + hunk header or line range). Specificity requirement: a verifier must be able to reproduce the read.
+4. If count/location does NOT match → emit RED (clear violation) or YELLOW (ambiguous) with the discrepancy named. Do NOT emit GREEN.
+5. If the AC is not structural → say so in the finding; do NOT manufacture diff citations.
+
+**Failure modes to avoid**:
+
+- **PHANTOM-SYMMETRIC-CLAIM**: HANDOFF prose, commit message, and coder self-attestation all agree on a specific structural claim. Agreement across layers is cheap. If you cite "the coder's HANDOFF states…" as evidence for a structural AC, stop and read the diff.
+- **VAGUE-DIFF-CITATION**: Evidence field contains "git diff excerpt" or "see diff" with no specific path, hunk, or line range. Not reproducible; indistinguishable from pattern-matching on prose.
+- **STRUCTURAL-DRESSING-ON-JUDGMENT-CALL**: GREEN on a judgment-call AC with a fabricated-looking Evidence field. If the AC is a judgment call, name it as such.
+
 ### Signal Format
 
 ```
@@ -1830,7 +1854,7 @@ The auditor operates primarily through file observation, not messaging. This min
 Reference: [architecture doc / plan / dispatch context]
 Scope: [which coder(s) / which files]
 Finding: [One-line summary]
-Evidence: [Specific file:line or diff excerpt]
+Evidence: [For structural ACs: `git diff <base>..HEAD -- <path>` plus the specific hunk header or line range that demonstrates the claim. For non-structural ACs: specific file:line of the code inspected. Vague citations like "see diff" are not acceptable — a verifier must be able to reproduce the read.]
 Action: [None (GREEN) / Route to test (YELLOW) / Intervene (RED)]
 ```
 
