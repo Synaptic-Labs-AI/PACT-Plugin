@@ -429,6 +429,33 @@ Exceptions:
 
 **Structured message constraint**: `shutdown_request` and other structured protocol messages (e.g., `plan_approval_request`) **cannot** be broadcast via `to: "*"` — broadcasts only support plain text. Always send structured messages individually to each teammate by name.
 
+### Intentional Waiting (orchestrator responsibilities)
+
+Teammates signal protocol-defined waits via the `intentional_wait` task metadata
+(see `pact-agent-teams/SKILL.md::Intentional Waiting` for the teammate-side
+SET/CLEAR contract). Under the flag, teammates stay silent until their wait
+resolves — no nag reminders. Your responsibilities:
+
+- **Don't interpret silence as stall.** A teammate with `intentional_wait` set
+  is waiting, not stuck. Read the task metadata before dispatching
+  `/PACT:imPACT`.
+
+- **Drive resolution on your own cadence.** Track outstanding waits across
+  your teammates; send the resolving message (approval / commit confirmation /
+  peer reply routed / user decision) when appropriate.
+
+- **Reading the flag**: `TaskGet` does NOT surface task metadata. Read the
+  task file directly: `cat ~/.claude/tasks/{team}/{taskId}.json | jq .metadata.intentional_wait`.
+  Fields: `reason`, `expected_resolver`, `since`.
+
+- **Staleness signal**: the 30-min threshold re-enables the nag as safety
+  valve. If a previously-silent teammate starts nagging again, check whether
+  state changed or the wait expired — different dispositions.
+
+- **Don't SET the `intentional_wait` task metadata on your own lead task.**
+  TeammateIdle hooks filter by task owner; they don't inspect lead state.
+  The flag is teammate-scoped.
+
 ### Recommended Agent Prompting Structure
 
 Use this structure in the `prompt` field to ensure agents have adequate context:
