@@ -386,6 +386,18 @@ class TestStructuralVerificationDiscipline:
         #   pact-auditor.md uses "### Failure modes to avoid" (H3)
         #   pact-audit.md / pact-protocols.md use "**Failure modes to avoid**:"
         # The bare phrase is present in all three; use it as a uniform marker.
+        # Guarded lookup: if a heading is renamed, fail with a pointed
+        # diagnostic instead of an uncaught ValueError.
+        for marker in (
+            "Failure modes to avoid",
+            "PHANTOM-SYMMETRIC-CLAIM",
+            "VAGUE-DIFF-CITATION",
+        ):
+            if marker not in content:
+                pytest.fail(
+                    f"{filename}: section marker '{marker}' missing — "
+                    f"heading may have been renamed or section deleted"
+                )
         failure_modes_start = content.index("Failure modes to avoid")
         phantom_start = content.index("PHANTOM-SYMMETRIC-CLAIM", failure_modes_start)
         # The bullet ends at the next list item (VAGUE-DIFF-CITATION).
@@ -402,6 +414,84 @@ class TestStructuralVerificationDiscipline:
                 f"layer '{layer}' — bullet's section preamble claims 'four "
                 f"layers' but enumeration must list all four (see #502 T1/B1)"
             )
+
+    def test_discipline_section_has_structural_ac_table(self, agent_content):
+        """The 'What counts as a structural AC' disambiguation table is present.
+
+        A future edit that deletes or drastically trims this table (e.g.,
+        below 4 yes-rows / 4 no-rows) leaves the MUST rule without its
+        disambiguation substrate. The auditor at execution time needs
+        concrete examples for each side to classify a novel AC.
+        """
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "### What counts as a structural acceptance criterion" in section, (
+            "Disambiguation table subsection missing"
+        )
+        # The table uses "| yes |" / "| **no** |" cells. Count presence as a
+        # structural-erosion guard: at least 4 of each required.
+        assert section.count("| yes |") >= 4, (
+            "Disambiguation table has fewer than 4 structural-yes example rows"
+        )
+        assert section.count("| **no** |") >= 4, (
+            "Disambiguation table has fewer than 4 non-structural example rows"
+        )
+
+    def test_discipline_section_has_five_step_verification_procedure(
+        self, agent_content
+    ):
+        """The Verification procedure is a numbered 5-step list, not prose.
+
+        Dropping the numbered-list structure or reducing the step count
+        erodes the procedure's operational teeth. Step 4 in particular
+        ('If count/location does NOT match → RED, not GREEN') is the
+        enforcement hinge the rule is installed around.
+        """
+        import re
+
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        assert "### Verification procedure" in section, (
+            "Verification procedure subsection missing"
+        )
+        proc_start = section.index("### Verification procedure")
+        proc_end = section.index("### Failure modes to avoid", proc_start)
+        procedure = section[proc_start:proc_end]
+        step_count = len(re.findall(r"^\d+\. ", procedure, re.MULTILINE))
+        assert step_count == 5, (
+            f"Verification procedure must be exactly 5 numbered steps; "
+            f"found {step_count}"
+        )
+
+    def test_step_4_requires_red_on_count_mismatch(self, agent_content):
+        """Step 4 prose requires RED on count mismatch, not YELLOW.
+
+        The RED-vs-YELLOW disambiguation was added by M5 (cycle 1) to close
+        a severity-assignment escape hatch — an auditor under coordination
+        pressure could silently downgrade a clear count violation to YELLOW.
+        Step 4 must name both 'RED' and 'count mismatch' explicitly so the
+        disambiguation is load-bearing at the decision point.
+        """
+        import re
+
+        start = agent_content.index("STRUCTURAL VERIFICATION DISCIPLINE")
+        end = agent_content.index("## SIGNAL FORMAT", start)
+        section = agent_content[start:end]
+        proc_start = section.index("### Verification procedure")
+        proc_end = section.index("### Failure modes to avoid", proc_start)
+        procedure = section[proc_start:proc_end]
+        # Extract step 4: from "^4\. " to "^5\. " or end of procedure.
+        step4_match = re.search(
+            r"^4\. .*?(?=^5\. |\Z)", procedure, re.MULTILINE | re.DOTALL
+        )
+        assert step4_match is not None, "Step 4 not found in Verification procedure"
+        step4 = step4_match.group(0)
+        assert "RED" in step4 and "count mismatch" in step4, (
+            "Step 4 must name both 'RED' and 'count mismatch' to carry the "
+            "RED-vs-YELLOW disambiguation (see #502 M5)"
+        )
 
     def test_agent_cites_prior_art(self, agent_content):
         """Discipline cites file inspection beats HANDOFF inference rationale."""

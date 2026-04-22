@@ -355,8 +355,9 @@ class TestStructuralVerificationDisciplineConsistency:
         A refactor that moves the discipline phrase to an unrelated section
         (e.g., a 'Principles' appendix) would still pass
         `test_all_files_reference_structural_verification_discipline` but
-        silently break the dispatch-priming property the runtime-behavior
-        trace in docs/review/502-backend-coder.md depends on.
+        silently break the property that the phrase is read by the auditor
+        as part of its dispatch payload at spawn time — not merely present
+        somewhere in the file.
 
         Window sized at ~3x the maximum measured actual (610 chars in
         orchestrate.md at time of landing); leaves headroom for dispatch-block
