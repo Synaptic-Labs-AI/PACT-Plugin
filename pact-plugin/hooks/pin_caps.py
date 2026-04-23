@@ -456,15 +456,34 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
     predicate. This helper lets the predicate ask "is post.kind ALSO
     present at pre-state?" without restructuring the primary return.
 
-    Handled kinds: `"count"`, `"size"` — post-parse derivable from a pin
-    list. Other `CapViolation.kind` values (`"embedded_pin"`,
-    `"invalid_override"`) are gate-layer constructs synthesized by
-    `pin_caps_gate.py` from tool_input inspection, not from a parsed pin
-    list, so they are not derivable here and return None. For any kind
-    outside the handled set (including future additions), returns None
-    and the caller treats it as "not-present on this axis." When adding
-    a new `CapViolation.kind` that IS post-parse-derivable, extend this
-    function with the corresponding branch.
+    Kinds this helper handles: `"count"`, `"size"`. Scope is defined by
+    what the net-worse Pareto predicate needs on the comparison axes it
+    knows about, NOT by post-parse derivability in general. Full
+    `CapViolation.kind` enumeration and taxonomy:
+
+      - `"count"`   — handled here; derived from `len(pins)`.
+      - `"size"`    — handled here; derived from `pin.body_chars`
+                      across all violators (max-scalar, per #492 F5).
+      - `"stale"`   — post-parse-derivable via `check_stale_block`
+                      (reads `pin.is_stale`), but OUT OF SCOPE for this
+                      helper. Stale overflow has its own predicate +
+                      session-start surfacing path; the cap-compare
+                      pipeline does not ingest it here.
+      - `"embedded_pin"` — gate-layer construct synthesized by
+                      `pin_caps_gate._check_tool_allowed` from the
+                      candidate body's `### ` structure, not from a
+                      parsed pin list. Not derivable here.
+      - `"invalid_override"` — gate-layer construct synthesized by
+                      `_validate_override_rationale` from the candidate
+                      override-comment line. Not derivable here.
+      - `"empty"`   — currently reserved (declared in the
+                      `CapViolation.kind` Literal, no emitter).
+
+    For any kind outside {count, size}, returns None and the caller
+    treats it as "not-present on this axis." When a future cap-axis is
+    added to the Pareto pipeline, extend this function with the
+    corresponding branch AND update `_pareto_other_axis_deny`'s
+    comparison switch so both sites stay in lockstep.
 
     For the size branch, returns the LARGEST violator (max `body_chars`
     among violators), matching the scalar-max contract used by
@@ -557,11 +576,28 @@ def apply_edit_and_parse(current_content: str, tool_input: dict) -> List[Pin]:
             raise TypeError(
                 "Edit tool_input.old_string and .new_string must both be str"
             )
-        replace_all = bool(tool_input.get("replace_all", False))
-        if replace_all:
-            simulated = current_content.replace(old_string, new_string)
+        if old_string == "":
+            # Empty old_string edge (blind-backend-coder-2 #492 F6):
+            # `str.replace(s, "", new)` interleaves `new` between every
+            # character (replace_all=True) or prepends it once (replace_all=
+            # False). Both outcomes produce gibberish that neither matches
+            # the Claude Code tool's actual apply behavior nor yields a
+            # parseable CLAUDE.md — `parse_pins` returns []; the gate sees
+            # "clean" post-state and allows. Treat the empty-old-string
+            # case as a no-op: return the PRE-state parse directly so the
+            # gate compares pre == post and applies the normal net-worse
+            # contract. Pre-malformed state never denies (F1 livelock
+            # precedent); honest simulation over misleading-clean from
+            # gibberish. The platform-level Edit tool's own validation of
+            # empty old_string is the primary defense — this branch just
+            # ensures the gate can't be weaponized into a silent bypass.
+            simulated = current_content
         else:
-            simulated = current_content.replace(old_string, new_string, 1)
+            replace_all = bool(tool_input.get("replace_all", False))
+            if replace_all:
+                simulated = current_content.replace(old_string, new_string)
+            else:
+                simulated = current_content.replace(old_string, new_string, 1)
 
     parsed = _parse_pinned_section(simulated)
     if parsed is None:
@@ -586,11 +622,28 @@ def compute_deny_reason(
     never denies: if the user already has 14 pins from a manual paste,
     every subsequent Edit would loop in deny (F1 livelock precedent).
 
-    Rules:
-      - Pre OK,   post OK   → allow (None)
-      - Pre OK,   post bad  → deny, render the post-state violation
-      - Pre bad,  post same kind → allow unless strictly worse numerically
-      - Pre bad,  post different kind → deny (introduced a NEW violation)
+    Rules (post-#492 cycle-3 Pareto semantics):
+      - Pre OK, post OK                        -> allow (None).
+      - Pre OK, post bad                       -> deny with the post-state
+                                                  violation rendered.
+      - Pre bad, post bad, first-wins kinds
+        differ (F2 kind-swap)                  -> query `_violation_for_kind`
+                                                  on pre_pins for post's kind.
+                                                  If pre also has that kind,
+                                                  normalize pre_violation to
+                                                  the same-kind view and fall
+                                                  through to the same-kind
+                                                  rules below. Else post kind
+                                                  is genuinely new -> deny.
+      - Pre bad, post bad, same first-wins kind
+        + post strictly worse on that axis     -> deny.
+      - Pre bad, post bad, same first-wins kind
+        + post NOT worse on that axis AND
+        post strictly worse on the OTHER axis
+        (F4 Pareto hidden-axis check)          -> deny via
+                                                  `_pareto_other_axis_deny`.
+      - Pre bad, post bad, NOT strictly worse
+        on any axis                            -> allow.
 
     Embedded-pin smuggle is a separate check — if `new_body` itself parses
     as a pin structure, deny with DENY_REASON_EMBEDDED_PIN even when

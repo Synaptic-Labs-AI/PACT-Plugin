@@ -620,6 +620,64 @@ class TestApplyEditAndParse_Smoke:
                 tool_input={"old_string": 1, "new_string": "y"},
             )
 
+    def test_edit_empty_old_string_replace_all_no_op(self):
+        """F6 #492 cycle-4: Edit with empty old_string + replace_all=True must
+        simulate as a no-op (return pre-state parse), not run str.replace which
+        would interleave new_string between every character and produce gibberish.
+
+        Pre-fix behavior: `str.replace(current, "", JUNK)` yields
+        `JUNKjJUNKuJUNK...` etc.; _parse_pinned_section returns None;
+        parse_pins returns []; compute_deny_reason compares post=[] vs pre,
+        sees no net-worse violation, allows. A curator could weaponize
+        this to pass the gate while the real Edit tool's behavior on
+        empty old_string is undefined/harmful.
+
+        Post-fix: empty old_string is treated as a no-op -> post-state
+        equals pre-state -> gate's net-worse contract kicks in normally.
+        """
+        from pin_caps import apply_edit_and_parse
+        before = _managed_content(
+            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
+            "<!-- pinned: 2026-04-21 -->\n### B\nBody B.\n\n"
+        )
+        tool_input = {
+            "old_string": "",
+            "new_string": "JUNK",
+            "replace_all": True,
+        }
+        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
+        # Pre-state has 2 pins; post-state must match.
+        assert len(pins) == 2
+        assert [p.heading for p in pins] == ["### A", "### B"]
+        # Bodies must not contain any JUNK interleaving.
+        assert all("JUNK" not in p.body for p in pins), (
+            "F6 regressed: empty-old-string with replace_all=True interleaved "
+            "new_string into pin bodies (str.replace behavior leaked through)."
+        )
+
+    def test_edit_empty_old_string_replace_all_false_no_op(self):
+        """F6 counter: empty old_string with replace_all=False must also
+        no-op. str.replace(s, "", new, 1) prepends `new` once — equally
+        gibberish-producing. Both replace_all values must route through
+        the no-op guard.
+        """
+        from pin_caps import apply_edit_and_parse
+        before = _managed_content(
+            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
+        )
+        tool_input = {
+            "old_string": "",
+            "new_string": "PREPENDED",
+            "replace_all": False,
+        }
+        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
+        assert len(pins) == 1
+        assert pins[0].heading == "### A"
+        assert "PREPENDED" not in pins[0].body, (
+            "F6 regressed: empty-old-string with replace_all=False allowed "
+            "str.replace to prepend new_string."
+        )
+
 
 class TestComputeDenyReason_Smoke:
     """compute_deny_reason — net-worse predicate over pre/post pin states."""

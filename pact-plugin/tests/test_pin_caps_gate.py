@@ -117,6 +117,149 @@ class TestPinCapsGate_Smoke:
         assert result is not None
         assert "Pin count cap" in result
 
+    def test_write_with_embedded_pin_in_new_body_denies(self, caps_gate_env):
+        """F7 #492 cycle-4: Write where a NEW pin's body contains a `### `
+        heading must deny with embedded-pin reason — the heading would be
+        parsed as an extra pin on reload and defeat the count cap.
+
+        Pre-fix: `_extract_new_body` returned "" for Write, so
+        compute_deny_reason's embedded-pin check at pin_caps.py:557 never
+        ran on Write. Only the count cap caught pin inflation, and a
+        smuggled heading inside a body wouldn't register in the count
+        cap because the smuggle becomes visible only AFTER a reload.
+
+        Post-fix: `_extract_new_body` concatenates new-or-mutated-body
+        text from post_pins (bodies not byte-identical to any pre_pin
+        body) and feeds it to compute_deny_reason. A new pin whose body
+        contains `### Smuggled\\nbody` now denies at the gate.
+        """
+        env = caps_gate_env(pin_count=2)
+        # Build a Write content with 3 pins — pins 0 and 1 are clean,
+        # pin 2's body embeds a `### Smuggled` heading.
+        boundary = (
+            "# PACT Framework and Managed Project Memory\n\n"
+            "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->\n"
+            "<!-- PACT_MEMORY_START -->\n"
+            "## Pinned Context\n\n"
+        )
+        pins_body = (
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### CleanPinA\nBody A.\n\n"
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### CleanPinB\nBody B.\n\n"
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### SmugglerPin\nintro text\n### Smuggled\nsmuggled body\n\n"
+        )
+        closing = (
+            "## Working Memory\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "<!-- PACT_MANAGED_END -->\n"
+        )
+        new_content = boundary + pins_body + closing
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": new_content,
+            },
+        })
+        assert result is not None, (
+            "F7 regressed: Write with embedded `### ` in new pin body no "
+            "longer denies; the embedded-pin defense-in-depth path is off."
+        )
+        assert "embedded pin structure" in result
+
+    def test_write_with_mutated_existing_pin_body_embeds_denies(
+        self, caps_gate_env
+    ):
+        """F7 counter-test: mutating an EXISTING pin's body to embed a
+        `### Smuggled` heading (same heading, different body) must deny.
+        Catches the same-heading-mutated-body smuggle — identity-by-
+        body-text catches mutation even when the heading is unchanged.
+        """
+        env = caps_gate_env(pin_count=3)  # baseline has 3 pins with clean bodies
+        # Build a Write content that keeps pin headings the same but mutates
+        # the first pin's body to smuggle `### Smuggled`.
+        boundary = (
+            "# PACT Framework and Managed Project Memory\n\n"
+            "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->\n"
+            "<!-- PACT_MEMORY_START -->\n"
+            "## Pinned Context\n\n"
+        )
+        # Pin0 has a MUTATED body now containing `### Smuggled`; Pin1/Pin2 unchanged
+        pins_body = (
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### Pin0\nmutated body\n### Smuggled\ninjected\n\n"
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### Pin1\nxxxx\n\n"
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### Pin2\nxxxx\n\n"
+        )
+        closing = (
+            "## Working Memory\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "<!-- PACT_MANAGED_END -->\n"
+        )
+        new_content = boundary + pins_body + closing
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": new_content,
+            },
+        })
+        assert result is not None, (
+            "F7 regressed: same-heading-mutated-body smuggle not denied; "
+            "identity-by-body-text check is off."
+        )
+        assert "embedded pin structure" in result
+
+    def test_write_unchanged_preexisting_embedded_pin_allows(
+        self, caps_gate_env
+    ):
+        """F7 negative counter: a Write that leaves an already-embedded
+        `### ` pin body UNCHANGED must NOT deny. Pre-malformed state never
+        denies (F1 livelock precedent); the identity-by-body-text check
+        correctly excludes unchanged bodies from the new_body scan.
+
+        Scenario: baseline CLAUDE.md has a pin whose body already contains
+        `### PreExistingEmbedded` (manually crafted past the gate at some
+        prior point). A subsequent Write that preserves this body must not
+        deny on the pre-existing state.
+        """
+        env = caps_gate_env(pin_count=0)  # start with empty baseline
+        # Hand-write both the baseline AND the Write content identically,
+        # both containing the embedded-pin pin. The env writes a "clean"
+        # baseline with `pin_count=0` pins, so overwrite it here.
+        boundary = (
+            "# PACT Framework and Managed Project Memory\n\n"
+            "<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->\n"
+            "<!-- PACT_MEMORY_START -->\n"
+            "## Pinned Context\n\n"
+        )
+        pins_body = (
+            "<!-- pinned: 2026-04-22 -->\n"
+            "### LegacyPin\nbody\n### PreExistingEmbedded\nextra\n\n"
+        )
+        closing = (
+            "## Working Memory\n"
+            "<!-- PACT_MEMORY_END -->\n"
+            "<!-- PACT_MANAGED_END -->\n"
+        )
+        same_content = boundary + pins_body + closing
+        env["claude_md"].write_text(same_content, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": same_content,  # identical -> no body change
+            },
+        })
+        assert result is None, (
+            f"F7 over-strict: Write that preserves pre-existing embedded-pin "
+            f"content denied (expected allow). Got: {result!r}"
+        )
+
     def test_non_claude_md_path_allows(self, caps_gate_env):
         env = caps_gate_env(pin_count=3)
         # Different file → gate short-circuits at the path match.

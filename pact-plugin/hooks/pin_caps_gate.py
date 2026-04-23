@@ -291,7 +291,12 @@ def _check_tool_allowed(input_data: dict) -> Optional[str]:
         return None
 
     # Net-worse predicate over pre/post pins + embedded-pin check on body.
-    new_body = _extract_new_body(tool_input)
+    # For Write, pass pre/post_pins so _extract_new_body can derive the
+    # new-or-mutated-body concatenation (#492 F7). For Edit, pre/post
+    # are ignored; the Edit path uses new_string verbatim.
+    new_body = _extract_new_body(
+        tool_input, pre_pins=pre_pins, post_pins=post_pins
+    )
     return compute_deny_reason(pre_pins, post_pins, new_body=new_body)
 
 
@@ -337,25 +342,64 @@ def _evaluate_write_as_fresh_start(tool_input: dict) -> Optional[str]:
     return _WRITE_BASELINE_DENY_REASON
 
 
-def _extract_new_body(tool_input: dict) -> str:
+def _extract_new_body(
+    tool_input: dict,
+    pre_pins: Optional[list] = None,
+    post_pins: Optional[list] = None,
+) -> str:
     """Return the candidate body text for embedded-pin smuggle detection.
 
-    Semantics note: the embedded-pin check exists to catch a single new
-    pin whose BODY contains a `### ` heading (smuggling an extra pin
-    past the count cap on reload). That only makes sense for Edit's
-    `new_string` — the fragment being INSERTED.
+    Semantics note: the embedded-pin check exists to catch a new or
+    mutated pin whose BODY contains a `### ` heading (smuggling an extra
+    pin past the count cap on reload).
 
-    For Write (full-file replacement), legitimate CLAUDE.md content
-    contains pin headings by construction. Applying the embedded-pin
-    predicate to the whole payload would reject every Write. Return ""
-    for Write so `compute_deny_reason`'s embedded-pin short-circuit
-    is skipped; the net-worse count predicate already catches Writes
-    that inflate the pin count.
+    For Edit (`new_string` present): return `new_string`, the fragment
+    being INSERTED. `compute_deny_reason` scans it via parse_pins; any
+    `### ` inside denies with DENY_REASON_EMBEDDED_PIN.
 
-    For Edit: new_string, unchanged.
+    For Write (full-file replacement, #492 F7 — security-engineer-1
+    MEDIUM): legitimate CLAUDE.md content contains pin headings by
+    construction, so scanning the whole payload would reject every
+    Write. The defense operates at the PARSED post_pins level instead:
+
+    Synthesize a synthetic "### H" heading line for each post_pin that
+    BOTH (1) is not present in pre_pins by heading AND (2) lacks a
+    `date_comment` (i.e., has no `<!-- pinned: ... -->` marker
+    immediately preceding its heading). Such pins are the signature of
+    a smuggle: parse_pins splits on every `### ` it sees, so an embedded
+    `### Smuggled` heading inside another pin's body materializes as a
+    separate post_pin but has `date_comment=None` because no dated
+    marker preceded it. Legitimately added pins always carry a date
+    comment (per PACT pin grammar).
+
+    Concatenating these synthetic headings produces a new_body that
+    `compute_deny_reason`'s embedded-pin check (`parse_pins(new_body)`)
+    will flag as a pin structure, denying with DENY_REASON_EMBEDDED_PIN.
+
+    Pre-existing smuggled pins (pre_pins containing a `date_comment=None`
+    pin from a prior manual edit) are excluded via the heading-in-pre
+    check — pre-malformed state never denies (F1 livelock precedent).
+
+    If pre_pins or post_pins is None (e.g., fallback path), return "" —
+    caller's semantic is unchanged.
     """
     if "content" in tool_input:
-        return ""
+        if pre_pins is None or post_pins is None:
+            return ""
+        pre_headings = {p.heading for p in pre_pins}
+        # A smuggle signal: post pin whose heading is NEW AND carries no
+        # date-comment marker. Surface it by synthesizing the heading line
+        # so compute_deny_reason's parse_pins(new_body) check registers it
+        # as an embedded pin structure.
+        smuggle_headings = [
+            p.heading
+            for p in post_pins
+            if p.heading not in pre_headings and p.date_comment is None
+        ]
+        if not smuggle_headings:
+            return ""
+        # Join with newlines so parse_pins treats each as its own line.
+        return "\n".join(f"{h}\nsmuggled body marker\n" for h in smuggle_headings)
     new_string = tool_input.get("new_string", "")
     return new_string if isinstance(new_string, str) else ""
 
