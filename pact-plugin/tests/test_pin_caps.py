@@ -657,25 +657,48 @@ class TestApplyEditAndParse_Smoke:
 
     def test_edit_empty_old_string_replace_all_false_no_op(self):
         """F6 counter: empty old_string with replace_all=False must also
-        no-op. str.replace(s, "", new, 1) prepends `new` once — equally
-        gibberish-producing. Both replace_all values must route through
-        the no-op guard.
+        no-op. str.replace(s, "", new, 1) prepends `new` once at position
+        0 — which is BEFORE the managed-region markers. A naive assertion
+        on pin body content would be trivially satisfied because
+        _parse_pinned_section isolates the managed region (phantom-green
+        #492 F6.1).
+
+        Differentiating probe: craft new_string as a FULL synthetic
+        managed region containing a smuggled pin. Under str.replace
+        revert, the prepend creates a second managed region at position
+        0 that extract_managed_region picks up first → parsed pins are
+        the SMUGGLED pin, not the original. Under the F6 no-op guard,
+        the original managed region is preserved → parsed pins are the
+        ORIGINAL pin.
         """
         from pin_caps import apply_edit_and_parse
         before = _managed_content(
             "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
         )
+        # Smuggle payload: a full synthetic managed region wrapping an
+        # "### Evil" pin. If str.replace runs (revert), this prepends a
+        # spurious managed region at position 0 that extract_managed_region
+        # captures first — parsed pins become [Evil], not [A].
+        smuggle_payload = (
+            "<!-- PACT_MANAGED_START -->\n"
+            "## Pinned Context\n"
+            "<!-- pinned: 2026-04-21 -->\n### Evil\nevil body.\n\n"
+            "<!-- PACT_MANAGED_END -->\n"
+        )
         tool_input = {
             "old_string": "",
-            "new_string": "PREPENDED",
+            "new_string": smuggle_payload,
             "replace_all": False,
         }
         pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
         assert len(pins) == 1
-        assert pins[0].heading == "### A"
-        assert "PREPENDED" not in pins[0].body, (
-            "F6 regressed: empty-old-string with replace_all=False allowed "
-            "str.replace to prepend new_string."
+        # Load-bearing assertion: the ORIGINAL pin heading survives, NOT
+        # the smuggled one. Under revert, this assertion fails because
+        # the smuggled managed region is the one parsed.
+        assert pins[0].heading == "### A", (
+            f"F6 regressed: empty-old-string + replace_all=False allowed "
+            f"str.replace to prepend a synthetic managed region, smuggling "
+            f"a pin past the no-op guard. Got heading {pins[0].heading!r}."
         )
 
 

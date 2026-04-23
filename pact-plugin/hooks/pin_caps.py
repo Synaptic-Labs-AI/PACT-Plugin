@@ -461,23 +461,40 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
     knows about, NOT by post-parse derivability in general. Full
     `CapViolation.kind` enumeration and taxonomy:
 
+    Post-parse-derivable from post_pins:
       - `"count"`   — handled here; derived from `len(pins)`.
       - `"size"`    — handled here; derived from `pin.body_chars`
                       across all violators (max-scalar, per #492 F5).
-      - `"stale"`   — post-parse-derivable via `check_stale_block`
-                      (reads `pin.is_stale`), but OUT OF SCOPE for this
-                      helper. Stale overflow has its own predicate +
-                      session-start surfacing path; the cap-compare
-                      pipeline does not ingest it here.
-      - `"embedded_pin"` — gate-layer construct synthesized by
-                      `pin_caps_gate._check_tool_allowed` from the
-                      candidate body's `### ` structure, not from a
-                      parsed pin list. Not derivable here.
-      - `"invalid_override"` — gate-layer construct synthesized by
-                      `_validate_override_rationale` from the candidate
-                      override-comment line. Not derivable here.
-      - `"empty"`   — currently reserved (declared in the
-                      `CapViolation.kind` Literal, no emitter).
+      - `"stale"`   — derivable via `check_stale_block` (reads
+                      `pin.is_stale`), but OUT OF SCOPE for this helper.
+                      Stale overflow has its own predicate + session-
+                      start surfacing path; the cap-compare pipeline
+                      does not ingest it here.
+
+    Post-parse-derivable from candidate new_body (not from post_pins):
+      - `"embedded_pin"` — constructed in `check_add_allowed`
+                      (`pin_caps.py:313`) when `parse_pins(new_body)`
+                      returns non-empty. Also rendered via the
+                      `compute_deny_reason` shortcut at `pin_caps.py:666-668`
+                      which returns `DENY_REASON_EMBEDDED_PIN` directly
+                      (no CapViolation constructor; the shortcut
+                      bypasses `_render_deny_reason`). Not derivable
+                      from a parsed pin list alone — requires the
+                      candidate body — so returns None here.
+
+    Reserved-no-emitter (declared in the `CapViolation.kind` Literal
+    but no constructor anywhere in the codebase):
+      - `"empty"`            — reserved for a future empty-pin predicate.
+      - `"invalid_override"` — intent was to represent an invalid
+                      override rationale, but the actual emitter path at
+                      `pin_caps_gate.py:248-250` returns a bare formatted
+                      string (`f"Pin cap violation (invalid override):
+                      {reason}"`) without constructing a CapViolation.
+                      A render branch at `pin_caps.py:802-806` remains
+                      but is unreachable under the current emitter
+                      graph. If a future refactor routes override
+                      failures through a CapViolation, the render
+                      branch + Literal entry become live simultaneously.
 
     For any kind outside {count, size}, returns None and the caller
     treats it as "not-present on this axis." When a future cap-axis is
