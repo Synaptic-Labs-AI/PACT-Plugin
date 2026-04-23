@@ -1,3 +1,29 @@
+## Design principle: shared understanding is constructed, not transmitted
+
+Per Pask's Conversation Theory, shared understanding between two agents is
+CONSTRUCTED through mutual generative exchange — not transmitted from one
+to the other. The teachback protocol implements this construction: the
+teammate produces self-identified risk plus concrete plan; the lead
+produces independent-read verification plus distinct-risk scan. Both sides
+generate content grounded in the other's text.
+
+The ritual applies at every dispatch, regardless of variety. Mechanical
+enforcement (the variety-7 gate threshold in `teachback_gate.py`) is a
+second-layer safeguard for high-consequence work — it does NOT define the
+scope of the ritual itself. Below the threshold, the discipline-based
+layer (orchestrator reading the teammate's teachback; teammate receiving
+the orchestrator's structured approval) constructs shared understanding
+with the same generative shape, just without mechanical fallback.
+
+**Implication**: `teachback_submit` and `teachback_approved` MUST be
+produced at every dispatch in every PACT workflow. No exceptions. The
+variety-7 threshold is a hidden mechanical enforcement layer — invisible
+in agent instructional voice, and does not gate whether the structured
+form is produced. From the agent's perspective, producing the structured
+form is always mandatory.
+
+---
+
 ## Conversation Theory: Teachback Protocol
 
 > **Source**: Gordon Pask's Conversation Theory, applied to LLM multi-agent systems.
