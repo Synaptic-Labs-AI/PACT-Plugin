@@ -1,10 +1,9 @@
 """
 Location: pact-plugin/hooks/shared/intentional_wait.py
-Summary: Unified silencer predicates for TeammateIdle hooks, plus the
-         `intentional_wait` metadata schema and staleness check.
-Used by: teammate_completion_gate.py, teammate_idle.py (detect_stall),
-         handoff_gate.py (is_signal_task only — handoff gating MUST NOT
-         honor intentional_wait; AC #8).
+Summary: intentional_wait metadata schema + staleness check, plus legacy
+         silencer predicates used by teammate_idle.py::detect_stall.
+Used by: teammate_idle.py::detect_stall (scheduled for removal in #538 C3
+         alongside is_signal_task + should_silence_stall_nag).
 
 Contract: pure functions; never raise. Malformed flags fail loud — e.g.
 `wait_stale` returns True on any parse error so a broken flag cannot
@@ -133,10 +132,11 @@ def is_signal_task(task: Any) -> bool:
     """
     Return True iff the task is a blocker/algedonic signal task.
 
-    Signal tasks are carve-outs across the hook surface: they bypass HANDOFF
-    validation (handoff_gate) and silence the TeammateIdle nag
-    (detect_stall, _scan_owned_tasks). Pure predicate on metadata.type —
-    does NOT consider `stalled` or `intentional_wait`.
+    Signal tasks silence the TeammateIdle nag (detect_stall). Pure
+    predicate on metadata.type — does NOT consider `stalled` or
+    `intentional_wait`. Scheduled for removal in #538 C3 when detect_stall
+    is deleted; the agent_handoff_emitter replacement uses the inline
+    literal directly (matches task_utils.py:184 + session_resume.py:525).
 
     Accepts any input and returns False on non-dict / missing metadata —
     never raises.
@@ -162,10 +162,8 @@ def should_silence_stall_nag(
     - metadata.stalled is truthy (already-marked stall — don't re-alert), OR
     - metadata.intentional_wait is set AND not stale (fresh protocol-defined wait).
 
-    Used by both TeammateIdle hooks (teammate_idle.py::detect_stall and
-    teammate_completion_gate.py::_scan_owned_tasks) as the single source of
-    truth for the nag-suppression predicate. handoff_gate.py must NOT call
-    this — AC #8 requires handoff validation to survive `intentional_wait`.
+    Used by teammate_idle.py::detect_stall (scheduled for removal in
+    #538 C3, at which point this helper becomes dead code and is deleted).
 
     Accepts any input and returns False on non-dict / missing metadata —
     never raises.

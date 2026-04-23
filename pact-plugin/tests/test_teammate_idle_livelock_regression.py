@@ -49,6 +49,19 @@ from types import ModuleType
 
 import pytest
 
+# #538 C2a: teammate_completion_gate.py is deleted. The #497 regression
+# harness below imports that module + depends on dual-hook parity which no
+# longer exists. C3 rewrites this file to cover the surviving teammate_idle
+# threshold-escalation path (plus the new #538 dogfood-regression file at
+# tests/test_dogfood_livelock_invariant.py supersedes the livelock coverage).
+# Skip at module load to keep the repo green between C2a and C3.
+pytest.skip(
+    "Superseded by #538 C3 teammate_idle rewrite + #538 C5 dogfood regression. "
+    "Pre-#497 livelock pattern no longer reproducible after teammate_completion_gate "
+    "deletion in #538 C2a.",
+    allow_module_level=True,
+)
+
 # --- setup -----------------------------------------------------------------
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))

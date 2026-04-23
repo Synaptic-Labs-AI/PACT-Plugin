@@ -463,9 +463,13 @@ class TestSignalTaskLiteralPin:
     shared/intentional_wait.py. If a consumer file reintroduces the literal
     inline, the cross-hook silencer asymmetry can silently return.
 
-    Scope: the three refactored hook files (detect_stall, _scan_owned_tasks,
-    handoff_gate). Out-of-scope for this PR: session_resume.py:525 and
-    task_utils.py:184 (preparer §2.7 inventory, follow-up refactor).
+    #538 C2a scope: the test's `refactored_files` list was scoped to three
+    pre-#538 hooks (detect_stall, _scan_owned_tasks, handoff_gate). Two of
+    those — teammate_completion_gate.py and handoff_gate.py — are deleted
+    in C2a; agent_handoff_emitter.py replaces handoff_gate.py but
+    intentionally holds the inline literal (matches task_utils.py:184 +
+    session_resume.py:525 convention). C3 deletes this class entirely
+    when is_signal_task itself is removed.
     """
 
     def test_signal_task_literal_lives_in_helper_only(self):
@@ -473,18 +477,15 @@ class TestSignalTaskLiteralPin:
         from pathlib import Path
 
         hooks_root = Path(__file__).parent.parent / "hooks"
-        # Literal tuple in code form — both single-quote and double-quote variants.
         pattern = re.compile(
             r"""\(\s*["']blocker["']\s*,\s*["']algedonic["']\s*\)"""
         )
 
-        # Scope the scan to the three refactored hook files. Other sites
-        # (session_resume.py:525, task_utils.py:184) are out of scope per
-        # task #18 description and remain on the preparer §2.7 follow-up list.
+        # Post-C2a scope: only teammate_idle.py survives as a caller of
+        # the helper. agent_handoff_emitter.py intentionally inlines the
+        # literal (not in scope for this pin).
         refactored_files = [
             hooks_root / "teammate_idle.py",
-            hooks_root / "teammate_completion_gate.py",
-            hooks_root / "handoff_gate.py",
         ]
 
         offenders = []

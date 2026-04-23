@@ -44,7 +44,7 @@ MUST_BE_SYNC = {
     "bootstrap_gate.py",  # Blocks implementation tools until bootstrap
     "bootstrap_prompt_gate.py",  # Injects bootstrap instruction on prompts
     "validate_handoff.py",  # Validates agent output
-    "handoff_gate.py",    # Blocks task completion without metadata
+    "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
     "peer_inject.py",     # Injects peer context on agent start
     "git_commit_check.py",  # Checks git commit conventions
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)

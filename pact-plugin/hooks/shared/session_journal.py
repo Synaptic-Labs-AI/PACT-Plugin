@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/hooks/shared/session_journal.py
 Summary: Append-only JSONL event store for GC-proof workflow state persistence.
-Used by: session_init.py, session_end.py, handoff_gate.py (hooks);
+Used by: session_init.py, session_end.py, agent_handoff_emitter.py (hooks);
          orchestrate.md, comPACT.md, peer-review.md, wrap-up.md, pause.md
          (commands invoke via CLI: python3 session_journal.py write|read|read-last).
 
@@ -101,7 +101,7 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # commands/orchestrate.md + comPACT.md write agent_dispatch with agent,
     # task_id, phase (all quoted strings) + scope (list).
     "agent_dispatch": {"agent": str, "task_id": str, "phase": str},
-    # hooks/handoff_gate.py:261 writes agent_handoff with agent, task_id,
+    # hooks/agent_handoff_emitter.py writes agent_handoff with agent, task_id,
     # task_subject (all strings) and handoff (dict from task metadata).
     # All four are load-bearing for the secretary.
     "agent_handoff": {
