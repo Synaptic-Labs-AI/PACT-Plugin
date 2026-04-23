@@ -79,6 +79,7 @@ from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
+from shared.plugin_manifest import format_plugin_banner
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -698,6 +699,14 @@ def main():
         stale_block_msg = check_pin_stale_block_directive()
         if stale_block_msg:
             context_parts.append(stale_block_msg)
+
+        # 4c. Surface plugin manifest diagnostic (#500). Tier-0 additionalContext —
+        # total-function banner; always emits, even on read/parse failure.
+        # Lets both lead and teammate context readers cross-reference
+        # worktree edits against the resolved installed-cache root at a
+        # glance. Helper is total: no conditional append, no try/except
+        # wrapper at the call site.
+        context_parts.append(format_plugin_banner())
 
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
