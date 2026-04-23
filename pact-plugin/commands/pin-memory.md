@@ -5,8 +5,16 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ## Mode
 
-- **With arguments** (`/PACT:pin-memory <content>`): Pin the specified content directly.
-- **Without arguments** (`/PACT:pin-memory`): Review the session for pin-worthy context, pin what matters, and prune stale entries.
+- **With arguments** (`/PACT:pin-memory <content>`): Pin the specified content.
+- **Without arguments** (`/PACT:pin-memory`): Review the session for pin-worthy context and pin what matters.
+
+## Caps (enforced mechanically)
+
+Cap violations are denied by `hooks/pin_caps_gate.py` when the Edit/Write tool call lands. You do NOT need to invoke a CLI check before adding — the hook is authoritative.
+
+- **Count**: 12 pins maximum.
+- **Size**: 1500 characters per pin body (excludes `<!-- pinned: ... -->` and `<!-- STALE: ... -->` auto-markers).
+- **Override**: verbatim load-bearing content MAY carry a `pin-size-override` rationale (≤ 120 chars, single line) — see [Size Override](#size-override). The hook validates the rationale in-band.
 
 ## When to Pin
 
@@ -23,46 +31,45 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ## Process
 
-**Target file**: The project CLAUDE.md may be at either `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Use `.claude/CLAUDE.md` if it exists, otherwise use `./CLAUDE.md`. If neither exists, create at `.claude/CLAUDE.md`. This matches the detection logic used by the `resolve_project_claude_md_path()` helper.
+**Target file**: The project CLAUDE.md may be at either `$CLAUDE_PROJECT_DIR/.claude/CLAUDE.md` (preferred) or `$CLAUDE_PROJECT_DIR/CLAUDE.md` (legacy). Use `.claude/CLAUDE.md` if it exists, otherwise `./CLAUDE.md`. If neither exists, create at `.claude/CLAUDE.md`.
 
-### With Arguments (targeted pin)
+### Adding a pin
 
-1. Read existing CLAUDE.md
-2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`)
+1. Read existing CLAUDE.md.
+2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`).
 3. Add the new entry with a date tag:
    ```markdown
    <!-- pinned: YYYY-MM-DD -->
    ### Entry Title
    Content here (~5-10 lines max)
    ```
-4. Run the pruning process (see [Pruning Pinned Entries](#pruning-pinned-entries) below)
-5. Commit changes
+4. Commit.
 
-### Without Arguments (session review)
+### Without arguments — session review
 
-1. Read existing CLAUDE.md
-2. Review the session for pin-worthy context — scan for significant decisions, architectural changes, gotchas discovered, or patterns established. Apply the "When to Pin" criteria above.
-3. If pin-worthy content is found, add each entry to the `## Pinned Context` section with date tags
-4. If nothing is pin-worthy, report "No new context to pin."
-5. Run the pruning process (see [Pruning Pinned Entries](#pruning-pinned-entries) below)
-6. Commit changes if any were made
+1. Read existing CLAUDE.md.
+2. Review the session for pin-worthy context. Apply the "When to Pin" criteria above.
+3. For each pin-worthy entry, add it as in "Adding a pin." If nothing is pin-worthy, report "No new context to pin."
+4. Commit changes if any were made.
 
-## Pruning Pinned Entries
+## Refusal flow (hook-denied edits)
 
-Run this whenever pin-memory is invoked (both modes). Review each entry in the `## Pinned Context` section.
+If the pin_caps_gate hook denies the Edit/Write, the deny reason tells you which cap fired. You MUST NOT bypass.
 
-**Prune when:**
-- The entry references files, patterns, or architecture that no longer exists in the codebase
-- The entry was pinned for a specific feature or task that has been completed and merged
-- The information is now documented elsewhere (CLAUDE.md sections, README, code comments)
-- The entry has been superseded by a newer pinned entry covering the same topic
+- **Pin count cap reached (12/12)**: Run `/PACT:prune-memory` to evict an existing pin, then retry the add.
+- **New pin body is N chars (cap: 1500)**: Compress the body, or add a `pin-size-override` rationale if the content is verbatim load-bearing.
+- **Embedded pin structure in body**: Your new pin body contains a `### ` heading, which would be counted as an additional pin on reload. Use `#### ` or bold for in-body structure instead.
+- **Override rationale malformed**: The rationale is empty, exceeds 120 chars, or contains a line terminator (`\n`, `\r`, or a Unicode line separator). Fix the rationale and retry.
 
-**Keep when:**
-- The entry is old but still accurate and actionable (age alone is not a reason to prune)
-- The entry documents a gotcha or pitfall that could recur
-- You are unsure whether it is still relevant — keep it and flag for user review
+## Size Override
 
-**How to prune:**
-- Remove the entry AND its `<!-- pinned: YYYY-MM-DD -->` tag entirely
-- If unsure about a specific entry, ask the user via `AskUserQuestion` before removing
-- Report what was pruned: "Pruned N stale entries: [titles]"
+Use `pin-size-override` ONLY when the pin body is **verbatim** content whose exact form is load-bearing for downstream LLM readers (canonical dispatch strings, protocol templates, regex literals). Rationale MUST state *why* splitting or compressing would lose correctness — not merely "this is important". Rationale is single-line, ≤ 120 chars.
+
+Example (live on CLAUDE.md):
+```markdown
+<!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form is load-bearing for LLM readers -->
+```
+
+## See also
+
+- `/PACT:prune-memory` — interactive pruning of existing pins (paginated AskUserQuestion over evictable entries).

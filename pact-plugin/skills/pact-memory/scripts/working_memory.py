@@ -45,6 +45,22 @@ WORKING_MEMORY_TOKEN_BUDGET = 800
 RETRIEVED_CONTEXT_TOKEN_BUDGET = 500
 # Note: PINNED_CONTEXT_TOKEN_BUDGET is defined solely in hooks/staleness.py
 
+# Pin caps constants (twin copy of hooks/pin_caps.py — cannot import across
+# the skills-to-hooks package boundary). Drift-detection test in
+# tests/test_staleness.py guards against divergence; if you change these,
+# update hooks/pin_caps.py in the SAME commit.
+#
+# Forward-looking drift anchors: no skill-side code currently consumes these
+# constants — they exist here solely so a future skills-side pin-cap
+# consumer can read the budget without needing to cross the package
+# boundary. Anchored only by TestPinCapsTwinCopyDrift. Do NOT remove
+# even if unused at read time; the drift test + forward-compat intent are
+# the justification for the twin copy.
+PIN_COUNT_CAP = 12
+PIN_SIZE_CAP = 1500
+PIN_STALE_BLOCK_THRESHOLD = 2
+OVERRIDE_RATIONALE_MAX = 120
+
 # PACT-managed boundary marker prefixes. Used by _find_terminator_offset to
 # terminate section scans on any PACT boundary marker. The canonical
 # definition lives in hooks/shared/claude_md_manager.py as

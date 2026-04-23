@@ -1128,3 +1128,88 @@ class TestParsePinnedSectionManagedRegionBounding:
         assert result is not None
         _, _, pinned_content = result
         assert "Old content." in pinned_content
+
+
+class TestPinCapsTwinCopyDrift:
+    """Drift detection for pin_caps constants twin-copied into working_memory.
+
+    pin_caps.py lives under pact-plugin/hooks/ and working_memory.py lives
+    under pact-plugin/skills/pact-memory/scripts/ — separate package
+    boundary means direct import is not available. Constants MUST stay in
+    sync; this test fails loudly when they drift.
+    """
+
+    def test_pin_count_cap_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.PIN_COUNT_CAP == working_memory.PIN_COUNT_CAP, (
+            "PIN_COUNT_CAP drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
+
+    def test_pin_size_cap_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.PIN_SIZE_CAP == working_memory.PIN_SIZE_CAP, (
+            "PIN_SIZE_CAP drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
+
+    def test_pin_stale_block_threshold_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.PIN_STALE_BLOCK_THRESHOLD == working_memory.PIN_STALE_BLOCK_THRESHOLD, (
+            "PIN_STALE_BLOCK_THRESHOLD drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
+
+    def test_override_rationale_max_twins_match(self):
+        import pin_caps
+        import working_memory
+
+        assert pin_caps.OVERRIDE_RATIONALE_MAX == working_memory.OVERRIDE_RATIONALE_MAX, (
+            "OVERRIDE_RATIONALE_MAX drift between hooks/pin_caps.py and "
+            "skills/pact-memory/scripts/working_memory.py — update both "
+            "in the same commit"
+        )
+
+    def test_forbidden_line_terminator_chars_twins_match(self):
+        """Line-terminator char set MUST agree across parser and hook.
+
+        Cycle-7 introduced a CLI-side refusal for line terminators in
+        override rationales. Cycle-8 demoted the CLI to advisory-only;
+        rationale validation moved to the PreToolUse hook
+        (hooks/pin_caps_gate.py). The CLI no longer carries its own
+        forbidden-char set, so this test compares parser ↔ hook only.
+
+        Drift guard: the hook DERIVES its forbidden-char set from
+        `pin_caps._FORBIDDEN_TERMINATOR_TABLE` at module load (single
+        source of truth). In a correctly wired repo the equality always
+        holds because the hook's set is literally `chr(k) for k in the
+        parser table`. This test catches the regression of someone
+        reverting the derivation to a hand-maintained literal — if that
+        happens, drift is possible, and this assertion fires with both
+        sides enumerated.
+        """
+        import pin_caps
+        import pin_caps_gate
+
+        parser_chars = set(chr(k) for k in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys())
+        hook_chars = set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS)
+
+        assert parser_chars == hook_chars, (
+            "Line-terminator char-set drift between parser and hook:\n"
+            f"  pin_caps._FORBIDDEN_TERMINATOR_TABLE (parser):   {sorted(parser_chars)!r}\n"
+            f"  pin_caps_gate._FORBIDDEN_RATIONALE_CHARS (hook): {sorted(hook_chars)!r}\n"
+            "The hook SHOULD derive from the parser table at module load "
+            "(see pin_caps_gate.py) so it cannot drift. If you see this "
+            "failure, someone reverted the derivation to a hand-maintained "
+            "literal. Fix by restoring the `chr(k) for k in "
+            "pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()` form."
+        )

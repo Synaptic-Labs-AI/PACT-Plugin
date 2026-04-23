@@ -26,6 +26,12 @@ from shared.claude_md_manager import (
     PACT_BOUNDARY_PREFIXES,
     extract_managed_region,
 )
+from pin_caps import (
+    PIN_STALE_BLOCK_THRESHOLD,
+    CapViolation,
+    check_stale_block,
+    parse_pins,
+)
 
 # Boundary prefix alternation used by _parse_pinned_section. Built from
 # PACT_BOUNDARY_PREFIXES (round 5, item 1) so the three-prefix union is
@@ -420,7 +426,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
 
     try:
         content = claude_md_path.read_text(encoding="utf-8")
-    except (IOError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError):
         return None
 
     parsed = _parse_pinned_section(content)
@@ -468,7 +474,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
                 claude_md_path.write_text(new_content, encoding="utf-8")
         except TimeoutError:
             return "Pinned staleness update skipped: lock contention."
-        except (IOError, OSError) as e:
+        except OSError as e:
             logger_msg = f"Failed to update pinned staleness: {e}"
             return logger_msg
 
@@ -478,3 +484,49 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
         return f"Pinned context{budget_warning}"
 
     return None
+
+
+def check_pinned_block_signal(
+    claude_md_path: Optional[Path] = None,
+) -> Optional[CapViolation]:
+    """Detect stale-pin overflow that warrants a SessionStart block directive.
+
+    Returns a CapViolation(kind=\"stale\") when the stale pin count meets or
+    exceeds PIN_STALE_BLOCK_THRESHOLD; None otherwise. Caller (session_init)
+    emits an unconditional directive in additionalContext on positive
+    detection — never exit-2 (would break /clear and /resume per plan
+    key-decisions row 6).
+
+    Fail-open: all I/O and parse errors yield None. The block directive
+    ONLY fires on positive detection; ambiguous state never blocks.
+
+    Args:
+        claude_md_path: Explicit path. If None, resolved via
+            get_project_claude_md_path(). Callers may patch resolution
+            independently from this module.
+
+    Returns:
+        CapViolation describing the stale overflow, or None.
+    """
+    if claude_md_path is None:
+        claude_md_path = _get_project_claude_md_path()
+    if claude_md_path is None:
+        return None
+
+    try:
+        content = claude_md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    parsed = _parse_pinned_section(content)
+    if parsed is None:
+        return None
+
+    _, _, pinned_content = parsed
+
+    try:
+        pins = parse_pins(pinned_content)
+    except Exception:  # noqa: BLE001 — fail-open by construction
+        return None
+
+    return check_stale_block(pins, threshold=PIN_STALE_BLOCK_THRESHOLD)
