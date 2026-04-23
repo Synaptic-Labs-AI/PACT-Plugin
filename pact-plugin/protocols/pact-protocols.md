@@ -1886,7 +1886,7 @@ The auditor uses signal-based completion rather than standard HANDOFF:
 1. Task is created with `metadata: {"completion_type": "signal"}`
 2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
 3. Auditor marks task completed
-4. Completion gate accepts `audit_summary` as the completion artifact (see teammate_completion_gate.py)
+4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no bespoke hook validates it — post-#538 the lead verifies presence directly via `TaskGet`).
 
 **audit_summary format**:
 ```json
@@ -1976,7 +1976,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 | `phase_transition` | orchestrate, comPACT | `phase`, `status` (`started`/`completed`) | Determine current phase |
 | `checkpoint` | orchestrate command | Workflow-specific snapshot | Fast recovery point |
 | `agent_dispatch` | orchestrate, comPACT | `agent`, `task_id`, `domain` | Track active agents |
-| `agent_handoff` | handoff_gate hook | `agent`, `task_subject`, `handoff` (dict) | Completed work (GC-proof HANDOFF store) |
+| `agent_handoff` | agent_handoff_emitter hook | `agent`, `task_subject`, `handoff` (dict) | Completed work (GC-proof HANDOFF store) |
 | `commit` | orchestrate, comPACT | `hash`, `message` | Track committed work |
 | `s2_state_seeded` | orchestrate command | `boundaries`, `conventions` | Restore S2 coordination state |
 | `review_dispatch` | peer-review command | `reviewers`, `pr_number` | Track review phase |
