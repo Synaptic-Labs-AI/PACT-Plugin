@@ -19,6 +19,7 @@ from pathlib import Path
 
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
+from shared.plugin_manifest import format_plugin_banner
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -154,7 +155,18 @@ def get_peer_context(
         )
 
     prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=safe_name)
-    return prelude + peer_context + _TEACHBACK_REMINDER
+    # Surface plugin manifest diagnostic (#500). Banner is a single line
+    # with no leading/trailing newlines; add an explicit "\n\n" separator
+    # between peer_context and the banner. _TEACHBACK_REMINDER already
+    # begins with "\n\n", which preserves the existing visual spacing
+    # between the banner and the teachback reminder.
+    return (
+        prelude
+        + peer_context
+        + "\n\n"
+        + format_plugin_banner()
+        + _TEACHBACK_REMINDER
+    )
 
 
 def main():
