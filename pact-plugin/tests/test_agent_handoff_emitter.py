@@ -573,3 +573,216 @@ class TestFallbackFieldStderr:
         assert calls[0]["task_subject"] == "(no subject)", (
             "missing task_subject must fall back to sentinel, not None"
         )
+
+
+class TestMalformedStdin:
+    """#10 remediation (per task #16): closes the header promise-drift at
+    lines 6-8 — "Comprehensive coverage (malformed stdin, ...) lands in
+    the TEST phase." Marker-OSError and fallback-field landed in initial
+    TEST; JSONDecodeError path at agent_handoff_emitter.py:134-138 did
+    not. These tests pin that path directly.
+
+    AC #8 invariant under test: no matter what stdin carries, the
+    emitter exits 0 with stdout=_SUPPRESS_OUTPUT and writes no event.
+    """
+
+    def test_invalid_json_exits_clean(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import main
+
+        calls: list[dict] = []
+        with patch(
+            "agent_handoff_emitter.append_event",
+            side_effect=lambda e: (calls.append(e), True)[1],
+        ), patch("sys.stdin", io.StringIO("not{valid json}")):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        captured = capsys.readouterr()
+        assert exc.value.code == 0, (
+            "JSONDecodeError path must exit 0; exit-2 would break AC #8"
+        )
+        assert "suppressOutput" in captured.out, (
+            "malformed stdin must emit _SUPPRESS_OUTPUT to hide the error "
+            "from Claude Code's hook-error display"
+        )
+        assert calls == [], (
+            "no journal event must be written when stdin cannot be parsed"
+        )
+
+    def test_empty_stdin_exits_clean(self, tmp_path, monkeypatch, capsys):
+        """Empty stdin (dispatcher sent zero-byte payload) is a special
+        case of JSONDecodeError — json.load on empty stream raises
+        JSONDecodeError("Expecting value", ...). Same invariant."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import main
+
+        calls: list[dict] = []
+        with patch(
+            "agent_handoff_emitter.append_event",
+            side_effect=lambda e: (calls.append(e), True)[1],
+        ), patch("sys.stdin", io.StringIO("")):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        captured = capsys.readouterr()
+        assert exc.value.code == 0
+        assert "suppressOutput" in captured.out
+        assert calls == []
+
+    def test_missing_required_fields_uses_fallback_and_emits_stderr(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Stdin lacks BOTH task_id AND task_subject simultaneously —
+        fallback path must fire, stderr warning must name both fields as
+        MISSING, event must still persist with sentinel values (data-
+        integrity carve-out per architect §2.7)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        _run_main(
+            stdin_payload={
+                # neither task_id nor task_subject present
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        captured = capsys.readouterr()
+        assert "task_id=MISSING" in captured.err, (
+            "stderr warning must name task_id as missing"
+        )
+        assert "task_subject=MISSING" in captured.err, (
+            "stderr warning must name task_subject as missing"
+        )
+        assert len(calls) == 1, (
+            "fallback path must still persist the journal event — "
+            "architect §2.7: data-integrity beats dropping the HANDOFF"
+        )
+        assert calls[0]["task_id"] == "unknown"
+        assert calls[0]["task_subject"] == "(no subject)"
+        # No systemMessage on stdout — stderr is the only sink.
+        assert "systemMessage" not in captured.out
+
+
+class TestNullMetadata:
+    """#4 pair (per task #16): security-reviewer's fix at
+    agent_handoff_emitter.py guards `task_data.get("metadata")` against
+    JSON `null` via `or {}` coercion. Without the fix, a crafted
+    task.json with `"metadata": null` (valid JSON, valid semantically as
+    "no metadata") would raise AttributeError on `.get("type")` or
+    `.get("handoff")`, crashing the emitter mid-main() — violating AC #8.
+
+    This test pins the post-fix invariant. Against pre-fix emitter, this
+    test WILL fail (AttributeError propagates through main's try/except
+    wrapper, depending on #16 fix order). That RED-initial state IS the
+    counter-test-by-revert load-bearingness proof per the #538 dogfood
+    discipline.
+    """
+
+    def test_null_metadata_field_does_not_crash_exit_zero_invariant_holds(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        # Crafted task_data with metadata explicitly null (not missing).
+        # This shape can land on disk if a teammate/platform writes
+        # task.json with `"metadata": null` — valid JSON but crashes
+        # `.get("type")` chain pre-fix.
+        exit_code = _run_main(
+            stdin_payload={
+                "task_id": "null-meta-probe",
+                "task_subject": "null metadata probe",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": None,  # the adversarial shape
+            },
+            append_calls=calls,
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 0, (
+            "metadata:null must not break AC #8 exit-0 invariant. "
+            "Security-reviewer's #4 fix (`or {}` coercion) must be "
+            "present in agent_handoff_emitter for this test to pass."
+        )
+        assert "suppressOutput" in captured.out
+        # Event is still written — metadata absent is NOT a signal-task
+        # bypass; it's a missing-metadata happy path with empty handoff.
+        assert len(calls) == 1, (
+            "metadata:null collapses to empty-metadata path; journal "
+            "event still persists with empty handoff."
+        )
+        assert calls[0]["handoff"] == {}, (
+            "post-fix: null metadata collapses to `{}` via `or {}`; "
+            "handoff field is empty dict, not None"
+        )
+
+
+class TestUnexpectedExceptionSuppression:
+    """#16 pair (per task #16): security-reviewer adds an outer
+    try/except around main()'s body. Without it, any unhandled exception
+    (runtime errors in append_event, task_utils, pact_context, etc.)
+    escapes the hook as a non-zero exit with traceback on stderr — and
+    more critically, may propagate a blocking exit code depending on
+    Claude Code's hook-dispatcher contract. AC #8 demands exit-0 suppression.
+
+    This test simulates an unexpected exception deep in the emit path by
+    patching `append_event` to raise RuntimeError, then asserts the
+    emitter STILL exits 0 and emits _SUPPRESS_OUTPUT. Pre-fix this RED;
+    post-fix GREEN.
+    """
+
+    def test_unexpected_exception_suppressed_exit_zero_invariant_holds(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import main
+
+        def _append_boom(event):
+            raise RuntimeError(
+                "simulated deep-path failure (e.g., journal write fault)"
+            )
+
+        task_data = {
+            "status": "completed",
+            "owner": "probe-agent",
+            "metadata": {"handoff": VALID_HANDOFF},
+        }
+        payload = {
+            "task_id": "boom-probe",
+            "task_subject": "unexpected exception probe",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }
+
+        with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
+             patch("agent_handoff_emitter.append_event", side_effect=_append_boom), \
+             patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        captured = capsys.readouterr()
+        assert exc.value.code == 0, (
+            "AC #8: any unhandled exception in main() must be caught by "
+            "the outer try/except (security-reviewer #16 fix) and collapse "
+            "to exit 0. A non-zero exit here means the fix is missing or "
+            "the exception escaped the guard."
+        )
+        assert "suppressOutput" in captured.out, (
+            "exit-0 without _SUPPRESS_OUTPUT still surfaces the hook-error "
+            "display to the user; AC #8 requires the full suppression "
+            "contract on every code path."
+        )
+        # stderr may contain the traceback or a short error line — either
+        # is acceptable per architect §2.7 (stderr is non-blocking). What's
+        # NOT acceptable is a systemMessage on stdout.
+        assert "systemMessage" not in captured.out, (
+            "outer try/except handler must NOT emit a systemMessage — "
+            "a protocol-level signal on an error path would re-introduce "
+            "the livelock-capability category #538 removed."
+        )
