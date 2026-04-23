@@ -254,33 +254,6 @@ class TestValidateHandoffErrorOutput:
         assert len(captured.err) > 0
 
 
-class TestPhaseCompletionErrorOutput:
-    """phase_completion.py exception handler produces JSON on stdout."""
-
-    def test_exception_outputs_json_with_system_message(self, capsys):
-        from phase_completion import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_error_json(captured.out, "phase_completion")
-
-    def test_exception_preserves_stderr(self, capsys):
-        """stderr should contain the hook name and error info."""
-        from phase_completion import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit):
-                main()
-
-        captured = capsys.readouterr()
-        assert "phase_completion" in captured.err
-        assert len(captured.err) > 0
-
-
 class TestSessionEndErrorOutput:
     """session_end.py exception handler produces JSON on stdout."""
 
@@ -443,37 +416,6 @@ class TestFileSizeCheckErrorOutput:
 
         captured = capsys.readouterr()
         assert "file_size_check" in captured.err
-        assert len(captured.err) > 0
-
-
-class TestMemoryAdhocReminderErrorOutput:
-    """memory_adhoc_reminder.py exception handler produces JSON on stdout.
-
-    This hook previously had a bare sys.exit(0) with no stderr.
-    Now it outputs both stderr and stdout JSON.
-    """
-
-    def test_exception_outputs_json_with_system_message(self, capsys):
-        from memory_adhoc_reminder import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_error_json(captured.out, "memory_adhoc_reminder")
-
-    def test_exception_now_outputs_stderr(self, capsys):
-        """Previously had no stderr output — now it does."""
-        from memory_adhoc_reminder import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("test error")):
-            with pytest.raises(SystemExit):
-                main()
-
-        captured = capsys.readouterr()
-        assert "memory_adhoc_reminder" in captured.err
         assert len(captured.err) > 0
 
 
@@ -1032,84 +974,6 @@ class TestPeerInjectSuppressOutput:
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
         _assert_suppress_output(captured.out)
-
-
-class TestPhaseCompletionSuppressOutput:
-    """phase_completion.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
-
-    def test_no_reminders_suppress(self, capsys):
-        """No phase reminders outputs suppressOutput."""
-        from phase_completion import main
-
-        input_data = json.dumps({"transcript": "just chatting"})
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("phase_completion.get_task_list", return_value=None), \
-             patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "."}, clear=False):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_error_path_uses_hook_error_json(self, capsys):
-        """Exception path outputs hook_error_json, NOT suppressOutput."""
-        from phase_completion import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("boom")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out.strip())
-        assert "systemMessage" in parsed
-        assert "suppressOutput" not in parsed
-
-
-class TestMemoryAdhocReminderSuppressOutput:
-    """memory_adhoc_reminder.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
-
-    def test_invalid_json_suppress(self, capsys):
-        """JSONDecodeError path outputs suppressOutput."""
-        from memory_adhoc_reminder import main
-
-        with patch("sys.stdin", io.StringIO("bad")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_no_reminder_type_suppress(self, capsys):
-        """No reminder type outputs suppressOutput."""
-        from memory_adhoc_reminder import main
-
-        input_data = json.dumps({"transcript": "short"})
-        with patch("sys.stdin", io.StringIO(input_data)), \
-             patch("memory_adhoc_reminder.get_team_name", return_value="pact-test"), \
-             patch("memory_adhoc_reminder.get_reminder_type", return_value=None):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_error_path_uses_hook_error_json(self, capsys):
-        """Exception path outputs hook_error_json, NOT suppressOutput."""
-        from memory_adhoc_reminder import main
-
-        with patch("sys.stdin", side_effect=RuntimeError("boom")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out.strip())
-        assert "systemMessage" in parsed
-        assert "suppressOutput" not in parsed
 
 
 class TestAuditorReminderSuppressOutput:

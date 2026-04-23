@@ -1589,13 +1589,11 @@ class TestInitBeforeReaderOrdering:
         ("agent_handoff_emitter.py", {"get_team_name"}),
         ("teachback_check.py", {"get_team_name", "resolve_agent_name"}),
         ("peer_inject.py", {"get_team_name"}),
-        ("memory_adhoc_reminder.py", {"get_team_name"}),
         ("file_tracker.py", {"get_team_name", "resolve_agent_name"}),
         ("track_files.py", {"get_session_id"}),
         ("merge_guard_pre.py", {"get_session_id"}),
         ("merge_guard_post.py", {"get_session_id"}),
         ("teammate_idle.py", {"get_team_name"}),
-        ("phase_completion.py", {"get_project_dir"}),
     ]
 
     @pytest.mark.parametrize(
