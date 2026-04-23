@@ -15,41 +15,38 @@ Output: Exit code 2 to block, 0 to allow; errors to stderr
 
 import sys
 import json
-import subprocess
 import re
-from pathlib import Path
 
 from shared.error_output import hook_error_json
+from shared.git_helpers import run_git
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def get_staged_files():
-    """Returns a list of staged files."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "--cached"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout.strip().splitlines()
-    except subprocess.CalledProcessError:
+    """Returns a list of staged files, EXCLUDING deletions.
+
+    `--diff-filter=d` excludes deletion-only stagings so security scans (which
+    inspect staged content for secrets / .env paths) do not flag a user's
+    `git rm --cached <file>` remediation. The deleted path has no staged
+    content to scan and no new secret to leak — excluding at the source of
+    truth keeps downstream checks (check_security, check_hardcoded_secrets,
+    check_frontend_credentials, check_direct_api_calls) correct by default.
+
+    Fail-open empty list on any subprocess failure.
+    """
+    result = run_git(["diff", "--name-only", "--cached", "--diff-filter=d"])
+    if result is None or result.returncode != 0:
         return []
+    return result.stdout.strip().splitlines()
 
 
 def get_staged_file_content(filename):
-    """Returns the content of a staged file."""
-    try:
-        result = subprocess.run(
-            ["git", "show", f":{filename}"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout
-    except subprocess.CalledProcessError:
+    """Returns the content of a staged file. Fail-open empty string on any subprocess failure."""
+    result = run_git(["show", f":{filename}"])
+    if result is None or result.returncode != 0:
         return ""
+    return result.stdout
 
 
 def check_security(staged_files):
@@ -67,7 +64,11 @@ def check_security(staged_files):
     # 1. Check for .env files being committed
     for f in staged_files:
         if f.endswith('.env') or '/.env' in f or f.startswith('.env'):
-            errors.append(f"SACROSANCT VIOLATION: Attempting to commit environment file: {f}")
+            errors.append(
+                f"SACROSANCT VIOLATION: Attempting to commit environment file: {f}. "
+                "If this is a template, rename to env.example (no leading dot) "
+                "to commit as a template file."
+            )
 
     # 2. Check for sensitive data in logs
     risky_patterns = [
@@ -210,34 +211,52 @@ def check_direct_api_calls(staged_files):
 
 def check_env_file_in_gitignore():
     """
-    Verify .env files are listed in .gitignore.
+    Verify .env is ignored by git's full ignore chain (global excludes,
+    per-repo excludes, parent-dir .gitignores, repo-root .gitignore).
+
+    Delegates to `git check-ignore -q .env` rather than reading .gitignore
+    directly, which closes ignore-chain false negatives (global excludes,
+    .git/info/exclude, parent .gitignores) and `!.env` false positives.
+
+    Fail-open posture on detection-mechanism errors: returns
+    (False, "SACROSANCT WARNING: ..."). The WARNING substring routes to
+    main()'s warnings list (non-blocking). The complementary staged-file
+    check (check_security) independently blocks .env committed files, so
+    a warning here is safe.
 
     Returns:
         Tuple of (is_protected, error_message or None)
     """
-    gitignore_path = Path('.gitignore')
-
-    if not gitignore_path.exists():
+    result = run_git(["check-ignore", "-q", ".env"])
+    if result is None:
+        # run_git collapses TimeoutExpired and FileNotFoundError into None.
+        # Both resolve to the same user-actionable remediation
+        # ("make sure git is installed and functional"), so a single merged
+        # WARNING covers both cases. See arch §8 (wording-merge decision).
         return False, (
-            "SACROSANCT WARNING: No .gitignore file found. "
-            "Create one with '.env' and '.env.*' entries."
+            "SACROSANCT WARNING: 'git check-ignore' could not be invoked "
+            "(timeout or git binary missing); cannot verify .env protection."
         )
 
-    try:
-        gitignore_content = gitignore_path.read_text(encoding='utf-8')
-        env_patterns = ['.env', '.env.*', '.env.local', '.env.production']
-
-        # Check if at least the base .env is protected
-        if '.env' not in gitignore_content:
-            return False, (
-                "SACROSANCT VIOLATION: .env not found in .gitignore. "
-                "Environment files must be excluded from version control."
-            )
-
+    if result.returncode == 0:
         return True, None
-
-    except IOError:
-        return False, "Warning: Could not read .gitignore file."
+    if result.returncode == 1:
+        return False, (
+            "SACROSANCT VIOLATION: .env is not ignored by git. "
+            "Add '.env' to .gitignore (repo), ~/.config/git/ignore (global), "
+            "or .git/info/exclude (per-repo private). "
+            "If .env already appears in .gitignore, you may have tracked it "
+            "previously; run 'git rm --cached .env' to untrack."
+        )
+    if result.returncode == 128:
+        return False, (
+            "SACROSANCT WARNING: 'git check-ignore' reports not in a git repo "
+            "(exit 128); cannot verify .env protection."
+        )
+    return False, (
+        f"SACROSANCT WARNING: 'git check-ignore' exited {result.returncode}; "
+        "cannot verify .env protection."
+    )
 
 
 def check_hardcoded_secrets(staged_files):

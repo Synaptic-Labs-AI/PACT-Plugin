@@ -440,3 +440,97 @@ class TestSessionResumeAliasBackcompat:
             side_effect=FileNotFoundError("gh not found"),
         ):
             assert session_resume._check_pr_state(42) == ""
+
+
+# ---------------------------------------------------------------------------
+# run_gh() -- direct unit tests (arch §8 catch-all invariant)
+# ---------------------------------------------------------------------------
+
+
+class TestRunGh:
+    """Direct tests for shared.gh_helpers.run_gh (the SACROSANCT broad-catch wrapper).
+
+    run_gh sits under check_pr_state and is the carrier of the gh-side
+    fail-open contract. check_pr_state's existing tests exercise run_gh
+    transitively; these tests pin the wrapper's own invariants so a future
+    refactor that narrows the except clause, drops the KeyboardInterrupt
+    propagation, or changes the argv shape is caught close to the source.
+    """
+
+    def test_run_gh_success_returns_completed_process(self):
+        """Happy path: run_gh returns the CompletedProcess with the expected argv + kwargs."""
+        from shared.gh_helpers import run_gh
+
+        mock_result = MagicMock(spec=subprocess.CompletedProcess)
+        mock_result.returncode = 0
+        mock_result.stdout = "OPEN\n"
+        with patch(
+            "shared.gh_helpers.subprocess.run", return_value=mock_result
+        ) as mock_sub:
+            result = run_gh(["pr", "view", "42", "--json", "state"])
+
+        assert result is mock_result
+        argv = mock_sub.call_args[0][0]
+        assert argv == ["gh", "pr", "view", "42", "--json", "state"]
+        kwargs = mock_sub.call_args[1]
+        assert kwargs.get("capture_output") is True
+        assert kwargs.get("text") is True
+        assert kwargs.get("timeout") == 5
+
+    def test_run_gh_timeout_returns_none(self):
+        """TimeoutExpired → None (caught by broad `except Exception`)."""
+        from shared.gh_helpers import run_gh
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5),
+        ):
+            assert run_gh(["pr", "view", "42"]) is None
+
+    def test_run_gh_unicode_decode_error_returns_none(self):
+        """UnicodeDecodeError → None — the documented fail-open case.
+
+        Arch §8 calls out decoding failure as one of the wide gh failure modes
+        the broad catch specifically exists to handle. A narrow-tuple wrapper
+        would let this escape and break the hook hot path; the broad catch is
+        SACROSANCT per gh_helpers.py lines 3-19.
+        """
+        from shared.gh_helpers import run_gh
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "bad byte"),
+        ):
+            assert run_gh(["pr", "view", "42"]) is None
+
+    def test_run_gh_unexpected_exception_returns_none(self):
+        """RuntimeError (or any non-subprocess-family exception) → None.
+
+        Confirms the breadth of `except Exception` — anything that isn't a
+        BaseException subclass gets swallowed to the None sentinel. This is
+        the specific invariant that distinguishes run_gh from run_git
+        (narrow-catch), so pin it positively.
+        """
+        from shared.gh_helpers import run_gh
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=RuntimeError("deliberate"),
+        ):
+            assert run_gh(["pr", "view", "42"]) is None
+
+    def test_run_gh_keyboard_interrupt_propagates(self):
+        """KeyboardInterrupt MUST propagate — not swallowed by `except Exception`.
+
+        Mirrors the check_pr_state pin. If a future refactor widens the catch
+        to `except BaseException:` (perhaps to handle GeneratorExit), Ctrl-C
+        stops working on the hook hot path. Regression guard.
+        """
+        from shared.gh_helpers import run_gh
+
+        with patch(
+            "shared.gh_helpers.subprocess.run",
+            side_effect=KeyboardInterrupt(),
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                run_gh(["pr", "view", "42"])
