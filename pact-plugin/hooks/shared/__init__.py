@@ -62,14 +62,13 @@ from .merge_guard_common import (
 from .error_output import hook_error_json
 from .gh_helpers import check_pr_state
 from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
-# Intentional-wait public API surface: only the two top-level predicates
-# most consumers need are re-exported. validate_wait, canonical_since,
+# Intentional-wait public API surface: only the top-level staleness
+# predicate is re-exported. validate_wait, canonical_since,
 # KNOWN_REASONS, KNOWN_RESOLVERS, and DEFAULT_THRESHOLD_MINUTES remain
 # module-only — `from shared.intentional_wait import X` for those.
-from .intentional_wait import (
-    should_silence_stall_nag,
-    wait_stale,
-)
+# (should_silence_stall_nag + is_signal_task removed in #538 C3 alongside
+# detect_stall in teammate_idle.py.)
+from .intentional_wait import wait_stale
 from .session_state import (
     SAFE_PATH_COMPONENT_RE,
     is_safe_path_component,
@@ -145,7 +144,6 @@ __all__ = [
     "check_pr_state",
     "PACT_AGENTS",
     "SYSTEM_TASK_PREFIXES",
-    "should_silence_stall_nag",
     "wait_stale",
     "SAFE_PATH_COMPONENT_RE",
     "is_safe_path_component",

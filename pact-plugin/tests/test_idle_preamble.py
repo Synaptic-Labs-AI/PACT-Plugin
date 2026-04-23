@@ -82,22 +82,14 @@ class TestPreambleInMainOutput:
             assert exc_info.value.code == 0
             return captured_stdout.getvalue()
 
-    def test_stall_message_has_preamble(self):
-        """Stall detection output should start with IDLE_PREAMBLE."""
-        from teammate_idle import IDLE_PREAMBLE
-
+    def test_in_progress_idle_does_not_emit_systemmessage(self):
+        """Post-#538 C3: in_progress + idle no longer emits a systemMessage.
+        The stall-nag surface was removed with detect_stall; suppressOutput
+        is the expected behavior."""
         output_str = self._run_main_with_stall()
-        if output_str.strip():
-            output = json.loads(output_str)
-            assert output["systemMessage"].startswith(IDLE_PREAMBLE)
-
-    def test_stall_message_contains_original_content(self):
-        """Stall detection output should still contain the stall warning text."""
-        output_str = self._run_main_with_stall()
-        if output_str.strip():
-            output = json.loads(output_str)
-            assert "went idle without completing" in output["systemMessage"]
-            assert "imPACT" in output["systemMessage"]
+        assert output_str.strip(), "hook should still emit suppressOutput JSON"
+        output = json.loads(output_str)
+        assert "systemMessage" not in output
 
     def _run_main_with_idle_cleanup(
         self, teammate_name="coder-a", team_name="pact-test",
