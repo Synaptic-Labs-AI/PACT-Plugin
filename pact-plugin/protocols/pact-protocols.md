@@ -1819,6 +1819,7 @@ The auditor operates primarily through file observation, not messaging. This min
 3. **Cross-agent consistency** — When parallel coders: compatible interfaces? Consistent naming? No semantic overlap?
 4. **Cross-cutting gaps** — Error handling patterns, security basics, performance red flags
 5. **Requirement alignment** — Solving the right problem as specified?
+6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Advisory only; does not block merge. Not checked during concurrent-with-CODE observation cycles (the log is often legitimately authored in TEST/docs phase). Migrated from the removed `phase_completion.py` hook in #538 — YELLOW (not RED) avoids pressuring teammates to fabricate shallow decision-logs.
 
 **NOT audited**: Code style, test coverage (TEST phase), code cleanliness mid-work, micro-optimization.
 
