@@ -302,6 +302,73 @@ class TestPinCapsGate_Smoke:
             })
         assert result is None
 
+    def test_edit_legitimate_new_pin_with_date_comment_allows(
+        self, caps_gate_env
+    ):
+        """#529: an Edit that adds a legitimate new pin (date-comment marker
+        + `### Title` + body, no embedded `### ` inside the body) must be
+        ALLOWED. The Edit-path smuggle-detection must mirror the Write path
+        and distinguish legitimate date-marked adds from naked-heading
+        smuggles — pre-fix, the Edit branch of `_extract_new_body` returned
+        `new_string` verbatim, so compute_deny_reason's `parse_pins(new_body)`
+        check flagged the `### Title` and denied every new-pin Edit.
+
+        This is the documented `/PACT:pin-memory` Add flow: Read CLAUDE.md,
+        insert `<!-- pinned: YYYY-MM-DD -->` + `### Entry Title` + body via
+        Edit, commit. Pre-fix this flow was structurally broken.
+        """
+        env = caps_gate_env(pin_count=3)  # baseline has 3 clean pins, well under 12
+        new_pin_block = (
+            "<!-- pinned: 2026-04-23 -->\n"
+            "### LegitimateNewPin\n"
+            "Legitimate body content.\n\n"
+        )
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                # old_string must exist in baseline — "## Working Memory\n"
+                # appears verbatim in make_claude_md_with_pins output.
+                "old_string": "## Working Memory\n",
+                "new_string": new_pin_block + "## Working Memory\n",
+                "replace_all": False,
+            },
+        })
+        assert result is None, (
+            f"#529 regressed: Edit adding a legitimate date-marked pin "
+            f"denied (expected allow). Got: {result!r}"
+        )
+
+    def test_edit_smuggled_pin_without_date_comment_denies(
+        self, caps_gate_env
+    ):
+        """#529 dual-direction counter: an Edit whose `new_string` inserts
+        a naked `### Title` heading WITHOUT a `<!-- pinned: -->` date-comment
+        marker must still DENY with DENY_REASON_EMBEDDED_PIN — the smuggle
+        signature the fix must preserve. Together with the legitimate-allow
+        test, this pins the Edit-path discriminator: date-comment presence
+        is the signal that separates legitimate adds from smuggles.
+        """
+        env = caps_gate_env(pin_count=3)
+        smuggled_block = (
+            "### SmuggledNoDateMarker\n"
+            "body without a preceding <!-- pinned: --> marker\n\n"
+        )
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "## Working Memory\n",
+                "new_string": smuggled_block + "## Working Memory\n",
+                "replace_all": False,
+            },
+        })
+        assert result is not None, (
+            "#529 dual-direction counter regressed: Edit with a naked "
+            "`### ` heading (no date-comment) allowed; smuggle-detection off."
+        )
+        assert "embedded pin structure" in result
+
 
 class TestPinCapsGate_FailOpen:
     """SACROSANCT: gate bugs never block (with Write-baseline exception)."""

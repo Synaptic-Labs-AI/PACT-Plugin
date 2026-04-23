@@ -353,14 +353,12 @@ def _extract_new_body(
     mutated pin whose BODY contains a `### ` heading (smuggling an extra
     pin past the count cap on reload).
 
-    For Edit (`new_string` present): return `new_string`, the fragment
-    being INSERTED. `compute_deny_reason` scans it via parse_pins; any
-    `### ` inside denies with DENY_REASON_EMBEDDED_PIN.
-
-    For Write (full-file replacement, #492 F7 — security-engineer-1
-    MEDIUM): legitimate CLAUDE.md content contains pin headings by
-    construction, so scanning the whole payload would reject every
-    Write. The defense operates at the PARSED post_pins level instead:
+    Both Write (full-file replacement, #492 F7 — security-engineer-1
+    MEDIUM) and Edit (#529) use the SAME pre/post post_pins diff when
+    pre_pins and post_pins are both available. Legitimate CLAUDE.md
+    content contains pin headings by construction, so scanning the raw
+    payload (Write: full content; Edit: new_string) would reject every
+    legitimate add. The defense operates at the PARSED post_pins level:
 
     Synthesize a synthetic "### H" heading line for each post_pin that
     BOTH (1) is not present in pre_pins by heading AND (2) lacks a
@@ -380,12 +378,14 @@ def _extract_new_body(
     pin from a prior manual edit) are excluded via the heading-in-pre
     check — pre-malformed state never denies (F1 livelock precedent).
 
-    If pre_pins or post_pins is None (e.g., fallback path), return "" —
-    caller's semantic is unchanged.
+    Edit fallback: if pre_pins or post_pins is None (error path before
+    simulation succeeded), fall through to the naive `new_string`-as-body
+    check to preserve conservative deny behavior.
+
+    Write fallback: if pre_pins or post_pins is None on Write, return ""
+    — scanning full content with naive logic would reject every Write.
     """
-    if "content" in tool_input:
-        if pre_pins is None or post_pins is None:
-            return ""
+    if pre_pins is not None and post_pins is not None:
         pre_headings = {p.heading for p in pre_pins}
         # A smuggle signal: post pin whose heading is NEW AND carries no
         # date-comment marker. Surface it by synthesizing the heading line
@@ -400,6 +400,9 @@ def _extract_new_body(
             return ""
         # Join with newlines so parse_pins treats each as its own line.
         return "\n".join(f"{h}\nsmuggled body marker\n" for h in smuggle_headings)
+
+    if "content" in tool_input:
+        return ""
     new_string = tool_input.get("new_string", "")
     return new_string if isinstance(new_string, str) else ""
 
