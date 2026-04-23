@@ -82,6 +82,21 @@ _PIN_HEADING_RE = re.compile(r'^### ', re.MULTILINE)
 # prompt-injection or comment-boundary spoofing. ASCII newline was
 # the Sec residual added in cycle-7: the original table covered
 # Unicode variants but missed the most common terminator.
+#
+# Asymmetry note (post-#492 F1): Python's `str.splitlines()` recognizes
+# MORE codepoints than this table — adds \v (U+000B), \f (U+000C),
+# and FS/GS/RS (U+001C/U+001D/U+001E). That asymmetry is currently SAFE
+# because the parser and gate both use splitlines BEFORE this table's
+# translate runs; splitlines is the more inclusive filter and eats every
+# char this table would strip. The translate is defense-in-depth against
+# a future refactor that replaces splitlines with something narrower
+# (e.g., a single-pass regex that only matches the explicit table). If
+# that refactor lands WITHOUT widening this table first, rationales
+# containing the splitlines-only chars (\v, \f, FS, GS, RS) bypass the
+# sanitizer. The drift detector is
+# `test_splitlines_eats_forbidden_chars_before_validation` in
+# `test_pin_caps_gate_matrix.py` — it fails loudly the moment the
+# upstream-split invariant changes, forcing a review of this table.
 _FORBIDDEN_TERMINATOR_TABLE = str.maketrans("", "", "\u2028\u2029\u0085\r\n")
 
 
@@ -190,6 +205,26 @@ def parse_pins(pinned_content: str) -> List[Pin]:
                 # \r CARRIAGE RETURN) from the rationale before accepting
                 # it. These span logical lines in some renderers and are
                 # latent prompt-injection / comment-boundary-spoofing risks.
+                #
+                # Post-#492 F1 this translate is defense-in-depth. The
+                # preceding `preceding.rstrip("\n").splitlines()` at the
+                # line scan above splits on every codepoint in
+                # `_FORBIDDEN_TERMINATOR_TABLE`, so by the time a line
+                # reaches `OVERRIDE_COMMENT_RE.fullmatch` it is guaranteed
+                # terminator-free — this translate has no chars to strip
+                # under the current control flow. Retained for the same
+                # two load-bearing reasons the gate's parallel guard at
+                # `pin_caps_gate.py::_validate_override_rationale` is
+                # retained: (1) fail-loud on a future refactor that
+                # replaces splitlines with a single-pass regex over the
+                # whole section — the translate then becomes the only
+                # barrier and quietly keeps the strip; (2) symmetric
+                # anchor with the gate's `_FORBIDDEN_RATIONALE_CHARS`
+                # derivation so the twin-copy-drift test
+                # (`test_gate_forbidden_chars_derived_from_parser_table`)
+                # has a stable parser-side counterpart. Not "mitigation"
+                # — prevention via upstream split. Mirrors
+                # `pin_caps_gate.py:148-180`.
                 rationale = rationale.translate(_FORBIDDEN_TERMINATOR_TABLE)
                 # Strict parser: empty rationale or > max → treat as no-override.
                 if rationale and len(rationale) <= OVERRIDE_RATIONALE_MAX:
@@ -385,17 +420,28 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
             current_count=count,
         )
 
+    # Return the LARGEST violator, not the first-by-list-order. The Pareto
+    # net-worse predicate in `compute_deny_reason` compares
+    # `offending_pin_chars` pre vs post; if this returned the first violator,
+    # a curator could worsen any non-first violator silently while the
+    # first-in-list stayed unchanged or improved (blind-backend-coder-2
+    # #492 F5 PoC). Max-violator scalar makes the size axis a well-defined
+    # scalar: "the worst offending body_chars currently present."
+    worst: Optional[Pin] = None
     for pin in pins:
         if pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin):
-            return CapViolation(
-                kind="size",
-                detail=(
-                    f"pin '{pin.heading}' body is {pin.body_chars} chars "
-                    f"(cap: {PIN_SIZE_CAP})"
-                ),
-                offending_pin_chars=pin.body_chars,
-                current_count=count,
-            )
+            if worst is None or pin.body_chars > worst.body_chars:
+                worst = pin
+    if worst is not None:
+        return CapViolation(
+            kind="size",
+            detail=(
+                f"pin '{worst.heading}' body is {worst.body_chars} chars "
+                f"(cap: {PIN_SIZE_CAP})"
+            ),
+            offending_pin_chars=worst.body_chars,
+            current_count=count,
+        )
 
     return None
 
@@ -410,10 +456,21 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
     predicate. This helper lets the predicate ask "is post.kind ALSO
     present at pre-state?" without restructuring the primary return.
 
-    Only "count" and "size" are checked — the other CapViolation kinds
-    ("embedded_pin", "invalid_override") are gate-layer constructs that
-    don't arise from pure post-parse state. For kinds outside this set,
-    returns None (caller treats as not-present).
+    Handled kinds: `"count"`, `"size"` — post-parse derivable from a pin
+    list. Other `CapViolation.kind` values (`"embedded_pin"`,
+    `"invalid_override"`) are gate-layer constructs synthesized by
+    `pin_caps_gate.py` from tool_input inspection, not from a parsed pin
+    list, so they are not derivable here and return None. For any kind
+    outside the handled set (including future additions), returns None
+    and the caller treats it as "not-present on this axis." When adding
+    a new `CapViolation.kind` that IS post-parse-derivable, extend this
+    function with the corresponding branch.
+
+    For the size branch, returns the LARGEST violator (max `body_chars`
+    among violators), matching the scalar-max contract used by
+    `evaluate_full_state`'s size branch. This keeps `compute_deny_reason`'s
+    numeric comparison on `offending_pin_chars` pointing at "the worst
+    violating body currently present" — blind-backend-coder-2 #492 F5.
     """
     if kind == "count":
         count = len(pins)
@@ -430,17 +487,21 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
 
     if kind == "size":
         count = len(pins)
+        worst: Optional[Pin] = None
         for pin in pins:
             if pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin):
-                return CapViolation(
-                    kind="size",
-                    detail=(
-                        f"pin '{pin.heading}' body is {pin.body_chars} chars "
-                        f"(cap: {PIN_SIZE_CAP})"
-                    ),
-                    offending_pin_chars=pin.body_chars,
-                    current_count=count,
-                )
+                if worst is None or pin.body_chars > worst.body_chars:
+                    worst = pin
+        if worst is not None:
+            return CapViolation(
+                kind="size",
+                detail=(
+                    f"pin '{worst.heading}' body is {worst.body_chars} chars "
+                    f"(cap: {PIN_SIZE_CAP})"
+                ),
+                offending_pin_chars=worst.body_chars,
+                current_count=count,
+            )
         return None
 
     return None
@@ -588,11 +649,31 @@ def compute_deny_reason(
         # Pre-state ALSO had this kind; compare numerically on this axis.
         pre_violation = pre_same_kind
 
+    # Pareto net-worse predicate: deny when post is strictly worse on ANY
+    # axis, not just the first-wins axis. `evaluate_full_state` returns
+    # count before size (first-wins), so a post-state that keeps the
+    # first-wins kind numerically-equal-or-better on its axis but worsens
+    # the OTHER axis silently slips through without a second-axis check.
+    # blind-backend-coder-2's #492 F4 PoC:
+    #   pre  = 13 pins + Huge body 1550 (count wins, size hidden at 1550)
+    #   post = 13 pins + Huge body 1700 (count same, size worsened to 1700)
+    # Pre-F4 returned None (allow); Pareto requires deny on the worsened
+    # size axis. Symmetric with the count case.
+    #
+    # Implementation: after the same-axis numeric check, before `return None`,
+    # query `_violation_for_kind(pre_pins, OTHER)` / `(post_pins, OTHER)`.
+    # Deny when post has an OTHER-axis violation that is strictly new
+    # (pre OTHER = None) or strictly worse numerically. The render path
+    # points at the worsened axis so the curator sees the right remediation.
     if post_violation.kind == "count":
         pre_count = pre_violation.current_count or 0
         post_count = post_violation.current_count or 0
         if post_count > pre_count:
             return _render_deny_reason(post_violation)
+        # Pareto: count didn't worsen on its axis — check size axis.
+        other_deny = _pareto_other_axis_deny(pre_pins, post_pins, other="size")
+        if other_deny is not None:
+            return other_deny
         return None
 
     if post_violation.kind == "size":
@@ -600,10 +681,57 @@ def compute_deny_reason(
         post_chars = post_violation.offending_pin_chars or 0
         if post_chars > pre_chars:
             return _render_deny_reason(post_violation)
+        # Pareto: size didn't worsen on its axis — check count axis.
+        other_deny = _pareto_other_axis_deny(pre_pins, post_pins, other="count")
+        if other_deny is not None:
+            return other_deny
         return None
 
     # Unknown kind — conservative: deny (safer than silent allow).
     return _render_deny_reason(post_violation)
+
+
+def _pareto_other_axis_deny(
+    pre_pins: List[Pin],
+    post_pins: List[Pin],
+    other: str,
+) -> Optional[str]:
+    """Pareto other-axis check: return a deny-reason if post is strictly
+    worse than pre on the `other` axis, else None.
+
+    Helper for `compute_deny_reason`. Called after the first-wins axis has
+    been shown not-worse; this secondary check looks at the OTHER axis to
+    enforce Pareto semantics — strictly worse on ANY axis denies.
+
+    Comparison rules:
+      - pre has no violation on `other`, post does → deny (new violation).
+      - Both violate `other`; post's numeric axis > pre's → deny.
+      - Otherwise → None (not strictly worse on this axis).
+    """
+    post_other = _violation_for_kind(post_pins, other)
+    if post_other is None:
+        return None
+
+    pre_other = _violation_for_kind(pre_pins, other)
+    if pre_other is None:
+        # Newly introduced violation on this axis → strictly worse.
+        return _render_deny_reason(post_other)
+
+    if other == "count":
+        pre_n = pre_other.current_count or 0
+        post_n = post_other.current_count or 0
+        if post_n > pre_n:
+            return _render_deny_reason(post_other)
+        return None
+
+    if other == "size":
+        pre_n = pre_other.offending_pin_chars or 0
+        post_n = post_other.offending_pin_chars or 0
+        if post_n > pre_n:
+            return _render_deny_reason(post_other)
+        return None
+
+    return None
 
 
 def _render_deny_reason(violation: CapViolation) -> str:

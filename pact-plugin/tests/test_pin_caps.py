@@ -728,6 +728,124 @@ class TestComputeDenyReason_Smoke:
         assert reason is not None
         assert "New pin body" in reason
 
+    def test_multi_kind_pre_count_plus_size_same_kind_size_worsens_denies(self):
+        """F4 Pareto positive: pre and post both have count violation
+        (first-wins kind), count unchanged, BUT size on the hidden axis
+        worsened. Must deny on size.
+
+        blind-backend-coder-2 #492 F4 PoC:
+          pre  = 13 pins + Huge body 1550 (count wins, size=1550 hidden)
+          post = 13 pins + Huge body 1700 (count unchanged, size=1700)
+        Pre-fix `compute_deny_reason` returned None (same-kind count
+        numeric compare: 13==13, not worse -> allow). Pareto fix queries
+        the OTHER axis via `_pareto_other_axis_deny`; post size exceeds
+        pre size -> deny on the worsened axis.
+        """
+        from pin_caps import PIN_COUNT_CAP, PIN_SIZE_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}", body_chars=100)
+               for i in range(PIN_COUNT_CAP)]
+        pre.append(_make_pin(heading="### Huge",
+                             body_chars=PIN_SIZE_CAP + 50, override=False))
+        assert len(pre) == PIN_COUNT_CAP + 1  # count violation
+        post = [_make_pin(heading=f"### P{i}", body_chars=100)
+                for i in range(PIN_COUNT_CAP)]
+        post.append(_make_pin(heading="### Huge",
+                              body_chars=PIN_SIZE_CAP + 200, override=False))
+        assert len(post) == len(pre)  # count unchanged
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None
+        assert f"{PIN_SIZE_CAP + 200}" in reason, (
+            f"deny-reason should reference the worsened size "
+            f"{PIN_SIZE_CAP + 200}: {reason!r}"
+        )
+
+    def test_multi_kind_pre_count_plus_size_same_kind_size_unchanged_allows(self):
+        """F4 Pareto negative counter: pre and post both count violation
+        (unchanged), size also unchanged. Not strictly worse on ANY axis ->
+        allow. Guards against Pareto over-relaxation: a state exactly equal
+        to pre must not deny.
+        """
+        from pin_caps import PIN_COUNT_CAP, PIN_SIZE_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}", body_chars=100)
+               for i in range(PIN_COUNT_CAP)]
+        pre.append(_make_pin(heading="### Huge",
+                             body_chars=PIN_SIZE_CAP + 50, override=False))
+        post = list(pre)  # identical state
+        assert compute_deny_reason(pre, post, new_body="") is None
+
+    def test_count_improves_size_worsens_denies(self):
+        """F4 asymmetry cover: count IMPROVES (still violating but fewer
+        pins) while size WORSENS on the hidden axis. Pareto: strictly worse
+        on ANY axis -> deny. One axis improving does not offset another
+        axis worsening under Pareto semantics.
+        """
+        from pin_caps import PIN_COUNT_CAP, PIN_SIZE_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}", body_chars=100)
+               for i in range(PIN_COUNT_CAP + 1)]
+        pre.append(_make_pin(heading="### Huge",
+                             body_chars=PIN_SIZE_CAP + 50, override=False))
+        assert len(pre) == PIN_COUNT_CAP + 2  # count violates
+        post = [_make_pin(heading=f"### P{i}", body_chars=100)
+                for i in range(PIN_COUNT_CAP)]
+        post.append(_make_pin(heading="### Huge",
+                              body_chars=PIN_SIZE_CAP + 200, override=False))
+        assert len(post) == PIN_COUNT_CAP + 1 and len(post) < len(pre)
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None
+        assert f"{PIN_SIZE_CAP + 200}" in reason
+
+    def test_multi_size_non_first_violator_worsens_denies(self):
+        """F5 positive: pre and post both have multiple size violators,
+        the FIRST-in-list improves while a LATER violator worsens.
+
+        Pre-fix `evaluate_full_state` / `_violation_for_kind` returned the
+        first-in-list violator, so the numeric compare at the same-kind
+        size branch saw pre=A (1600) vs post=A (1590) -> not worse -> allow,
+        silently letting B's 2000->2500 worsening through.
+
+        blind-backend-coder-2 #492 F5 PoC:
+          pre  = [A@1600, B@2000]   (first-wins returns A)
+          post = [A@1590, B@2500]   (first-wins returns A)
+        Post-F5 fix returns MAX violator: pre max=B@2000, post max=B@2500
+        -> deny on the genuinely-worsened axis.
+        """
+        from pin_caps import PIN_SIZE_CAP, compute_deny_reason
+        pre = [
+            _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 100),
+            _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 500),
+        ]
+        post = [
+            _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 90),
+            _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 1000),
+        ]
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None, (
+            "F5 regression: non-first-violator worsening must deny via "
+            "max-violator scalar"
+        )
+        assert f"{PIN_SIZE_CAP + 1000}" in reason, (
+            f"deny-reason should reference the worsened non-first-violator "
+            f"body size {PIN_SIZE_CAP + 1000}: {reason!r}"
+        )
+
+    def test_multi_size_non_first_violator_unchanged_allows(self):
+        """F5 negative counter: pre and post share multiple size violators;
+        the first-in-list improves while the LATER violator is unchanged.
+        Max-violator scalar did not worsen -> allow. Guards against F5
+        over-strict denial: if no violator is strictly worse than the
+        prior worst, the state is not Pareto-worse on the size axis.
+        """
+        from pin_caps import PIN_SIZE_CAP, compute_deny_reason
+        pre = [
+            _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 100),
+            _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 500),
+        ]
+        post = [
+            _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 90),
+            _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 500),
+        ]
+        assert compute_deny_reason(pre, post, new_body="") is None
+
 
 class TestDenyReasonTemplates_Constants:
     """Deny-reason templates are shared; test they render with expected shape."""

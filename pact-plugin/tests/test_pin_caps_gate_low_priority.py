@@ -293,11 +293,15 @@ class TestFailureLogClassification:
         """Write + baseline readable-but-parse-raises + over-cap content → DENY.
 
         Sibling to test_write_baseline_failclosed_records_classification: covers
-        the second trigger branch of the fail-CLOSED matrix (parse-exception
-        at pin_caps_gate.py:263, is_write=True path at line 269). Without this
-        guard a regression fail-OPENing the parse-error Write branch would
-        ship green through the full suite (empirically verified via counter-
-        test-by-revert during task #3 review).
+        the second trigger branch of the fail-CLOSED matrix — the
+        `_FAIL_BASELINE_PARSE` classification path inside
+        `pin_caps_gate._check_tool_allowed`, where a `_parse_baseline`
+        exception routes through the `is_write and not parseable` branch to
+        `_evaluate_write_as_fresh_start`. Without this guard a regression
+        fail-OPENing the parse-error Write branch would ship green through
+        the full suite (empirically verified via counter-test-by-revert
+        during task #3 review). Symbol references (not line numbers) so
+        future diff insertions don't invalidate this citation.
         """
         env = gate_with_captured_failures
         env["claude_md"].write_text(
