@@ -305,13 +305,18 @@ class TestPinCapsGate_Smoke:
     def test_edit_legitimate_new_pin_with_date_comment_allows(
         self, caps_gate_env
     ):
-        """#529: an Edit that adds a legitimate new pin (date-comment marker
-        + `### Title` + body, no embedded `### ` inside the body) must be
-        ALLOWED. The Edit-path smuggle-detection must mirror the Write path
-        and distinguish legitimate date-marked adds from naked-heading
-        smuggles — pre-fix, the Edit branch of `_extract_new_body` returned
-        `new_string` verbatim, so compute_deny_reason's `parse_pins(new_body)`
-        check flagged the `### Title` and denied every new-pin Edit.
+        """Guards against #529 regression (PR #530): pre-fix the Edit path
+        fell through to naive `return new_string`, so every date-marked
+        new-pin Edit denied via `DENY_REASON_EMBEDDED_PIN`. Post-fix the
+        Edit path mirrors Write via the pre/post-pin diff: legitimate adds
+        (carrying a `<!-- pinned: YYYY-MM-DD -->` marker) ALLOW; naked
+        smuggles deny.
+
+        An Edit that adds a legitimate new pin (date-comment marker +
+        `### Title` + body, no embedded `### ` inside the body) must be
+        ALLOWED. The Edit-path smuggle-detection must mirror the Write
+        path and distinguish legitimate date-marked adds from naked-heading
+        smuggles.
 
         This is the documented `/PACT:pin-memory` Add flow: Read CLAUDE.md,
         insert `<!-- pinned: YYYY-MM-DD -->` + `### Entry Title` + body via

@@ -291,9 +291,9 @@ def _check_tool_allowed(input_data: dict) -> Optional[str]:
         return None
 
     # Net-worse predicate over pre/post pins + embedded-pin check on body.
-    # For Write, pass pre/post_pins so _extract_new_body can derive the
-    # new-or-mutated-body concatenation (#492 F7). For Edit, pre/post
-    # are ignored; the Edit path uses new_string verbatim.
+    # _extract_new_body uses pre/post_pins (when available) to synthesize
+    # a smuggle-heading body identically for Write and Edit (#529); see
+    # its docstring for the fallback hierarchy.
     new_body = _extract_new_body(
         tool_input, pre_pins=pre_pins, post_pins=post_pins
     )
@@ -354,11 +354,12 @@ def _extract_new_body(
     pin past the count cap on reload).
 
     Both Write (full-file replacement, #492 F7 — security-engineer-1
-    MEDIUM) and Edit (#529) use the SAME pre/post post_pins diff when
-    pre_pins and post_pins are both available. Legitimate CLAUDE.md
-    content contains pin headings by construction, so scanning the raw
-    payload (Write: full content; Edit: new_string) would reject every
-    legitimate add. The defense operates at the PARSED post_pins level:
+    MEDIUM) and Edit (#529) use the SAME pre-vs-post heading diff on
+    parsed pins when pre_pins and post_pins are both available.
+    Legitimate CLAUDE.md content contains pin headings by construction,
+    so scanning the raw payload (Write: full content; Edit: new_string)
+    would reject every legitimate add. The defense operates at the
+    PARSED post_pins level:
 
     Synthesize a synthetic "### H" heading line for each post_pin that
     BOTH (1) is not present in pre_pins by heading AND (2) lacks a
@@ -378,12 +379,18 @@ def _extract_new_body(
     pin from a prior manual edit) are excluded via the heading-in-pre
     check — pre-malformed state never denies (F1 livelock precedent).
 
-    Edit fallback: if pre_pins or post_pins is None (error path before
-    simulation succeeded), fall through to the naive `new_string`-as-body
-    check to preserve conservative deny behavior.
-
-    Write fallback: if pre_pins or post_pins is None on Write, return ""
-    — scanning full content with naive logic would reject every Write.
+    Fallback contract — signature-level defense only. No production path
+    reaches the helper with `pre_pins=None` or `post_pins=None`: the sole
+    caller `_check_tool_allowed` computes both via `_parse_baseline` and
+    `apply_edit_and_parse`, each of which either returns a list or raises
+    an exception the caller catches with an early `return None` before
+    reaching this helper. The `Optional[list] = None` defaults exist so
+    a future direct test probe that omits pins gets a safe, deterministic
+    result rather than a TypeError:
+      - Edit fallback: fall through to naive `new_string`-as-body check
+        (pre-#529 conservative deny shape).
+      - Write fallback: return "" (scanning full content with naive logic
+        would reject every Write by construction).
     """
     if pre_pins is not None and post_pins is not None:
         pre_headings = {p.heading for p in pre_pins}
