@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: phase_completion.py, session_init.py
+Used by: session_init.py, agent_handoff_emitter.py
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
@@ -15,10 +15,14 @@ Functions:
     find_active_agents: Find all active agent tasks
     find_blockers: Find blocker/algedonic tasks
     build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
+    read_task_json: Read the raw task JSON by id + team_name (path-traversal safe)
+    read_task_metadata: Read task metadata dict by id + team_name
+    read_task_owner: Read task owner string by id + team_name
 """
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -261,3 +265,78 @@ def build_post_compaction_checkpoint(
         lines.append("Next Step: **Check TaskList and ask user how to proceed.**")
 
     return "\n".join(lines)
+
+
+def read_task_json(
+    task_id: str,
+    team_name: str | None,
+    tasks_base_dir: str | None = None,
+) -> dict:
+    """
+    Read the raw task JSON from disk, safe against path traversal.
+
+    Locates the task file in the team directory first, then falls back to
+    the base directory. Hoisted from handoff_gate.py so non-hook callers
+    (agent_handoff_emitter.py) can consume the same reader.
+
+    Args:
+        task_id: Task identifier. Sanitized to strip `/`, `\\`, and `..`.
+        team_name: Team name for scoped task lookup (may be None).
+        tasks_base_dir: Override for tasks base directory (testing).
+
+    Returns:
+        Full task dict from the JSON file, or empty dict on any failure
+        (missing file, malformed JSON, IO error). Fail-open by design —
+        callers treat "no task data" as a signal to bypass, not crash.
+    """
+    if not task_id:
+        return {}
+
+    task_id = re.sub(r'[/\\]|\.\.', '', task_id)
+    if not task_id:
+        return {}
+
+    if tasks_base_dir is None:
+        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
+
+    base = Path(tasks_base_dir)
+
+    task_dirs = []
+    if team_name:
+        task_dirs.append(base / team_name)
+    task_dirs.append(base)
+
+    for task_dir in task_dirs:
+        task_file = task_dir / f"{task_id}.json"
+        if task_file.exists():
+            try:
+                return json.loads(task_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, IOError):
+                return {}
+
+    return {}
+
+
+def read_task_metadata(
+    task_id: str,
+    team_name: str | None,
+    tasks_base_dir: str | None = None,
+) -> dict:
+    """
+    Read task metadata dict by id + team_name. Fail-open (empty dict).
+    """
+    return read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
+
+
+def read_task_owner(
+    task_id: str,
+    team_name: str | None,
+    tasks_base_dir: str | None = None,
+) -> str | None:
+    """
+    Read task owner string by id + team_name.
+
+    Used as fallback when the platform doesn't provide teammate_name in
+    hook input (e.g., lead marks task completed on behalf of an agent).
+    """
+    return read_task_json(task_id, team_name, tasks_base_dir).get("owner")

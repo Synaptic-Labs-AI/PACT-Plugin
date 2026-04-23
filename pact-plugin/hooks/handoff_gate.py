@@ -15,15 +15,18 @@ Output: stderr message on block (exit 2), nothing on allow (exit 0)
 """
 
 import json
-import re
 import sys
-from pathlib import Path
 
 from shared.handoff_example import format_handoff_example
 from shared.intentional_wait import is_signal_task
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.session_journal import append_event, make_event
+from shared.task_utils import (
+    read_task_json as _read_task_json,
+    read_task_metadata,
+    read_task_owner,
+)
 
 # reasoning_chain (item 3) intentionally excluded — optional per CT Phase 1
 REQUIRED_HANDOFF_FIELDS = ["produced", "decisions", "uncertainty", "integration", "open_questions"]
@@ -130,85 +133,6 @@ def check_memory_saved(
         f"If you have nothing new to save, that's OK — just set the flag. "
         f"Then set memory_saved: true via TaskUpdate(taskId, metadata={{\"memory_saved\": true}})."
     )
-
-
-def _read_task_json(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
-    """
-    Read the raw task JSON from disk.
-
-    Shared logic for read_task_metadata() and read_task_owner(). Locates the
-    task file in the team directory first, then falls back to the base directory.
-
-    Args:
-        task_id: Task identifier
-        team_name: Team name for scoped task lookup
-        tasks_base_dir: Override for tasks base directory (for testing)
-
-    Returns:
-        Full task dict from the JSON file, or empty dict if not found
-    """
-    if not task_id:
-        return {}
-
-    # Sanitize task_id to prevent path traversal
-    task_id = re.sub(r'[/\\]|\.\.', '', task_id)
-    if not task_id:
-        return {}
-
-    if tasks_base_dir is None:
-        tasks_base_dir = str(Path.home() / ".claude" / "tasks")
-
-    base = Path(tasks_base_dir)
-
-    # Try team task directory first, then default
-    task_dirs = []
-    if team_name:
-        task_dirs.append(base / team_name)
-    task_dirs.append(base)
-
-    for task_dir in task_dirs:
-        task_file = task_dir / f"{task_id}.json"
-        if task_file.exists():
-            try:
-                return json.loads(task_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, IOError):
-                return {}
-
-    return {}
-
-
-def read_task_metadata(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> dict:
-    """
-    Read task metadata from the task file.
-
-    Args:
-        task_id: Task identifier
-        team_name: Team name for scoped task lookup
-        tasks_base_dir: Override for tasks base directory (for testing)
-
-    Returns:
-        Task metadata dict, or empty dict if not found
-    """
-    return _read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
-
-
-def read_task_owner(task_id: str, team_name: str | None, tasks_base_dir: str | None = None) -> str | None:
-    """
-    Read the task owner from the task file.
-
-    Used as a fallback when the platform doesn't provide teammate_name in hook
-    input (e.g., orchestrator marks a task completed on behalf of an agent).
-
-    Args:
-        task_id: Task identifier
-        team_name: Team name for scoped task lookup
-        tasks_base_dir: Override for tasks base directory (for testing)
-
-    Returns:
-        Owner string if present, None otherwise
-    """
-    return _read_task_json(task_id, team_name, tasks_base_dir).get("owner")
-
 
 
 def main():
