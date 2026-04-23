@@ -287,6 +287,88 @@ class TestFailureLogClassification:
         assert len(read_failures) == 1
         assert read_failures[0]["source"] == "Write"
 
+    def test_write_baseline_parse_error_over_cap_denies(
+        self, gate_with_captured_failures, monkeypatch
+    ):
+        """Write + baseline readable-but-parse-raises + over-cap content → DENY.
+
+        Sibling to test_write_baseline_failclosed_records_classification: covers
+        the second trigger branch of the fail-CLOSED matrix (parse-exception
+        at pin_caps_gate.py:263, is_write=True path at line 269). Without this
+        guard a regression fail-OPENing the parse-error Write branch would
+        ship green through the full suite (empirically verified via counter-
+        test-by-revert during task #3 review).
+        """
+        env = gate_with_captured_failures
+        env["claude_md"].write_text(
+            make_claude_md_with_pins([
+                make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)
+            ]),
+            encoding="utf-8",
+        )
+
+        import pin_caps_gate
+
+        def raising_parse(_):
+            raise RuntimeError("synthetic parse failure")
+
+        monkeypatch.setattr(pin_caps_gate, "_parse_baseline", raising_parse)
+
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": _build_over_cap(),
+            },
+        })
+        assert result is not None
+        assert "Refusing Write" in result
+        # Observability: classification recorded even though decision is DENY.
+        parse_failures = [
+            f for f in env["failures"]
+            if f["classification"] == "pin_caps_gate_baseline_parse"
+        ]
+        assert len(parse_failures) == 1
+        assert parse_failures[0]["source"] == "Write"
+
+    def test_write_baseline_parse_error_under_cap_allows(
+        self, gate_with_captured_failures, monkeypatch
+    ):
+        """Write + baseline readable-but-parse-raises + under-cap content → ALLOW.
+
+        The fail-CLOSED gate treats an unparseable baseline as empty and then
+        evaluates the Write's own content against the caps. Under-cap content
+        is clean → allow (no spurious denial). Pinning this invariant prevents
+        an over-eager fix from flipping the parse-error branch to unconditional
+        DENY, which would block legitimate CLAUDE.md repair Writes.
+        """
+        env = gate_with_captured_failures
+        env["claude_md"].write_text(
+            make_claude_md_with_pins([
+                make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)
+            ]),
+            encoding="utf-8",
+        )
+
+        import pin_caps_gate
+
+        def raising_parse(_):
+            raise RuntimeError("synthetic parse failure")
+
+        monkeypatch.setattr(pin_caps_gate, "_parse_baseline", raising_parse)
+
+        under_cap_content = make_claude_md_with_pins([
+            make_pin_entry(title=f"P{i}", body_chars=4) for i in range(3)
+        ])
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "content": under_cap_content,
+            },
+        })
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # file_lock adversarial concurrency

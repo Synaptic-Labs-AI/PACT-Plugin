@@ -678,6 +678,56 @@ class TestComputeDenyReason_Smoke:
         assert reason is not None
         assert "New pin body" in reason
 
+    def test_multi_kind_pre_count_plus_size_reducing_count_allows(self):
+        """Pre-state has BOTH count AND size violations; Edit reduces count
+        below cap, pre-existing size violation remains unchanged.
+
+        Pre-fix regression (#492 cycle-8 F2 / architect-1): evaluate_full_state
+        returned pre.kind="count" (first-wins precedence). Post-state after
+        count-reduction surfaced size, so post.kind="size" != pre.kind="count"
+        → compute_deny_reason denied via the kind-swap branch, livelocking the
+        curator into the pre-malformed state. Net-worse predicate's whole job
+        is to prevent exactly this.
+
+        Post-fix (via _violation_for_kind lookup): the kind-swap branch asks
+        whether pre-state ALSO violates post.kind. When yes, it falls through
+        to numeric comparison — a size violation present at pre-state and
+        unchanged at post-state is NOT strictly worse, so the remediation Edit
+        is allowed.
+        """
+        from pin_caps import PIN_COUNT_CAP, PIN_SIZE_CAP, compute_deny_reason
+        # Pre-state: (cap+1) pins, the last one is oversize.
+        pre = [_make_pin(heading=f"### P{i}", body_chars=100)
+               for i in range(PIN_COUNT_CAP)]
+        pre.append(_make_pin(heading="### Huge",
+                             body_chars=PIN_SIZE_CAP + 50, override=False))
+        assert len(pre) == PIN_COUNT_CAP + 1  # count-violation
+        # Post-state: archival Edit drops two pins; size violation on Huge unchanged.
+        post = pre[:-2] + [pre[-1]]
+        assert len(post) <= PIN_COUNT_CAP  # count-violation resolved
+        # Remediation must be allowed — the size violation is net-equivalent.
+        assert compute_deny_reason(pre, post, new_body="") is None
+
+    def test_multi_kind_pre_count_plus_size_worsening_size_denies(self):
+        """Same pre-state (count + size) but the Edit WORSENS size while
+        reducing count below cap. Net change on size axis is strictly worse,
+        so the predicate must still deny via the fall-through numeric path.
+        Counter-test to test_multi_kind_pre_count_plus_size_reducing_count_allows
+        — verifies the fix didn't over-relax.
+        """
+        from pin_caps import PIN_COUNT_CAP, PIN_SIZE_CAP, compute_deny_reason
+        pre = [_make_pin(heading=f"### P{i}", body_chars=100)
+               for i in range(PIN_COUNT_CAP)]
+        pre.append(_make_pin(heading="### Huge",
+                             body_chars=PIN_SIZE_CAP + 50, override=False))
+        # Post: drops two pins AND enlarges the offending one.
+        post = pre[:-2] + [_make_pin(heading="### Huge",
+                                     body_chars=PIN_SIZE_CAP + 200,
+                                     override=False)]
+        reason = compute_deny_reason(pre, post, new_body="")
+        assert reason is not None
+        assert "New pin body" in reason
+
 
 class TestDenyReasonTemplates_Constants:
     """Deny-reason templates are shared; test they render with expected shape."""

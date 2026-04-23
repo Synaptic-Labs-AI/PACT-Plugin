@@ -451,6 +451,76 @@ class TestPinCapsGate_Matrix_Edit:
             f"review test_edit_override_with_line_terminator_never_accepted."
         )
 
+    @pytest.mark.parametrize(
+        "terminator,ord_hex",
+        [
+            (chr(0x2028), "0x2028"),
+            (chr(0x2029), "0x2029"),
+            (chr(0x0085), "0x0085"),
+            ("\r", "0x0d"),
+        ],
+    )
+    def test_oracle_symmetry_terminator_smuggling(self, terminator, ord_hex):
+        """Gate extractor and parse_pins MUST agree on terminator-smuggling.
+
+        Regression for #492 cycle-8 F1 (security-engineer-1 PoC): pre-fix,
+        the gate extractor used `splitlines()` while the parser (`parse_pins`)
+        used `split("\\n")`. A rationale embedding U+2028/U+2029/U+0085
+        split at the gate boundary but survived as one line at the parser
+        boundary, which then `.translate(_FORBIDDEN_TERMINATOR_TABLE)`
+        silently stripped the char and accepted the laundered rationale.
+        Net: an oversize pin with a smuggled terminator in its rationale
+        passed the gate (extractor saw "no override claimed" → size check
+        unguarded) while the parser on next reload treated it as a valid
+        override (size cap bypassed).
+
+        Post-fix: both sides use `splitlines()`. For ANY terminator in
+        `_FORBIDDEN_RATIONALE_CHARS`, the candidate splits on BOTH sides.
+        Neither the gate nor the parser can capture a rationale → the
+        `has_size_override` flag never becomes True on a smuggled pin →
+        the size cap is enforced end-to-end.
+
+        Invariant: `_extract_override_rationale(candidate)` is None
+        ⇔ `parse_pins(synthetic_pinned_section).override_rationale` is None.
+        """
+        import pin_caps_gate
+        from pin_caps import parse_pins
+
+        candidate = (
+            f"<!-- pinned: 2026-04-20, "
+            f"pin-size-override: smuggled{terminator}rationale -->"
+        )
+        gate_result = pin_caps_gate._extract_override_rationale(candidate)
+
+        # Build a synthetic pinned-section body (what parse_pins receives
+        # after `_parse_pinned_section` extracts the section).
+        pinned_section = f"{candidate}\n### TargetPin\nbody text here\n"
+        parsed = parse_pins(pinned_section)
+        assert len(parsed) == 1, (
+            f"Expected exactly one pin from the synthetic section; got "
+            f"{len(parsed)} — test fixture drift."
+        )
+        parser_rationale = parsed[0].override_rationale
+
+        # Oracle-symmetry invariant: gate and parser MUST agree.
+        assert (gate_result is None) == (parser_rationale is None), (
+            f"Oracle asymmetry on terminator {ord_hex}: "
+            f"gate.extract={gate_result!r} vs parser.override_rationale="
+            f"{parser_rationale!r}. This is exactly the bypass #492 cycle-8 F1 "
+            f"fixed — parser must not accept what the gate rejected."
+        )
+        # After the fix, both must be None (terminator-split prevented a
+        # rationale from ever being captured on either side).
+        assert gate_result is None, (
+            f"Gate extractor still captured a rationale on {ord_hex} "
+            f"despite splitlines-based extraction — fix regressed."
+        )
+        assert parser_rationale is None, (
+            f"Parser still captured a rationale on {ord_hex} despite "
+            f"splitlines-based parsing (pin_caps.py:166 fix regressed). "
+            f"Size cap bypass is live again."
+        )
+
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
     def test_edit_teammate_bypass(self, gate_env, baseline):
         """Teammate session bypasses the gate regardless of baseline state."""

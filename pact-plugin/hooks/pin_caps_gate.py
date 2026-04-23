@@ -145,25 +145,35 @@ def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
             f"(max: {OVERRIDE_RATIONALE_MAX}). Shorten it or compress "
             "the pin body."
         )
-    # Defense-in-depth guard — NOT reached at runtime in the current call
-    # graph because `_extract_override_rationale` above applies str.splitlines()
-    # to the candidate fragment before running OVERRIDE_COMMENT_RE.fullmatch,
-    # and Python's splitlines() already recognizes \n, \r, U+2028, U+2029,
-    # U+0085 as line boundaries. A rationale containing any of those chars
-    # is therefore split across multiple lines and the override comment is
-    # never matched (extraction returns None; this validator is skipped).
+    # Unreached at runtime under the current call graph: both the gate's
+    # `_extract_override_rationale` AND the parser's `parse_pins` use
+    # str.splitlines() (pin_caps.py:166, post-#492-F1). splitlines()
+    # recognizes \n, \r, U+2028, U+2029, U+0085 (and VT, FF, FS, GS, RS)
+    # as line boundaries, so any rationale containing one of those chars
+    # is split before OVERRIDE_COMMENT_RE.fullmatch sees it — fullmatch
+    # fails, extraction returns None, this validator is called with None
+    # and short-circuits at line 135 before reaching this check.
     #
-    # KEEP regardless: (1) the parser-side stripping in pin_caps.parse_pins
-    # (_FORBIDDEN_TERMINATOR_TABLE / translate) is the load-bearing defense
-    # and this block mirrors the invariant at the gate layer for structural
-    # consistency (no twin-copy drift, invariant #5); (2) if a future refactor
-    # of `_extract_override_rationale` stops calling splitlines (e.g., moves
-    # to a single-pass regex over the whole fragment), this guard becomes
-    # live immediately; (3) the derivation from _FORBIDDEN_TERMINATOR_TABLE
-    # above is the load-bearing site for the twin-copy-drift test in
-    # test_pin_caps_gate_matrix.py — removing this block would require
-    # restructuring that test. See test_splitlines_eats_forbidden_chars_*
-    # in test_pin_caps_gate_matrix.py for the upstream-split invariant.
+    # Retained for two load-bearing reasons. NOT "defense-in-depth" on
+    # the terminator path — that claim is false under the current control
+    # flow (see test_splitlines_eats_forbidden_chars_before_validation in
+    # test_pin_caps_gate_matrix.py). The real reasons:
+    #
+    # (1) Fail-loud on future refactor drift. If a future change to
+    #     `_extract_override_rationale` replaces splitlines() with a
+    #     single-pass regex over the whole fragment, this guard becomes
+    #     runtime-live and the gate fails closed on terminator-embedded
+    #     rationales instead of silently allowing them. Test
+    #     `test_splitlines_eats_forbidden_chars_before_validation` is
+    #     the drift detector — it will fail the moment the upstream
+    #     invariant breaks, forcing a refactor-time review of THIS block.
+    #
+    # (2) Derivation anchor for twin-copy drift. `_FORBIDDEN_RATIONALE_CHARS`
+    #     is built at module load from `pin_caps._FORBIDDEN_TERMINATOR_TABLE`
+    #     so the two char sets never drift (enforced by
+    #     test_gate_forbidden_chars_derived_from_parser_table). Removing
+    #     the consumer here would require restructuring the anchor; the
+    #     net maintenance cost is strictly higher.
     if any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS):
         return (
             "Override rationale contains a line terminator "

@@ -163,7 +163,15 @@ def parse_pins(pinned_content: str) -> List[Pin]:
         override_rationale: Optional[str] = None
 
         # Scan prior non-empty line(s) for an <!-- pinned: ... --> comment.
-        prior_lines = preceding.rstrip("\n").split("\n")
+        # Use splitlines() (not split("\n")) so Unicode line terminators
+        # (U+2028, U+2029, U+0085, \r, \v, \f, etc.) split lines the same
+        # way the gate extractor does. Prior split("\n") created an oracle
+        # asymmetry: a rationale embedding U+2028 was seen by the parser as
+        # one logical line (match succeeds, translate silently strips the
+        # char), but by the gate as two lines (no match, validator skipped).
+        # A curator could smuggle a laundered oversize rationale past the
+        # size-cap gate. Splitlines everywhere keeps both oracles strict.
+        prior_lines = preceding.rstrip("\n").splitlines()
         # Walk backward over blank lines then inspect first non-blank.
         idx = len(prior_lines) - 1
         while idx >= 0 and not prior_lines[idx].strip():
@@ -392,6 +400,52 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
     return None
 
 
+def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
+    """Return a violation of `kind` if one exists on `pins`, else None.
+
+    Sibling of `evaluate_full_state` that skips the kind precedence used
+    by the "first violation wins" shortcut. `evaluate_full_state` returns
+    count before size when both fire, which is useful for rendering but
+    hides multi-kind states from `compute_deny_reason`'s net-worse
+    predicate. This helper lets the predicate ask "is post.kind ALSO
+    present at pre-state?" without restructuring the primary return.
+
+    Only "count" and "size" are checked — the other CapViolation kinds
+    ("embedded_pin", "invalid_override") are gate-layer constructs that
+    don't arise from pure post-parse state. For kinds outside this set,
+    returns None (caller treats as not-present).
+    """
+    if kind == "count":
+        count = len(pins)
+        if count > PIN_COUNT_CAP:
+            return CapViolation(
+                kind="count",
+                detail=(
+                    f"post-edit pin count {count} exceeds cap {PIN_COUNT_CAP}"
+                ),
+                offending_pin_chars=None,
+                current_count=count,
+            )
+        return None
+
+    if kind == "size":
+        count = len(pins)
+        for pin in pins:
+            if pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin):
+                return CapViolation(
+                    kind="size",
+                    detail=(
+                        f"pin '{pin.heading}' body is {pin.body_chars} chars "
+                        f"(cap: {PIN_SIZE_CAP})"
+                    ),
+                    offending_pin_chars=pin.body_chars,
+                    current_count=count,
+                )
+        return None
+
+    return None
+
+
 def apply_edit_and_parse(current_content: str, tool_input: dict) -> List[Pin]:
     """Simulate the post-tool CLAUDE.md state and return parsed pins.
 
@@ -510,11 +564,29 @@ def compute_deny_reason(
         # Pre clean, post bad → strictly worse; deny with templated reason.
         return _render_deny_reason(post_violation)
 
-    # Both bad. Deny only if post is strictly worse than pre:
-    #   - different kind (e.g., was size, now count+size) → worse
-    #   - same kind but larger numeric overshoot → worse
+    # Both bad. Deny only if post is strictly worse than pre.
+    #
+    # Multi-kind-leak guard: `evaluate_full_state` returns first-violation
+    # only (count before size). If pre-state already has BOTH count AND
+    # size violations, `pre_violation.kind == "count"`. A legitimate
+    # remediation Edit that reduces count below the cap surfaces the
+    # pre-existing size violation → post_violation.kind == "size", which
+    # would look like a kind-swap and falsely deny — locking the user
+    # into the pre-malformed state (exactly the livelock the net-worse
+    # predicate was designed to prevent, architect-1 #492 cycle-8 F2).
+    #
+    # Fix: when kinds differ, ask "did post.kind ALSO violate at pre-state?"
+    # via `_violation_for_kind`. If yes, the two violations are comparable
+    # on the same axis — fall through to numeric-overshoot comparison using
+    # the pre-state violation OF THE SAME KIND. If no, the post violation
+    # is genuinely new and denying is correct.
     if post_violation.kind != pre_violation.kind:
-        return _render_deny_reason(post_violation)
+        pre_same_kind = _violation_for_kind(pre_pins, post_violation.kind)
+        if pre_same_kind is None:
+            # Genuinely new violation → strictly worse.
+            return _render_deny_reason(post_violation)
+        # Pre-state ALSO had this kind; compare numerically on this axis.
+        pre_violation = pre_same_kind
 
     if post_violation.kind == "count":
         pre_count = pre_violation.current_count or 0
