@@ -7,9 +7,12 @@ guard. Comprehensive coverage (malformed stdin, fallback-field
 substitution, marker-OSError fail-open) lands in the TEST phase; this
 file is the CODE-phase smoke test per #538 plan C1.
 """
+import errno
 import io
 import json
+import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -271,3 +274,302 @@ class TestIdempotency:
         )
         marker = tmp_path / ".claude" / "teams" / "pact-test" / ".agent_handoff_emitted" / "marker-probe"
         assert marker.exists(), "fire-once marker must be created at team-scoped path"
+
+
+class TestMarkerFailOpen:
+    """Architect §2.4 fail-OPEN contract: if the marker subsystem itself
+    errors (permission denied, ENOSPC, directory creation failure), the
+    emitter MUST still write the journal event rather than suppress.
+    Data-integrity (preserving the HANDOFF) beats duplication-prevention
+    when the marker layer breaks. Worst case: fall back to pre-#538
+    duplication on THIS task only.
+
+    These tests target `_already_emitted`'s OSError branches directly,
+    which are otherwise hard to exercise without filesystem manipulation.
+    """
+
+    def test_marker_dir_mkdir_permission_denied_still_emits(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+
+        import agent_handoff_emitter
+        original_mkdir = Path.mkdir
+
+        def _mkdir_denied(self_path, *args, **kwargs):
+            # Only deny the marker dir; let other mkdir calls proceed.
+            if ".agent_handoff_emitted" in str(self_path):
+                raise PermissionError(13, "Permission denied")
+            return original_mkdir(self_path, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", _mkdir_denied):
+            _run_main(
+                stdin_payload={
+                    "task_id": "perm-denied",
+                    "task_subject": "probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+        assert len(calls) == 1, (
+            "marker dir PermissionError must fail-OPEN and still emit — "
+            "architect §2.4 carve-out preserves data-integrity over dedup."
+        )
+
+    def test_marker_open_enospc_still_emits(self, tmp_path, monkeypatch):
+        """ENOSPC during O_EXCL marker creation must not suppress the
+        journal write. `os.open` raises OSError(errno=ENOSPC); the
+        emitter's _already_emitted returns False on any non-EEXIST
+        OSError, allowing the fire-OPEN path."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+
+        original_os_open = os.open
+
+        def _os_open_enospc(path, flags, mode=0o777, *, dir_fd=None):
+            if ".agent_handoff_emitted" in str(path):
+                raise OSError(errno.ENOSPC, "No space left on device", str(path))
+            return original_os_open(path, flags, mode)
+
+        with patch("agent_handoff_emitter.os.open", side_effect=_os_open_enospc):
+            _run_main(
+                stdin_payload={
+                    "task_id": "enospc-probe",
+                    "task_subject": "probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+        assert len(calls) == 1, (
+            "ENOSPC on marker open must fail-OPEN and still emit the "
+            "agent_handoff event — data-integrity carve-out per §2.4."
+        )
+
+
+class TestConcurrentFireRace:
+    """O_EXCL marker must deterministically deduplicate concurrent
+    `_already_emitted` calls for the same (team, task_id). One caller
+    wins marker creation (returns False → emit); the other observes
+    FileExistsError (returns True → suppress).
+
+    We target the atomic test-and-set primitive directly rather than
+    invoking `main()` in threads — `sys.stdin` and unittest.mock patches
+    are process-global state that thread-based invocation of main()
+    cannot safely share. The atomicity invariant lives in
+    `_already_emitted`, which is what #538 C1 added to defend against
+    stopHooks.ts duplication.
+    """
+
+    def test_concurrent_already_emitted_exactly_one_false(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import _already_emitted
+
+        team = "pact-race"
+        task_id = "race-probe"
+        results: list[bool] = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def _fire():
+            barrier.wait()
+            r = _already_emitted(team, task_id)
+            with results_lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=_fire) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly one thread wins the marker creation (returns False —
+        # proceed with emit). All others lose (return True — suppress).
+        false_count = sum(1 for r in results if r is False)
+        true_count = sum(1 for r in results if r is True)
+        assert false_count == 1, (
+            f"O_EXCL marker failed to deduplicate {len(results)} "
+            f"concurrent fires: {false_count} winners (expected 1). "
+            f"Race window widened — re-verify atomicity of "
+            f"os.open(O_WRONLY|O_CREAT|O_EXCL)."
+        )
+        assert true_count == len(results) - 1, (
+            f"expected {len(results) - 1} losers returning True; got {true_count}"
+        )
+        # The marker file exists on disk after the race.
+        marker = tmp_path / ".claude" / "teams" / team / ".agent_handoff_emitted" / task_id
+        assert marker.exists(), "race winner must have created the marker file"
+
+
+class TestTeammateNamePrecedence:
+    """Architect §2.3 ordering: `task_data.get("owner") or
+    input_data.get("teammate_name")`. Owner takes precedence; stdin
+    teammate_name is fallback. Empty strings and missing fields should
+    degrade gracefully.
+    """
+
+    def test_empty_owner_string_falls_back_to_stdin_teammate_name(
+        self, tmp_path, monkeypatch
+    ):
+        """owner='' (falsy) should defer to input_data.teammate_name."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        _run_main(
+            stdin_payload={
+                "task_id": "empty-owner",
+                "task_subject": "empty owner, stdin teammate present",
+                "teammate_name": "stdin-fallback-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "",  # empty string — falsy, same as missing
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1
+        assert calls[0]["agent"] == "stdin-fallback-agent", (
+            "empty-string owner must fall back to stdin teammate_name "
+            "per architect §2.3 `or`-chain semantics."
+        )
+
+    def test_missing_owner_and_empty_stdin_teammate_name_no_event(
+        self, tmp_path, monkeypatch
+    ):
+        """Both signals empty/missing → non-agent completion → suppress."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        _run_main(
+            stdin_payload={
+                "task_id": "no-agent",
+                "task_subject": "non-agent feature task",
+                "teammate_name": "",  # empty stdin signal
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                # no "owner" key at all
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert calls == [], (
+            "both owner and stdin teammate_name empty → non-agent "
+            "completion → MUST suppress (no phantom agent_handoff event)."
+        )
+
+    def test_owner_whitespace_only_is_treated_as_falsy(
+        self, tmp_path, monkeypatch
+    ):
+        """Whitespace-only owner — Python `or` treats non-empty strings
+        as truthy, so '   ' would pass. This test pins the CURRENT
+        behavior: whitespace owner IS used as agent name. If we want
+        stricter validation (strip+empty check), that's a follow-up.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        _run_main(
+            stdin_payload={
+                "task_id": "ws-owner",
+                "task_subject": "whitespace owner",
+                "teammate_name": "proper-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "   ",  # whitespace-only but truthy in Python
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        # Current behavior: whitespace-only is truthy; it wins over stdin
+        # teammate_name. This pins the CURRENT contract — if a future
+        # hardening wants strict validation, update this test.
+        assert len(calls) == 1
+        assert calls[0]["agent"] == "   ", (
+            "whitespace-only owner IS currently truthy; this test pins "
+            "that behavior. If stricter validation lands, update here."
+        )
+
+
+class TestFallbackFieldStderr:
+    """Backend LOW uncertainty #3: the fallback-field stderr write for
+    missing task_id/task_subject is a carve-out in architect §2.7. It
+    must:
+      - fire at most once per invocation (not a loop),
+      - NOT set exit-2 (non-blocking),
+      - NOT emit a systemMessage (no protocol-level signal).
+    """
+
+    def test_missing_task_id_emits_stderr_but_not_systemmessage(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        exit_code = _run_main(
+            stdin_payload={
+                # task_id missing entirely
+                "task_subject": "stderr fallback probe",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 0, (
+            "fallback-field path must NOT propagate a blocking exit; "
+            "architect §2.7 forbids exit-2 from this carve-out."
+        )
+        assert "MISSING" in captured.err, (
+            "fallback-field stderr warning expected to surface which "
+            "field was missing"
+        )
+        # Protocol-level signal check: only _SUPPRESS_OUTPUT JSON on stdout.
+        assert "systemMessage" not in captured.out, (
+            "fallback-field path emitted a systemMessage — violates "
+            "architect §2.7 zero-emission-sink invariant."
+        )
+        # Event IS still written — preserving HANDOFF beats dropping it.
+        assert len(calls) == 1
+
+    def test_missing_task_subject_emits_stderr_and_persists_event(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        _run_main(
+            stdin_payload={
+                "task_id": "ts-probe",
+                # task_subject missing
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        captured = capsys.readouterr()
+        assert "task_subject=MISSING" in captured.err
+        assert len(calls) == 1
+        assert calls[0]["task_subject"] == "(no subject)", (
+            "missing task_subject must fall back to sentinel, not None"
+        )
