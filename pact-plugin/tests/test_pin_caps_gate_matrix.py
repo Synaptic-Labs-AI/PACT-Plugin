@@ -162,44 +162,38 @@ class TestPinCapsGate_Matrix_Edit:
         ],
     )
     def test_edit_count_axis(self, gate_env, pre_count, post_count, expected_allow):
-        """Count-axis Edit: replace the managed region wholesale.
+        """Count-axis Edit: count-DECREASE and count-UNCHANGED cases only.
 
-        Strategy: Edit the ENTIRE pre-CLAUDE.md content with a freshly
-        built new-CLAUDE.md via old_string=<whole-file>, new_string=<new-
-        whole-file>. The `new_string` DOES contain `### ` headings
-        (legitimate pins) but the embedded-pin check is computed against
-        `_extract_new_body` which for Edit returns `new_string` — so a
-        count test via Edit's full-file replacement trips embedded-pin
-        every time.
-
-        Real-world Edit usage for count changes is single-pin Edit: the
-        old_string is a 1-pin block, new_string removes/replaces that
-        block with a plain-text fragment. Simulate that instead: start
-        with N pins, replace the ENTIRE managed region via a Write-like
-        Edit (old=baseline, new=target) but route the count comparison
-        via Write tool semantics — the embedded-pin carve-out applies
-        to Write (content key) not to Edit (new_string key).
+        Post-#529 (PR #530), count-INCREASE via Edit IS allowed when the
+        new pin carries a `<!-- pinned: -->` date-comment marker — see
+        `TestPinCapsGate_Smoke::test_edit_legitimate_new_pin_with_date_comment_allows`
+        for the legitimate-add legitimate-allow path, and
+        `test_edit_embedded_pin_denies` (this file) for the smuggle-deny
+        counter. Count-increase coverage in this parametrized matrix is
+        intentionally scoped to DECREASE + UNCHANGED: fixture/payload
+        bookkeeping for date-marked increase-adds is heavier than the
+        incremental signal justifies, since the smoke file already pins
+        the legitimate-allow outcome.
 
         The honest test: use Edit to REMOVE `### PinN` headings entirely
         (no `### ` in new_string). Pre count 3 → remove 0 → post count
         3 (allow). Pre count 3 → remove a pin-comment → post 2 (allow).
-        For the OVER-cap direction we must go via Write (full payload)
-        or use an Edit-time fragment that DOESN'T embed `### ` but still
-        mutates count, which is architecturally impossible via Edit for
-        a count INCREASE — you cannot add a pin without introducing
-        `### `. So count-INCREASE tests belong in the Write matrix.
+        For count-INCREASE coverage see the smoke file; for over-cap
+        count denies see the Write matrix.
 
         For Edit, we test count-DECREASE (allow paths) and count-UNCHANGED
         (irrelevant-fragment Edit).
         """
-        # Count-increase via Edit is architecturally impossible without
-        # the fragment containing `### ` → embedded-pin DENY. So we skip
-        # increase tests here and defer them to the Write matrix.
+        # Count-increase via Edit with a date-marker is a legitimate add
+        # (covered by TestPinCapsGate_Smoke); count-increase via Edit
+        # WITHOUT a date-marker is a smuggle and denies (covered by
+        # test_edit_embedded_pin_denies above). Skip increase cases in
+        # this parametrized matrix to keep the payload bookkeeping lean.
         if post_count > pre_count:
             pytest.skip(
-                "count-increase via Edit requires `### ` in new_string → "
-                "embedded-pin DENY path (tested separately); count matrix "
-                "belongs in the Write axis"
+                "count-increase Edit coverage: legitimate (date-marked) "
+                "allow case → TestPinCapsGate_Smoke; smuggle (no date "
+                "marker) deny case → test_edit_embedded_pin_denies"
             )
 
         env = gate_env(pin_count=pre_count)
@@ -285,16 +279,33 @@ class TestPinCapsGate_Matrix_Edit:
             assert "cap" in result.lower()
 
     def test_edit_embedded_pin_denies(self, gate_env):
-        """Edit new_string containing a `### ` heading → DENY embedded_pin."""
+        """Edit with a naked `### ` heading (no `<!-- pinned: -->` date-comment)
+        correctly DENIES via `DENY_REASON_EMBEDDED_PIN`. Post-#529 (PR #530)
+        the Edit path mirrors Write: legitimate date-marked adds allow
+        (covered in `TestPinCapsGate_Smoke::
+        test_edit_legitimate_new_pin_with_date_comment_allows`); smuggles
+        (heading without a preceding date-comment marker) still deny.
+
+        Prior to #530 this test used a legitimate-shaped date-marked payload
+        and asserted DENY — codifying the #529 asymmetric-path bug as
+        intended behavior. The payload has been reworked to a true smuggle
+        so the assertion reflects the actual contract: naked `### Title`
+        without a date-comment marker is the smuggle signature.
+        """
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "Pin0",
+                # Prepend a naked `### ` heading (no `<!-- pinned: -->`
+                # marker) before the Pinned-Context section's terminator
+                # boundary — a real smuggle attempt that preserves existing
+                # pins but injects an undated heading.
+                "old_string": "## Working Memory\n",
                 "new_string": (
-                    "<!-- pinned: 2026-04-20 -->\n"
-                    "### Sneaky Embedded Pin\nbody-smuggled"
+                    "### SmuggledNoDateMarker\n"
+                    "body-smuggled\n\n"
+                    "## Working Memory\n"
                 ),
                 "replace_all": False,
             },
