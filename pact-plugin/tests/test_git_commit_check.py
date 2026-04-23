@@ -599,6 +599,11 @@ class TestSecurityResidualE2E:
         # Defense in depth: even if exit 0, confirm no VIOLATION string surfaced.
         captured = capsys.readouterr()
         assert "VIOLATION" not in captured.err
+        # Belt-and-suspenders: guard the false-pass where main()'s outer
+        # try/except swallows an unexpected error and exits 0 with
+        # "Hook Error" on stderr. Without this, a regression that broke
+        # main() would silently pass this test on exit-code alone.
+        assert "Hook Error" not in captured.err
 
 
 # ---------------------------------------------------------------------------

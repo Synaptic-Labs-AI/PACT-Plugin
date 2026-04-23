@@ -64,7 +64,11 @@ def check_security(staged_files):
     # 1. Check for .env files being committed
     for f in staged_files:
         if f.endswith('.env') or '/.env' in f or f.startswith('.env'):
-            errors.append(f"SACROSANCT VIOLATION: Attempting to commit environment file: {f}")
+            errors.append(
+                f"SACROSANCT VIOLATION: Attempting to commit environment file: {f}. "
+                "If this is a template, rename to env.example (no leading dot) "
+                "to commit as a template file."
+            )
 
     # 2. Check for sensitive data in logs
     risky_patterns = [
