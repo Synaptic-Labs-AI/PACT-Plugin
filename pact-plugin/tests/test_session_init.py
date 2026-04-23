@@ -4687,3 +4687,206 @@ class TestSessionInitDirectiveAcrossAllSources:
             f"sentinel (idx={sentinel_idx}) — if this fails, the compact "
             f"branch's insert(0) was likely demoted to .append()"
         )
+
+
+# ---------------------------------------------------------------------------
+# #500 plugin-version banner integration + counter-test-by-revert (moved
+# from test_plugin_manifest.py per reviewer feedback — integration tests
+# belong alongside the hook they exercise).
+# ---------------------------------------------------------------------------
+
+
+def _make_banner_plugin_root(tmp_path, manifest=None):
+    """Build a plugin-root tree with optional manifest content.
+
+    Returns (plugin_root, manifest_path_or_none).
+    """
+    plugin_root = tmp_path / "installed-cache"
+    claude_plugin = plugin_root / ".claude-plugin"
+    if manifest is None:
+        return plugin_root, None
+    claude_plugin.mkdir(parents=True)
+    manifest_path = claude_plugin / "plugin.json"
+    manifest_path.write_text(manifest)
+    return plugin_root, manifest_path
+
+
+class TestSessionInitSlotAIntegration:
+    """End-to-end: banner appears in session_init.main() additionalContext.
+
+    Verifies wiring between the helper and the hook — not just that the
+    helper produces a string, but that session_init.main() actually calls
+    it and includes the result in the emitted additionalContext. Mirrors
+    the patching style of TestTeamResumeDetection in this file.
+    """
+
+    def _run_main(self, monkeypatch, tmp_path, plugin_root=None, manifest=None):
+        from session_init import main
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir(exist_ok=True)
+
+        if plugin_root is not None:
+            if manifest is not None:
+                claude_plugin = plugin_root / ".claude-plugin"
+                claude_plugin.mkdir(parents=True)
+                (claude_plugin / "plugin.json").write_text(manifest)
+            monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        else:
+            monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+
+        stdin_data = json.dumps(
+            {"session_id": "abc12345-0000-0000-0000-000000000000"}
+        )
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        return output["hookSpecificOutput"]["additionalContext"]
+
+    def test_banner_appears_in_additional_context_happy_path(
+        self, monkeypatch, tmp_path
+    ):
+        plugin_root = tmp_path / "installed-cache"
+        additional = self._run_main(
+            monkeypatch,
+            tmp_path,
+            plugin_root=plugin_root,
+            manifest=json.dumps({"name": "PACT", "version": "3.18.1"}),
+        )
+
+        assert f"PACT plugin: PACT 3.18.1 (root: {plugin_root})" in additional
+
+    def test_banner_appears_even_when_plugin_root_unset(
+        self, monkeypatch, tmp_path
+    ):
+        additional = self._run_main(monkeypatch, tmp_path, plugin_root=None)
+
+        assert "PACT plugin: unknown (root: <unset>)" in additional
+
+    def test_banner_appears_when_plugin_json_malformed(
+        self, monkeypatch, tmp_path
+    ):
+        plugin_root = tmp_path / "installed-cache"
+        additional = self._run_main(
+            monkeypatch,
+            tmp_path,
+            plugin_root=plugin_root,
+            manifest="{this is not json",
+        )
+
+        assert f"PACT plugin: unknown (root: {plugin_root})" in additional
+
+    def test_banner_follows_pin_slot_diagnostic_in_join_order(
+        self, monkeypatch, tmp_path
+    ):
+        """Slot A position pin: banner emits AFTER the pin-slot diagnostic
+        (Slot 4a) in the ' | '-joined additionalContext, per architecture §4.
+
+        The pin-slot diagnostic (`check_pin_slot_status`) is NOT patched in
+        this fixture — it reads CLAUDE.md directly and produces a
+        `Pin slots: N/12 used` token when the managed-region is present.
+        This test asserts the banner's index > that token's index, which
+        pins Slot A's relative position to an adjacent pre-banner diagnostic.
+        If Slot A is moved above step 4a, this assertion fails with a
+        concrete index comparison.
+        """
+        plugin_root = tmp_path / "installed-cache"
+        additional = self._run_main(
+            monkeypatch,
+            tmp_path,
+            plugin_root=plugin_root,
+            manifest=json.dumps({"name": "PACT", "version": "3.18.1"}),
+        )
+
+        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
+        assert banner in additional
+        # Banner is not the very first content — team prelude + bootstrap
+        # directive are emitted first (insert(0, ...)).
+        assert not additional.startswith(banner)
+        # Position pin: pin-slot diagnostic (Slot 4a) precedes banner (Slot 4c).
+        pin_slot_token = "Pin slots:"
+        if pin_slot_token in additional:
+            assert additional.index(pin_slot_token) < additional.index(banner), (
+                f"banner (Slot 4c) must emit after pin-slot diagnostic "
+                f"(Slot 4a) — if this fails, check session_init.py "
+                f"context_parts ordering around line 700-710."
+            )
+
+
+class TestCounterTestBySlotARevert:
+    """Counter-test-by-revert for session_init Slot A append (d4f0f794
+    dual-direction discipline). These tests are written so that if a
+    future edit removes the `context_parts.append(format_plugin_banner())`
+    call at Slot A (line ~709 in session_init.py), at least one named
+    test here fails with a specific, informative assertion message.
+
+    Verified empirically by reviewer-independent cp-backup revert:
+    commenting out the Slot A append produces 4 Integration + 2 RevertGuard
+    failures across these classes (cardinality 6)."""
+
+    def test_banner_present_in_additional_context(
+        self, monkeypatch, tmp_path
+    ):
+        """Load-bearing regression guard: if Slot A is reverted, the banner
+        disappears from additionalContext and this assertion fails."""
+        from session_init import main
+
+        plugin_root = tmp_path / "installed-cache"
+        claude_plugin = plugin_root / ".claude-plugin"
+        claude_plugin.mkdir(parents=True)
+        (claude_plugin / "plugin.json").write_text(
+            json.dumps({"name": "PACT", "version": "3.18.1"})
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        (tmp_path / "home").mkdir(exist_ok=True)
+
+        stdin_data = json.dumps(
+            {"session_id": "abc12345-0000-0000-0000-000000000000"}
+        )
+
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.remove_stale_kernel_block", return_value=None), \
+             patch("session_init.update_pact_routing", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.update_session_info", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_paused_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit):
+                main()
+
+        output = json.loads(mock_stdout.getvalue())
+        additional = output["hookSpecificOutput"]["additionalContext"]
+        assert "PACT plugin: PACT 3.18.1" in additional, (
+            "Slot A banner missing from additionalContext — verify "
+            "session_init.py line ~709 still appends format_plugin_banner()"
+        )
+
+    def test_format_plugin_banner_is_imported_in_session_init(self):
+        """Static guard: if the import line is deleted, an import-time
+        error is raised at session_init.py load, not just a quiet drop."""
+        import session_init
+
+        assert hasattr(session_init, "format_plugin_banner"), (
+            "session_init must import format_plugin_banner at module scope"
+        )

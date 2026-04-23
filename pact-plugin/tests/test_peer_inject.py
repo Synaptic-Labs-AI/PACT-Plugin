@@ -755,3 +755,223 @@ class TestSanitizeAgentName:
                 f"Hostile agent_name injected an orchestrator marker line: "
                 f"{line!r}. The sanitizer should have stripped the close-paren."
             )
+
+
+# ---------------------------------------------------------------------------
+# #500 plugin-version banner integration + counter-test-by-revert (moved
+# from test_plugin_manifest.py per reviewer feedback — integration tests
+# belong alongside the hook they exercise).
+# ---------------------------------------------------------------------------
+
+
+class TestPeerInjectBannerIntegration:
+    """End-to-end: banner appears in peer_inject.get_peer_context() return
+    between peer_context and _TEACHBACK_REMINDER, per architecture §3.3."""
+
+    def _write_team_config(self, tmp_path, members):
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps({"members": members})
+        )
+        return tmp_path / "teams"
+
+    def test_banner_appears_in_peer_context_with_multiple_members(
+        self, tmp_path, monkeypatch
+    ):
+        from peer_inject import _TEACHBACK_REMINDER, get_peer_context
+
+        plugin_root = tmp_path / "installed-cache"
+        claude_plugin = plugin_root / ".claude-plugin"
+        claude_plugin.mkdir(parents=True)
+        (claude_plugin / "plugin.json").write_text(
+            json.dumps({"name": "PACT", "version": "3.18.1"})
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        teams_dir = self._write_team_config(
+            tmp_path,
+            [
+                {"name": "architect", "agentType": "pact-architect"},
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+            ],
+        )
+
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(teams_dir),
+        )
+
+        assert result is not None
+        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
+        assert banner in result
+        # Banner is BETWEEN peer_context and _TEACHBACK_REMINDER.
+        banner_idx = result.index(banner)
+        reminder_idx = result.index(_TEACHBACK_REMINDER)
+        assert banner_idx < reminder_idx, (
+            "banner must precede the teachback reminder"
+        )
+        # peer_context text appears before the banner.
+        assert result.index("backend-coder") < banner_idx
+
+    def test_banner_appears_when_alone_on_team(self, tmp_path, monkeypatch):
+        from peer_inject import _TEACHBACK_REMINDER, get_peer_context
+
+        plugin_root = tmp_path / "installed-cache"
+        claude_plugin = plugin_root / ".claude-plugin"
+        claude_plugin.mkdir(parents=True)
+        (claude_plugin / "plugin.json").write_text(
+            json.dumps({"name": "PACT", "version": "3.18.1"})
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        teams_dir = self._write_team_config(
+            tmp_path,
+            [{"name": "architect", "agentType": "pact-architect"}],
+        )
+
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(teams_dir),
+        )
+
+        assert result is not None
+        assert "only active teammate" in result.lower()
+        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
+        assert banner in result
+        assert result.index(banner) < result.index(_TEACHBACK_REMINDER)
+
+    def test_banner_appears_on_failure_sentinel_in_peer_context(
+        self, tmp_path, monkeypatch
+    ):
+        """Even when plugin.json fails to read, the sentinel banner still
+        appears in the peer_context output — fail-open at the integration
+        layer, not just the helper layer."""
+        from peer_inject import get_peer_context
+
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+
+        teams_dir = self._write_team_config(
+            tmp_path,
+            [
+                {"name": "architect", "agentType": "pact-architect"},
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+            ],
+        )
+
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(teams_dir),
+        )
+
+        assert result is not None
+        assert "PACT plugin: unknown (root: <unset>)" in result
+
+    def test_banner_does_not_precede_pact_role_marker(
+        self, tmp_path, monkeypatch
+    ):
+        """Security invariant: the PACT ROLE marker at byte-0 of the
+        peer context must remain the first line. Banner must land
+        AFTER the prelude, per architecture §3.3 `Place banner
+        BETWEEN peer_context and teachback reminder (not before
+        prelude — prelude's PACT ROLE marker must remain the first
+        line for the byte-0 line-anchored substring check).`"""
+        from peer_inject import get_peer_context
+
+        plugin_root = tmp_path / "installed-cache"
+        claude_plugin = plugin_root / ".claude-plugin"
+        claude_plugin.mkdir(parents=True)
+        (claude_plugin / "plugin.json").write_text(
+            json.dumps({"name": "PACT", "version": "3.18.1"})
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        teams_dir = self._write_team_config(
+            tmp_path,
+            [
+                {"name": "architect", "agentType": "pact-architect"},
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+            ],
+        )
+
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(teams_dir),
+        )
+
+        assert result is not None
+        # The PACT ROLE marker must still be the very first bytes.
+        assert result.startswith("YOUR PACT ROLE: teammate (architect)")
+        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
+        assert result.index(banner) > result.index("YOUR PACT ROLE:")
+
+
+class TestCounterTestByPeerInjectRevert:
+    """Counter-test-by-revert for peer_inject banner insertion (dual
+    direction — pair with TestCounterTestBySlotARevert in test_session_init).
+    If a future edit removes the `format_plugin_banner()` call from
+    the return tuple in get_peer_context() (peer_inject.py line ~167),
+    at least one named test here fails with a specific message.
+
+    Verified empirically by reviewer-independent cp-backup revert:
+    removing the banner term from the return concatenation makes 4
+    Integration + 2 RevertGuard tests fail (cardinality 6)."""
+
+    def test_peer_inject_output_contains_banner(self, tmp_path, monkeypatch):
+        """Load-bearing regression guard: banner must appear in
+        get_peer_context() output."""
+        from peer_inject import get_peer_context
+
+        plugin_root = tmp_path / "installed-cache"
+        claude_plugin = plugin_root / ".claude-plugin"
+        claude_plugin.mkdir(parents=True)
+        (claude_plugin / "plugin.json").write_text(
+            json.dumps({"name": "PACT", "version": "3.18.1"})
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "members": [
+                        {"name": "architect", "agentType": "pact-architect"},
+                        {
+                            "name": "backend-coder",
+                            "agentType": "pact-backend-coder",
+                        },
+                    ]
+                }
+            )
+        )
+
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(tmp_path / "teams"),
+        )
+
+        assert result is not None
+        assert "PACT plugin: PACT 3.18.1" in result, (
+            "banner missing from peer_inject.get_peer_context() return — "
+            "verify peer_inject.py line ~167 still includes "
+            "format_plugin_banner() in the return concatenation"
+        )
+
+    def test_format_plugin_banner_is_imported_in_peer_inject(self):
+        """Static guard: import must be present at module scope."""
+        import peer_inject
+
+        assert hasattr(peer_inject, "format_plugin_banner"), (
+            "peer_inject must import format_plugin_banner at module scope"
+        )

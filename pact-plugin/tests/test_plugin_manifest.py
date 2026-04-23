@@ -138,22 +138,25 @@ class TestBannerInvariants:
 
         assert "\n" not in banner
         assert "\r" not in banner
-        assert "PACT " in banner  # name retained (with trailing space)
-        assert "3.18 .1" in banner  # embedded \r replaced with space
+        # Sanitizer uses empty-string replacement (mirrors
+        # `session_state._RENDER_STRIP_RE.sub("", ...)`), so trailing `\n`
+        # on name collapses, and embedded `\r` in version collapses.
+        assert "PACT 3.18.1" in banner
 
 
-class TestFailOpenFireMatrixExtendedRows:
-    """Architect fire-matrix §6 — explicit named rows beyond smoke coverage.
-
-    Smoke covers rows 1, 2, 4, 5 (+ a parametrized sweep of 6-11). These
-    named tests pin each remaining row individually so a failure in any one
-    cell surfaces a specific diagnostic rather than a collapsed parametrize
-    failure. The prefix + root-display pattern is the public contract;
-    asserting the exact sentinel literal guards against any caller
-    ever seeing a partial or mangled banner under failure.
+class TestFailOpenFailurePathsExtended:
+    """Explicit named tests for each fail-open failure path beyond smoke
+    coverage. Smoke tests cover happy path + CLAUDE_PLUGIN_ROOT unset +
+    plugin.json missing + malformed JSON via the parametrized invariants
+    sweep. These named tests pin each remaining failure mode individually
+    so a failure in any one mode surfaces a specific diagnostic rather
+    than a collapsed parametrize failure. The prefix + root-display
+    pattern is the public contract; asserting the exact sentinel literal
+    guards against any caller ever seeing a partial or mangled banner
+    under failure.
     """
 
-    def test_row3_env_set_but_root_does_not_exist(self, tmp_path, monkeypatch):
+    def test_nonexistent_root_path_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         nonexistent = tmp_path / "does-not-exist"
@@ -163,7 +166,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {nonexistent})"
 
-    def test_row7_missing_version_key(self, tmp_path, monkeypatch):
+    def test_missing_version_key_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(tmp_path, json.dumps({"name": "PACT"}))
@@ -173,7 +176,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row8_missing_name_key(self, tmp_path, monkeypatch):
+    def test_missing_name_key_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(tmp_path, json.dumps({"version": "3.18.1"}))
@@ -183,7 +186,13 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row9_version_is_integer(self, tmp_path, monkeypatch):
+    def test_non_string_version_emits_sentinel_with_resolved_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Discriminates inner-schema gate (returns `<root>` in sentinel)
+        from outer-blanket except (returns `<unset>`). Integer version
+        must be rejected by the `isinstance` check, not fall through to
+        `.replace` and raise AttributeError into the outer guard."""
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(
@@ -195,7 +204,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row10a_name_empty_string(self, tmp_path, monkeypatch):
+    def test_empty_name_string_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(
@@ -207,7 +216,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row10b_version_empty_string(self, tmp_path, monkeypatch):
+    def test_empty_version_string_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(
@@ -219,7 +228,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row6a_top_level_is_list(self, tmp_path, monkeypatch):
+    def test_top_level_json_list_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(tmp_path, json.dumps(["not", "a", "dict"]))
@@ -229,7 +238,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row6b_top_level_is_string(self, tmp_path, monkeypatch):
+    def test_top_level_json_string_emits_sentinel(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
         root = _make_plugin_root(tmp_path, json.dumps("just-a-string"))
@@ -239,7 +248,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row12_permission_error_on_read(self, tmp_path, monkeypatch):
+    def test_permission_error_on_read_emits_sentinel(self, tmp_path, monkeypatch):
         """plugin.json exists but cannot be read (chmod 000 / EACCES).
 
         On platforms where chmod 000 does not actually block root, the test
@@ -270,7 +279,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row12b_generic_oserror_on_read(self, tmp_path, monkeypatch):
+    def test_generic_oserror_on_read_emits_sentinel(self, tmp_path, monkeypatch):
         """Any OSError subclass on read → fail-open sentinel."""
         from pathlib import Path as _Path
 
@@ -290,7 +299,7 @@ class TestFailOpenFireMatrixExtendedRows:
 
         assert banner == f"PACT plugin: unknown (root: {root})"
 
-    def test_row13_unicode_decode_error(self, tmp_path, monkeypatch):
+    def test_unicode_decode_error_emits_sentinel(self, tmp_path, monkeypatch):
         """plugin.json contains non-utf-8 bytes → fail-open sentinel."""
         from shared.plugin_manifest import format_plugin_banner
 
@@ -491,9 +500,9 @@ class TestBannerContractInvariants:
             ("PA\r\nCT", "3.\n18.\r1"),
             ("\n\nPACT", "\r\n3.18.1\r\n"),
         ]
-        for name, version in hostile_values:
+        for i, (name, version) in enumerate(hostile_values):
             root = _make_plugin_root(
-                tmp_path / f"r-{hash((name, version)) & 0xFFFF}",
+                tmp_path / f"case_{i}",
                 json.dumps({"name": name, "version": version}),
             )
             monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
@@ -521,391 +530,273 @@ class TestBannerContractInvariants:
 
         assert b1 == b2
 
+    # --- Project-wide sanitization regex contract (mirrors session_state._RENDER_STRIP_RE) ---
+    # Concurrent task #14 adds `_sanitize()` to plugin_manifest.py with the same
+    # regex `[\x00-\x1f\x7f\u0085\u2028\u2029]` used by session_state.py:83
+    # and peer_inject._sanitize_agent_name. Replacement is space (not empty).
+    # Tests below assert the output-level contract (characters absent from banner,
+    # banner remains single-line) — robust to whether the fix ships as an
+    # `_sanitize()` helper or an inline regex call.
+    #
+    # IMPORTANT AUTHORING NOTE: per backend-coder memory `edit_tool_unicode_normalization_492.md`,
+    # Edit-tool paste silently normalizes U+2028/U+2029 → ASCII 0x20. We use
+    # `chr(0x...)` construction below to guarantee the literal codepoint lands
+    # unchanged regardless of how the test file was authored.
 
-class TestSessionInitSlotAIntegration:
-    """End-to-end: banner appears in session_init.main() additionalContext.
+    _U2028 = chr(0x2028)
+    _U2029 = chr(0x2029)
+    _U0085 = chr(0x0085)
 
-    Verifies wiring between the helper and the hook — not just that the
-    helper produces a string, but that session_init.main() actually calls
-    it and includes the result in the emitted additionalContext. Mirrors
-    the patching style of TestTeamResumeDetection in test_session_init.py.
-    """
+    @staticmethod
+    def _probe_sanitizer_support():
+        """Probe whether the production helper strips the project-convention
+        regex char set. Runs `format_plugin_banner()` against a manifest
+        containing U+2028; returns True iff the character is absent from the
+        output.
 
-    def _run_main(self, monkeypatch, tmp_path, plugin_root=None, manifest=None):
-        import io as _io
-        from unittest.mock import patch as _patch
+        Coordinates with concurrent task #14 (sanitizer implementation).
+        Tests guarded by this probe skip when the sanitizer is not yet in
+        production; they activate automatically once #14 lands.
 
-        from session_init import main
+        The probe targets U+2028 specifically rather than a C0 control
+        because the pre-#14 implementation already strips `\n` / `\r`
+        (a subset of C0). A U+2028 probe discriminates old vs new behavior
+        precisely."""
+        import json as _json
+        import os
+        import tempfile
+        from shared.plugin_manifest import format_plugin_banner
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-        (tmp_path / "home").mkdir(exist_ok=True)
+        u2028 = chr(0x2028)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            cp = root / ".claude-plugin"
+            cp.mkdir(parents=True)
+            (cp / "plugin.json").write_text(
+                _json.dumps({"name": f"PA{u2028}CT", "version": "3.18.1"})
+            )
+            os.environ["CLAUDE_PLUGIN_ROOT"] = str(root)
+            try:
+                banner = format_plugin_banner()
+            finally:
+                os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
+            return u2028 not in banner
 
-        if plugin_root is not None:
-            if manifest is not None:
-                claude_plugin = plugin_root / ".claude-plugin"
-                claude_plugin.mkdir(parents=True)
-                (claude_plugin / "plugin.json").write_text(manifest)
-            monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        else:
-            monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    def _skip_if_sanitizer_absent(self):
+        if not self._probe_sanitizer_support():
+            pytest.skip(
+                "plugin_manifest sanitizer does not yet strip the project-"
+                "convention control-char + Unicode-line-terminator set "
+                "(regex `[\\x00-\\x1f\\x7f\\u0085\\u2028\\u2029]`); "
+                "skipping until concurrent task #14 lands"
+            )
 
-        stdin_data = json.dumps(
-            {"session_id": "abc12345-0000-0000-0000-000000000000"}
-        )
+    def test_c0_null_byte_stripped_from_name(self, tmp_path, monkeypatch):
+        """C0 control NUL (\x00) must not leak into banner."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
 
-        with _patch("session_init.setup_plugin_symlinks", return_value=None), \
-             _patch("session_init.remove_stale_kernel_block", return_value=None), \
-             _patch("session_init.update_pact_routing", return_value=None), \
-             _patch("session_init.ensure_project_memory_md", return_value=None), \
-             _patch("session_init.check_pinned_staleness", return_value=None), \
-             _patch("session_init.update_session_info", return_value=None), \
-             _patch("session_init.get_task_list", return_value=None), \
-             _patch("session_init.restore_last_session", return_value=None), \
-             _patch("session_init.check_paused_state", return_value=None), \
-             _patch("sys.stdin", _io.StringIO(stdin_data)), \
-             _patch("sys.stdout", new_callable=_io.StringIO) as mock_stdout:
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        output = json.loads(mock_stdout.getvalue())
-        return output["hookSpecificOutput"]["additionalContext"]
-
-    def test_banner_appears_in_additional_context_happy_path(
-        self, monkeypatch, tmp_path
-    ):
-        plugin_root = tmp_path / "installed-cache"
-        additional = self._run_main(
-            monkeypatch,
+        root = _make_plugin_root(
             tmp_path,
-            plugin_root=plugin_root,
-            manifest=json.dumps({"name": "PACT", "version": "3.18.1"}),
+            json.dumps({"name": f"PA{chr(0x00)}CT", "version": "3.18.1"}),
         )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
 
-        assert f"PACT plugin: PACT 3.18.1 (root: {plugin_root})" in additional
+        banner = format_plugin_banner()
 
-    def test_banner_appears_even_when_plugin_root_unset(
-        self, monkeypatch, tmp_path
-    ):
-        additional = self._run_main(monkeypatch, tmp_path, plugin_root=None)
+        assert chr(0x00) not in banner, f"NUL leaked: {banner!r}"
+        assert banner.startswith("PACT plugin: ")
 
-        assert "PACT plugin: unknown (root: <unset>)" in additional
+    def test_c0_soh_byte_stripped_from_version(self, tmp_path, monkeypatch):
+        """C0 control SOH (\x01), non-boundary C0. Regex character class
+        `[\x00-\x1f]` must cover the full C0 range, not just NUL + \n + \r."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
 
-    def test_banner_appears_when_plugin_json_malformed(
-        self, monkeypatch, tmp_path
-    ):
-        plugin_root = tmp_path / "installed-cache"
-        additional = self._run_main(
-            monkeypatch,
+        root = _make_plugin_root(
             tmp_path,
-            plugin_root=plugin_root,
-            manifest="{this is not json",
+            json.dumps({"name": "PACT", "version": f"3.{chr(0x01)}18.1"}),
         )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
 
-        assert f"PACT plugin: unknown (root: {plugin_root})" in additional
+        banner = format_plugin_banner()
 
-    def test_banner_follows_stale_block_directive_in_join_order(
-        self, monkeypatch, tmp_path
-    ):
-        """Slot A placement: banner comes after pin/stale-block diagnostics
-        in the `" | ".join(context_parts)` output, per architecture §4.
-        Verified by asserting the banner is not the very first token
-        in additionalContext (team prelude inserts at index 0, then
-        bootstrap + diagnostics precede the banner)."""
-        plugin_root = tmp_path / "installed-cache"
-        additional = self._run_main(
-            monkeypatch,
+        assert chr(0x01) not in banner, f"SOH leaked: {banner!r}"
+
+    def test_c0_escape_byte_stripped(self, tmp_path, monkeypatch):
+        """ESC (\x1b) — security-relevant: unsanitized ESC enables ANSI
+        terminal escape injection into logs rendering the banner."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
             tmp_path,
-            plugin_root=plugin_root,
-            manifest=json.dumps({"name": "PACT", "version": "3.18.1"}),
-        )
-
-        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
-        assert banner in additional
-        # Banner is not the very first content — team prelude + bootstrap
-        # directive are emitted first (insert(0, ...)).
-        assert not additional.startswith(banner)
-
-
-class TestPeerInjectIntegration:
-    """End-to-end: banner appears in peer_inject.get_peer_context() return
-    between peer_context and _TEACHBACK_REMINDER, per architecture §3.3."""
-
-    def _write_team_config(self, tmp_path, members):
-        team_dir = tmp_path / "teams" / "pact-test"
-        team_dir.mkdir(parents=True)
-        (team_dir / "config.json").write_text(
-            json.dumps({"members": members})
-        )
-        return tmp_path / "teams"
-
-    def test_banner_appears_in_peer_context_with_multiple_members(
-        self, tmp_path, monkeypatch
-    ):
-        from peer_inject import _TEACHBACK_REMINDER, get_peer_context
-
-        plugin_root = tmp_path / "installed-cache"
-        claude_plugin = plugin_root / ".claude-plugin"
-        claude_plugin.mkdir(parents=True)
-        (claude_plugin / "plugin.json").write_text(
-            json.dumps({"name": "PACT", "version": "3.18.1"})
-        )
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-
-        teams_dir = self._write_team_config(
-            tmp_path,
-            [
-                {"name": "architect", "agentType": "pact-architect"},
-                {"name": "backend-coder", "agentType": "pact-backend-coder"},
-            ],
-        )
-
-        result = get_peer_context(
-            agent_type="pact-architect",
-            team_name="pact-test",
-            agent_name="architect",
-            teams_dir=str(teams_dir),
-        )
-
-        assert result is not None
-        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
-        assert banner in result
-        # Banner is BETWEEN peer_context and _TEACHBACK_REMINDER.
-        banner_idx = result.index(banner)
-        reminder_idx = result.index(_TEACHBACK_REMINDER)
-        assert banner_idx < reminder_idx, (
-            "banner must precede the teachback reminder"
-        )
-        # peer_context text appears before the banner.
-        assert result.index("backend-coder") < banner_idx
-
-    def test_banner_appears_when_alone_on_team(self, tmp_path, monkeypatch):
-        from peer_inject import _TEACHBACK_REMINDER, get_peer_context
-
-        plugin_root = tmp_path / "installed-cache"
-        claude_plugin = plugin_root / ".claude-plugin"
-        claude_plugin.mkdir(parents=True)
-        (claude_plugin / "plugin.json").write_text(
-            json.dumps({"name": "PACT", "version": "3.18.1"})
-        )
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-
-        teams_dir = self._write_team_config(
-            tmp_path,
-            [{"name": "architect", "agentType": "pact-architect"}],
-        )
-
-        result = get_peer_context(
-            agent_type="pact-architect",
-            team_name="pact-test",
-            agent_name="architect",
-            teams_dir=str(teams_dir),
-        )
-
-        assert result is not None
-        assert "only active teammate" in result.lower()
-        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
-        assert banner in result
-        assert result.index(banner) < result.index(_TEACHBACK_REMINDER)
-
-    def test_banner_appears_on_failure_sentinel_in_peer_context(
-        self, tmp_path, monkeypatch
-    ):
-        """Even when plugin.json fails to read, the sentinel banner still
-        appears in the peer_context output — fail-open at the integration
-        layer, not just the helper layer."""
-        from peer_inject import get_peer_context
-
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-
-        teams_dir = self._write_team_config(
-            tmp_path,
-            [
-                {"name": "architect", "agentType": "pact-architect"},
-                {"name": "backend-coder", "agentType": "pact-backend-coder"},
-            ],
-        )
-
-        result = get_peer_context(
-            agent_type="pact-architect",
-            team_name="pact-test",
-            agent_name="architect",
-            teams_dir=str(teams_dir),
-        )
-
-        assert result is not None
-        assert "PACT plugin: unknown (root: <unset>)" in result
-
-    def test_banner_does_not_precede_pact_role_marker(
-        self, tmp_path, monkeypatch
-    ):
-        """Security invariant: the PACT ROLE marker at byte-0 of the
-        peer context must remain the first line. Banner must land
-        AFTER the prelude, per architecture §3.3 `Place banner
-        BETWEEN peer_context and teachback reminder (not before
-        prelude — prelude's PACT ROLE marker must remain the first
-        line for the byte-0 line-anchored substring check).`"""
-        from peer_inject import get_peer_context
-
-        plugin_root = tmp_path / "installed-cache"
-        claude_plugin = plugin_root / ".claude-plugin"
-        claude_plugin.mkdir(parents=True)
-        (claude_plugin / "plugin.json").write_text(
-            json.dumps({"name": "PACT", "version": "3.18.1"})
-        )
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-
-        teams_dir = self._write_team_config(
-            tmp_path,
-            [
-                {"name": "architect", "agentType": "pact-architect"},
-                {"name": "backend-coder", "agentType": "pact-backend-coder"},
-            ],
-        )
-
-        result = get_peer_context(
-            agent_type="pact-architect",
-            team_name="pact-test",
-            agent_name="architect",
-            teams_dir=str(teams_dir),
-        )
-
-        assert result is not None
-        # The PACT ROLE marker must still be the very first bytes.
-        assert result.startswith("YOUR PACT ROLE: teammate (architect)")
-        banner = f"PACT plugin: PACT 3.18.1 (root: {plugin_root})"
-        assert result.index(banner) > result.index("YOUR PACT ROLE:")
-
-
-class TestCounterTestBySlotARevert:
-    """Counter-test-by-revert for session_init Slot A append (d4f0f794
-    dual-direction discipline). These tests are written so that if a
-    future edit removes the `context_parts.append(format_plugin_banner())`
-    call at Slot A (line 709 in session_init.py), at least one named
-    test here fails with a specific, informative assertion message.
-
-    Verified empirically during authoring: commenting out the Slot A
-    append and rerunning this class produces a failure. See the
-    docstring of test_banner_absent_without_slot_a_append for the
-    load-bearing assertion."""
-
-    def test_banner_present_in_additional_context(
-        self, monkeypatch, tmp_path
-    ):
-        """Load-bearing regression guard: if Slot A is reverted, the banner
-        disappears from additionalContext and this assertion fails."""
-        import io as _io
-        from unittest.mock import patch as _patch
-
-        from session_init import main
-
-        plugin_root = tmp_path / "installed-cache"
-        claude_plugin = plugin_root / ".claude-plugin"
-        claude_plugin.mkdir(parents=True)
-        (claude_plugin / "plugin.json").write_text(
-            json.dumps({"name": "PACT", "version": "3.18.1"})
-        )
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
-        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-        (tmp_path / "home").mkdir(exist_ok=True)
-
-        stdin_data = json.dumps(
-            {"session_id": "abc12345-0000-0000-0000-000000000000"}
-        )
-
-        with _patch("session_init.setup_plugin_symlinks", return_value=None), \
-             _patch("session_init.remove_stale_kernel_block", return_value=None), \
-             _patch("session_init.update_pact_routing", return_value=None), \
-             _patch("session_init.ensure_project_memory_md", return_value=None), \
-             _patch("session_init.check_pinned_staleness", return_value=None), \
-             _patch("session_init.update_session_info", return_value=None), \
-             _patch("session_init.get_task_list", return_value=None), \
-             _patch("session_init.restore_last_session", return_value=None), \
-             _patch("session_init.check_paused_state", return_value=None), \
-             _patch("sys.stdin", _io.StringIO(stdin_data)), \
-             _patch("sys.stdout", new_callable=_io.StringIO) as mock_stdout:
-            with pytest.raises(SystemExit):
-                main()
-
-        output = json.loads(mock_stdout.getvalue())
-        additional = output["hookSpecificOutput"]["additionalContext"]
-        assert "PACT plugin: PACT 3.18.1" in additional, (
-            "Slot A banner missing from additionalContext — verify "
-            "session_init.py line 709 still appends format_plugin_banner()"
-        )
-
-    def test_format_plugin_banner_is_imported_in_session_init(self):
-        """Static guard: if the import line is deleted, an import-time
-        error is raised at session_init.py load, not just a quiet drop."""
-        import session_init
-
-        assert hasattr(session_init, "format_plugin_banner"), (
-            "session_init must import format_plugin_banner at module scope"
-        )
-
-
-class TestCounterTestByPeerInjectRevert:
-    """Counter-test-by-revert for peer_inject banner insertion (dual
-    direction — pair with TestCounterTestBySlotARevert per d4f0f794).
-    If a future edit removes the `format_plugin_banner()` call from
-    the return tuple in get_peer_context() (peer_inject.py line 167),
-    at least one named test here fails with a specific message.
-
-    Verified empirically during authoring: removing the banner term
-    from the return concatenation makes these tests fail."""
-
-    def test_peer_inject_output_contains_banner(self, tmp_path, monkeypatch):
-        """Load-bearing regression guard: banner must appear in
-        get_peer_context() output."""
-        from peer_inject import get_peer_context
-
-        plugin_root = tmp_path / "installed-cache"
-        claude_plugin = plugin_root / ".claude-plugin"
-        claude_plugin.mkdir(parents=True)
-        (claude_plugin / "plugin.json").write_text(
-            json.dumps({"name": "PACT", "version": "3.18.1"})
-        )
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
-
-        team_dir = tmp_path / "teams" / "pact-test"
-        team_dir.mkdir(parents=True)
-        (team_dir / "config.json").write_text(
             json.dumps(
                 {
-                    "members": [
-                        {"name": "architect", "agentType": "pact-architect"},
-                        {
-                            "name": "backend-coder",
-                            "agentType": "pact-backend-coder",
-                        },
-                    ]
+                    "name": f"PA{chr(0x1b)}CT",
+                    "version": f"{chr(0x1b)}[31m3.18.1",
                 }
+            ),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert chr(0x1b) not in banner, f"ESC leaked: {banner!r}"
+        assert "[31m" in banner or "31m" in banner  # residue of stripped ESC+bracket is OK
+        # But the raw ESC byte itself must be gone.
+
+    def test_c0_unit_separator_byte_stripped(self, tmp_path, monkeypatch):
+        """Upper C0 boundary: US (\x1f). Pins the `[\x00-\x1f]` upper
+        edge — \x20 (space) must NOT be in the strip class."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": f"PA{chr(0x1f)}CT", "version": "3.18.1"}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert chr(0x1f) not in banner, f"US leaked: {banner!r}"
+        # Space (0x20) must be preserved — it separates name and version
+        # and also appears in the " (root: " section.
+        assert " " in banner
+
+    def test_del_byte_stripped(self, tmp_path, monkeypatch):
+        """DEL (\x7f) — isolated codepoint outside C0, covered by the
+        `\x7f` literal in the regex."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": f"PA{chr(0x7f)}CT", "version": "3.18.1"}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert chr(0x7f) not in banner, f"DEL leaked: {banner!r}"
+
+    def test_nel_u0085_stripped(self, tmp_path, monkeypatch):
+        """NEL (U+0085, NEXT LINE) — Unicode line terminator that
+        `str.splitlines()` honors. Regex must cover it via the `\u0085`
+        literal in the character class."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": f"PA{chr(0x0085)}CT", "version": "3.18.1"}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert chr(0x0085) not in banner, f"NEL leaked: {banner!r}"
+        assert len(banner.splitlines()) == 1
+
+    def test_u2028_line_separator_stripped_from_name(self, tmp_path, monkeypatch):
+        """U+2028 (LINE SEPARATOR) — Unicode line terminator. `str.splitlines()`
+        treats it as a line boundary, so downstream consumers that split on
+        lines would see it as a break even though ASCII `\n`/`\r` strip misses it."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": f"PA{chr(0x2028)}CT", "version": "3.18.1"}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert chr(0x2028) not in banner, f"U+2028 leaked: {banner!r}"
+        assert len(banner.splitlines()) == 1
+
+    def test_u2029_paragraph_separator_stripped_from_version(
+        self, tmp_path, monkeypatch
+    ):
+        """U+2029 (PARAGRAPH SEPARATOR) — sibling Unicode line terminator."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": "PACT", "version": f"3.{chr(0x2029)}18.1"}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert chr(0x2029) not in banner, f"U+2029 leaked: {banner!r}"
+        assert len(banner.splitlines()) == 1
+
+    def test_all_stripped_chars_together_yield_single_line_banner(
+        self, tmp_path, monkeypatch
+    ):
+        """Exhaustive: inject every character class member into name and
+        version simultaneously. Banner must remain single-line with NO
+        member present."""
+        self._skip_if_sanitizer_absent()
+        from shared.plugin_manifest import format_plugin_banner
+
+        hostile_chars = [
+            chr(0x00), chr(0x01), chr(0x0a), chr(0x0d), chr(0x1b),
+            chr(0x1f), chr(0x7f), chr(0x0085), chr(0x2028), chr(0x2029),
+        ]
+        hostile_name = "P" + "".join(hostile_chars) + "ACT"
+        hostile_version = chr(0x01) + "3.18.1" + chr(0x2028)
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": hostile_name, "version": hostile_version}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        for bad_char in hostile_chars:
+            assert bad_char not in banner, (
+                f"char {bad_char!r} (U+{ord(bad_char):04X}) leaked: {banner!r}"
             )
+        # Also the ASCII newline/CR variants must be gone — defense in depth
+        # against the pre-#14 `.replace("\n", " ").replace("\r", " ")` chain.
+        assert "\n" not in banner, banner
+        assert "\r" not in banner, banner
+        assert len(banner.splitlines()) == 1
+        assert banner.startswith("PACT plugin: ")
+
+    def test_clean_input_passes_through_unchanged(self, tmp_path, monkeypatch):
+        """Positive control: manifest with only printable ASCII should
+        produce a banner IDENTICAL to what the pre-sanitizer helper would
+        produce (no accidental mangling of legitimate content). Pins the
+        `\x20` (space) and `\x21..\x7e` printable range AS OUTSIDE the
+        strip class."""
+        # No skip needed — this test asserts behavior under clean input,
+        # which must hold whether or not the sanitizer is present.
+        from shared.plugin_manifest import format_plugin_banner
+
+        root = _make_plugin_root(
+            tmp_path,
+            json.dumps({"name": "PACT", "version": "3.18.1-beta+build.5"}),
+        )
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+
+        banner = format_plugin_banner()
+
+        assert banner == (
+            f"PACT plugin: PACT 3.18.1-beta+build.5 (root: {root})"
         )
 
-        result = get_peer_context(
-            agent_type="pact-architect",
-            team_name="pact-test",
-            agent_name="architect",
-            teams_dir=str(tmp_path / "teams"),
-        )
 
-        assert result is not None
-        assert "PACT plugin: PACT 3.18.1" in result, (
-            "banner missing from peer_inject.get_peer_context() return — "
-            "verify peer_inject.py line 167 still includes "
-            "format_plugin_banner() in the return concatenation"
-        )
-
-    def test_format_plugin_banner_is_imported_in_peer_inject(self):
-        """Static guard: import must be present at module scope."""
-        import peer_inject
-
-        assert hasattr(peer_inject, "format_plugin_banner"), (
-            "peer_inject must import format_plugin_banner at module scope"
-        )
+# Integration tests (TestSessionInitSlotAIntegration, TestPeerInjectIntegration)
+# and revert guards (TestCounterTestBySlotARevert, TestCounterTestByPeerInjectRevert)
+# have moved to tests/test_session_init.py and tests/test_peer_inject.py
+# respectively — they exercise the hooks, so they live alongside them.
 
 
 class TestDogfoodPathWorktreeVsInstalledCache:
@@ -960,17 +851,39 @@ class TestDogfoodPathWorktreeVsInstalledCache:
     def test_banner_does_not_surface_worktree_version(
         self, tmp_path, monkeypatch
     ):
-        """Negative form of the above: the worktree's 3.99.0 must NOT
-        appear anywhere in the banner."""
+        """Negative form: the worktree's 3.99.0 must NOT appear anywhere
+        in the banner AND Path.read_text must NEVER be called with a path
+        under the worktree tree. The call-site negative assertion turns
+        this test into a load-bearing contract: if future regression
+        accidentally reads from CLAUDE_PLUGIN_ROOT's sibling/parent paths
+        or from the current working directory, the call-tracking fails
+        even if the output string happens to omit `3.99.0`."""
+        from pathlib import Path as _Path
+
         from shared.plugin_manifest import format_plugin_banner
 
         installed_cache, worktree = self._setup_two_trees(tmp_path)
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(installed_cache))
 
+        worktree_reads: list[str] = []
+        original_read_text = _Path.read_text
+
+        def tracking_read_text(self, *args, **kwargs):
+            if str(worktree) in str(self):
+                worktree_reads.append(str(self))
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(_Path, "read_text", tracking_read_text)
+
         banner = format_plugin_banner()
 
         assert "3.99.0" not in banner
         assert str(worktree) not in banner
+        assert worktree_reads == [], (
+            f"banner helper should never consult the worktree tree when "
+            f"CLAUDE_PLUGIN_ROOT points elsewhere; observed reads: "
+            f"{worktree_reads}"
+        )
 
     def test_banner_divergence_visible_via_root_path(
         self, tmp_path, monkeypatch
