@@ -707,14 +707,21 @@ class PACTMemory:
                 return None
             memory_id = resolved
 
-            # Also remove from vector table
+            # Also remove from vector table. vec_memories is created lazily
+            # by the FTS extension; absence is expected when FTS is
+            # unavailable, and the "no such table" OperationalError is
+            # silently swallowed in that case. All other OperationalErrors
+            # (lock contention, corruption, schema violations) and every
+            # other exception class must propagate so the caller sees the
+            # real failure instead of a silent orphan-vector.
             try:
                 conn.execute(
                     "DELETE FROM vec_memories WHERE memory_id = ?",
                     (memory_id,)
                 )
-            except Exception:
-                pass  # Vector table might not exist
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
 
             return memory_id if delete_memory(conn, memory_id) else None
 

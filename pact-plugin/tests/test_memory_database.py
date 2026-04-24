@@ -475,6 +475,117 @@ class TestDeleteMemory:
         assert delete_memory(db_conn, "nonexistent") is False
 
 
+class TestPACTMemoryDeleteVecTableHandling:
+    """Locks the narrowed-except contract on PACTMemory.delete's vec_memories cleanup.
+
+    PACTMemory.delete attempts `DELETE FROM vec_memories WHERE memory_id = ?`
+    AFTER deleting the row from the primary memories table. The vec_memories
+    table only exists when sqlite-vec is loaded; absence is the legitimate
+    common case. A bare `except Exception: pass` here would also swallow
+    "database is locked", "disk I/O error", and other surface-or-surface-this
+    failures. The narrowed `except sqlite3.OperationalError if "no such table"
+    in str(e)` lets the legitimate-FTS-absent path stay silent while
+    surfacing every other operational error.
+    """
+
+    def test_delete_silently_handles_missing_vec_memories_table(self, tmp_path):
+        """Real-DB path: schema has no vec_memories table; delete must succeed."""
+        sys.path.insert(
+            0,
+            os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'),
+        )
+        from scripts.memory_api import PACTMemory
+
+        db_path = tmp_path / "vec_absent.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
+        # Schema does NOT include vec_memories — DELETE FROM vec_memories will
+        # raise sqlite3.OperationalError("no such table: vec_memories"), which
+        # the narrowed except must swallow.
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(PACTMemory, "_store_embedding", autospec=True):
+            memory = PACTMemory(
+                project_id="vec-absent-test",
+                session_id="s1",
+                db_path=db_path,
+            )
+            mem_id = memory.save({"context": "row to delete"})
+            # Delete must succeed despite vec_memories being absent.
+            resolved = memory.delete(mem_id)
+            assert resolved == mem_id
+            # Verify the primary-table delete actually landed.
+            assert memory.get(mem_id) is None
+
+    def test_delete_propagates_other_operational_errors(self, tmp_path):
+        """Bug-surfacing: non-"no such table" OperationalError must propagate.
+
+        Wraps conn.execute so the vec_memories DELETE raises a controlled
+        OperationalError ("database is locked") instead of the natural
+        no-such-table error. The narrowed except must NOT swallow this —
+        propagating it surfaces real problems (lock contention, disk I/O,
+        etc.) instead of silently leaving stale vector entries.
+        """
+        sys.path.insert(
+            0,
+            os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'),
+        )
+        from scripts.memory_api import PACTMemory
+        import scripts.memory_api as memory_api_mod
+
+        db_path = tmp_path / "vec_locked.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
+
+        from contextlib import contextmanager
+        real_db_connection = memory_api_mod.db_connection
+
+        class _ConnProxy:
+            """Delegates everything to real_conn, intercepts execute()."""
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *args, **kwargs):
+                # Inject a non-"no such table" OperationalError on the
+                # vec_memories DELETE only. All other queries (resolver,
+                # primary-table delete, ensure_initialized) pass through.
+                if "vec_memories" in sql and sql.lstrip().upper().startswith("DELETE"):
+                    raise sqlite3.OperationalError("database is locked")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                # Delegate any other attribute (commit, close, row_factory, etc.)
+                return getattr(self._real, name)
+
+        @contextmanager
+        def db_connection_locking_vec(path):
+            with real_db_connection(path) as real_conn:
+                yield _ConnProxy(real_conn)
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(PACTMemory, "_store_embedding", autospec=True):
+            memory = PACTMemory(
+                project_id="vec-locked-test",
+                session_id="s1",
+                db_path=db_path,
+            )
+            mem_id = memory.save({"context": "row delete will lock-fail"})
+
+            # Now patch db_connection so the SUBSEQUENT delete uses the
+            # locking wrapper. (save() above used the real db_connection.)
+            with patch.object(
+                memory_api_mod, "db_connection", db_connection_locking_vec
+            ):
+                with pytest.raises(sqlite3.OperationalError) as exc_info:
+                    memory.delete(mem_id)
+                assert "database is locked" in str(exc_info.value)
+                assert "no such table" not in str(exc_info.value)
+
+
 class TestListMemories:
     def test_lists_all(self, db_conn):
         from scripts.database import create_memory, list_memories
