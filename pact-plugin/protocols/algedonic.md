@@ -83,17 +83,7 @@ Apply the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.m
 
 ### Latency Caveat
 
-Algedonic signals travel over `SendMessage` and are subject to the standard
-delivery model: messages land in the recipient's inbox at their next idle
-boundary, not instantaneously.
-
-- **Lead's "surface to user immediately"** means at the lead's next idle — the lead cannot preempt itself mid-tool-call to deliver the signal.
-- **HALT broadcast to teammates** via `SendMessage(to="*", ...)` reaches each teammate at that teammate's next idle boundary; a teammate currently mid-tool-call continues until their tool returns and they next check inbox.
-- **Immediate halt of in-flight teammate work** requires user-side manual interrupt (Esc / stop in the host UI). The in-band broadcast cannot stop work that is already executing a tool call.
-
-When emitting a HALT, assume non-zero latency before affected teammates see
-it and act on it. Plan recovery on the assumption that some in-flight work
-may complete before the HALT is observed.
+See the Communication Charter Part I — Algedonic-Signal Latency Caveat ([pact-communication-charter.md](pact-communication-charter.md)) for the delivery-model implications (idle-boundary HALT latency; immediate in-flight halt needs user interrupt; lead's "surface immediately" = lead's next idle).
 
 ### Task System Integration
 
