@@ -1668,6 +1668,126 @@ class TestCliSubprocess:
         assert out["result"]["memory_id"] == full_id
         assert out["result"]["memory_id"] != prefix
 
+    # ----- Cycle 3 H1: case-insensitive matching extends to FULL-32-char branch -----
+
+    def test_uppercase_full_id_resolves_to_lowercase_stored_get(self, cli_script_path, cli_db):
+        """E2E: passing the full ID in UPPERCASE to `get` still resolves the lowercase-stored row.
+
+        The 32-char branch bypasses prefix resolution entirely; case-normalization
+        must apply on this branch too, otherwise an uppercase full ID misses
+        despite being byte-identical-after-lower() to the stored ID.
+        """
+        full_id_lower = "abcdef0" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id_lower, "case-roundtrip")
+
+        full_id_upper = full_id_lower.upper()
+        assert full_id_upper != full_id_lower  # confirm the input differs
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id_upper,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        out = json.loads(result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["id"] == full_id_lower
+        assert out["result"]["context"] == "case-roundtrip"
+
+    def test_uppercase_full_id_resolves_to_lowercase_stored_update(self, cli_script_path, cli_db):
+        """E2E: passing the full ID in UPPERCASE to `update` mutates the lowercase-stored row."""
+        full_id_lower = "abcdef0" + "2" + "0" * 24
+        self._seed_memory(cli_db, full_id_lower, "before-case")
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", full_id_lower.upper(),
+             json.dumps({"context": "after-case"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        out = json.loads(update_result.stdout)
+        assert out["ok"] is True
+        # Resolved-id echo must be the lowercase storage form, not the uppercase input.
+        assert out["result"]["memory_id"] == full_id_lower
+
+        # Verify mutation actually landed via lowercase GET
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id_lower,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(get_result.stdout)["result"]["context"] == "after-case"
+
+    def test_uppercase_full_id_resolves_to_lowercase_stored_delete(self, cli_script_path, cli_db):
+        """E2E: passing the full ID in UPPERCASE to `delete` removes the lowercase-stored row."""
+        full_id_lower = "abcdef0" + "3" + "0" * 24
+        self._seed_memory(cli_db, full_id_lower, "case-doomed")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", full_id_lower.upper(),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        out = json.loads(delete_result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["memory_id"] == full_id_lower
+
+        # Verify removal via lowercase GET → NOT_FOUND
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id_lower,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
+
+    # ----- Cycle 3 H3: AMBIGUOUS_PREFIX envelope scrubs $HOME from match contexts -----
+
+    def test_ambiguous_prefix_scrubs_context_in_envelope(self, cli_script_path, cli_db):
+        """E2E: AMBIGUOUS_PREFIX envelope replaces user $HOME path with '~' in each match context.
+
+        Contexts may carry absolute paths from agent notes; piping the envelope
+        to a log file would otherwise leak the operating user's home directory.
+        Scrub is applied per-match in cli.py at all 3 ambiguous-prefix call
+        sites (cmd_get, cmd_update, cmd_delete); this test exercises cmd_get
+        as representative.
+        """
+        home = str(Path.home())
+        # Guard against an unresolved tilde — _scrub no-ops if HOME is unset
+        # or returns the literal '~', and this test would not be exercising
+        # the scrub path in that case.
+        assert home and home != "~", f"HOME must be a real path for this test (got {home!r})"
+
+        sensitive_path = f"{home}/Sites/secret-project/file.py"
+        id_a = "scrub00" + "a" + "0" * 24
+        id_b = "scrub00" + "b" + "0" * 24
+        self._seed_memory(cli_db, id_a, f"Note about {sensitive_path}")
+        self._seed_memory(cli_db, id_b, f"Other note also at {sensitive_path}")
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", "scrub00",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, f"stdout: {result.stdout}"
+        err = json.loads(result.stderr)
+        assert err["error"] == "AMBIGUOUS_PREFIX"
+        assert err["prefix"] == "scrub00"
+
+        # Per-match contexts must NOT contain the literal $HOME expansion.
+        for match in err["matches"]:
+            assert home not in match["context"], (
+                f"$HOME ({home!r}) leaked into match context: {match['context']!r}"
+            )
+            # Positive assertion: the substituted form is present.
+            assert "~/Sites/secret-project/file.py" in match["context"]
+            # IDs are hex and must NOT be scrubbed; they should be the
+            # untouched 32-char storage form. Per backend H3 contract.
+            assert match["id"] in (id_a, id_b)
+            assert len(match["id"]) == 32
+
     def test_save_via_stdin(self, cli_script_path, cli_db):
         memory_dict = make_cli_memory_dict(context="stdin test")
         json_str = json.dumps(memory_dict)

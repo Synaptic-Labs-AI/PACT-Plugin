@@ -246,12 +246,19 @@ class TestResolveMemoryIdPrefix:
         assert exc_info.value.prefix == "abc123"
         assert exc_info.value.minimum == 7
 
-    def test_like_wildcard_in_prefix_is_escaped(self, db_conn):
-        """A literal '%' in the prefix must not expand as a SQL wildcard."""
+    def test_non_hex_prefix_returns_none(self, db_conn):
+        """Non-hex prefix characters (e.g., punctuation) yield no match.
+
+        The range scan operates on a literal `id >= prefix AND id < prefix+'g'`
+        bound; a prefix outside the lowercase-hex alphabet falls outside the
+        range of any real ID, so the lookup correctly returns None. Guards
+        against attempts to inject SQL metacharacters via the prefix arg.
+        """
         from scripts.database import create_memory, resolve_memory_id_prefix
-        # Real memory whose ID does NOT contain '%' (IDs are hex)
         create_memory(db_conn, {"id": "deadbeef" + "0" * 24, "context": "x"})
-        # '%deadbe' would match 'deadbeef...' if '%' were not escaped
+        # '%' < '0' in ASCII; a prefix starting with '%' falls outside any
+        # hex ID's range. Same outcome a literal-meta-char attempt would have
+        # produced under the prior LIKE-with-escape implementation.
         assert resolve_memory_id_prefix(db_conn, "%deadbe") is None
 
     def test_empty_string_prefix_raises_too_short(self, db_conn):
@@ -349,6 +356,51 @@ class TestResolveMemoryIdPrefix:
         assert exc_info.value.truncated is True
         assert exc_info.value.total_matches == seeded
         assert len(exc_info.value.matches) == AMBIGUOUS_MATCH_CAP
+
+    def test_range_scan_does_not_overmatch_at_boundary(self, db_conn):
+        """Range scan must NOT match rows where the next char exceeds the prefix.
+
+        Locks the H2 contract independent of internals (LIKE vs range): a
+        prefix `abcdef0` should match `abcdef0...` but NOT `abcdef1...`,
+        even though both share the same first 6 chars. A buggy
+        upper-bound construction (e.g., open-ended scan, off-by-one cap)
+        would over-match here.
+        """
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+        )
+        id_at_prefix = "abcdef0" + "0" * 25  # matches prefix "abcdef0"
+        id_above_prefix = "abcdef1" + "0" * 25  # one char higher at the boundary
+        create_memory(db_conn, {"id": id_at_prefix, "context": "in-range"})
+        create_memory(db_conn, {"id": id_above_prefix, "context": "above-range"})
+
+        # Unique match — only the in-range row resolves
+        assert resolve_memory_id_prefix(db_conn, "abcdef0") == id_at_prefix
+
+    def test_generate_id_alphabet_invariant(self):
+        """Every generate_id() output must stay within the lowercase-hex alphabet.
+
+        The resolver's range-scan upper bound is `prefix + _PREFIX_UPPER_BOUND_CHAR`
+        (currently 'g' — the smallest ASCII char above 'f'). That bound is
+        correct ONLY if generate_id produces strictly lowercase hex [0-9a-f].
+        If the alphabet ever broadens (e.g., to base32 or full alphanumeric),
+        the upper-bound constant must be revisited; this test fails loudly
+        in that case.
+        """
+        from scripts.database import generate_id, _PREFIX_UPPER_BOUND_CHAR
+
+        # 100 IDs is enough to surface a misconfigured charset without
+        # making the test slow; secrets.token_hex is uniform over [0-9a-f].
+        for _ in range(100):
+            mid = generate_id()
+            for ch in mid:
+                assert ch < _PREFIX_UPPER_BOUND_CHAR, (
+                    f"generate_id produced char {ch!r} (in {mid!r}) outside the "
+                    f"strictly-below-{_PREFIX_UPPER_BOUND_CHAR!r} alphabet that "
+                    "the range-scan upper bound depends on. If charset broadened "
+                    "intentionally, update _PREFIX_UPPER_BOUND_CHAR."
+                )
 
 
 class TestUpdateMemory:

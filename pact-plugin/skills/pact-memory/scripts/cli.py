@@ -160,11 +160,18 @@ def cmd_get(args, db_path=None):
             minimum=exc.minimum,
         )
     except AmbiguousPrefixError as exc:
+        # Scrub user HOME from each match's `context` snippet so a memory
+        # whose context recorded an absolute path doesn't leak it via the
+        # disambiguation envelope. Per-site scrub keeps the redaction
+        # obvious; do not centralize into `_error`.
+        scrubbed_matches = [
+            {**m, "context": _scrub(m["context"])} for m in exc.matches
+        ]
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
             prefix=exc.prefix,
-            matches=exc.matches,
+            matches=scrubbed_matches,
             truncated=exc.truncated,
             total_matches=exc.total_matches,
         )
@@ -223,11 +230,18 @@ def cmd_update(args, db_path=None):
         # field-validation ValueError handler below.
         _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
     except AmbiguousPrefixError as exc:
+        # Scrub user HOME from each match's `context` snippet so a memory
+        # whose context recorded an absolute path doesn't leak it via the
+        # disambiguation envelope. Per-site scrub keeps the redaction
+        # obvious; do not centralize into `_error`.
+        scrubbed_matches = [
+            {**m, "context": _scrub(m["context"])} for m in exc.matches
+        ]
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
             prefix=exc.prefix,
-            matches=exc.matches,
+            matches=scrubbed_matches,
             truncated=exc.truncated,
             total_matches=exc.total_matches,
         )
@@ -256,11 +270,18 @@ def cmd_delete(args, db_path=None):
     except PrefixTooShortError as exc:
         _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
     except AmbiguousPrefixError as exc:
+        # Scrub user HOME from each match's `context` snippet so a memory
+        # whose context recorded an absolute path doesn't leak it via the
+        # disambiguation envelope. Per-site scrub keeps the redaction
+        # obvious; do not centralize into `_error`.
+        scrubbed_matches = [
+            {**m, "context": _scrub(m["context"])} for m in exc.matches
+        ]
         _error(
             "AMBIGUOUS_PREFIX",
             str(exc),
             prefix=exc.prefix,
-            matches=exc.matches,
+            matches=scrubbed_matches,
             truncated=exc.truncated,
             total_matches=exc.total_matches,
         )

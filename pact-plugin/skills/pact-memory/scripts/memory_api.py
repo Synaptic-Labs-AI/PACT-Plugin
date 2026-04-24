@@ -534,11 +534,14 @@ class PACTMemory:
         """
         Resolve a caller-supplied ID into a full 32-char memory ID.
 
-        Full-length input is returned unchanged (no DB query). Shorter
-        input is treated as a prefix and resolved via the storage-layer
-        resolver: a unique prefix returns the full ID; ambiguity raises
-        AmbiguousPrefixError; too-short raises PrefixTooShortError; no
-        match returns None.
+        Input is case-folded to lowercase before any branch, so an
+        uppercase or mixed-case full ID resolves identically to its
+        lowercase form (memory IDs are stored as lowercase hex).
+        Full-length input is then returned unchanged (no DB query).
+        Shorter input is treated as a prefix and resolved via the
+        storage-layer resolver: a unique prefix returns the full ID;
+        ambiguity raises AmbiguousPrefixError; too-short raises
+        PrefixTooShortError; no match returns None.
 
         Caller already owns an open `conn` (inside a `db_connection`
         context manager). This helper does not open or close connections.
@@ -546,14 +549,18 @@ class PACTMemory:
         Args:
             conn: Active database connection.
             memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
+                Case-insensitive: uppercase and mixed-case input is
+                normalized to lowercase before lookup.
 
         Returns:
-            The full memory ID, or None if the prefix matches no row.
+            The full memory ID (lowercase), or None if the prefix matches
+            no row.
 
         Raises:
             PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
             AmbiguousPrefixError: prefix matches more than one memory.
         """
+        memory_id = memory_id.lower()
         if len(memory_id) >= MEMORY_ID_LENGTH:
             return memory_id
         return resolve_memory_id_prefix(conn, memory_id)

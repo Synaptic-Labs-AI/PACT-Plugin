@@ -49,6 +49,12 @@ MIN_PREFIX_LENGTH = 7
 # ambiguous branch (rare); the unique-match common path is unaffected.
 AMBIGUOUS_MATCH_CAP = 50
 
+# Upper bound for prefix range scan: smallest ASCII char strictly greater
+# than 'f' (max char of lowercase hex alphabet). If `generate_id` ever
+# broadens the alphabet beyond [0-9a-f], this constant must change AND
+# the alphabet-invariant test on generate_id will fail loudly.
+_PREFIX_UPPER_BOUND_CHAR = "g"
+
 
 class PrefixTooShortError(ValueError):
     """Raised when a memory-ID prefix is shorter than MIN_PREFIX_LENGTH."""
@@ -878,7 +884,10 @@ def resolve_memory_id_prefix(
     """
     Resolve a memory-ID prefix to a single full ID, git-style.
 
-    The prefix is lowercased before lookup so `ABCD1234` and `abcd1234`
+    Lookup uses a half-open range scan (`id >= prefix AND id < prefix + 'g'`)
+    against the BINARY-collated primary key, which lets SQLite walk the
+    index instead of full-scanning under a LIKE pattern. The prefix is
+    lowercased before bounds construction so `ABCD1234` and `abcd1234`
     resolve identically. IDs are stored as lowercase hex.
 
     Args:
@@ -906,23 +915,20 @@ def resolve_memory_id_prefix(
     if len(prefix) < MIN_PREFIX_LENGTH:
         raise PrefixTooShortError(prefix)
 
-    # Trust boundary: `prefix` arrives untrusted from CLI argv. The escape
-    # below + parameter binding below are the only barriers between user
-    # input and a SQL LIKE clause. Do not bypass either.
     # Case-fold to match the lowercase hex IDs produced by generate_id.
     prefix = prefix.lower()
 
-    # SQL LIKE escape. Order is load-bearing: backslash MUST be doubled
-    # FIRST, because the subsequent `%` and `_` substitutions introduce new
-    # backslashes that must NOT themselves be re-escaped. The `ESCAPE '\\'`
-    # clause on the SELECT pairs with this.
-    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    # Half-open range bounds; see `_PREFIX_UPPER_BOUND_CHAR` for the
+    # alphabet-invariant. [lo, hi) covers exactly the rows whose ID begins
+    # with `prefix` under BINARY collation on the lowercase-hex PK.
+    lo = prefix
+    hi = prefix + _PREFIX_UPPER_BOUND_CHAR
 
     # LIMIT 2 short-circuits the common case (unique match): we only need to
     # know whether more than one row matches before issuing a wider query.
     cursor = conn.execute(
-        "SELECT id FROM memories WHERE id LIKE ? ESCAPE '\\' LIMIT 2",
-        (escaped + "%",),
+        "SELECT id FROM memories WHERE id >= ? AND id < ? LIMIT 2",
+        (lo, hi),
     )
     rows = cursor.fetchall()
 
@@ -934,11 +940,10 @@ def resolve_memory_id_prefix(
     # Ambiguous — fetch a capped match list with a short context descriptor
     # plus a separate COUNT for the true total. Both queries fire only on
     # this branch; the unique-match path above is single-query.
-    pattern = escaped + "%"
     cursor = conn.execute(
-        "SELECT id, context FROM memories WHERE id LIKE ? ESCAPE '\\' "
+        "SELECT id, context FROM memories WHERE id >= ? AND id < ? "
         "ORDER BY id LIMIT ?",
-        (pattern, AMBIGUOUS_MATCH_CAP),
+        (lo, hi, AMBIGUOUS_MATCH_CAP),
     )
     matches = []
     for row in cursor.fetchall():
@@ -953,8 +958,8 @@ def resolve_memory_id_prefix(
             "context_truncated": len(full_context) > descriptor_chars,
         })
     count_row = conn.execute(
-        "SELECT COUNT(*) AS n FROM memories WHERE id LIKE ? ESCAPE '\\'",
-        (pattern,),
+        "SELECT COUNT(*) AS n FROM memories WHERE id >= ? AND id < ?",
+        (lo, hi),
     ).fetchone()
     total_matches = count_row["n"]
     truncated = total_matches > len(matches)
