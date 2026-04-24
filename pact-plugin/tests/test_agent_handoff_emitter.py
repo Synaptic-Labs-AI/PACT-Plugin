@@ -1134,21 +1134,27 @@ class TestPathSanitization:
                 f"bug has resurfaced."
             )
 
+        @pytest.mark.parametrize(
+            "raw_task_id",
+            ["/./.", ".//."],  # both sanitize to '..'
+            # Per security-reviewer-538's empirical 17-input probe: these
+            # forms produce `..` after regex stripping (two single-dot
+            # segments separated by `/` collapse to `..` once the `/` is
+            # stripped). Exercises the `task_id == ".."` branch of the
+            # #24 guard — distinct from the `"."` branch covered above.
+            # Pre-#24 without the branch, `marker_dir / ".."` resolves to
+            # `marker_dir.parent`, causing EEXIST → permanent suppression
+            # with a marker landing OUTSIDE the intended path.
+        )
         def test_dotdot_post_sanitize_emits_via_guard(
-            self, tmp_path, monkeypatch
+            self, raw_task_id, tmp_path, monkeypatch
         ):
-            """`task_id='..'` sanitizes to `''`; covered by the empty-case
-            parametrize above. This test pins the separate `.` vs `..`
-            concern in the guard: both must be caught. The guard check
-            `task_id in ("", ".", "..")` covers all three; we verify
-            the post-sanitize `''` path specifically by passing pre-
-            sanitize `'..'` and asserting emit."""
             monkeypatch.setenv("HOME", str(tmp_path))
             calls: list[dict] = []
             _run_main(
                 stdin_payload={
-                    "task_id": "..",
-                    "task_subject": "dotdot probe",
+                    "task_id": raw_task_id,
+                    "task_subject": "dotdot-collapse probe",
                     "teammate_name": "probe-agent",
                     "team_name": "pact-test",
                 },
@@ -1159,16 +1165,36 @@ class TestPathSanitization:
                 },
                 append_calls=calls,
             )
-            assert len(calls) == 1
+            assert len(calls) == 1, (
+                f"task_id {raw_task_id!r} sanitizes to '..' which pre-#24 "
+                f"resolved to `marker_dir.parent` → permanent suppression. "
+                f"#24 guard `task_id in ('', '.', '..')` must catch this."
+            )
+            # Pin that no stray marker files landed above team scope at
+            # `~/.claude/teams/` level (the pre-#24 escape shape when
+            # the `..` collapses marker_dir onto its parent).
+            teams_dir = tmp_path / ".claude" / "teams"
+            teams_children = (
+                {p.name for p in teams_dir.iterdir()}
+                if teams_dir.exists() else set()
+            )
+            assert teams_children <= {"pact-test"}, (
+                f"unexpected children in {teams_dir}: "
+                f"{teams_children - {'pact-test'}}. The `..` collapse may "
+                f"have created marker files above the team scope."
+            )
 
         @pytest.mark.parametrize(
             "raw_team_name,expected_sanitized",
             [
-                ("..", ""),     # pre-#24 guarded (empty branch)
-                ("..\\..", ""), # pre-#24 guarded
-                (".", "."),     # NEWLY guarded by #24 — cross-team pollution without guard
-                ("...", "."),   # NEWLY guarded by #24
-                ("/./", "."),   # NEWLY guarded by #24 — same root cause as task_id case
+                ("..", ""),       # pre-#24 guarded (empty branch)
+                ("..\\..", ""),   # pre-#24 guarded
+                (".", "."),       # NEWLY guarded by #24 — cross-team pollution without guard
+                ("...", "."),     # NEWLY guarded by #24
+                (".....", "."),   # NEWLY guarded by #24 — odd-count dots collapse to '.'
+                ("/./", "."),     # NEWLY guarded by #24 — same root cause as task_id case
+                ("/./.", ".."),   # NEWLY guarded by #24 — dotdot-collapse branch
+                (".//.", ".."),   # NEWLY guarded by #24 — same class as /./.
             ],
         )
         def test_degenerate_team_name_values_guarded(
