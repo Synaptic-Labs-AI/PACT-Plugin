@@ -2,8 +2,7 @@
 """
 Location: pact-plugin/hooks/agent_handoff_emitter.py
 Summary: TaskCompleted hook — pure journal-writer for agent_handoff events.
-Used by: hooks.json TaskCompleted registration (replaces handoff_gate.py
-         post-#538).
+Used by: hooks.json TaskCompleted registration.
 
 Responsibilities:
 - On TaskCompleted, write a single agent_handoff event to the session
@@ -13,8 +12,8 @@ Responsibilities:
 
 NOT responsible for:
 - HANDOFF metadata validation (no blocking, no stderr prompts).
-- memory_saved enforcement (advisory only at validate_handoff.py per #538).
-- Stall / nag detection (#538 removes that category of hook entirely).
+- memory_saved enforcement (advisory only at validate_handoff.py).
+- Stall / nag detection (not this hook's responsibility).
 
 Emission invariant: write exactly once iff
 (1) disk-read task status == "completed" AND
@@ -30,15 +29,13 @@ metadata-only TaskUpdates (claim flags, intentional_wait toggles,
 briefing_delivered tracking, etc.) generate spurious agent_handoff
 events on tasks still in_progress. The on-disk status read is the only
 source of truth for "did this TaskUpdate actually flip status to
-completed." (Regression class filed as #528; dogfood evidence at
-secretary-task-#1 in pact-114c988a — hundreds of spurious nags from
-metadata-only updates.)
+completed."
 
 Idempotency: sidecar O_EXCL marker at
 ~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. Claude Code's
 stopHooks.ts dispatches TaskCompleted on every matching owner during a
 Stop flow; without the marker the journal would see the same completion
-up to 37× per task (empirically sampled across 36 sessions pre-#538).
+up to 37× per task (empirically sampled across 36 sessions).
 The marker and the status gate defend orthogonal failure modes: the
 marker dedupes repeated fires of the SAME (team, task_id) completion;
 the status gate rejects metadata-only TaskUpdates on in-progress tasks
@@ -52,8 +49,7 @@ that would otherwise pass the marker's first-fire check.
 # The five properties above ARE the hook-class categorical standard's
 # acceptance contract (pure journal-writer, zero emission sinks,
 # at-most-once per key, exit-0 on every code path, no intentional_wait
-# consumption). Satisfied by construction — see #538 AC #8 for the
-# canonical statement.
+# consumption). Satisfied by construction.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name (TaskCompleted schema).
@@ -76,8 +72,8 @@ from shared.task_utils import read_task_json
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 # Signal-task types — inline literal, matches task_utils.py:188 and
-# session_resume.py:525 convention. Do NOT import is_signal_task: that
-# helper is removed in #538 C3 alongside intentional_wait cleanup.
+# session_resume.py:525 convention. Do NOT import is_signal_task: no
+# such helper exists.
 _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 
 
@@ -125,9 +121,8 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
     ENOSPC, filesystem race), returns False so the caller emits the
     event anyway. Data-integrity (preserving the HANDOFF in the journal)
     outweighs duplication-prevention when the marker subsystem itself
-    breaks; worst case the caller falls back to the per-fire emission
-    behavior the previous hook implementation exhibited (up to 37× per
-    task; see #538 for the empirical measurement) for this one task.
+    breaks; worst case the caller falls back to per-fire emission for
+    this one task (up to 37× per task, empirically measured).
     """
     # Degenerate post-sanitization values collapse the marker path onto an
     # existing directory:
@@ -181,17 +176,16 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
 
 def main() -> None:
     # Outer catch-all preserves the exit-0 suppressOutput contract (see
-    # docstring; #538 AC #8) against any unexpected exception (malformed
-    # task.json with non-dict metadata, import-time race, filesystem errors
-    # past the inner guards). The bare `except Exception` is deliberate —
+    # docstring) against any unexpected exception (malformed task.json
+    # with non-dict metadata, import-time race, filesystem errors past
+    # the inner guards). The bare `except Exception` is deliberate —
     # livelock-safety via the "exits 0 on every code path" invariant
     # outweighs observability for unexpected errors here. Callers of this
     # hook (Claude Code's TaskCompleted dispatch) treat nonzero exit as a
-    # hook-error UI surface; that would re-introduce the livelock-capable
-    # failure class — TeammateIdle/TaskCompleted/Stop hooks emitting
+    # hook-error UI surface; nonzero exit would produce the livelock-capable
+    # failure class: TeammateIdle/TaskCompleted/Stop hooks emitting
     # systemMessage or error output on every event dispatch until the
-    # owner task resolves — which the categorical standard was introduced
-    # to eliminate (see #538).
+    # owner task resolves — which the categorical standard forbids.
     try:
         try:
             input_data = json.load(sys.stdin)
@@ -253,12 +247,11 @@ def main() -> None:
         # not only on transitions to `completed`; trusting the event name as
         # the transition signal would re-emit agent_handoff events on every
         # metadata-only TaskUpdate (claim flags, intentional_wait toggles,
-        # briefing_delivered tracking, etc.) — the regression class filed
-        # as #528. The on-disk `status` is the only reliable source of
-        # truth for "did this
-        # TaskUpdate actually flip status to completed." Metadata-only
-        # TaskUpdates (claim flags, briefing_delivered, intentional_wait
-        # toggles, etc.) keep status=in_progress and MUST NOT emit.
+        # briefing_delivered tracking, etc.). The on-disk `status` is the
+        # only reliable source of truth for "did this TaskUpdate actually
+        # flip status to completed." Metadata-only TaskUpdates (claim flags,
+        # briefing_delivered, intentional_wait toggles, etc.) keep
+        # status=in_progress and MUST NOT emit.
         if task_data.get("status") != "completed":
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
@@ -283,8 +276,8 @@ def main() -> None:
         # write errors), the marker persists and any retry will see it
         # and suppress — the event is lost on disk AND marked as
         # already-emitted. Intentional trade-off: preventing 37× duplicate
-        # emission (empirically measured pre-#538) outweighs the rare
-        # single-event loss under write failure.
+        # emission (empirically measured) outweighs the rare single-event
+        # loss under write failure.
         if _already_emitted(team_name, task_id):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)

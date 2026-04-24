@@ -62,7 +62,7 @@ The auditor operates primarily through file observation, not messaging. This min
 3. **Cross-agent consistency** — When parallel coders: compatible interfaces? Consistent naming? No semantic overlap?
 4. **Cross-cutting gaps** — Error handling patterns, security basics, performance red flags
 5. **Requirement alignment** — Solving the right problem as specified?
-6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Advisory only; does not block merge. Not checked during concurrent-with-CODE observation cycles (the log is often legitimately authored in TEST/docs phase). Migrated from the removed `phase_completion.py` hook in #538 — YELLOW (not RED) avoids pressuring teammates to fabricate shallow decision-logs.
+6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Advisory only; does not block merge. Not checked during concurrent-with-CODE observation cycles: the log is often legitimately authored in TEST/docs phase, so a per-CODE check produces false-positive advisories. YELLOW (not RED) prevents pressuring teammates to fabricate shallow decision-logs — advisory nudges elicit missing logs; RED on a missing artifact elicits empty ones.
 
 **NOT audited**: Code style, test coverage (TEST phase), code cleanliness mid-work, micro-optimization.
 
@@ -130,7 +130,7 @@ The auditor uses signal-based completion rather than standard HANDOFF:
 1. Task is created with `metadata: {"completion_type": "signal"}`
 2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
 3. Auditor marks task completed
-4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no bespoke hook validates it — post-#538 the lead verifies presence directly via `TaskGet`).
+4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the lead verifies presence directly via `TaskGet`).
 
 **audit_summary format**:
 ```json

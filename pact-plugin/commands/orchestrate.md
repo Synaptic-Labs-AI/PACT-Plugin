@@ -686,7 +686,7 @@ JSON
   TaskUpdate(taskId, owner="secretary")
   ```
   Do not block on completion — TEST phase proceeds in parallel.
-- [ ] **Primary HANDOFF-presence check (post-#538)**: on receiving each Task-complete SendMessage, verify via TaskGet — confirm status=completed AND metadata.handoff populated/non-empty. If missing, SendMessage the agent to complete HANDOFF before downstream dispatch proceeds.
+- [ ] **Primary HANDOFF-presence check**: on receiving each Task-complete SendMessage, verify via TaskGet — confirm status=completed AND metadata.handoff populated/non-empty. If missing, SendMessage the agent to complete HANDOFF before downstream dispatch proceeds.
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE

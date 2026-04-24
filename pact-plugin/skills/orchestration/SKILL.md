@@ -433,7 +433,7 @@ Exceptions:
 
 Teammates signal protocol-defined waits via the `intentional_wait` task metadata
 (see `pact-agent-teams/SKILL.md::Intentional Waiting` for the teammate-side
-SET/CLEAR contract). Post-#538 there are no in-plugin consumers of the flag;
+SET/CLEAR contract). There are no in-plugin consumers of the flag;
 teammate silence during a wait is a consequence of the Idle Discipline they
 follow (no new output when nothing advances the work), not of any hook reading
 the flag. The flag is audit metadata — it documents the wait for your

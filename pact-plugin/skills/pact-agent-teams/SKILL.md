@@ -126,7 +126,7 @@ When your work is done:
    a. `SendMessage(to="lead", message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
    b. `TaskUpdate(taskId, status="completed")`
 
-   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the `TaskUpdate(status="completed")` call is required to fire the TaskCompleted event. Post-#538, the lead's `TaskGet` verification is the primary HANDOFF-presence check; a missing or empty `metadata.handoff` will be flagged and your completion rejected until you store the HANDOFF. The `agent_handoff_emitter.py` hook that journals the completion is a pure journal-writer — it does NOT block, so your metadata.handoff content is load-bearing for both the lead's gate and institutional memory.
+   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the `TaskUpdate(status="completed")` call is required to fire the TaskCompleted event. The lead's `TaskGet` verification is the primary HANDOFF-presence check; a missing or empty `metadata.handoff` will be flagged and your completion rejected until you store the HANDOFF. The `agent_handoff_emitter.py` hook that journals the completion is a pure journal-writer — it does NOT block, so your metadata.handoff content is load-bearing for both the lead's gate and institutional memory.
 
 3. **Self-claim follow-up work**: Check `TaskList` for unassigned, unblocked tasks matching your domain
 4. If found: `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin
@@ -191,7 +191,7 @@ If you have nothing to say that advances the work, say nothing.
 When your task is `in_progress` but you are legitimately idle awaiting a message
 (teachback approval, inter-commit hold, peer reply, user decision, blocker
 resolution), signal it via the `intentional_wait` task metadata BEFORE going idle.
-Post-#538 there are no in-plugin consumers of this flag; the schema primitives
+There are no in-plugin consumers of this flag; the schema primitives
 (`KNOWN_REASONS`, `KNOWN_RESOLVERS`, `wait_stale`) in `shared.intentional_wait`
 are retained as the teammate-facing metadata contract for protocol-defined
 waits. Using the flag documents the wait intent for the lead's TaskGet
@@ -241,7 +241,7 @@ later inspection reflects the real duration.
 
 - **Consultant mode** (no owned `in_progress` task): the flag has no current consumer for consultants anyway.
 - **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it for brief waits.
-- **Completion gating**: the flag does NOT suppress the lead's post-#538 HANDOFF-presence check. An empty or missing `metadata.handoff` will be flagged by the lead's TaskGet verification — store your HANDOFF before marking the task completed, regardless of intentional_wait state.
+- **Completion gating**: the flag does NOT suppress the lead's HANDOFF-presence check. An empty or missing `metadata.handoff` will be flagged by the lead's TaskGet verification — store your HANDOFF before marking the task completed, regardless of intentional_wait state.
 
 ## Consultant Mode
 

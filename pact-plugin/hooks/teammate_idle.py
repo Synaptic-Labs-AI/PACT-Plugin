@@ -33,9 +33,7 @@ Used by: hooks.json TeammateIdle hook
 # itself is a general "no livelock capability" contract whose concrete
 # manifestation differs per hook — see the emitter's docstring for
 # the TaskCompleted hook's version (pure-journal-writer + O_EXCL
-# marker + disk-status gate + exit-0). (The categorical standard and
-# its acceptance criterion #8 were introduced with the hook-class
-# redesign; see #538 for the empirical record and rollout history.)
+# marker + disk-status gate + exit-0).
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, request shutdown via shutdown_request.

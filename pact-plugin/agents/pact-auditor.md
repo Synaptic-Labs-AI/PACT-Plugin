@@ -114,7 +114,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 3. **Cross-agent consistency** — Parallel coders producing compatible interfaces, consistent naming, shared types
 4. **Cross-cutting gaps** — Error handling patterns, security basics, performance red flags
 5. **Requirement alignment** — Solving the right problem as stated in the plan
-6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Does not block; advisory signal for lead/architect to author before merge. Not checked during concurrent-with-CODE observation cycles (too-early-fire class; the log is often legitimately deferred to TEST/docs phase). Migrated from the removed `phase_completion.py` hook in #538 — YELLOW (not RED) avoids pressuring teammates to fabricate shallow decision-logs.
+6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Does not block; advisory signal for lead/architect to author before merge. Not checked during concurrent-with-CODE observation cycles: the log is often legitimately deferred to TEST/docs phase, so a per-CODE check produces false-positive advisories. YELLOW (not RED) prevents pressuring teammates to fabricate shallow decision-logs — advisory nudges elicit missing logs; RED on a missing artifact elicits empty ones.
 
 **NOT checked** (out of scope): Code style, test coverage, code cleanliness mid-work, micro-optimization, formatting.
 
