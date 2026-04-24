@@ -60,8 +60,8 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth tokens" --current-file
 # List recent memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
 
-# Get a specific memory by ID
-python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id>
+# Get a specific memory by full ID or unique prefix (>= 4 chars)
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id_or_prefix>
 
 # Update an existing memory (scalar fields replace; list fields merge additively)
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update <memory_id> '{"goal": "Updated goal"}'
@@ -135,7 +135,7 @@ Each memory can contain:
 | `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
 | `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
 | `list --limit N` | List with limit | `[...]` (default: 20) |
-| `get <id>` | Get memory by ID | `{"id": "...", "context": "...", ...}` |
+| `get <id\|prefix>` | Get memory by full ID or unique prefix (>= 4 chars). Ambiguous prefix returns `AMBIGUOUS_PREFIX` with `matches: [...]`; too-short returns `PREFIX_TOO_SHORT` | `{"id": "...", "context": "...", ...}` |
 | `update <id> <json>` | Update memory fields (list fields merge additively) | `{"memory_id": "<hex>"}` |
 | `update <id> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
 | `update <id> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |

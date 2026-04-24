@@ -705,6 +705,86 @@ class TestCliGetCommand:
         mock_cls.assert_called_once_with(db_path=Path("/tmp/t.db"))
 
 
+class TestCliGetPrefixResolution:
+    """CLI-layer tests for git-style prefix resolution on `get`."""
+
+    def test_get_unique_prefix_returns_memory(self, mock_pact_memory, capsys):
+        from scripts.database import MEMORY_ID_LENGTH
+        full_id = "a" * MEMORY_ID_LENGTH
+        mock_obj = MagicMock()
+        mock_obj.to_dict.return_value = {"id": full_id, "context": "match"}
+        # Simulate API-layer prefix resolution: short input still returns the obj
+        mock_pact_memory.get.return_value = mock_obj
+        parser = build_parser()
+        args = parser.parse_args(["get", "aaaa1234"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+        assert output["result"]["id"] == full_id
+        # CLI passed the prefix through to the API layer unchanged
+        mock_pact_memory.get.assert_called_once_with("aaaa1234")
+
+    def test_get_ambiguous_prefix_returns_match_list(self, mock_pact_memory, capsys):
+        from scripts.database import AmbiguousPrefixError
+        matches = [
+            {"id": "abcd0001" + "0" * 24, "context": "first"},
+            {"id": "abcd0002" + "0" * 24, "context": "second"},
+        ]
+        mock_pact_memory.get.side_effect = AmbiguousPrefixError("abcd", matches)
+        parser = build_parser()
+        args = parser.parse_args(["get", "abcd"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "AMBIGUOUS_PREFIX"
+        assert err_output["prefix"] == "abcd"
+        assert err_output["matches"] == matches
+
+    def test_get_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
+        from scripts.database import PrefixTooShortError
+        mock_pact_memory.get.side_effect = PrefixTooShortError("abc", minimum=4)
+        parser = build_parser()
+        args = parser.parse_args(["get", "abc"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == 4
+
+    def test_get_full_hash_unchanged(self, mock_pact_memory, capsys):
+        """Full 32-char IDs continue to work unchanged."""
+        from scripts.database import MEMORY_ID_LENGTH
+        full_id = "a" * MEMORY_ID_LENGTH
+        mock_obj = MagicMock()
+        mock_obj.to_dict.return_value = {"id": full_id, "context": "found"}
+        mock_pact_memory.get.return_value = mock_obj
+        parser = build_parser()
+        args = parser.parse_args(["get", full_id])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["result"]["id"] == full_id
+        mock_pact_memory.get.assert_called_once_with(full_id)
+
+
 # ---------------------------------------------------------------------------
 # Status Command
 # ---------------------------------------------------------------------------

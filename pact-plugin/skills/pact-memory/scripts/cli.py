@@ -18,7 +18,7 @@ Commands:
     save <json>          Save a memory object (or --stdin for piped input)
     search <query>       Semantic search across memories
     list [--limit N]     List recent memories (default: 20)
-    get <id>             Retrieve a specific memory by ID
+    get <id|prefix>      Retrieve a memory by full ID or unique prefix (>= 4 chars)
     update <id> <json>   Update an existing memory (or --stdin for piped input)
     delete <id>          Delete a memory by ID
     status               Show memory system status
@@ -41,6 +41,8 @@ if _SKILL_ROOT not in sys.path:
 from scripts.database import (
     CALLER_FACING_CREATE_FIELDS,
     CALLER_FACING_UPDATE_FIELDS,
+    AmbiguousPrefixError,
+    PrefixTooShortError,
 )
 from scripts.memory_api import PACTMemory
 from scripts.setup_memory import ensure_initialized, get_setup_status
@@ -139,9 +141,28 @@ def cmd_list(args, db_path=None):
 
 
 def cmd_get(args, db_path=None):
-    """Handle the 'get' subcommand."""
+    """Handle the 'get' subcommand.
+
+    Accepts a full 32-char memory ID or a prefix of >= 4 chars. A unique
+    prefix returns the matching memory. An ambiguous prefix returns an
+    AMBIGUOUS_PREFIX error envelope with the full list of matching IDs.
+    """
     memory = PACTMemory(db_path=db_path)
-    result = memory.get(args.memory_id)
+    try:
+        result = memory.get(args.memory_id)
+    except PrefixTooShortError as exc:
+        _error(
+            "PREFIX_TOO_SHORT",
+            str(exc),
+            minimum=exc.minimum,
+        )
+    except AmbiguousPrefixError as exc:
+        _error(
+            "AMBIGUOUS_PREFIX",
+            str(exc),
+            prefix=exc.prefix,
+            matches=exc.matches,
+        )
     if result is None:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
     _success(result.to_dict())
@@ -269,9 +290,22 @@ def build_parser():
 
     # get
     get_parser = subparsers.add_parser(
-        "get", help="Get a memory by ID", parents=[parent]
+        "get",
+        help="Get a memory by full ID or unique prefix (>= 4 chars)",
+        description=(
+            "Retrieve a memory by its full 32-char ID or a unique prefix of "
+            "at least 4 characters. A unique prefix returns the matching "
+            "memory; an ambiguous prefix returns an AMBIGUOUS_PREFIX error "
+            "with the full list of matching IDs; a prefix shorter than 4 "
+            "characters returns a PREFIX_TOO_SHORT error; no match returns "
+            "NOT_FOUND."
+        ),
+        parents=[parent],
     )
-    get_parser.add_argument("memory_id", help="Memory ID to retrieve")
+    get_parser.add_argument(
+        "memory_id",
+        help="Full 32-char memory ID, or a unique prefix of >= 4 characters",
+    )
 
     # status
     subparsers.add_parser(

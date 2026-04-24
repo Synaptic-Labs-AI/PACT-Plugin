@@ -43,6 +43,10 @@ from .database import (
     ensure_initialized,
     get_db_path,
     generate_id,
+    resolve_memory_id_prefix,
+    AmbiguousPrefixError,
+    PrefixTooShortError,
+    MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
 )
 from .embeddings import (
@@ -526,19 +530,34 @@ class PACTMemory:
 
     def get(self, memory_id: str) -> Optional[MemoryObject]:
         """
-        Get a specific memory by ID.
+        Get a specific memory by ID or unique prefix.
+
+        Accepts a full 32-char memory ID or a prefix of at least 4
+        characters. A unique prefix resolves to the matching memory. The
+        minimum-length gate and ambiguous-prefix surfacing are enforced by
+        the storage-layer resolver via exceptions.
 
         Args:
-            memory_id: The memory ID.
+            memory_id: Full 32-char ID or a prefix >= 4 chars.
 
         Returns:
-            MemoryObject if found, None otherwise.
+            MemoryObject if found, None if no match.
+
+        Raises:
+            PrefixTooShortError: prefix is shorter than the minimum.
+            AmbiguousPrefixError: prefix matches more than one memory.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
+
+            if len(memory_id) < MEMORY_ID_LENGTH:
+                resolved = resolve_memory_id_prefix(conn, memory_id)
+                if resolved is None:
+                    return None
+                memory_id = resolved
 
             memory_dict = get_memory(conn, memory_id)
             if memory_dict is None:

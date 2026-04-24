@@ -196,6 +196,61 @@ class TestGetMemory:
         assert get_memory(db_conn, "nonexistent") is None
 
 
+class TestResolveMemoryIdPrefix:
+    """Storage-layer tests for resolve_memory_id_prefix."""
+
+    def test_unique_prefix_returns_full_id(self, db_conn):
+        from scripts.database import create_memory, resolve_memory_id_prefix
+        mem_id = create_memory(
+            db_conn,
+            {"id": "abc12345" + "0" * 24, "context": "unique"},
+        )
+        assert resolve_memory_id_prefix(db_conn, "abc12345") == mem_id
+
+    def test_ambiguous_prefix_raises(self, db_conn):
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+        )
+        id_a = "abcd0001" + "0" * 24
+        id_b = "abcd0002" + "0" * 24
+        create_memory(db_conn, {"id": id_a, "context": "first match"})
+        create_memory(db_conn, {"id": id_b, "context": "second match"})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "abcd")
+
+        match_ids = sorted(m["id"] for m in exc_info.value.matches)
+        assert match_ids == sorted([id_a, id_b])
+        # Descriptor snippet attached for terse disambiguation
+        contexts = {m["id"]: m["context"] for m in exc_info.value.matches}
+        assert contexts[id_a] == "first match"
+        assert contexts[id_b] == "second match"
+
+    def test_no_match_returns_none(self, db_conn):
+        from scripts.database import resolve_memory_id_prefix
+        assert resolve_memory_id_prefix(db_conn, "ffff") is None
+
+    def test_too_short_prefix_raises(self, db_conn):
+        from scripts.database import (
+            resolve_memory_id_prefix,
+            PrefixTooShortError,
+        )
+        with pytest.raises(PrefixTooShortError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "abc")
+        assert exc_info.value.prefix == "abc"
+        assert exc_info.value.minimum == 4
+
+    def test_like_wildcard_in_prefix_is_escaped(self, db_conn):
+        """A literal '%' in the prefix must not expand as a SQL wildcard."""
+        from scripts.database import create_memory, resolve_memory_id_prefix
+        # Real memory whose ID does NOT contain '%' (IDs are hex)
+        create_memory(db_conn, {"id": "deadbeef" + "0" * 24, "context": "x"})
+        # '%dead' would match 'deadbeef...' if '%' were not escaped
+        assert resolve_memory_id_prefix(db_conn, "%dead") is None
+
+
 class TestUpdateMemory:
     def test_updates_fields(self, db_conn):
         from scripts.database import create_memory, update_memory, get_memory

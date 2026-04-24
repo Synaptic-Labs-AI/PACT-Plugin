@@ -38,6 +38,35 @@ from .config import DB_PATH, PACT_MEMORY_DIR
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Memory IDs are 32-char hex (secrets.token_hex(16) — see generate_id).
+# Prefix resolution accepts any input shorter than the full ID, but enforces
+# a minimum of 4 characters to keep ambiguity manageable on growing stores.
+MEMORY_ID_LENGTH = 32
+MIN_PREFIX_LENGTH = 4
+
+
+class PrefixTooShortError(ValueError):
+    """Raised when a memory-ID prefix is shorter than MIN_PREFIX_LENGTH."""
+
+    def __init__(self, prefix: str, minimum: int = MIN_PREFIX_LENGTH):
+        self.prefix = prefix
+        self.minimum = minimum
+        super().__init__(
+            f"Prefix '{prefix}' is too short — provide at least {minimum} characters."
+        )
+
+
+class AmbiguousPrefixError(LookupError):
+    """Raised when a memory-ID prefix matches multiple stored memories."""
+
+    def __init__(self, prefix: str, matches: List[Dict[str, Any]]):
+        self.prefix = prefix
+        # Each match is {"id": <full_id>, "context": <first 60 chars or "">}
+        self.matches = matches
+        super().__init__(
+            f"Prefix '{prefix}' is ambiguous — {len(matches)} memories match."
+        )
+
 
 def get_db_path() -> Path:
     """Get the database file path, creating parent directories if needed."""
@@ -821,16 +850,82 @@ def create_memory(
     return memory_id
 
 
+def resolve_memory_id_prefix(
+    conn: sqlite3.Connection,
+    prefix: str,
+    *,
+    descriptor_chars: int = 60,
+) -> Optional[str]:
+    """
+    Resolve a memory-ID prefix to a single full ID, git-style.
+
+    Args:
+        conn: Active database connection.
+        prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
+        descriptor_chars: Length of the context snippet attached to each match
+            on ambiguity (for terse disambiguation output).
+
+    Returns:
+        The full memory ID when the prefix uniquely matches one row, or None
+        when no row matches.
+
+    Raises:
+        PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
+        AmbiguousPrefixError: prefix matches more than one row. The exception's
+            `matches` attribute is a list of {"id", "context"} dicts.
+    """
+    ensure_initialized(conn)
+
+    if len(prefix) < MIN_PREFIX_LENGTH:
+        raise PrefixTooShortError(prefix)
+
+    # Escape SQL LIKE wildcards in the prefix so a literal '%' or '_' from a
+    # malformed input never expands. Memory IDs are hex, so this is defensive
+    # — it costs nothing and removes a foot-gun for future non-hex IDs.
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    # LIMIT 2 short-circuits the common case (unique match): we only need to
+    # know whether more than one row matches before issuing a wider query.
+    cursor = conn.execute(
+        "SELECT id FROM memories WHERE id LIKE ? ESCAPE '\\' LIMIT 2",
+        (escaped + "%",),
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]["id"]
+
+    # Ambiguous — fetch the full match list with a short context descriptor.
+    cursor = conn.execute(
+        "SELECT id, context FROM memories WHERE id LIKE ? ESCAPE '\\' ORDER BY id",
+        (escaped + "%",),
+    )
+    matches = [
+        {
+            "id": row["id"],
+            "context": (row["context"] or "")[:descriptor_chars],
+        }
+        for row in cursor.fetchall()
+    ]
+    raise AmbiguousPrefixError(prefix, matches)
+
+
 def get_memory(
     conn: sqlite3.Connection,
     memory_id: str
 ) -> Optional[Dict[str, Any]]:
     """
-    Retrieve a memory by ID.
+    Retrieve a memory by exact ID.
+
+    This is the exact-match storage primitive. Callers that want git-style
+    prefix resolution should compose with resolve_memory_id_prefix above
+    (see PACTMemory.get for the canonical pattern).
 
     Args:
         conn: Active database connection.
-        memory_id: The unique memory identifier.
+        memory_id: The unique memory identifier (full ID).
 
     Returns:
         Memory dictionary if found, None otherwise.
