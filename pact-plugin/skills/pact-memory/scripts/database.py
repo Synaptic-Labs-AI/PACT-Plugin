@@ -38,6 +38,63 @@ from .config import DB_PATH, PACT_MEMORY_DIR
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Memory IDs are 32-char lowercase hex (secrets.token_hex(16) — see generate_id).
+# Prefix resolution accepts any input shorter than the full ID, but enforces
+# a minimum of 7 characters to match git's default core.abbrev and keep
+# false-ambiguity rare on stores of practical size.
+MEMORY_ID_LENGTH = 32
+MIN_PREFIX_LENGTH = 7
+
+# Cap for the disambiguation match list. Two queries fire only on the
+# ambiguous branch (rare); the unique-match common path is unaffected.
+# 50 is the human/agent disambiguation ceiling: with a >=7-char prefix
+# (16^7 ~= 268M keyspace), >50 collisions implies caller-malformed input,
+# at which point matches_capped/total_matches already signal truncation.
+AMBIGUOUS_MATCH_CAP = 50
+
+# Upper bound for prefix range scan: smallest ASCII char strictly greater
+# than 'f' (max char of lowercase hex alphabet). If `generate_id` ever
+# broadens the alphabet beyond [0-9a-f], this constant must change AND
+# the alphabet-invariant test on generate_id will fail loudly.
+_PREFIX_UPPER_BOUND_CHAR = "g"
+
+
+class PrefixTooShortError(ValueError):
+    """Raised when a memory-ID prefix is shorter than MIN_PREFIX_LENGTH."""
+
+    def __init__(self, prefix: str, minimum: int = MIN_PREFIX_LENGTH):
+        self.prefix = prefix
+        self.minimum = minimum
+        super().__init__(
+            f"Prefix '{prefix}' is too short — provide at least {minimum} characters."
+        )
+
+
+class AmbiguousPrefixError(LookupError):
+    """Raised when a memory-ID prefix matches multiple stored memories.
+
+    The `matches` attribute is a list of {"id", "context"} dicts capped at
+    AMBIGUOUS_MATCH_CAP entries. `total_matches` is the true row count and
+    `matches_capped` is True when the cap was applied.
+    """
+
+    def __init__(
+        self,
+        prefix: str,
+        matches: List[Dict[str, Any]],
+        *,
+        matches_capped: bool = False,
+        total_matches: Optional[int] = None,
+    ):
+        self.prefix = prefix
+        self.matches = matches
+        self.matches_capped = matches_capped
+        self.total_matches = total_matches if total_matches is not None else len(matches)
+        suffix = f" (showing {len(matches)} of {self.total_matches})" if matches_capped else ""
+        super().__init__(
+            f"Prefix '{prefix}' is ambiguous — {self.total_matches} memories match.{suffix}"
+        )
+
 
 def get_db_path() -> Path:
     """Get the database file path, creating parent directories if needed."""
@@ -821,16 +878,117 @@ def create_memory(
     return memory_id
 
 
+def resolve_memory_id_prefix(
+    conn: sqlite3.Connection,
+    prefix: str,
+    *,
+    descriptor_chars: int = 60,
+) -> Optional[str]:
+    """
+    Resolve a memory-ID prefix to a single full ID, git-style.
+
+    Lookup uses a half-open range scan (`id >= prefix AND id < prefix + 'g'`)
+    against the BINARY-collated primary key, which lets SQLite walk the
+    index instead of full-scanning under a LIKE pattern. The prefix is
+    lowercased before bounds construction so `ABCD1234` and `abcd1234`
+    resolve identically. IDs are stored as lowercase hex.
+
+    Args:
+        conn: Active database connection.
+        prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
+        descriptor_chars: Length of the context snippet attached to each match
+            on ambiguity (for terse disambiguation output). Security-relevant
+            knob if multi-tenant access is ever introduced — context may carry
+            tenant data the disambiguation reader is not entitled to read; in
+            that case shorten or drop the snippet, or scope it by tenant.
+
+    Returns:
+        The full memory ID when the prefix uniquely matches one row, or None
+        when no row matches.
+
+    Raises:
+        PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
+        AmbiguousPrefixError: prefix matches more than one row. The exception
+            carries `matches` (list capped at AMBIGUOUS_MATCH_CAP),
+            `matches_capped` (True if the cap was applied), and
+            `total_matches` (the true row count).
+    """
+    ensure_initialized(conn)
+
+    if len(prefix) < MIN_PREFIX_LENGTH:
+        raise PrefixTooShortError(prefix)
+
+    # Case-fold to match the lowercase hex IDs produced by generate_id.
+    prefix = prefix.lower()
+
+    # Half-open range bounds; see `_PREFIX_UPPER_BOUND_CHAR` for the
+    # alphabet-invariant. [lo, hi) covers exactly the rows whose ID begins
+    # with `prefix` under BINARY collation on the lowercase-hex PK.
+    lo = prefix
+    hi = prefix + _PREFIX_UPPER_BOUND_CHAR
+
+    # LIMIT 2 short-circuits the common case (unique match): we only need to
+    # know whether more than one row matches before issuing a wider query.
+    cursor = conn.execute(
+        "SELECT id FROM memories WHERE id >= ? AND id < ? LIMIT 2",
+        (lo, hi),
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]["id"]
+
+    # Ambiguous — fetch a capped match list with a short context descriptor
+    # plus a separate COUNT for the true total. Both queries fire only on
+    # this branch; the unique-match path above is single-query.
+    cursor = conn.execute(
+        "SELECT id, context FROM memories WHERE id >= ? AND id < ? "
+        "ORDER BY id LIMIT ?",
+        (lo, hi, AMBIGUOUS_MATCH_CAP),
+    )
+    matches = []
+    for row in cursor.fetchall():
+        full_context = row["context"] or ""
+        snippet = full_context[:descriptor_chars]
+        matches.append({
+            "id": row["id"],
+            "context": snippet,
+            # Per-match flag distinct from the list-level `matches_capped`
+            # on the exception: signals that THIS row's `context` was
+            # clipped to `descriptor_chars`, not that the match list
+            # itself was capped.
+            "context_truncated": len(full_context) > descriptor_chars,
+        })
+    count_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM memories WHERE id >= ? AND id < ?",
+        (lo, hi),
+    ).fetchone()
+    total_matches = count_row["n"]
+    matches_capped = total_matches > len(matches)
+    raise AmbiguousPrefixError(
+        prefix,
+        matches,
+        matches_capped=matches_capped,
+        total_matches=total_matches,
+    )
+
+
 def get_memory(
     conn: sqlite3.Connection,
     memory_id: str
 ) -> Optional[Dict[str, Any]]:
     """
-    Retrieve a memory by ID.
+    Retrieve a memory by exact ID.
+
+    This is the exact-match storage primitive. Callers that want git-style
+    prefix resolution should compose with resolve_memory_id_prefix above
+    (see PACTMemory.get for the canonical pattern).
 
     Args:
         conn: Active database connection.
-        memory_id: The unique memory identifier.
+        memory_id: The unique memory identifier (full ID).
 
     Returns:
         Memory dictionary if found, None otherwise.

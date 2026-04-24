@@ -60,14 +60,15 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth tokens" --current-file
 # List recent memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" list --limit 10
 
-# Get a specific memory by ID
-python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id>
+# Get a specific memory by full ID or unique prefix (>= 7 chars, case-insensitive)
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" get <memory_id_or_prefix>
 
-# Update an existing memory (scalar fields replace; list fields merge additively)
-python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update <memory_id> '{"goal": "Updated goal"}'
+# Update an existing memory by full ID or unique prefix (scalar fields replace;
+# list fields merge additively). Ambiguous prefix is refused.
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" update <memory_id_or_prefix> '{"goal": "Updated goal"}'
 
-# Delete a memory
-python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete <memory_id>
+# Delete a memory by full ID or unique prefix. Ambiguous prefix is refused.
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" delete <memory_id_or_prefix>
 
 # Check system status
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" status
@@ -135,11 +136,11 @@ Each memory can contain:
 | `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
 | `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
 | `list --limit N` | List with limit | `[...]` (default: 20) |
-| `get <id>` | Get memory by ID | `{"id": "...", "context": "...", ...}` |
-| `update <id> <json>` | Update memory fields (list fields merge additively) | `{"memory_id": "<hex>"}` |
-| `update <id> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
-| `update <id> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |
-| `delete <id>` | Delete a memory | `{"deleted": true, "memory_id": "<hex>"}` |
+| `get <id\|prefix>` | Get memory by full ID or unique prefix (>= 7 chars, case-insensitive). Ambiguous prefix returns `AMBIGUOUS_PREFIX` with `matches: [...]`, `matches_capped`, `total_matches`; too-short returns `PREFIX_TOO_SHORT` | `{"id": "...", "context": "...", ...}` |
+| `update <id\|prefix> <json>` | Update memory fields (list fields merge additively). Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"memory_id": "<hex>"}` |
+| `update <id\|prefix> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
+| `update <id\|prefix> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |
+| `delete <id\|prefix>` | Delete a memory. Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"deleted": true, "memory_id": "<hex>"}` |
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 

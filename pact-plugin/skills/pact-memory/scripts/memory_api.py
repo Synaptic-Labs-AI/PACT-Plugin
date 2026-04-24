@@ -43,6 +43,10 @@ from .database import (
     ensure_initialized,
     get_db_path,
     generate_id,
+    resolve_memory_id_prefix,
+    AmbiguousPrefixError,
+    PrefixTooShortError,
+    MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED
 )
 from .embeddings import (
@@ -524,21 +528,72 @@ class PACTMemory:
 
         return search_by_file(file_path, self._project_id, limit)
 
-    def get(self, memory_id: str) -> Optional[MemoryObject]:
+    def _resolve_id_or_full(
+        self, conn, memory_id: str
+    ) -> Optional[str]:
         """
-        Get a specific memory by ID.
+        Resolve a caller-supplied ID into a full 32-char memory ID.
+
+        Input is case-folded to lowercase before any branch, so an
+        uppercase or mixed-case full ID resolves identically to its
+        lowercase form (memory IDs are stored as lowercase hex).
+        Full-length input is then returned unchanged (no DB query).
+        Shorter input is treated as a prefix and resolved via the
+        storage-layer resolver: a unique prefix returns the full ID;
+        ambiguity raises AmbiguousPrefixError; too-short raises
+        PrefixTooShortError; no match returns None.
+
+        Caller already owns an open `conn` (inside a `db_connection`
+        context manager). This helper does not open or close connections.
 
         Args:
-            memory_id: The memory ID.
+            conn: Active database connection.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
+                Case-insensitive: uppercase and mixed-case input is
+                normalized to lowercase before lookup.
 
         Returns:
-            MemoryObject if found, None otherwise.
+            The full memory ID (lowercase), or None if the prefix matches
+            no row.
+
+        Raises:
+            PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
+            AmbiguousPrefixError: prefix matches more than one memory.
+        """
+        memory_id = memory_id.lower()
+        if len(memory_id) >= MEMORY_ID_LENGTH:
+            return memory_id
+        return resolve_memory_id_prefix(conn, memory_id)
+
+    def get(self, memory_id: str) -> Optional[MemoryObject]:
+        """
+        Get a specific memory by ID or unique prefix.
+
+        Accepts a full 32-char memory ID or a prefix of at least
+        MIN_PREFIX_LENGTH characters. A unique prefix resolves to the
+        matching memory; ambiguity and too-short input surface as
+        exceptions from the storage-layer resolver.
+
+        Args:
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
+
+        Returns:
+            MemoryObject if found, None if no match.
+
+        Raises:
+            PrefixTooShortError: prefix is shorter than the minimum.
+            AmbiguousPrefixError: prefix matches more than one memory.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
+
+            resolved = self._resolve_id_or_full(conn, memory_id)
+            if resolved is None:
+                return None
+            memory_id = resolved
 
             memory_dict = get_memory(conn, memory_id)
             if memory_dict is None:
@@ -556,29 +611,44 @@ class PACTMemory:
         updates: Dict[str, Any],
         *,
         replace: bool = False,
-    ) -> bool:
+    ) -> Optional[str]:
         """
-        Update an existing memory.
+        Update an existing memory by ID or unique prefix.
+
+        Accepts a full 32-char memory ID or a prefix of at least
+        MIN_PREFIX_LENGTH characters. A unique prefix resolves to the
+        matching memory; ambiguous prefixes are refused (the update is
+        rejected via AmbiguousPrefixError so the caller can disambiguate).
 
         Args:
-            memory_id: The memory ID.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
             updates: Dictionary of fields to update.
             replace: If True, list-valued fields are replaced wholesale
                 instead of merged additively (default False = additive merge
                 with content-hash dedup).
 
         Returns:
-            True if updated, False if memory not found.
+            The resolved full 32-char memory ID on successful update, or
+            None when the input matched no row. Callers that invoked with a
+            prefix get the canonical ID back so downstream operations key off
+            the storage form.
 
         Raises:
             ValueError: If updates contains unknown field names, or if any
                 dict-list item contains unknown sub-object keys.
+            PrefixTooShortError: prefix is shorter than the minimum.
+            AmbiguousPrefixError: prefix matches more than one memory.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
+
+            resolved = self._resolve_id_or_full(conn, memory_id)
+            if resolved is None:
+                return None
+            memory_id = resolved
 
             # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
             # update so we can detect whether the merge actually changed
@@ -602,17 +672,29 @@ class PACTMemory:
                 ):
                     self._store_embedding(conn, memory_id, memory_dict)
 
-            return success
+            return memory_id if success else None
 
-    def delete(self, memory_id: str) -> bool:
+    def delete(self, memory_id: str) -> Optional[str]:
         """
-        Delete a memory.
+        Delete a memory by ID or unique prefix.
+
+        Accepts a full 32-char memory ID or a prefix of at least
+        MIN_PREFIX_LENGTH characters. A unique prefix resolves to the
+        matching memory; ambiguous prefixes are refused (the delete is
+        rejected via AmbiguousPrefixError so the caller can disambiguate).
 
         Args:
-            memory_id: The memory ID.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
 
         Returns:
-            True if deleted, False if not found.
+            The resolved full 32-char memory ID on successful delete, or
+            None when the input matched no row. Callers that invoked with a
+            prefix get the canonical ID back so downstream operations key off
+            the storage form.
+
+        Raises:
+            PrefixTooShortError: prefix is shorter than the minimum.
+            AmbiguousPrefixError: prefix matches more than one memory.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
@@ -620,16 +702,28 @@ class PACTMemory:
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
 
-            # Also remove from vector table
+            resolved = self._resolve_id_or_full(conn, memory_id)
+            if resolved is None:
+                return None
+            memory_id = resolved
+
+            # Also remove from vector table. vec_memories is created lazily
+            # by the FTS extension; absence is expected when FTS is
+            # unavailable, and the "no such table" OperationalError is
+            # silently swallowed in that case. All other OperationalErrors
+            # (lock contention, corruption, schema violations) and every
+            # other exception class must propagate so the caller sees the
+            # real failure instead of a silent orphan-vector.
             try:
                 conn.execute(
                     "DELETE FROM vec_memories WHERE memory_id = ?",
                     (memory_id,)
                 )
-            except Exception:
-                pass  # Vector table might not exist
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
 
-            return delete_memory(conn, memory_id)
+            return memory_id if delete_memory(conn, memory_id) else None
 
     def list(
         self,

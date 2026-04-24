@@ -196,6 +196,246 @@ class TestGetMemory:
         assert get_memory(db_conn, "nonexistent") is None
 
 
+class TestResolveMemoryIdPrefix:
+    """Storage-layer tests for resolve_memory_id_prefix."""
+
+    def test_unique_prefix_returns_full_id(self, db_conn):
+        from scripts.database import create_memory, resolve_memory_id_prefix
+        mem_id = create_memory(
+            db_conn,
+            {"id": "abc12345" + "0" * 24, "context": "unique"},
+        )
+        assert resolve_memory_id_prefix(db_conn, "abc12345") == mem_id
+
+    def test_ambiguous_prefix_raises(self, db_conn):
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+        )
+        id_a = "abcd123" + "1" + "0" * 24
+        id_b = "abcd123" + "2" + "0" * 24
+        # Inserted in REVERSE lexicographic order to verify ORDER BY id sorts
+        # the matches independently of insert order.
+        create_memory(db_conn, {"id": id_b, "context": "second match"})
+        create_memory(db_conn, {"id": id_a, "context": "first match"})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "abcd123")
+
+        # Direct list equality preserves the ORDER BY id contract — sorting
+        # both sides would mask a regression that drops the ORDER BY clause.
+        match_ids = [m["id"] for m in exc_info.value.matches]
+        assert match_ids == [id_a, id_b]
+        # Descriptor snippet attached for terse disambiguation
+        contexts = {m["id"]: m["context"] for m in exc_info.value.matches}
+        assert contexts[id_a] == "first match"
+        assert contexts[id_b] == "second match"
+
+    def test_no_match_returns_none(self, db_conn):
+        from scripts.database import resolve_memory_id_prefix
+        assert resolve_memory_id_prefix(db_conn, "fffffff") is None
+
+    def test_too_short_prefix_raises(self, db_conn):
+        from scripts.database import (
+            resolve_memory_id_prefix,
+            PrefixTooShortError,
+        )
+        with pytest.raises(PrefixTooShortError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "abc123")
+        assert exc_info.value.prefix == "abc123"
+        assert exc_info.value.minimum == 7
+
+    def test_non_hex_prefix_returns_none(self, db_conn):
+        """Non-hex prefix characters (e.g., punctuation) yield no match.
+
+        The range scan operates on a literal `id >= prefix AND id < prefix+'g'`
+        bound; a prefix outside the lowercase-hex alphabet falls outside the
+        range of any real ID, so the lookup correctly returns None. Guards
+        against attempts to inject SQL metacharacters via the prefix arg.
+        """
+        from scripts.database import create_memory, resolve_memory_id_prefix
+        create_memory(db_conn, {"id": "deadbeef" + "0" * 24, "context": "x"})
+        # '%' < '0' in ASCII; a prefix starting with '%' falls outside any
+        # hex ID's range. Same outcome a literal-meta-char attempt would have
+        # produced under the prior LIKE-with-escape implementation.
+        assert resolve_memory_id_prefix(db_conn, "%deadbe") is None
+
+    def test_empty_string_prefix_raises_too_short(self, db_conn):
+        """Empty input hits the minimum-length gate before the SQL query."""
+        from scripts.database import (
+            resolve_memory_id_prefix,
+            PrefixTooShortError,
+        )
+        with pytest.raises(PrefixTooShortError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "")
+        assert exc_info.value.prefix == ""
+        assert exc_info.value.minimum == 7
+
+    def test_exactly_min_length_unique_match(self, db_conn):
+        """A 7-char prefix (the boundary) resolves when the match is unique."""
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            MIN_PREFIX_LENGTH,
+        )
+        mem_id = create_memory(
+            db_conn,
+            {"id": "feed123" + "0" * 25, "context": "boundary"},
+        )
+        # Exactly MIN_PREFIX_LENGTH chars — no padding above the floor
+        prefix = "feed123"
+        assert len(prefix) == MIN_PREFIX_LENGTH
+        assert resolve_memory_id_prefix(db_conn, prefix) == mem_id
+
+    def test_exactly_full_length_no_match_returns_none(self, db_conn):
+        """A 32-char input bypasses the resolver but still returns None on miss.
+
+        Guards against an off-by-one regression in the `len < MEMORY_ID_LENGTH`
+        gate: a 32-char nonexistent ID must not raise, must return None.
+        """
+        from scripts.database import resolve_memory_id_prefix
+        full_length_miss = "f" * 32
+        assert resolve_memory_id_prefix(db_conn, full_length_miss) is None
+
+    def test_uppercase_prefix_resolves_to_lowercase_stored_id(self, db_conn):
+        """Prefix lookup is case-insensitive; the returned ID is the stored form.
+
+        Memory IDs are produced by secrets.token_hex (lowercase). A user
+        typing an uppercase prefix must still resolve to the canonical
+        lowercase ID — disambiguation, downstream API calls, and CLI
+        envelopes all key off the storage form.
+        """
+        from scripts.database import create_memory, resolve_memory_id_prefix
+        stored_id = "abcd1234" + "0" * 24
+        create_memory(db_conn, {"id": stored_id, "context": "case test"})
+        resolved = resolve_memory_id_prefix(db_conn, "ABCD1234")
+        assert resolved == stored_id
+
+    def test_ambiguous_small_set_not_truncated(self, db_conn):
+        """Ambiguous match below the cap reports matches_capped=False, exact total."""
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+        )
+        ids = [f"smalset{i}" + "0" * 24 for i in range(3)]  # 7-char shared prefix
+        for mid in ids:
+            create_memory(db_conn, {"id": mid, "context": f"row-{mid[-25]}"})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "smalset")
+
+        assert exc_info.value.matches_capped is False
+        assert exc_info.value.total_matches == 3
+        assert len(exc_info.value.matches) == 3
+
+    def test_ambiguous_pathological_set_truncated_at_cap(self, db_conn):
+        """When matches exceed AMBIGUOUS_MATCH_CAP, list is capped + matches_capped=True.
+
+        total_matches reflects the actual COUNT(*) from the storage layer,
+        not len(matches). Guards regression where the cap query and the
+        count query diverge.
+        """
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+            AMBIGUOUS_MATCH_CAP,
+        )
+        # Seed AMBIGUOUS_MATCH_CAP + 1 rows under shared 7-char prefix "patho00"
+        seeded = AMBIGUOUS_MATCH_CAP + 1
+        for i in range(seeded):
+            mid = f"patho00{i:025d}"  # 7-char prefix + 25-char numeric pad = 32
+            assert len(mid) == 32
+            create_memory(db_conn, {"id": mid, "context": f"row-{i}"})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "patho00")
+
+        assert exc_info.value.matches_capped is True
+        assert exc_info.value.total_matches == seeded
+        assert len(exc_info.value.matches) == AMBIGUOUS_MATCH_CAP
+
+    def test_range_scan_does_not_overmatch_at_boundary(self, db_conn):
+        """Range scan must NOT match rows where the next char exceeds the prefix.
+
+        Locks the H2 contract independent of internals (LIKE vs range): a
+        prefix `abcdef0` should match `abcdef0...` but NOT `abcdef1...`,
+        even though both share the same first 6 chars. A buggy
+        upper-bound construction (e.g., open-ended scan, off-by-one cap)
+        would over-match here.
+        """
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+        )
+        id_at_prefix = "abcdef0" + "0" * 25  # matches prefix "abcdef0"
+        id_above_prefix = "abcdef1" + "0" * 25  # one char higher at the boundary
+        create_memory(db_conn, {"id": id_at_prefix, "context": "in-range"})
+        create_memory(db_conn, {"id": id_above_prefix, "context": "above-range"})
+
+        # Unique match — only the in-range row resolves
+        assert resolve_memory_id_prefix(db_conn, "abcdef0") == id_at_prefix
+
+    def test_generate_id_alphabet_invariant(self):
+        """Every generate_id() output must stay within the lowercase-hex alphabet.
+
+        The resolver's range-scan upper bound is `prefix + _PREFIX_UPPER_BOUND_CHAR`
+        (currently 'g' — the smallest ASCII char above 'f'). That bound is
+        correct ONLY if generate_id produces strictly lowercase hex [0-9a-f].
+        If the alphabet ever broadens (e.g., to base32 or full alphanumeric),
+        the upper-bound constant must be revisited; this test fails loudly
+        in that case.
+        """
+        from scripts.database import generate_id, _PREFIX_UPPER_BOUND_CHAR
+
+        # 100 IDs is enough to surface a misconfigured charset without
+        # making the test slow; secrets.token_hex is uniform over [0-9a-f].
+        for _ in range(100):
+            mid = generate_id()
+            for ch in mid:
+                assert ch < _PREFIX_UPPER_BOUND_CHAR, (
+                    f"generate_id produced char {ch!r} (in {mid!r}) outside the "
+                    f"strictly-below-{_PREFIX_UPPER_BOUND_CHAR!r} alphabet that "
+                    "the range-scan upper bound depends on. If charset broadened "
+                    "intentionally, update _PREFIX_UPPER_BOUND_CHAR."
+                )
+
+    def test_long_context_marked_truncated_per_match(self, db_conn):
+        """Per-match `context_truncated` flag distinguishes long vs short contexts.
+
+        Long contexts (> descriptor_chars) are truncated to descriptor_chars
+        and flagged `context_truncated=True`; short contexts pass through
+        unchanged with `context_truncated=False`. The flag is per-match,
+        not per-list — guards a regression where the flag gets set globally
+        based on any-row-truncated.
+        """
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+        )
+        descriptor_chars = 60  # default arg of resolve_memory_id_prefix
+        long_id = "trunca0" + "1" + "0" * 24
+        short_id = "trunca0" + "2" + "0" * 24
+        long_context = "x" * 200
+        short_context = "short"
+        create_memory(db_conn, {"id": long_id, "context": long_context})
+        create_memory(db_conn, {"id": short_id, "context": short_context})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "trunca0")
+
+        by_id = {m["id"]: m for m in exc_info.value.matches}
+        assert by_id[long_id]["context_truncated"] is True
+        assert len(by_id[long_id]["context"]) == descriptor_chars
+        assert by_id[long_id]["context"] == "x" * descriptor_chars
+
+        assert by_id[short_id]["context_truncated"] is False
+        assert by_id[short_id]["context"] == short_context
+
+
 class TestUpdateMemory:
     def test_updates_fields(self, db_conn):
         from scripts.database import create_memory, update_memory, get_memory
@@ -233,6 +473,117 @@ class TestDeleteMemory:
     def test_returns_false_for_missing(self, db_conn):
         from scripts.database import delete_memory
         assert delete_memory(db_conn, "nonexistent") is False
+
+
+class TestPACTMemoryDeleteVecTableHandling:
+    """Locks the narrowed-except contract on PACTMemory.delete's vec_memories cleanup.
+
+    PACTMemory.delete attempts `DELETE FROM vec_memories WHERE memory_id = ?`
+    AFTER deleting the row from the primary memories table. The vec_memories
+    table only exists when sqlite-vec is loaded; absence is the legitimate
+    common case. A bare `except Exception: pass` here would also swallow
+    "database is locked", "disk I/O error", and other surface-or-surface-this
+    failures. The narrowed `except sqlite3.OperationalError if "no such table"
+    in str(e)` lets the legitimate-FTS-absent path stay silent while
+    surfacing every other operational error.
+    """
+
+    def test_delete_silently_handles_missing_vec_memories_table(self, tmp_path):
+        """Real-DB path: schema has no vec_memories table; delete must succeed."""
+        sys.path.insert(
+            0,
+            os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'),
+        )
+        from scripts.memory_api import PACTMemory
+
+        db_path = tmp_path / "vec_absent.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
+        # Schema does NOT include vec_memories — DELETE FROM vec_memories will
+        # raise sqlite3.OperationalError("no such table: vec_memories"), which
+        # the narrowed except must swallow.
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(PACTMemory, "_store_embedding", autospec=True):
+            memory = PACTMemory(
+                project_id="vec-absent-test",
+                session_id="s1",
+                db_path=db_path,
+            )
+            mem_id = memory.save({"context": "row to delete"})
+            # Delete must succeed despite vec_memories being absent.
+            resolved = memory.delete(mem_id)
+            assert resolved == mem_id
+            # Verify the primary-table delete actually landed.
+            assert memory.get(mem_id) is None
+
+    def test_delete_propagates_other_operational_errors(self, tmp_path):
+        """Bug-surfacing: non-"no such table" OperationalError must propagate.
+
+        Wraps conn.execute so the vec_memories DELETE raises a controlled
+        OperationalError ("database is locked") instead of the natural
+        no-such-table error. The narrowed except must NOT swallow this —
+        propagating it surfaces real problems (lock contention, disk I/O,
+        etc.) instead of silently leaving stale vector entries.
+        """
+        sys.path.insert(
+            0,
+            os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'),
+        )
+        from scripts.memory_api import PACTMemory
+        import scripts.memory_api as memory_api_mod
+
+        db_path = tmp_path / "vec_locked.db"
+        conn = sqlite3.connect(str(db_path))
+        create_test_schema(conn)
+        conn.close()
+
+        from contextlib import contextmanager
+        real_db_connection = memory_api_mod.db_connection
+
+        class _ConnProxy:
+            """Delegates everything to real_conn, intercepts execute()."""
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *args, **kwargs):
+                # Inject a non-"no such table" OperationalError on the
+                # vec_memories DELETE only. All other queries (resolver,
+                # primary-table delete, ensure_initialized) pass through.
+                if "vec_memories" in sql and sql.lstrip().upper().startswith("DELETE"):
+                    raise sqlite3.OperationalError("database is locked")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                # Delegate any other attribute (commit, close, row_factory, etc.)
+                return getattr(self._real, name)
+
+        @contextmanager
+        def db_connection_locking_vec(path):
+            with real_db_connection(path) as real_conn:
+                yield _ConnProxy(real_conn)
+
+        with patch("scripts.memory_api._ensure_ready"), \
+             patch("scripts.memory_api.sync_to_claude_md"), \
+             patch.object(PACTMemory, "_store_embedding", autospec=True):
+            memory = PACTMemory(
+                project_id="vec-locked-test",
+                session_id="s1",
+                db_path=db_path,
+            )
+            mem_id = memory.save({"context": "row delete will lock-fail"})
+
+            # Now patch db_connection so the SUBSEQUENT delete uses the
+            # locking wrapper. (save() above used the real db_connection.)
+            with patch.object(
+                memory_api_mod, "db_connection", db_connection_locking_vec
+            ):
+                with pytest.raises(sqlite3.OperationalError) as exc_info:
+                    memory.delete(mem_id)
+                assert "database is locked" in str(exc_info.value)
+                assert "no such table" not in str(exc_info.value)
 
 
 class TestListMemories:

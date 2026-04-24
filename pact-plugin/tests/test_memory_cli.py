@@ -39,6 +39,14 @@ from scripts.memory_api import PACTMemory
 # Fixtures
 # ---------------------------------------------------------------------------
 
+# Stable 32-char fake memory ID used by mock_pact_memory defaults so tests
+# asserting on the success envelope's `memory_id` field have a known value
+# to compare against. Distinct from any prefix used in test args so that
+# assertions catch regressions where the user-supplied prefix is echoed
+# instead of the resolved full ID.
+_FAKE_RESOLVED_ID = "fa1ce1d" + "0" * 25  # 32 chars, lowercase hex pattern
+
+
 @pytest.fixture
 def mock_pact_memory():
     """Create a mock PACTMemory instance with standard return values."""
@@ -49,6 +57,10 @@ def mock_pact_memory():
     # Non-None default so save verification in PACTMemory.save() passes;
     # override to None in tests that need NOT_FOUND behavior.
     mock.get.return_value = MagicMock()
+    # update/delete return Optional[str] (resolved full ID). Explicit defaults
+    # match the API contract; tests for not-found paths override to None.
+    mock.update.return_value = _FAKE_RESOLVED_ID
+    mock.delete.return_value = _FAKE_RESOLVED_ID
     mock.get_status.return_value = {
         "project_id": "test-project",
         "memory_count": 5,
@@ -705,6 +717,88 @@ class TestCliGetCommand:
         mock_cls.assert_called_once_with(db_path=Path("/tmp/t.db"))
 
 
+class TestCliGetPrefixResolution:
+    """CLI-layer tests for git-style prefix resolution on `get`."""
+
+    def test_get_unique_prefix_returns_memory(self, mock_pact_memory, capsys):
+        from scripts.database import MEMORY_ID_LENGTH
+        full_id = "a" * MEMORY_ID_LENGTH
+        mock_obj = MagicMock()
+        mock_obj.to_dict.return_value = {"id": full_id, "context": "match"}
+        # Simulate API-layer prefix resolution: short input still returns the obj
+        mock_pact_memory.get.return_value = mock_obj
+        parser = build_parser()
+        args = parser.parse_args(["get", "aaaa1234"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+        assert output["result"]["id"] == full_id
+        # CLI passed the prefix through to the API layer unchanged
+        mock_pact_memory.get.assert_called_once_with("aaaa1234")
+
+    def test_get_ambiguous_prefix_returns_match_list(self, mock_pact_memory, capsys):
+        from scripts.database import AmbiguousPrefixError
+        matches = [
+            {"id": "abcd123" + "1" + "0" * 24, "context": "first"},
+            {"id": "abcd123" + "2" + "0" * 24, "context": "second"},
+        ]
+        mock_pact_memory.get.side_effect = AmbiguousPrefixError("abcd123", matches)
+        parser = build_parser()
+        args = parser.parse_args(["get", "abcd123"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "AMBIGUOUS_PREFIX"
+        assert err_output["prefix"] == "abcd123"
+        assert err_output["matches"] == matches
+
+    def test_get_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
+        from scripts.database import PrefixTooShortError, MIN_PREFIX_LENGTH
+        mock_pact_memory.get.side_effect = PrefixTooShortError(
+            "abc123", minimum=MIN_PREFIX_LENGTH
+        )
+        parser = build_parser()
+        args = parser.parse_args(["get", "abc123"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == MIN_PREFIX_LENGTH
+
+    def test_get_full_hash_unchanged(self, mock_pact_memory, capsys):
+        """Full 32-char IDs continue to work unchanged."""
+        from scripts.database import MEMORY_ID_LENGTH
+        full_id = "a" * MEMORY_ID_LENGTH
+        mock_obj = MagicMock()
+        mock_obj.to_dict.return_value = {"id": full_id, "context": "found"}
+        mock_pact_memory.get.return_value = mock_obj
+        parser = build_parser()
+        args = parser.parse_args(["get", full_id])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_get(args)
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["result"]["id"] == full_id
+        mock_pact_memory.get.assert_called_once_with(full_id)
+
+
 # ---------------------------------------------------------------------------
 # Status Command
 # ---------------------------------------------------------------------------
@@ -780,24 +874,26 @@ class TestCliUpdateCommand:
     """Test the update subcommand handler."""
 
     def test_update_existing_memory(self, mock_pact_memory, capsys):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
-        args = parser.parse_args(["update", "abc123", '{"context": "updated"}'])
+        args = parser.parse_args(["update", "abc1234", '{"context": "updated"}'])
 
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_update(args)
         assert exc_info.value.code == 0
         mock_pact_memory.update.assert_called_once_with(
-            "abc123", {"context": "updated"}, replace=False
+            "abc1234", {"context": "updated"}, replace=False
         )
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["ok"] is True
-        assert output["result"]["memory_id"] == "abc123"
+        # Envelope echoes the RESOLVED full ID returned by the API, not the
+        # user-supplied prefix — locks the cycle-2 echo fix.
+        assert output["result"]["memory_id"] == _FAKE_RESOLVED_ID
 
     def test_update_not_found(self, mock_pact_memory, capsys):
-        mock_pact_memory.update.return_value = False
+        mock_pact_memory.update.return_value = None
         parser = build_parser()
         args = parser.parse_args(["update", "nonexistent", '{"context": "x"}'])
 
@@ -809,8 +905,35 @@ class TestCliUpdateCommand:
         err_output = json.loads(captured.err)
         assert err_output["error"] == "NOT_FOUND"
 
+    def test_update_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
+        """Locks the PrefixTooShortError-IS-A-ValueError except-clause precedence.
+
+        cmd_update catches PrefixTooShortError BEFORE the generic ValueError
+        handler that surfaces field-validation failures. Since
+        PrefixTooShortError is a ValueError subclass, the order matters:
+        a swap would silently route prefix-too-short to the ValueError
+        envelope (with allowed_fields list and exit_code=2) instead of the
+        intended PREFIX_TOO_SHORT envelope.
+        """
+        from scripts.database import PrefixTooShortError
+        mock_pact_memory.update.side_effect = PrefixTooShortError("abc", minimum=7)
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc", '{"context": "x"}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == 7
+        # Negative assertion: the ValueError envelope shape would have
+        # this key; PREFIX_TOO_SHORT must NOT.
+        assert "allowed_fields" not in err_output
+
     def test_update_with_stdin(self, mock_pact_memory, monkeypatch):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         monkeypatch.setattr("sys.stdin", StringIO('{"context": "from stdin"}'))
         parser = build_parser()
         args = parser.parse_args(["update", "abc123", "--stdin"])
@@ -857,7 +980,7 @@ class TestCliUpdateCommand:
         assert err_output["error"] == "MISSING_INPUT"
 
     def test_update_passes_db_path(self, mock_pact_memory):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(["update", "abc123", '{"context": "x"}', "--db-path", "/tmp/t.db"])
 
@@ -871,7 +994,7 @@ class TestCliUpdateReplaceFlag:
     """Test the --replace flag and ValueError envelope on the update subcommand."""
 
     def test_replace_flag_forwards_true(self, mock_pact_memory):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(
             ["update", "abc123", '{"lessons": ["x"]}', "--replace"]
@@ -886,7 +1009,7 @@ class TestCliUpdateReplaceFlag:
         )
 
     def test_replace_default_is_false(self, mock_pact_memory):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(["update", "abc123", '{"lessons": ["x"]}'])
 
@@ -1061,23 +1184,24 @@ class TestCliDeleteCommand:
     """Test the delete subcommand handler."""
 
     def test_delete_existing_memory(self, mock_pact_memory, capsys):
-        mock_pact_memory.delete.return_value = True
+        mock_pact_memory.delete.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
-        args = parser.parse_args(["delete", "abc123"])
+        args = parser.parse_args(["delete", "abc1234"])
 
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_delete(args)
         assert exc_info.value.code == 0
-        mock_pact_memory.delete.assert_called_once_with("abc123")
+        mock_pact_memory.delete.assert_called_once_with("abc1234")
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["ok"] is True
         assert output["result"]["deleted"] is True
-        assert output["result"]["memory_id"] == "abc123"
+        # Envelope echoes the RESOLVED full ID, not the user-supplied prefix.
+        assert output["result"]["memory_id"] == _FAKE_RESOLVED_ID
 
     def test_delete_not_found(self, mock_pact_memory, capsys):
-        mock_pact_memory.delete.return_value = False
+        mock_pact_memory.delete.return_value = None
         parser = build_parser()
         args = parser.parse_args(["delete", "nonexistent"])
 
@@ -1089,8 +1213,30 @@ class TestCliDeleteCommand:
         err_output = json.loads(captured.err)
         assert err_output["error"] == "NOT_FOUND"
 
+    def test_delete_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
+        """cmd_delete surfaces PREFIX_TOO_SHORT envelope, not a generic error.
+
+        cmd_delete has no field-validation ValueError path, but the
+        explicit `except PrefixTooShortError` clause still matters: it
+        carries the `minimum` field through to the envelope rather than
+        falling through to a generic exception handler.
+        """
+        from scripts.database import PrefixTooShortError
+        mock_pact_memory.delete.side_effect = PrefixTooShortError("abc", minimum=7)
+        parser = build_parser()
+        args = parser.parse_args(["delete", "abc"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_delete(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == 7
+
     def test_delete_passes_db_path(self, mock_pact_memory):
-        mock_pact_memory.delete.return_value = True
+        mock_pact_memory.delete.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(["delete", "abc123", "--db-path", "/tmp/t.db"])
 
@@ -1282,6 +1428,414 @@ class TestCliSubprocess:
         get_output = json.loads(get_result.stdout)
         assert get_output["ok"] is True
         assert get_output["result"]["context"] == memory_dict["context"]
+
+    def test_get_unique_prefix_resolves_via_subprocess(self, cli_script_path, cli_db):
+        """E2E: real cli.py → memory_api → database → SQL roundtrip on a unique prefix."""
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+
+        full_id = "fa11ce5" + "1" + "0" * 24  # 32 chars; prefix "fa11ce5" is 7 chars
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {"id": full_id, "context": "unique-prefix-roundtrip"})
+        conn.commit()
+        conn.close()
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", "fa11ce5",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["ok"] is True
+        assert output["result"]["id"] == full_id
+        assert output["result"]["context"] == "unique-prefix-roundtrip"
+
+    def test_get_ambiguous_prefix_envelope_via_subprocess(self, cli_script_path, cli_db):
+        """E2E: ambiguous prefix returns AMBIGUOUS_PREFIX envelope with full match list."""
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+
+        id_a = "ambig00" + "a" + "0" * 24
+        id_b = "ambig00" + "b" + "0" * 24
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {"id": id_a, "context": "first"})
+            create_memory(conn, {"id": id_b, "context": "second"})
+        conn.commit()
+        conn.close()
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", "ambig00",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, f"stdout: {result.stdout}, stderr: {result.stderr}"
+        err_output = json.loads(result.stderr)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "AMBIGUOUS_PREFIX"
+        assert err_output["prefix"] == "ambig00"
+        match_ids = sorted(m["id"] for m in err_output["matches"])
+        assert match_ids == sorted([id_a, id_b])
+
+    def test_get_too_short_prefix_envelope_via_subprocess(self, cli_script_path, cli_db):
+        """E2E: prefix shorter than minimum returns PREFIX_TOO_SHORT envelope.
+
+        Uses a 6-char prefix — exactly MIN_PREFIX_LENGTH - 1 — to exercise
+        the gate at its sharpest boundary rather than a trivially-short input.
+        """
+        from scripts.database import MIN_PREFIX_LENGTH
+        too_short = "abcdef"  # exactly MIN_PREFIX_LENGTH - 1
+        assert len(too_short) == MIN_PREFIX_LENGTH - 1
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", too_short,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, f"stdout: {result.stdout}, stderr: {result.stderr}"
+        err_output = json.loads(result.stderr)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == MIN_PREFIX_LENGTH
+
+    # ----- F7: update/delete prefix resolution (subprocess E2E) -----
+
+    def _seed_memory(self, db_path, memory_id, context):
+        """Helper: insert one memory via storage primitive (bypasses CLI ingress strip)."""
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {"id": memory_id, "context": context})
+        conn.commit()
+        conn.close()
+
+    def test_update_unique_prefix_resolves_and_mutates(self, cli_script_path, cli_db):
+        """E2E: update by unique prefix resolves to full ID and mutates the memory."""
+        full_id = "upd1nfo" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id, "before-update")
+
+        update_payload = json.dumps({"context": "after-update"})
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", "upd1nfo", update_payload,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        assert json.loads(update_result.stdout)["ok"] is True
+
+        # Verify the mutation landed by reading the FULL ID
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0
+        assert json.loads(get_result.stdout)["result"]["context"] == "after-update"
+
+    def test_update_ambiguous_prefix_refuses_with_envelope(self, cli_script_path, cli_db):
+        """E2E: ambiguous prefix on update refuses with AMBIGUOUS_PREFIX, leaves both rows untouched."""
+        id_a = "updambi" + "a" + "0" * 24
+        id_b = "updambi" + "b" + "0" * 24
+        self._seed_memory(cli_db, id_a, "original-a")
+        self._seed_memory(cli_db, id_b, "original-b")
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", "updambi",
+             json.dumps({"context": "should-not-land"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 1, f"stdout: {update_result.stdout}"
+        err = json.loads(update_result.stderr)
+        assert err["error"] == "AMBIGUOUS_PREFIX"
+        assert err["prefix"] == "updambi"
+        assert err["matches_capped"] is False
+        assert err["total_matches"] == 2
+        match_ids = sorted(m["id"] for m in err["matches"])
+        assert match_ids == sorted([id_a, id_b])
+
+        # Verify NEITHER row was mutated
+        for fid, original in [(id_a, "original-a"), (id_b, "original-b")]:
+            get_result = subprocess.run(
+                [sys.executable, cli_script_path, "get", fid,
+                 "--db-path", str(cli_db)],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert json.loads(get_result.stdout)["result"]["context"] == original
+
+    def test_update_full_hash_unchanged(self, cli_script_path, cli_db):
+        """E2E: full 32-char ID on update bypasses resolver and works as before."""
+        full_id = "fu11upd0" + "0" * 24
+        self._seed_memory(cli_db, full_id, "pre")
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", full_id,
+             json.dumps({"context": "post"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(get_result.stdout)["result"]["context"] == "post"
+
+    def test_delete_unique_prefix_resolves_and_removes(self, cli_script_path, cli_db):
+        """E2E: delete by unique prefix resolves to full ID and removes the memory."""
+        full_id = "del1nfo" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id, "to-be-deleted")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", "del1nfo",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        out = json.loads(delete_result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["deleted"] is True
+
+        # Verify it's actually gone via full ID
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
+
+    def test_delete_ambiguous_prefix_refuses_with_envelope(self, cli_script_path, cli_db):
+        """E2E: ambiguous prefix on delete refuses, leaves both rows present."""
+        id_a = "delambi" + "a" + "0" * 24
+        id_b = "delambi" + "b" + "0" * 24
+        self._seed_memory(cli_db, id_a, "stays-a")
+        self._seed_memory(cli_db, id_b, "stays-b")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", "delambi",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 1, f"stdout: {delete_result.stdout}"
+        err = json.loads(delete_result.stderr)
+        assert err["error"] == "AMBIGUOUS_PREFIX"
+        assert err["prefix"] == "delambi"
+        assert err["matches_capped"] is False
+        assert err["total_matches"] == 2
+
+        # Verify BOTH rows survive
+        for fid in (id_a, id_b):
+            get_result = subprocess.run(
+                [sys.executable, cli_script_path, "get", fid,
+                 "--db-path", str(cli_db)],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert get_result.returncode == 0, f"row {fid} was unexpectedly deleted"
+
+    def test_delete_full_hash_unchanged(self, cli_script_path, cli_db):
+        """E2E: full 32-char ID on delete bypasses resolver and works as before."""
+        full_id = "fu11del0" + "0" * 24
+        self._seed_memory(cli_db, full_id, "doomed")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
+
+    # ----- Cycle 2: echo-fix regression — envelope must echo resolved full ID -----
+
+    def test_update_success_envelope_returns_resolved_full_id(self, cli_script_path, cli_db):
+        """E2E: update success envelope echoes the resolved full ID, not the user prefix.
+
+        Calling `pact-memory update <prefix>` and then chaining a follow-up
+        operation against the returned ID must work without re-running prefix
+        resolution. Locks the cycle-2 echo fix.
+        """
+        full_id = "ech0upd" + "1" + "0" * 24  # 32 chars
+        self._seed_memory(cli_db, full_id, "before")
+
+        prefix = "ech0upd"
+        assert prefix != full_id  # The whole point: caller passed a prefix
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", prefix,
+             json.dumps({"context": "after"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        out = json.loads(update_result.stdout)
+        assert out["ok"] is True
+        # Regression assertion: envelope must surface the RESOLVED full ID,
+        # not the user-supplied prefix.
+        assert out["result"]["memory_id"] == full_id
+        assert out["result"]["memory_id"] != prefix
+
+    def test_delete_success_envelope_returns_resolved_full_id(self, cli_script_path, cli_db):
+        """E2E: delete success envelope echoes the resolved full ID, not the user prefix."""
+        full_id = "ech0del" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id, "to-go")
+
+        prefix = "ech0del"
+        assert prefix != full_id
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", prefix,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        out = json.loads(delete_result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["deleted"] is True
+        assert out["result"]["memory_id"] == full_id
+        assert out["result"]["memory_id"] != prefix
+
+    # ----- Cycle 3 H1: case-insensitive matching extends to FULL-32-char branch -----
+
+    def test_uppercase_full_id_resolves_to_lowercase_stored_get(self, cli_script_path, cli_db):
+        """E2E: passing the full ID in UPPERCASE to `get` still resolves the lowercase-stored row.
+
+        The 32-char branch bypasses prefix resolution entirely; case-normalization
+        must apply on this branch too, otherwise an uppercase full ID misses
+        despite being byte-identical-after-lower() to the stored ID.
+        """
+        full_id_lower = "abcdef0" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id_lower, "case-roundtrip")
+
+        full_id_upper = full_id_lower.upper()
+        assert full_id_upper != full_id_lower  # confirm the input differs
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id_upper,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        out = json.loads(result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["id"] == full_id_lower
+        assert out["result"]["context"] == "case-roundtrip"
+
+    def test_uppercase_full_id_resolves_to_lowercase_stored_update(self, cli_script_path, cli_db):
+        """E2E: passing the full ID in UPPERCASE to `update` mutates the lowercase-stored row."""
+        full_id_lower = "abcdef0" + "2" + "0" * 24
+        self._seed_memory(cli_db, full_id_lower, "before-case")
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", full_id_lower.upper(),
+             json.dumps({"context": "after-case"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        out = json.loads(update_result.stdout)
+        assert out["ok"] is True
+        # Resolved-id echo must be the lowercase storage form, not the uppercase input.
+        assert out["result"]["memory_id"] == full_id_lower
+
+        # Verify mutation actually landed via lowercase GET
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id_lower,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(get_result.stdout)["result"]["context"] == "after-case"
+
+    def test_uppercase_full_id_resolves_to_lowercase_stored_delete(self, cli_script_path, cli_db):
+        """E2E: passing the full ID in UPPERCASE to `delete` removes the lowercase-stored row."""
+        full_id_lower = "abcdef0" + "3" + "0" * 24
+        self._seed_memory(cli_db, full_id_lower, "case-doomed")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", full_id_lower.upper(),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        out = json.loads(delete_result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["memory_id"] == full_id_lower
+
+        # Verify removal via lowercase GET → NOT_FOUND
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id_lower,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
+
+    # ----- Cycle 3 H3: AMBIGUOUS_PREFIX envelope scrubs $HOME from match contexts -----
+
+    def test_ambiguous_prefix_scrubs_context_in_envelope(self, cli_script_path, cli_db):
+        """E2E: AMBIGUOUS_PREFIX envelope replaces user $HOME path with '~' in each match context.
+
+        Contexts may carry absolute paths from agent notes; piping the envelope
+        to a log file would otherwise leak the operating user's home directory.
+        Scrub is applied per-match in cli.py at all 3 ambiguous-prefix call
+        sites (cmd_get, cmd_update, cmd_delete); this test exercises cmd_get
+        as representative.
+        """
+        home = str(Path.home())
+        # Guard against an unresolved tilde — _scrub no-ops if HOME is unset
+        # or returns the literal '~', and this test would not be exercising
+        # the scrub path in that case.
+        assert home and home != "~", f"HOME must be a real path for this test (got {home!r})"
+
+        sensitive_path = f"{home}/Sites/secret-project/file.py"
+        id_a = "scrub00" + "a" + "0" * 24
+        id_b = "scrub00" + "b" + "0" * 24
+        self._seed_memory(cli_db, id_a, f"Note about {sensitive_path}")
+        self._seed_memory(cli_db, id_b, f"Other note also at {sensitive_path}")
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", "scrub00",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, f"stdout: {result.stdout}"
+        err = json.loads(result.stderr)
+        assert err["error"] == "AMBIGUOUS_PREFIX"
+        assert err["prefix"] == "scrub00"
+
+        # Per-match contexts must NOT contain the literal $HOME expansion.
+        for match in err["matches"]:
+            assert home not in match["context"], (
+                f"$HOME ({home!r}) leaked into match context: {match['context']!r}"
+            )
+            # Positive assertion: the substituted form is present.
+            assert "~/Sites/secret-project/file.py" in match["context"]
+            # IDs are hex and must NOT be scrubbed; they should be the
+            # untouched 32-char storage form. Per backend H3 contract.
+            assert match["id"] in (id_a, id_b)
+            assert len(match["id"]) == 32
 
     def test_save_via_stdin(self, cli_script_path, cli_db):
         memory_dict = make_cli_memory_dict(context="stdin test")
