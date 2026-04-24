@@ -27,7 +27,11 @@ The rules below govern how messages delivered via this tool actually behave.
 - Treat task creation + `TaskUpdate(owner)` as the dispatch commit point; SendMessage is supplemental context.
 
 ### Teammate-Side Discipline — Verify Before Acting + Assume Eventually-Seen
+
+#### Inbound — Verify Before Acting
 - On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
+
+#### Outbound — Assume Eventually-Seen
 - Your outbound messages are delivered at the recipient's idle — not immediately. `intentional_wait` means "nothing advances until a resolver arrives," not "my message was read."
 - Before resending an apparently-unacknowledged message, verify the addressee has reached idle at least once since the original send. Otherwise the original is still queued and resending just duplicates it.
 - Peer-to-peer: do not assume a peer saw your message before their next tool call. Peer's in-flight action runs to completion before they read inbound.
