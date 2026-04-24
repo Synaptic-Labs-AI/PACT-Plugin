@@ -1,8 +1,43 @@
 # Communication Charter
 
-These norms apply to all PACT agents and the orchestrator. They govern all written output: code comments, documentation, inter-agent messages, user-facing text, GitHub PRs, issues, commit messages, and review comments.
+These norms govern how PACT agents communicate. Part I covers the
+mechanics of how messages are delivered between agents. Part II covers
+how written output — messages, comments, docs, PRs, issues — should
+read. Both apply to all PACT agents and the orchestrator.
 
----
+## Part I — Message Delivery Mechanics
+
+Inter-agent communication uses the `SendMessage` tool. Basic call shape:
+
+    SendMessage(to="teammate-name", message="[sender→recipient] ...", summary="5-10 word preview")
+
+The rules below govern how messages delivered via this tool actually behave.
+
+### Delivery Model
+- Messages are queued-async, delivered at the recipient's next idle boundary.
+- Agents read queued messages in FIFO order on reaching idle.
+- No cancellation primitive exists — a follow-up message cannot supersede a queued earlier one.
+- The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
+
+### Lead-Side Discipline — Verify Before Dispatching
+- Before sending a course-correction, check actual state (`git status`, `TaskList`, read files). The lead's mental model of teammate state diverges every time the teammate takes a tool action.
+- Do not rapid-fire corrections while a teammate is mid-turn. Each queues and executes in order at their idle boundary, by which point the earlier message's premise may be stale.
+- Supersede-the-last-message does not exist. If message A is wrong and you send B, both will execute.
+- For in-flight damage that is unacceptable, escalate to the user for manual interrupt — do not attempt to fake sync interrupt via rapid-fire SendMessage.
+- Treat task creation + `TaskUpdate(owner)` as the dispatch commit point; SendMessage is supplemental context.
+
+### Teammate-Side Discipline — Verify Before Acting + Assume Eventually-Seen
+- On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
+- Your outbound messages are delivered at the recipient's idle — not immediately. `intentional_wait` means "nothing advances until a resolver arrives," not "my message was read."
+- Before resending an apparently-unacknowledged message, verify the addressee has reached idle at least once since the original send. Otherwise the original is still queued and resending just duplicates it.
+- Peer-to-peer: do not assume a peer saw your message before their next tool call. Peer's in-flight action runs to completion before they read inbound.
+
+### Algedonic-Signal Latency Caveat
+- HALT signals via SendMessage have idle-boundary latency like any other message.
+- For immediate halt of in-flight teammate work, user-side manual interrupt is required.
+- The lead's responsibility to "surface immediately" means at the lead's next idle, not at arbitrary real-time.
+
+## Part II — Written Output
 
 ## Pillar 1 — Plain English
 
