@@ -313,7 +313,7 @@ class TestResolveMemoryIdPrefix:
         assert resolved == stored_id
 
     def test_ambiguous_small_set_not_truncated(self, db_conn):
-        """Ambiguous match below the cap reports truncated=False, exact total."""
+        """Ambiguous match below the cap reports matches_capped=False, exact total."""
         from scripts.database import (
             create_memory,
             resolve_memory_id_prefix,
@@ -326,12 +326,12 @@ class TestResolveMemoryIdPrefix:
         with pytest.raises(AmbiguousPrefixError) as exc_info:
             resolve_memory_id_prefix(db_conn, "smalset")
 
-        assert exc_info.value.truncated is False
+        assert exc_info.value.matches_capped is False
         assert exc_info.value.total_matches == 3
         assert len(exc_info.value.matches) == 3
 
     def test_ambiguous_pathological_set_truncated_at_cap(self, db_conn):
-        """When matches exceed AMBIGUOUS_MATCH_CAP, list is capped + truncated=True.
+        """When matches exceed AMBIGUOUS_MATCH_CAP, list is capped + matches_capped=True.
 
         total_matches reflects the actual COUNT(*) from the storage layer,
         not len(matches). Guards regression where the cap query and the
@@ -353,7 +353,7 @@ class TestResolveMemoryIdPrefix:
         with pytest.raises(AmbiguousPrefixError) as exc_info:
             resolve_memory_id_prefix(db_conn, "patho00")
 
-        assert exc_info.value.truncated is True
+        assert exc_info.value.matches_capped is True
         assert exc_info.value.total_matches == seeded
         assert len(exc_info.value.matches) == AMBIGUOUS_MATCH_CAP
 
@@ -401,6 +401,39 @@ class TestResolveMemoryIdPrefix:
                     "the range-scan upper bound depends on. If charset broadened "
                     "intentionally, update _PREFIX_UPPER_BOUND_CHAR."
                 )
+
+    def test_long_context_marked_truncated_per_match(self, db_conn):
+        """Per-match `context_truncated` flag distinguishes long vs short contexts.
+
+        Long contexts (> descriptor_chars) are truncated to descriptor_chars
+        and flagged `context_truncated=True`; short contexts pass through
+        unchanged with `context_truncated=False`. The flag is per-match,
+        not per-list — guards a regression where the flag gets set globally
+        based on any-row-truncated.
+        """
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+        )
+        descriptor_chars = 60  # default arg of resolve_memory_id_prefix
+        long_id = "trunca0" + "1" + "0" * 24
+        short_id = "trunca0" + "2" + "0" * 24
+        long_context = "x" * 200
+        short_context = "short"
+        create_memory(db_conn, {"id": long_id, "context": long_context})
+        create_memory(db_conn, {"id": short_id, "context": short_context})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "trunca0")
+
+        by_id = {m["id"]: m for m in exc_info.value.matches}
+        assert by_id[long_id]["context_truncated"] is True
+        assert len(by_id[long_id]["context"]) == descriptor_chars
+        assert by_id[long_id]["context"] == "x" * descriptor_chars
+
+        assert by_id[short_id]["context_truncated"] is False
+        assert by_id[short_id]["context"] == short_context
 
 
 class TestUpdateMemory:

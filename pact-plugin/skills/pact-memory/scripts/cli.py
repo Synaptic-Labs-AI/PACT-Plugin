@@ -172,7 +172,7 @@ def cmd_get(args, db_path=None):
             str(exc),
             prefix=exc.prefix,
             matches=scrubbed_matches,
-            truncated=exc.truncated,
+            matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
         )
     if result is None:
@@ -242,7 +242,7 @@ def cmd_update(args, db_path=None):
             str(exc),
             prefix=exc.prefix,
             matches=scrubbed_matches,
-            truncated=exc.truncated,
+            matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
         )
     except ValueError as exc:
@@ -282,7 +282,7 @@ def cmd_delete(args, db_path=None):
             str(exc),
             prefix=exc.prefix,
             matches=scrubbed_matches,
-            truncated=exc.truncated,
+            matches_capped=exc.matches_capped,
             total_matches=exc.total_matches,
         )
     if resolved_id is None:
@@ -355,8 +355,9 @@ def build_parser():
             "Retrieve a memory by its full 32-char ID or a unique prefix of "
             "at least 7 characters. A unique prefix returns the matching "
             "memory; an ambiguous prefix returns an AMBIGUOUS_PREFIX error "
-            "with a capped list of matching IDs (truncated/total_matches "
-            "fields indicate when the cap was applied); a prefix shorter "
+            "with a capped list of matching IDs (matches_capped/"
+            "total_matches fields indicate when the cap was applied); "
+            "a prefix shorter "
             "than 7 characters returns a PREFIX_TOO_SHORT error; no match "
             "returns NOT_FOUND. Prefix is case-insensitive."
         ),

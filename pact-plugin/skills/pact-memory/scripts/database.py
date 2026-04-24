@@ -47,6 +47,9 @@ MIN_PREFIX_LENGTH = 7
 
 # Cap for the disambiguation match list. Two queries fire only on the
 # ambiguous branch (rare); the unique-match common path is unaffected.
+# 50 is the human/agent disambiguation ceiling: with a >=7-char prefix
+# (16^7 ~= 268M keyspace), >50 collisions implies caller-malformed input,
+# at which point matches_capped/total_matches already signal truncation.
 AMBIGUOUS_MATCH_CAP = 50
 
 # Upper bound for prefix range scan: smallest ASCII char strictly greater
@@ -72,7 +75,7 @@ class AmbiguousPrefixError(LookupError):
 
     The `matches` attribute is a list of {"id", "context"} dicts capped at
     AMBIGUOUS_MATCH_CAP entries. `total_matches` is the true row count and
-    `truncated` is True when the cap was applied.
+    `matches_capped` is True when the cap was applied.
     """
 
     def __init__(
@@ -80,14 +83,14 @@ class AmbiguousPrefixError(LookupError):
         prefix: str,
         matches: List[Dict[str, Any]],
         *,
-        truncated: bool = False,
+        matches_capped: bool = False,
         total_matches: Optional[int] = None,
     ):
         self.prefix = prefix
         self.matches = matches
-        self.truncated = truncated
+        self.matches_capped = matches_capped
         self.total_matches = total_matches if total_matches is not None else len(matches)
-        suffix = f" (showing {len(matches)} of {self.total_matches})" if truncated else ""
+        suffix = f" (showing {len(matches)} of {self.total_matches})" if matches_capped else ""
         super().__init__(
             f"Prefix '{prefix}' is ambiguous — {self.total_matches} memories match.{suffix}"
         )
@@ -897,7 +900,8 @@ def resolve_memory_id_prefix(
             on ambiguity (for terse disambiguation output). Security-relevant
             knob if multi-tenant access is ever introduced — context may carry
             tenant data the disambiguation reader is not entitled to read; in
-            that case shorten or drop the snippet, or scope it by tenant.
+            that case shorten or drop the snippet, or scope it by tenant
+            (see issue #548).
 
     Returns:
         The full memory ID when the prefix uniquely matches one row, or None
@@ -907,8 +911,8 @@ def resolve_memory_id_prefix(
         PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
         AmbiguousPrefixError: prefix matches more than one row. The exception
             carries `matches` (list capped at AMBIGUOUS_MATCH_CAP),
-            `truncated` (True if the cap was applied), and `total_matches`
-            (the true row count).
+            `matches_capped` (True if the cap was applied), and
+            `total_matches` (the true row count).
     """
     ensure_initialized(conn)
 
@@ -952,9 +956,10 @@ def resolve_memory_id_prefix(
         matches.append({
             "id": row["id"],
             "context": snippet,
-            # Per-match flag distinct from the list-level `truncated` on the
-            # exception: signals that THIS row's `context` was clipped to
-            # `descriptor_chars`, not that the match list itself was capped.
+            # Per-match flag distinct from the list-level `matches_capped`
+            # on the exception: signals that THIS row's `context` was
+            # clipped to `descriptor_chars`, not that the match list
+            # itself was capped.
             "context_truncated": len(full_context) > descriptor_chars,
         })
     count_row = conn.execute(
@@ -962,11 +967,11 @@ def resolve_memory_id_prefix(
         (lo, hi),
     ).fetchone()
     total_matches = count_row["n"]
-    truncated = total_matches > len(matches)
+    matches_capped = total_matches > len(matches)
     raise AmbiguousPrefixError(
         prefix,
         matches,
-        truncated=truncated,
+        matches_capped=matches_capped,
         total_matches=total_matches,
     )
 

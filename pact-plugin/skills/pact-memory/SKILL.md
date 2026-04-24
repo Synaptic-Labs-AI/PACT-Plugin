@@ -136,7 +136,7 @@ Each memory can contain:
 | `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
 | `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
 | `list --limit N` | List with limit | `[...]` (default: 20) |
-| `get <id\|prefix>` | Get memory by full ID or unique prefix (>= 7 chars, case-insensitive). Ambiguous prefix returns `AMBIGUOUS_PREFIX` with `matches: [...]`, `truncated`, `total_matches`; too-short returns `PREFIX_TOO_SHORT` | `{"id": "...", "context": "...", ...}` |
+| `get <id\|prefix>` | Get memory by full ID or unique prefix (>= 7 chars, case-insensitive). Ambiguous prefix returns `AMBIGUOUS_PREFIX` with `matches: [...]`, `matches_capped`, `total_matches`; too-short returns `PREFIX_TOO_SHORT` | `{"id": "...", "context": "...", ...}` |
 | `update <id\|prefix> <json>` | Update memory fields (list fields merge additively). Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"memory_id": "<hex>"}` |
 | `update <id\|prefix> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
 | `update <id\|prefix> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |

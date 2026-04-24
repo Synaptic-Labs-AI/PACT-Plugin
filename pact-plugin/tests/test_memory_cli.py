@@ -905,6 +905,33 @@ class TestCliUpdateCommand:
         err_output = json.loads(captured.err)
         assert err_output["error"] == "NOT_FOUND"
 
+    def test_update_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
+        """Locks the PrefixTooShortError-IS-A-ValueError except-clause precedence.
+
+        cmd_update catches PrefixTooShortError BEFORE the generic ValueError
+        handler that surfaces field-validation failures. Since
+        PrefixTooShortError is a ValueError subclass, the order matters:
+        a swap would silently route prefix-too-short to the ValueError
+        envelope (with allowed_fields list and exit_code=2) instead of the
+        intended PREFIX_TOO_SHORT envelope.
+        """
+        from scripts.database import PrefixTooShortError
+        mock_pact_memory.update.side_effect = PrefixTooShortError("abc", minimum=7)
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc", '{"context": "x"}'])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == 7
+        # Negative assertion: the ValueError envelope shape would have
+        # this key; PREFIX_TOO_SHORT must NOT.
+        assert "allowed_fields" not in err_output
+
     def test_update_with_stdin(self, mock_pact_memory, monkeypatch):
         mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         monkeypatch.setattr("sys.stdin", StringIO('{"context": "from stdin"}'))
@@ -1185,6 +1212,28 @@ class TestCliDeleteCommand:
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "NOT_FOUND"
+
+    def test_delete_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
+        """cmd_delete surfaces PREFIX_TOO_SHORT envelope, not a generic error.
+
+        cmd_delete has no field-validation ValueError path, but the
+        explicit `except PrefixTooShortError` clause still matters: it
+        carries the `minimum` field through to the envelope rather than
+        falling through to a generic exception handler.
+        """
+        from scripts.database import PrefixTooShortError
+        mock_pact_memory.delete.side_effect = PrefixTooShortError("abc", minimum=7)
+        parser = build_parser()
+        args = parser.parse_args(["delete", "abc"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_delete(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        err_output = json.loads(captured.err)
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == 7
 
     def test_delete_passes_db_path(self, mock_pact_memory):
         mock_pact_memory.delete.return_value = _FAKE_RESOLVED_ID
@@ -1515,7 +1564,7 @@ class TestCliSubprocess:
         err = json.loads(update_result.stderr)
         assert err["error"] == "AMBIGUOUS_PREFIX"
         assert err["prefix"] == "updambi"
-        assert err["truncated"] is False
+        assert err["matches_capped"] is False
         assert err["total_matches"] == 2
         match_ids = sorted(m["id"] for m in err["matches"])
         assert match_ids == sorted([id_a, id_b])
@@ -1589,7 +1638,7 @@ class TestCliSubprocess:
         err = json.loads(delete_result.stderr)
         assert err["error"] == "AMBIGUOUS_PREFIX"
         assert err["prefix"] == "delambi"
-        assert err["truncated"] is False
+        assert err["matches_capped"] is False
         assert err["total_matches"] == 2
 
         # Verify BOTH rows survive
