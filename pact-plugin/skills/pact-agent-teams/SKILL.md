@@ -186,6 +186,12 @@ output (even zero-content) blocks the next inbox delivery.
 
 If you have nothing to say that advances the work, say nothing.
 
+**Outbound direction**: a `SendMessage` you send lands in the recipient's
+inbox at their next idle boundary, not instantaneously. See
+[Communication Charter Part I — Teammate-Side Discipline — Verify Before Acting + Assume Eventually-Seen](../../protocols/pact-communication-charter.md#teammate-side-discipline--verify-before-acting--assume-eventually-seen)
+for verify-before-acting and assume-eventually-seen rules that follow from
+this delivery model.
+
 ## Intentional Waiting
 
 When your task is `in_progress` but you are legitimately idle awaiting a message

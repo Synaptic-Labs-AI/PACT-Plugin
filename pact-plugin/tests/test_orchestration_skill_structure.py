@@ -33,32 +33,35 @@ BOOTSTRAP_MD = COMMANDS_DIR / "bootstrap.md"
 CORE_FILE = SKILLS_DIR / "orchestration" / "SKILL.md"
 
 # The 9 mandatory Read targets, in the order listed in bootstrap.md.
-# Entry 1 is the orchestration skill (under skills/); entries 2-9 are
-# supplementary protocols under protocols/. Paths are relative to plugin root.
+# The list is tail-biased: the most-load-bearing file (skills/orchestration/SKILL.md,
+# consulted every turn) sits last so it occupies the best-surviving slot in the
+# 5-slot path-agnostic Read/@-ref tracker after compaction. Situationally-invoked
+# protocols (algedonic, state-recovery, variety) head the list; they are cheap
+# to re-Read on demand at the moment of need. Paths are relative to plugin root.
 MANDATORY_READ_TARGETS = [
-    "skills/orchestration/SKILL.md",
-    "protocols/pact-s5-policy.md",
-    "protocols/pact-s4-checkpoints.md",
-    "protocols/pact-s4-tension.md",
+    "protocols/algedonic.md",
+    "protocols/pact-state-recovery.md",
     "protocols/pact-variety.md",
+    "protocols/pact-s4-tension.md",
+    "protocols/pact-s4-checkpoints.md",
+    "protocols/pact-s5-policy.md",
     "protocols/pact-workflows.md",
     "protocols/pact-communication-charter.md",
-    "protocols/pact-state-recovery.md",
-    "protocols/algedonic.md",
+    "skills/orchestration/SKILL.md",
 ]
 
 # The 8 supplementary protocols (filenames only). Retained separately for
 # forward-reference tests within the core skill body — the core file cannot
 # forward-reference itself.
 SUPPLEMENTARY_PROTOCOL_FILES = [
-    "pact-s5-policy.md",
-    "pact-s4-checkpoints.md",
-    "pact-s4-tension.md",
+    "algedonic.md",
+    "pact-state-recovery.md",
     "pact-variety.md",
+    "pact-s4-tension.md",
+    "pact-s4-checkpoints.md",
+    "pact-s5-policy.md",
     "pact-workflows.md",
     "pact-communication-charter.md",
-    "pact-state-recovery.md",
-    "algedonic.md",
 ]
 
 
@@ -173,10 +176,12 @@ class TestBootstrapStructure:
         """Read instructions must appear in the first 30 lines for truncation resilience."""
         first_30 = "\n".join(bootstrap_lines[:30])
         assert "skills/orchestration/SKILL.md" in first_30, (
-            "skills/orchestration/SKILL.md Read instruction not found in first 30 lines"
+            "skills/orchestration/SKILL.md Read instruction (tail slot) "
+            "not referenced in first 30 lines"
         )
         assert "algedonic.md" in first_30, (
-            "Last protocol file (algedonic.md) not referenced in first 30 lines"
+            "algedonic.md Read instruction (head slot) not referenced in "
+            "first 30 lines"
         )
 
     def test_bootstrap_body_size_reduced(self, bootstrap_lines):
@@ -186,17 +191,29 @@ class TestBootstrapStructure:
             f"bootstrap.md is {count} lines — exceeds 100-line target for stub"
         )
 
-    def test_core_file_is_first_read_target(self, bootstrap_text):
-        """skills/orchestration/SKILL.md must be listed as the FIRST Read target."""
-        # Find the numbered list: item 1 should reference the orchestration skill
+    def test_core_file_is_last_read_target(self, bootstrap_text):
+        """skills/orchestration/SKILL.md must be listed as the LAST Read target.
+
+        Tail-bias compaction durability: the 5-slot path-agnostic Read/@-ref
+        tracker is tail-biased, so the most-load-bearing file gets the best
+        post-compaction survival slot by appearing last. The orchestration
+        skill body is consulted every turn by the Agent Team lead; it gets
+        the tail slot. Situationally-invoked protocols head the list because
+        they can be re-Read on demand at the moment of need.
+        """
+        # Find every numbered Read entry and pick the highest-numbered one.
         pattern = re.compile(
-            r"1\.\s+`\{plugin_root\}/((?:protocols|skills)/[\w\-/]+\.md)`"
+            r"(\d+)\.\s+`\{plugin_root\}/((?:protocols|skills)/[\w\-/]+\.md)`"
         )
-        match = pattern.search(bootstrap_text)
-        assert match is not None, "No numbered Read instruction #1 found"
-        assert match.group(1) == "skills/orchestration/SKILL.md", (
-            f"First Read target is '{match.group(1)}', "
-            f"expected 'skills/orchestration/SKILL.md'"
+        matches = pattern.findall(bootstrap_text)
+        assert matches, "No numbered Read instructions found"
+        last_index, last_path = max(matches, key=lambda m: int(m[0]))
+        assert last_path == "skills/orchestration/SKILL.md", (
+            f"Last Read target is '{last_path}' (entry #{last_index}), "
+            f"expected 'skills/orchestration/SKILL.md'. The tail slot in "
+            f"the bootstrap Read list is reserved for the most-load-bearing "
+            f"file so tail-biased tracker durability preserves it across "
+            f"compaction."
         )
 
     def test_load_operating_instructions_heading(self, bootstrap_text):

@@ -81,6 +81,10 @@ Apply the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.m
 
 **Protocol-level, not architectural**: Agents emit algedonic signals through the same communication channel (to orchestrator), but the SIGNAL FORMAT itself demands immediate user escalation. The orchestrator is **REQUIRED** to surface algedonic signals to user immediately—it cannot triage, delay, or suppress them.
 
+### Latency Caveat
+
+See [Communication Charter Part I — Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat) for the delivery-model implications (idle-boundary HALT latency; immediate in-flight halt needs user interrupt; lead's "surface immediately" = lead's next idle).
+
 ### Task System Integration
 
 With PACT Task integration, algedonic signals create **signal Tasks** that persist and block affected work.
@@ -160,7 +164,7 @@ On receiving an algedonic signal:
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Broadcast stop** — `SendMessage(to="*", ...)` ensures all teammates receive the HALT simultaneously (see step 2 above)
+1. **Broadcast stop** — `SendMessage(to="*", ...)` delivers the HALT to each teammate's inbox at their next idle boundary (see step 2 above and the Latency Caveat under Signal Delivery Mechanism); for immediate halt of in-flight work, user-side manual interrupt is required
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress

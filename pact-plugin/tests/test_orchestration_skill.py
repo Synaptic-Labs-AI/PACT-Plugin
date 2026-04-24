@@ -3,7 +3,7 @@ Tests for #452 — dual-purpose orchestration skill invariants.
 
 skills/orchestration/SKILL.md is a dual-purpose file:
   - Readable as markdown via the Read tool (bootstrap.md Reads it as
-    its first Read target; Tier-2 Read-tracker durability).
+    its last Read target; tail-biased Tier-2 Read-tracker durability).
   - Invokable as a skill via Skill("PACT:orchestration") (Tier-1
     Skills-restored durability, backup only).
 
@@ -12,7 +12,7 @@ skill must be auto-discoverable via plugin.json's directory-reference
 skill schema.
 
 Test coverage (plan doc row IDs):
-  T6  bootstrap.md first Read target path equals skills/orchestration/SKILL.md
+  T6  bootstrap.md last Read target path equals skills/orchestration/SKILL.md
   T7  Skill body byte-identical to what bootstrap.md Reads (SSOT byte-diff)
   T8  PACT:orchestration resolvable via plugin.json skill auto-discovery
   T9  End-to-end Skill("PACT:orchestration") returns skill body
@@ -35,29 +35,33 @@ PLUGIN_JSON_PATH = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 
 
 class TestDualPurposeInvariants:
-    """T6 + T7: Bootstrap.md's first Read target must point to the same
-    file that Skill("PACT:orchestration") loads. The two delivery paths
-    have zero content divergence tolerance — any drift is a dead-on-arrival
-    contract violation."""
+    """Bootstrap.md's tail Read target must point to the same file that
+    Skill("PACT:orchestration") loads. The two delivery paths have zero
+    content divergence tolerance — any drift is a dead-on-arrival contract
+    violation. The tail slot (not head) carries the skill body because the
+    5-slot Read/@-ref tracker is tail-biased: the most-load-bearing file
+    gets the best post-compaction survival slot by appearing last."""
 
-    def test_bootstrap_first_read_target_path(self):
-        """Bootstrap.md's first numbered Read target must be the
-        orchestration skill file (by path)."""
+    def test_bootstrap_last_read_target_path(self):
+        """Bootstrap.md's last numbered Read target must be the
+        orchestration skill file (by path). Tail-biased tracker durability
+        places the heaviest operating content at the end of the list."""
         text = BOOTSTRAP_MD.read_text(encoding="utf-8")
-        # Find the numbered list: item 1 should reference the skill file.
+        # Find every numbered Read entry and pick the highest-numbered one.
         pattern = re.compile(
-            r"1\.\s+`\{plugin_root\}/((?:protocols|skills)/[\w\-/]+\.md)`"
+            r"(\d+)\.\s+`\{plugin_root\}/((?:protocols|skills)/[\w\-/]+\.md)`"
         )
-        match = pattern.search(text)
-        assert match is not None, (
-            "bootstrap.md has no numbered Read instruction #1"
+        matches = pattern.findall(text)
+        assert matches, (
+            "bootstrap.md has no numbered Read instructions"
         )
-        assert match.group(1) == "skills/orchestration/SKILL.md", (
-            f"bootstrap.md first Read target is '{match.group(1)}', "
-            f"expected 'skills/orchestration/SKILL.md'. The dual-purpose "
-            f"contract requires the first Read target to point at the "
-            f"skill body file; diverging paths break the Tier-2 durability "
-            f"path for orchestration content."
+        last_index, last_path = max(matches, key=lambda m: int(m[0]))
+        assert last_path == "skills/orchestration/SKILL.md", (
+            f"bootstrap.md last Read target is '{last_path}' "
+            f"(entry #{last_index}), expected 'skills/orchestration/SKILL.md'. "
+            f"The dual-purpose contract requires the tail Read target to "
+            f"point at the skill body file; diverging paths break the "
+            f"tail-biased Tier-2 durability path for orchestration content."
         )
 
     def test_skill_file_readable_and_substantial(self):
