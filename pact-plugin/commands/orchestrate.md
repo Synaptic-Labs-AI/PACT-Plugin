@@ -686,7 +686,7 @@ JSON
   TaskUpdate(taskId, owner="secretary")
   ```
   Do not block on completion — TEST phase proceeds in parallel.
-- [ ] **Verify agent task completion**: On receiving each HANDOFF summary via SendMessage, check the agent's task status via TaskList. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`. This is the belt-and-suspenders check for the SKILL.md step merge (ADR-003).
+- [ ] **Primary HANDOFF-presence check**: on receiving each Task-complete SendMessage, verify via TaskGet — confirm status=completed AND metadata.handoff populated/non-empty. If missing, SendMessage the agent to complete HANDOFF before downstream dispatch proceeds.
 - [ ] **S4 Checkpoint**: Environment stable? Model aligned? Plan viable?
 
 #### Handling Complex Sub-Tasks During CODE

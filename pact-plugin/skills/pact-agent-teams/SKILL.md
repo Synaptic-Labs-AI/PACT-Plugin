@@ -126,7 +126,7 @@ When your work is done:
    a. `SendMessage(to="lead", message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
    b. `TaskUpdate(taskId, status="completed")`
 
-   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the TaskCompleted hook only fires after TaskUpdate, which triggers HANDOFF capture for institutional memory. Skipping (b) means your work is invisible to the memory system.
+   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the `TaskUpdate(status="completed")` call is required to fire the TaskCompleted event. The lead's `TaskGet` verification is the primary HANDOFF-presence check; a missing or empty `metadata.handoff` will be flagged and your completion rejected until you store the HANDOFF. The `agent_handoff_emitter.py` hook that journals the completion is a pure journal-writer — it does NOT block, so your metadata.handoff content is load-bearing for both the lead's gate and institutional memory.
 
 3. **Self-claim follow-up work**: Check `TaskList` for unassigned, unblocked tasks matching your domain
 4. If found: `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin
@@ -190,9 +190,12 @@ If you have nothing to say that advances the work, say nothing.
 
 When your task is `in_progress` but you are legitimately idle awaiting a message
 (teachback approval, inter-commit hold, peer reply, user decision, blocker
-resolution), signal it via the `intentional_wait` task metadata BEFORE going idle. Both
-TeammateIdle hooks honor it for 30 minutes via `shared.intentional_wait.wait_stale`;
-without the signal, they nag every tick — the livelock Idle Discipline warns about.
+resolution), signal it via the `intentional_wait` task metadata BEFORE going idle.
+There are no in-plugin consumers of this flag; the schema primitives
+(`KNOWN_REASONS`, `KNOWN_RESOLVERS`, `wait_stale`) in `shared.intentional_wait`
+are retained as the teammate-facing metadata contract for protocol-defined
+waits. Using the flag documents the wait intent for the lead's TaskGet
+inspection and for post-hoc session review.
 
 ### SET — before going idle
 
@@ -207,7 +210,7 @@ TaskUpdate(taskId=taskId, metadata={
 })
 ```
 
-`since` must be tz-aware ISO-8601. A naive timestamp re-enables the nag (fail-loud).
+`since` must be tz-aware ISO-8601. A naive timestamp fails `validate_wait` and will be surfaced as malformed to any reader of the flag (lead TaskGet, audit, future consumers). Fail-loud.
 
 ### CLEAR — when the wait resolves
 
@@ -229,13 +232,16 @@ Unknown keys are preserved (forward-compat).
 
 ### Staleness safeguard
 
-Auto-expires after 30 minutes. If the wait takes longer, re-SET with a fresh `since`.
+The `wait_stale` primitive in `shared.intentional_wait` considers the flag stale after 30
+minutes from `since`. No hook currently enforces this — it's advisory metadata the lead may
+inspect via TaskGet. If your wait genuinely takes longer, re-SET with a fresh `since` so
+later inspection reflects the real duration.
 
 ### When NOT to set
 
-- **Consultant mode** (no owned `in_progress` task): hooks already skip you via owner/status filters.
-- **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it.
-- **Completion gating**: `handoff_gate.py` does NOT honor this flag. Empty HANDOFF still blocks completion — store your HANDOFF first.
+- **Consultant mode** (no owned `in_progress` task): the flag has no current consumer for consultants anyway.
+- **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it for brief waits.
+- **Completion gating**: the flag does NOT suppress the lead's HANDOFF-presence check. An empty or missing `metadata.handoff` will be flagged by the lead's TaskGet verification — store your HANDOFF before marking the task completed, regardless of intentional_wait state.
 
 ## Consultant Mode
 

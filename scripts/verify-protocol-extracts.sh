@@ -71,8 +71,8 @@ verify "pact-completeness.md" "Completeness Signals (lines 1339-1377)" "1339,137
 verify "pact-scope-detection.md" "Scope Detection (lines 1379-1513)" "1379,1513"
 verify "pact-scope-contract.md" "Scope Contract (lines 1515-1673)" "1515,1673"
 verify "pact-scope-phases.md" "Scoped Phases (lines 1675-1756)" "1675,1756"
-verify "pact-audit.md" "Concurrent Audit (lines 1758-1923)" "1758,1923"
-verify "pact-state-recovery.md" "State Recovery (lines 1941-2039)" "1941,2039"
+verify "pact-audit.md" "Concurrent Audit (lines 1758-1924)" "1758,1924"
+verify "pact-state-recovery.md" "State Recovery (lines 1942-2040)" "1942,2040"
 
 echo ""
 echo "=== Summary ==="

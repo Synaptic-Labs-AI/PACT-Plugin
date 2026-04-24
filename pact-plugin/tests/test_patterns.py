@@ -14,7 +14,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from shared.constants import PACT_AGENTS
-from phase_completion import CODE_PHASE_INDICATORS
 from shared.task_utils import find_active_agents  # agent_prefixes is local; we parse source
 
 from refresh.patterns import (
@@ -582,17 +581,3 @@ class TestAgentListConsistency:
             f"Got: {prefixes}"
         )
 
-    def test_code_phase_indicators_are_valid_subset(self):
-        """CODE_PHASE_INDICATORS should only contain known agent name stems."""
-        # Extract the base agent name from each indicator
-        # Indicators use both hyphen (pact-backend-coder) and underscore (pact_backend_coder) forms
-        known_stems = {a.replace("pact-", "") for a in PACT_AGENTS}
-
-        for indicator in CODE_PHASE_INDICATORS:
-            # Normalize: strip "pact-" or "pact_" prefix, convert underscores to hyphens
-            normalized = indicator.replace("pact_", "").replace("pact-", "")
-            normalized = normalized.replace("_", "-")
-            assert normalized in known_stems, (
-                f"CODE_PHASE_INDICATORS entry '{indicator}' does not correspond "
-                f"to a known PACT agent. Known stems: {sorted(known_stems)}"
-            )

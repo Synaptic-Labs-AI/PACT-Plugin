@@ -2179,47 +2179,46 @@ class TestJournalPreference:
 
 
 # ---------------------------------------------------------------------------
-# Integration: handoff_gate journal write
+# Integration: agent_handoff_emitter journal write (#538 replacement for
+# prior handoff_gate coverage; handoff_gate removed in C2a)
 # ---------------------------------------------------------------------------
 
 
-class TestHandoffGateJournalWrite:
-    """Tests that handoff_gate.main() writes agent_handoff event to journal."""
+class TestAgentHandoffEmitterJournalWrite:
+    """Tests that agent_handoff_emitter.main() writes agent_handoff event to journal."""
 
-    def _run_main(self, input_data, task_data=None):
-        """Helper to run handoff_gate.main() with given stdin and task file."""
+    def _run_main(self, input_data, task_data, tmp_path, monkeypatch):
+        """Helper to run agent_handoff_emitter.main() with given stdin and task file."""
         import io
         from unittest.mock import patch as _patch
 
-        if task_data is None:
-            task_data = {}
-
+        monkeypatch.setenv("HOME", str(tmp_path))
         stdin = io.StringIO(json.dumps(input_data))
 
         with _patch("sys.stdin", stdin), \
-             _patch("handoff_gate._read_task_json", return_value=task_data), \
-             _patch("handoff_gate.pact_context") as mock_ctx, \
-             _patch("handoff_gate.get_team_name", return_value="pact-test1234"), \
-             _patch("handoff_gate.append_event", return_value=True) as mock_append, \
-             _patch("handoff_gate.make_event", wraps=None) as mock_make:
+             _patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
+             _patch("agent_handoff_emitter.pact_context"), \
+             _patch("agent_handoff_emitter.get_team_name", return_value="pact-test1234"), \
+             _patch("agent_handoff_emitter.append_event", return_value=True) as mock_append, \
+             _patch("agent_handoff_emitter.make_event", wraps=None) as mock_make:
 
-            # make_event needs to return a dict for append_event
             mock_make.return_value = {"v": 1, "type": "agent_handoff", "ts": "2026-01-01T00:00:00Z"}
 
             with pytest.raises(SystemExit) as exc:
-                from handoff_gate import main
+                from agent_handoff_emitter import main
                 main()
 
             return exc.value.code, mock_append, mock_make
 
-    def test_writes_journal_on_valid_handoff(self):
-        """Writes agent_handoff event when all gates pass."""
+    def test_writes_journal_on_completed_task(self, tmp_path, monkeypatch):
+        """Writes agent_handoff event when status=completed + owner + non-signal."""
         input_data = {
             "task_id": "7",
             "task_subject": "CODE: auth",
             "team_name": "pact-test1234",
         }
         task_data = {
+            "status": "completed",
             "owner": "backend-coder",
             "metadata": {
                 "handoff": {
@@ -2229,30 +2228,30 @@ class TestHandoffGateJournalWrite:
                     "integration": ["UserService"],
                     "open_questions": [],
                 },
-                "memory_saved": True,
             },
         }
 
-        exit_code, mock_append, mock_make = self._run_main(input_data, task_data)
+        exit_code, mock_append, _ = self._run_main(input_data, task_data, tmp_path, monkeypatch)
 
         assert exit_code == 0
         mock_append.assert_called_once()
 
-    def test_no_journal_write_on_blocked(self):
-        """Does NOT write journal event when handoff validation blocks."""
+    def test_no_journal_write_on_in_progress_taskupdate(self, tmp_path, monkeypatch):
+        """Does NOT write journal event on metadata-only TaskUpdate (#528 guard)."""
         input_data = {
             "task_id": "7",
             "task_subject": "CODE: auth",
             "team_name": "pact-test1234",
         }
         task_data = {
+            "status": "in_progress",
             "owner": "backend-coder",
-            "metadata": {},  # Missing handoff -> blocks
+            "metadata": {"briefing_delivered": True},
         }
 
-        exit_code, mock_append, _ = self._run_main(input_data, task_data)
+        exit_code, mock_append, _ = self._run_main(input_data, task_data, tmp_path, monkeypatch)
 
-        assert exit_code == 2  # Blocked
+        assert exit_code == 0
         mock_append.assert_not_called()
 
 

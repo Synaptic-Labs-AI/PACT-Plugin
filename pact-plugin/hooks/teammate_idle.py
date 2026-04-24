@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/teammate_idle.py
-Summary: TeammateIdle hook with two responsibilities: stall detection and idle
-         cleanup. Detects agents that go idle without completing or reporting
-         blockers, and tracks consecutive idle events for completed agents to
-         suggest or force shutdown.
+Summary: TeammateIdle hook — resource-management for zombie teammates.
+         Tracks consecutive idle events for teammates whose task is
+         completed; at threshold N=3 suggests shutdown, at N=5 requests
+         shutdown via shutdown_request.
 Used by: hooks.json TeammateIdle hook
 
-Stall detection: If a teammate goes idle while their task is still in_progress
-and no HANDOFF or BLOCKER was sent, emit a systemMessage alerting the
-orchestrator to consider /PACT:imPACT.
+# livelock-safe: threshold-escalation, not a nag. Message emissions
+# transition only at the IDLE_SUGGEST_THRESHOLD and IDLE_FORCE_THRESHOLD
+# boundaries — not every idle tick. Above IDLE_FORCE_THRESHOLD a
+# shutdown_request is re-emitted per tick until the lead processes it and
+# the platform terminates the agent (safety is protocol-level, not a
+# structural cap). Exits deterministically on every code path. Does NOT
+# consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, request shutdown via shutdown_request.
 
 Input: JSON from stdin with teammate_name, team_name
-Output: JSON with systemMessage (stall alert or shutdown suggestion)
+Output: JSON with systemMessage (shutdown suggestion / force request)
 """
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -34,7 +39,6 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 from shared.error_output import hook_error_json
-from shared.intentional_wait import should_silence_stall_nag
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
 from shared.task_utils import get_task_list
@@ -93,48 +97,6 @@ def find_teammate_task(
     return in_progress or completed
 
 
-def detect_stall(
-    tasks: list[dict],
-    teammate_name: str,
-) -> str | None:
-    """
-    Check if a teammate has stalled (idle with in_progress task).
-
-    A stall is detected when:
-    - The teammate has a task with status in_progress
-    - They went idle (TeammateIdle event fired) without completing
-
-    Args:
-        tasks: List of all tasks
-        teammate_name: Name of the idle teammate
-
-    Returns:
-        Warning message if stall detected, None otherwise
-    """
-    task = find_teammate_task(tasks, teammate_name)
-    if not task:
-        return None
-
-    if task.get("status") != "in_progress":
-        return None
-
-    # Unified silencer: signal-task carve-outs + already-stalled skip +
-    # protocol-defined wait (intentional_wait). Single source of truth in
-    # shared/intentional_wait.py; handoff_gate.py honors a narrower slice
-    # via is_signal_task (AC #8 — cannot honor intentional_wait).
-    if should_silence_stall_nag(task):
-        return None
-
-    task_id = task.get("id", "?")
-    subject = task.get("subject", "unknown")
-
-    return (
-        f"Teammate '{teammate_name}' went idle without completing task "
-        f"#{task_id} ({subject}). Possible stall. "
-        f"Consider /PACT:imPACT to triage."
-    )
-
-
 def read_idle_counts(idle_counts_path: str) -> dict:
     """
     Read the idle counts tracking file.
@@ -183,7 +145,7 @@ def write_idle_counts(idle_counts_path: str, counts: dict) -> None:
 
 def _atomic_update_idle_counts(
     idle_counts_path: str,
-    mutator: "Callable[[dict], dict]",
+    mutator: Callable[[dict], dict],
 ) -> dict:
     """
     Atomically read, mutate, and write the idle counts file under a single lock.
@@ -361,20 +323,11 @@ def main():
         )
 
         messages = []
-        should_shutdown = False
-
-        # Check for stall (in_progress task + idle)
-        stall_msg = detect_stall(tasks, teammate_name)
-        if stall_msg:
-            messages.append(stall_msg)
-        else:
-            # Only check idle cleanup if not stalled
-            # (stalled agents need triage, not shutdown)
-            cleanup_msg, should_shutdown = check_idle_cleanup(
-                tasks, teammate_name, idle_counts_path
-            )
-            if cleanup_msg:
-                messages.append(cleanup_msg)
+        cleanup_msg, should_shutdown = check_idle_cleanup(
+            tasks, teammate_name, idle_counts_path
+        )
+        if cleanup_msg:
+            messages.append(cleanup_msg)
 
         if messages:
             if should_shutdown:

@@ -1,20 +1,25 @@
 """
-Tests for teammate_idle.py — TeammateIdle hook for stall detection and idle cleanup.
+Tests for teammate_idle.py — TeammateIdle hook for threshold-escalation
+resource cleanup of zombie teammates.
+
+#538 C3 scope: detect_stall + the stall-nag surface were removed entirely;
+this file now covers only the surviving check_idle_cleanup
+threshold-escalation + TOCTOU / legacy-migration / concurrent tracking
+paths. Stall-detection + intentional_wait suppression tests have been
+retired because the gated surface no longer exists.
 
 Tests cover:
-1. Stall detection: in_progress task + idle = stall warning
-2. Stall detection: completed task + idle = no stall (handled by idle cleanup)
-3. Stall detection: no task = no stall
-4. Stall detection: already-stalled task = no re-alert
-5. Stall detection: blocker/algedonic task = no stall
-6. Idle count tracking: increment on consecutive idles
-7. Idle count tracking: reset when agent gets new work
-8. Shutdown thresholds: no message below 3
-9. Shutdown thresholds: suggest at 3
-10. Shutdown thresholds: force shutdown_request at 5
-11. Main entry point: stdin/stdout/exit behavior
+- find_teammate_task: owner/status priority, multi-status fixtures.
+- Idle count tracking: read/write/reset + TOCTOU atomicity.
+- check_idle_cleanup: threshold 3 (suggest) + threshold 5 (force shutdown)
+  + task reassignment reset + stalled/terminated skip.
+- main(): stdin/stdout/exit behavior including force-shutdown ACTION
+  REQUIRED emission.
+- Legacy int → structured-dict migration.
+- Concurrent multi-agent tracking independence.
 """
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -24,7 +29,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
-# Sample task fixtures
 def make_task(task_id="1", subject="CODE: auth", status="in_progress",
               owner="backend-coder", metadata=None):
     """Helper to create a task dict."""
@@ -43,15 +47,15 @@ class TestFindTeammateTask:
     def test_finds_in_progress_task(self):
         from teammate_idle import find_teammate_task
 
-        tasks = [make_task(status="in_progress", owner="coder-a")]
+        tasks = [make_task(owner="coder-a", status="in_progress")]
         result = find_teammate_task(tasks, "coder-a")
         assert result is not None
-        assert result["status"] == "in_progress"
+        assert result["owner"] == "coder-a"
 
     def test_finds_completed_task(self):
         from teammate_idle import find_teammate_task
 
-        tasks = [make_task(status="completed", owner="coder-a")]
+        tasks = [make_task(owner="coder-a", status="completed")]
         result = find_teammate_task(tasks, "coder-a")
         assert result is not None
         assert result["status"] == "completed"
@@ -60,12 +64,11 @@ class TestFindTeammateTask:
         from teammate_idle import find_teammate_task
 
         tasks = [
-            make_task(task_id="1", status="completed", owner="coder-a"),
-            make_task(task_id="2", status="in_progress", owner="coder-a"),
+            make_task(task_id="1", owner="coder-a", status="completed"),
+            make_task(task_id="2", owner="coder-a", status="in_progress"),
         ]
         result = find_teammate_task(tasks, "coder-a")
         assert result["id"] == "2"
-        assert result["status"] == "in_progress"
 
     def test_returns_none_for_no_matching_owner(self):
         from teammate_idle import find_teammate_task
@@ -77,114 +80,77 @@ class TestFindTeammateTask:
     def test_returns_none_for_empty_tasks(self):
         from teammate_idle import find_teammate_task
 
-        result = find_teammate_task([], "coder-a")
-        assert result is None
+        assert find_teammate_task([], "coder-a") is None
 
     def test_returns_highest_id_completed_task(self):
         from teammate_idle import find_teammate_task
 
         tasks = [
-            make_task(task_id="3", status="completed", owner="coder-a"),
-            make_task(task_id="7", status="completed", owner="coder-a"),
-            make_task(task_id="5", status="completed", owner="coder-a"),
+            make_task(task_id="1", owner="coder-a", status="completed"),
+            make_task(task_id="7", owner="coder-a", status="completed"),
+            make_task(task_id="3", owner="coder-a", status="completed"),
         ]
         result = find_teammate_task(tasks, "coder-a")
         assert result["id"] == "7"
 
     def test_returns_highest_id_with_double_digit_ids(self):
-        """Regression: IDs are numeric strings. "20" > "3" numerically,
-        but "3" > "20" lexicographically. Must compare as int."""
+        """String comparison would pick '9' over '20' — test numeric compare."""
         from teammate_idle import find_teammate_task
 
         tasks = [
-            make_task(task_id="3", status="completed", owner="coder-a"),
-            make_task(task_id="20", status="completed", owner="coder-a"),
-            make_task(task_id="10", status="completed", owner="coder-a"),
+            make_task(task_id="9", owner="coder-a", status="completed"),
+            make_task(task_id="20", owner="coder-a", status="completed"),
         ]
         result = find_teammate_task(tasks, "coder-a")
         assert result["id"] == "20"
 
     def test_handles_non_numeric_ids_gracefully(self):
-        """Non-numeric task IDs should not crash — falls back safely."""
+        """Non-numeric IDs should not raise; best-effort comparison."""
         from teammate_idle import find_teammate_task
 
         tasks = [
-            make_task(task_id="abc", status="completed", owner="coder-a"),
-            make_task(task_id="xyz", status="completed", owner="coder-a"),
+            make_task(task_id="abc", owner="coder-a", status="completed"),
+            make_task(task_id="5", owner="coder-a", status="completed"),
         ]
-        # Should not raise — just returns one of the tasks
+        # Should not raise
         result = find_teammate_task(tasks, "coder-a")
         assert result is not None
-        assert result["status"] == "completed"
 
 
-class TestDetectStall:
-    """Tests for teammate_idle.detect_stall()."""
+class TestFindTeammateTaskEdgeCases:
+    """Additional edge cases for find_teammate_task()."""
 
-    def test_detects_stall_in_progress_task(self):
-        from teammate_idle import detect_stall
+    def test_pending_task_not_returned(self):
+        from teammate_idle import find_teammate_task
 
-        tasks = [make_task(status="in_progress", owner="coder-a")]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None
-        assert "stall" in result.lower()
-        assert "coder-a" in result
-        assert "imPACT" in result
-
-    def test_no_stall_for_completed_task(self):
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(status="completed", owner="coder-a")]
-        result = detect_stall(tasks, "coder-a")
+        tasks = [make_task(status="pending", owner="coder-a")]
+        result = find_teammate_task(tasks, "coder-a")
         assert result is None
 
-    def test_no_stall_for_no_task(self):
-        from teammate_idle import detect_stall
+    def test_deleted_task_not_returned(self):
+        from teammate_idle import find_teammate_task
 
-        tasks = [make_task(owner="coder-b")]
-        result = detect_stall(tasks, "coder-a")
+        tasks = [make_task(status="deleted", owner="coder-a")]
+        result = find_teammate_task(tasks, "coder-a")
         assert result is None
 
-    def test_no_stall_for_blocker_task(self):
-        from teammate_idle import detect_stall
+    def test_mixed_statuses_returns_in_progress(self):
+        from teammate_idle import find_teammate_task
 
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"type": "blocker"}
-        )]
-        result = detect_stall(tasks, "coder-a")
+        tasks = [
+            make_task(task_id="1", status="pending", owner="coder-a"),
+            make_task(task_id="2", status="in_progress", owner="coder-a"),
+            make_task(task_id="3", status="completed", owner="coder-a"),
+        ]
+        result = find_teammate_task(tasks, "coder-a")
+        assert result["id"] == "2"
+
+    def test_owner_matching_is_exact(self):
+        from teammate_idle import find_teammate_task
+
+        tasks = [make_task(status="in_progress", owner="coder-a-backend")]
+        result = find_teammate_task(tasks, "coder-a")
         assert result is None
-
-    def test_no_stall_for_algedonic_task(self):
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"type": "algedonic"}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is None
-
-    def test_no_re_alert_for_already_stalled(self):
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"stalled": True}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is None
-
-    def test_includes_task_id_and_subject(self):
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            task_id="42", subject="CODE: fix login",
-            status="in_progress", owner="coder-a"
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert "#42" in result
-        assert "fix login" in result
 
 
 class TestIdleCountTracking:
@@ -259,7 +225,7 @@ class TestIdleCountTracking:
 
 
 class TestCheckIdleCleanup:
-    """Tests for teammate_idle.check_idle_cleanup()."""
+    """Tests for teammate_idle.check_idle_cleanup() threshold-escalation."""
 
     def test_no_action_below_threshold(self, tmp_path):
         from teammate_idle import check_idle_cleanup
@@ -267,7 +233,6 @@ class TestCheckIdleCleanup:
         counts_path = str(tmp_path / "idle_counts.json")
         tasks = [make_task(status="completed", owner="coder-a")]
 
-        # First idle event (count = 1)
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
         assert msg is None
         assert should_shutdown is False
@@ -276,7 +241,7 @@ class TestCheckIdleCleanup:
         from teammate_idle import check_idle_cleanup, write_idle_counts
 
         counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 1})  # Already had 1
+        write_idle_counts(counts_path, {"coder-a": 1})
         tasks = [make_task(status="completed", owner="coder-a")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
@@ -287,7 +252,7 @@ class TestCheckIdleCleanup:
         from teammate_idle import check_idle_cleanup, write_idle_counts
 
         counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 2})  # Will become 3
+        write_idle_counts(counts_path, {"coder-a": 2})
         tasks = [make_task(status="completed", owner="coder-a")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
@@ -300,7 +265,7 @@ class TestCheckIdleCleanup:
         from teammate_idle import check_idle_cleanup, write_idle_counts
 
         counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 3})  # Will become 4
+        write_idle_counts(counts_path, {"coder-a": 3})
         tasks = [make_task(status="completed", owner="coder-a")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
@@ -311,7 +276,7 @@ class TestCheckIdleCleanup:
         from teammate_idle import check_idle_cleanup, write_idle_counts
 
         counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 4})  # Will become 5
+        write_idle_counts(counts_path, {"coder-a": 4})
         tasks = [make_task(status="completed", owner="coder-a")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
@@ -323,7 +288,7 @@ class TestCheckIdleCleanup:
         from teammate_idle import check_idle_cleanup, write_idle_counts
 
         counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 9})  # Will become 10
+        write_idle_counts(counts_path, {"coder-a": 9})
         tasks = [make_task(status="completed", owner="coder-a")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
@@ -335,14 +300,12 @@ class TestCheckIdleCleanup:
 
         counts_path = str(tmp_path / "idle_counts.json")
         write_idle_counts(counts_path, {"coder-a": 3})
-        # Agent now has in_progress task (got new work)
         tasks = [make_task(status="in_progress", owner="coder-a")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
         assert msg is None
         assert should_shutdown is False
 
-        # Count should be reset
         counts = read_idle_counts(counts_path)
         assert "coder-a" not in counts
 
@@ -379,13 +342,129 @@ class TestCheckIdleCleanup:
 
         counts_path = str(tmp_path / "idle_counts.json")
         write_idle_counts(counts_path, {"coder-a": 3})
-        tasks = [make_task(owner="coder-b")]  # No task for coder-a
+        tasks = [make_task(owner="coder-b")]
 
         msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
         assert msg is None
 
         counts = read_idle_counts(counts_path)
         assert "coder-a" not in counts
+
+
+class TestLegacyIdleCountMigration:
+    """Tests for the int-to-structured-dict migration in check_idle_cleanup().
+
+    Legacy idle_counts.json files stored plain ints per teammate. The current
+    format uses structured dicts. The migration logic must handle both."""
+
+    def test_legacy_int_migrated_to_structured_dict(self, tmp_path):
+        from teammate_idle import check_idle_cleanup, read_idle_counts, write_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+        write_idle_counts(counts_path, {"coder-a": 2})
+        tasks = [make_task(task_id="5", status="completed", owner="coder-a")]
+
+        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert msg is not None
+        assert "idle" in msg.lower()
+        assert should_shutdown is False
+
+        counts = read_idle_counts(counts_path)
+        entry = counts["coder-a"]
+        assert isinstance(entry, dict)
+        assert entry["count"] == 3
+        assert entry["task_id"] == "5"
+
+    def test_legacy_int_zero_migrated_correctly(self, tmp_path):
+        from teammate_idle import check_idle_cleanup, read_idle_counts, write_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+        write_idle_counts(counts_path, {"coder-a": 0})
+        tasks = [make_task(task_id="1", status="completed", owner="coder-a")]
+
+        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert msg is None
+        assert should_shutdown is False
+
+        counts = read_idle_counts(counts_path)
+        entry = counts["coder-a"]
+        assert isinstance(entry, dict)
+        assert entry["count"] == 1
+
+
+class TestTaskReassignmentReset:
+    """Verify that a task switch between idle events resets the count."""
+
+    def test_completed_then_new_work_resets_idle(self, tmp_path):
+        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+        write_idle_counts(counts_path, {"coder-a": 4})
+
+        # Agent gets new in_progress task — find_teammate_task now returns
+        # the in_progress one, so cleanup resets (status != completed).
+        new_tasks = [
+            make_task(task_id="2", status="in_progress", owner="coder-a"),
+            make_task(task_id="1", status="completed", owner="coder-a"),
+        ]
+        msg, shutdown = check_idle_cleanup(new_tasks, "coder-a", counts_path)
+        assert msg is None
+        assert shutdown is False
+
+        counts = read_idle_counts(counts_path)
+        assert "coder-a" not in counts
+
+
+class TestConcurrentIdleTracking:
+    """Independence + TOCTOU coverage for multi-agent idle tracking."""
+
+    def test_multiple_agents_tracked_independently(self, tmp_path):
+        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+
+        tasks = [
+            make_task(task_id="1", status="completed", owner="coder-a"),
+            make_task(task_id="2", status="completed", owner="coder-b"),
+        ]
+
+        write_idle_counts(counts_path, {"coder-a": {"count": 2, "task_id": "1"}})
+        msg_a, _ = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert msg_a is not None
+        assert "coder-a" in msg_a
+
+        msg_b, _ = check_idle_cleanup(tasks, "coder-b", counts_path)
+        assert msg_b is None
+
+        counts = read_idle_counts(counts_path)
+        assert counts["coder-a"]["count"] == 3
+        assert counts["coder-b"]["count"] == 1
+
+    def test_one_agent_shutdown_doesnt_affect_others(self, tmp_path):
+        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
+
+        counts_path = str(tmp_path / "idle_counts.json")
+
+        tasks = [
+            make_task(task_id="1", status="completed", owner="coder-a"),
+            make_task(task_id="2", status="completed", owner="coder-b"),
+        ]
+
+        write_idle_counts(counts_path, {
+            "coder-a": {"count": 4, "task_id": "1"},
+            "coder-b": {"count": 1, "task_id": "2"},
+        })
+
+        msg_a, shutdown_a = check_idle_cleanup(tasks, "coder-a", counts_path)
+        assert shutdown_a is True
+
+        msg_b, shutdown_b = check_idle_cleanup(tasks, "coder-b", counts_path)
+        assert shutdown_b is False
+        assert msg_b is None
+
+        counts = read_idle_counts(counts_path)
+        assert counts["coder-a"]["count"] == 5
+        assert counts["coder-b"]["count"] == 2
 
 
 class TestMain:
@@ -406,7 +485,7 @@ class TestMain:
 
         return exc_info.value.code
 
-    def test_exits_0_when_no_team(self, capsys):
+    def test_exits_0_when_no_team(self):
         import io
         from teammate_idle import main
 
@@ -424,37 +503,18 @@ class TestMain:
     def test_exits_0_when_no_tasks(self):
         exit_code = self._run_main(
             {"teammate_name": "coder-a"},
-            tasks=None
+            tasks=None,
         )
         assert exit_code == 0
 
-    def test_outputs_stall_warning(self, capsys, tmp_path):
+    def test_in_progress_task_emits_no_output(self, capsys, tmp_path):
+        """Post-#538: in_progress + idle → no emission (stall-nag removed).
+        The hook silently passes; no systemMessage, no stderr."""
         import io
         from teammate_idle import main
 
         tasks = [make_task(status="in_progress", owner="coder-a")]
 
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        if captured.out.strip():
-            output = json.loads(captured.out)
-            assert "systemMessage" in output
-            assert "stall" in output["systemMessage"].lower()
-
-    def test_outputs_nothing_for_completed_below_threshold(self, capsys, tmp_path):
-        import io
-        from teammate_idle import main
-
-        tasks = [make_task(status="completed", owner="coder-a")]
-
-        # Patch Path.home() so idle_counts.json uses tmp_path instead of real home
-        # (prevents cross-test pollution from persisted idle count files)
         with patch("teammate_idle.get_team_name", return_value="pact-test"), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
              patch("teammate_idle.get_task_list", return_value=tasks), \
@@ -464,8 +524,29 @@ class TestMain:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        # No output expected below threshold (first idle event, count=1)
-        assert captured.out.strip() == "" or "systemMessage" not in captured.out
+        # suppressOutput JSON is allowed; systemMessage is not.
+        if captured.out.strip():
+            output = json.loads(captured.out)
+            assert "systemMessage" not in output
+
+    def test_completed_below_threshold_no_emission(self, capsys, tmp_path):
+        import io
+        from teammate_idle import main
+
+        tasks = [make_task(status="completed", owner="coder-a")]
+
+        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
+             patch("teammate_idle.get_task_list", return_value=tasks), \
+             patch("teammate_idle.Path.home", return_value=tmp_path):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        if captured.out.strip():
+            output = json.loads(captured.out)
+            assert "systemMessage" not in output
 
     def test_exits_0_on_invalid_json(self):
         import io
@@ -479,289 +560,10 @@ class TestMain:
         assert exc_info.value.code == 0
 
 
-# Required for patch.dict
-import os
-
-
-# =============================================================================
-# Edge Case Tests — Stall/Idle Interaction, Concurrent Tracking
-# =============================================================================
-
-class TestLegacyIdleCountMigration:
-    """Tests for the int-to-structured-dict migration in check_idle_cleanup().
-
-    Legacy idle_counts.json files stored plain ints per teammate (e.g., {"coder-a": 3}).
-    The current format uses structured dicts (e.g., {"coder-a": {"count": 3, "task_id": "1"}}).
-    The migration logic in _increment() must handle both formats transparently."""
-
-    def test_legacy_int_migrated_to_structured_dict(self, tmp_path):
-        """When idle_counts.json has a plain int, check_idle_cleanup should
-        migrate it to structured format and continue counting correctly."""
-        from teammate_idle import check_idle_cleanup, read_idle_counts, write_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        # Write legacy format: plain int
-        write_idle_counts(counts_path, {"coder-a": 2})
-        tasks = [make_task(task_id="5", status="completed", owner="coder-a")]
-
-        # Should migrate the int (2) to {"count": 2, "task_id": ""} then
-        # increment to 3, which hits the suggest threshold
-        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
-        assert msg is not None
-        assert "idle" in msg.lower()
-        assert should_shutdown is False
-
-        # Verify the file now contains structured format
-        counts = read_idle_counts(counts_path)
-        entry = counts["coder-a"]
-        assert isinstance(entry, dict)
-        assert entry["count"] == 3
-        assert entry["task_id"] == "5"
-
-    def test_legacy_int_zero_migrated_correctly(self, tmp_path):
-        """Edge case: legacy count of 0 should migrate and increment to 1."""
-        from teammate_idle import check_idle_cleanup, read_idle_counts, write_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 0})
-        tasks = [make_task(task_id="1", status="completed", owner="coder-a")]
-
-        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
-        # Count goes from 0 -> 1, below threshold
-        assert msg is None
-        assert should_shutdown is False
-
-        counts = read_idle_counts(counts_path)
-        entry = counts["coder-a"]
-        assert isinstance(entry, dict)
-        assert entry["count"] == 1
-
-
-class TestStallIdleInteraction:
-    """Verify that stalled agents get stall detection, NOT idle cleanup.
-    This is the key invariant: a stalled agent (in_progress task + idle)
-    should receive a stall warning, and should NOT be tracked for idle cleanup."""
-
-    def test_stall_prevents_idle_count_increment(self, tmp_path):
-        """When stall is detected, idle count should NOT be incremented."""
-        from teammate_idle import detect_stall, check_idle_cleanup, read_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        tasks = [make_task(status="in_progress", owner="coder-a")]
-
-        # Stall IS detected
-        stall_msg = detect_stall(tasks, "coder-a")
-        assert stall_msg is not None
-
-        # Idle cleanup returns nothing (task not completed)
-        msg, shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
-        assert msg is None
-        assert shutdown is False
-
-        # Idle count should NOT have been set
-        counts = read_idle_counts(counts_path)
-        assert "coder-a" not in counts
-
-    def test_main_exclusive_stall_or_cleanup(self, capsys, tmp_path):
-        """main() should emit stall OR cleanup message, never both.
-        The code has 'else' branch: if stall, skip cleanup check."""
-        import io
-        from teammate_idle import main
-
-        # Agent with in_progress task (stall case)
-        tasks = [make_task(status="in_progress", owner="coder-a")]
-
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks):
-            with pytest.raises(SystemExit):
-                main()
-
-        captured = capsys.readouterr()
-        if captured.out.strip():
-            output = json.loads(captured.out)
-            msg = output.get("systemMessage", "")
-            # Should have stall message, NOT cleanup/shutdown message
-            assert "stall" in msg.lower()
-            assert "shutdown" not in msg.lower()
-
-    def test_completed_then_new_work_resets_idle(self, tmp_path):
-        """Agent completes task (starts idle tracking), then gets new work
-        (in_progress). Idle count should be reset."""
-        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-
-        # First: agent has completed task, idle count accumulates
-        completed_tasks = [make_task(status="completed", owner="coder-a")]
-        write_idle_counts(counts_path, {"coder-a": 4})
-
-        # Now: agent gets a new in_progress task
-        new_tasks = [
-            make_task(task_id="2", status="in_progress", owner="coder-a"),
-            make_task(task_id="1", status="completed", owner="coder-a"),
-        ]
-
-        # check_idle_cleanup should reset because find_teammate_task returns
-        # the in_progress task (not completed)
-        msg, shutdown = check_idle_cleanup(new_tasks, "coder-a", counts_path)
-        assert msg is None
-        assert shutdown is False
-
-        counts = read_idle_counts(counts_path)
-        assert "coder-a" not in counts
-
-
-class TestConcurrentIdleTracking:
-    """Test idle tracking with multiple agents being tracked simultaneously."""
-
-    def test_multiple_agents_tracked_independently(self, tmp_path):
-        """Each agent's idle count should be independent."""
-        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-
-        tasks = [
-            make_task(task_id="1", status="completed", owner="coder-a"),
-            make_task(task_id="2", status="completed", owner="coder-b"),
-        ]
-
-        # coder-a idles 3 times (pre-seed with structured format)
-        write_idle_counts(counts_path, {"coder-a": {"count": 2, "task_id": "1"}})
-        msg_a, _ = check_idle_cleanup(tasks, "coder-a", counts_path)
-        assert msg_a is not None  # Suggest at 3
-        assert "coder-a" in msg_a
-
-        # coder-b idles once (count starts at 0)
-        msg_b, _ = check_idle_cleanup(tasks, "coder-b", counts_path)
-        assert msg_b is None  # Below threshold
-
-        counts = read_idle_counts(counts_path)
-        assert counts["coder-a"]["count"] == 3
-        assert counts["coder-b"]["count"] == 1
-
-    def test_one_agent_shutdown_doesnt_affect_others(self, tmp_path):
-        """Force-shutdown of one agent should not affect others' counts."""
-        from teammate_idle import check_idle_cleanup, write_idle_counts, read_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-
-        tasks = [
-            make_task(task_id="1", status="completed", owner="coder-a"),
-            make_task(task_id="2", status="completed", owner="coder-b"),
-        ]
-
-        write_idle_counts(counts_path, {
-            "coder-a": {"count": 4, "task_id": "1"},
-            "coder-b": {"count": 1, "task_id": "2"},
-        })
-
-        # coder-a hits force threshold (5)
-        msg_a, shutdown_a = check_idle_cleanup(tasks, "coder-a", counts_path)
-        assert shutdown_a is True
-
-        # coder-b still at count 2, no action
-        msg_b, shutdown_b = check_idle_cleanup(tasks, "coder-b", counts_path)
-        assert shutdown_b is False
-        assert msg_b is None
-
-        counts = read_idle_counts(counts_path)
-        assert counts["coder-a"]["count"] == 5
-        assert counts["coder-b"]["count"] == 2
-
-
-class TestFindTeammateTaskEdgeCases:
-    """Additional edge cases for find_teammate_task()."""
-
-    def test_pending_task_not_returned(self):
-        """Pending tasks (not yet started) should NOT be returned."""
-        from teammate_idle import find_teammate_task
-
-        tasks = [make_task(status="pending", owner="coder-a")]
-        result = find_teammate_task(tasks, "coder-a")
-        assert result is None
-
-    def test_deleted_task_not_returned(self):
-        """Deleted tasks should NOT be returned."""
-        from teammate_idle import find_teammate_task
-
-        tasks = [make_task(status="deleted", owner="coder-a")]
-        result = find_teammate_task(tasks, "coder-a")
-        assert result is None
-
-    def test_mixed_statuses_returns_in_progress(self):
-        """With pending + in_progress + completed, returns in_progress."""
-        from teammate_idle import find_teammate_task
-
-        tasks = [
-            make_task(task_id="1", status="pending", owner="coder-a"),
-            make_task(task_id="2", status="in_progress", owner="coder-a"),
-            make_task(task_id="3", status="completed", owner="coder-a"),
-        ]
-        result = find_teammate_task(tasks, "coder-a")
-        assert result["id"] == "2"
-
-    def test_owner_matching_is_exact(self):
-        """Owner matching should be exact, not substring."""
-        from teammate_idle import find_teammate_task
-
-        tasks = [make_task(status="in_progress", owner="coder-a-backend")]
-        result = find_teammate_task(tasks, "coder-a")
-        assert result is None
-
-
-class TestDetectStallEdgeCases:
-    """Additional edge cases for detect_stall()."""
-
-    def test_empty_metadata_still_detects_stall(self):
-        """Task with empty metadata dict should still trigger stall."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None
-
-    def test_no_metadata_key_still_detects_stall(self):
-        """Task without metadata key at all should still trigger stall."""
-        from teammate_idle import detect_stall
-
-        task = {"id": "1", "subject": "work", "status": "in_progress", "owner": "coder-a"}
-        result = detect_stall([task], "coder-a")
-        assert result is not None
-
-    def test_stalled_false_value_still_detects_stall(self):
-        """metadata.stalled=False should NOT suppress stall detection."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"stalled": False}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None  # False != truthy, so stall should fire
-
-
 class TestMainEdgeCases:
     """Additional edge cases for main() entry point."""
 
-    def test_team_name_lowercased(self):
-        """get_team_name() returns lowercased value per v3.3.2 convention."""
-        import io
-        from teammate_idle import main
-
-        # get_team_name() already returns lowercased — test that main() works
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": ""}))):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0  # Empty teammate_name exits cleanly
-
     def test_get_task_list_returns_none(self):
-        """Should exit cleanly when get_task_list() returns None."""
         import io
         from teammate_idle import main
 
@@ -774,14 +576,13 @@ class TestMainEdgeCases:
         assert exc_info.value.code == 0
 
     def test_shutdown_message_includes_action_required(self, capsys, tmp_path):
-        """When force shutdown threshold hit, output should include ACTION REQUIRED."""
+        """At force threshold, output must include ACTION REQUIRED +
+        shutdown_request wording for the lead to act on."""
         import io
         from teammate_idle import main, write_idle_counts
 
         tasks = [make_task(status="completed", owner="coder-a")]
 
-        # Pre-set count to 4 (will become 5 = force threshold)
-        # Path must include .claude to match hook's Path.home() / ".claude" / "teams" / ...
         idle_dir = tmp_path / ".claude" / "teams" / "pact-test"
         idle_dir.mkdir(parents=True)
         write_idle_counts(str(idle_dir / "idle_counts.json"), {"coder-a": 4})
@@ -795,372 +596,8 @@ class TestMainEdgeCases:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        if captured.out.strip():
-            output = json.loads(captured.out)
-            msg = output.get("systemMessage", "")
-            assert "ACTION REQUIRED" in msg
-            assert "shutdown_request" in msg
-
-
-# =============================================================================
-# #497 — detect_stall honors metadata.intentional_wait
-# =============================================================================
-
-from datetime import datetime, timedelta, timezone
-
-
-def _iso_seconds(dt):
-    return dt.isoformat(timespec="seconds")
-
-
-def _fresh_wait_payload(reason="awaiting_teachback_approved",
-                       resolver="lead",
-                       since_offset_seconds=-60):
-    return {
-        "reason": reason,
-        "expected_resolver": resolver,
-        "since": _iso_seconds(
-            datetime.now(timezone.utc) + timedelta(seconds=since_offset_seconds)
-        ),
-    }
-
-
-class TestIntentionalWaitIdlePredicate:
-    """detect_stall honors a fresh intentional_wait and suppresses the nag.
-
-    Plan row 9 (fresh suppresses), row 10 (stale re-nags), row 11 (missing nags),
-    row 12 (ordering: type/stalled/intentional_wait all silence independently).
-    """
-
-    def test_fresh_intentional_wait_suppresses_stall(self):
-        """Row 9: in_progress + fresh intentional_wait -> no stall message."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": _fresh_wait_payload()}
-        )]
-        assert detect_stall(tasks, "coder-a") is None
-
-    def test_stale_intentional_wait_re_nags(self):
-        """Row 10: stale intentional_wait (age >= 30 min) -> stall fires."""
-        from teammate_idle import detect_stall
-
-        stale_since = datetime.now(timezone.utc) - timedelta(minutes=45)
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": _iso_seconds(stale_since),
-            }}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None
-        assert "stall" in result.lower()
-
-    def test_missing_intentional_wait_nags(self):
-        """Row 11: no intentional_wait key at all -> stall fires (pre-fix path)."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"other_key": "value"}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None
-
-    def test_malformed_intentional_wait_fails_loud(self):
-        """Malformed intentional_wait (missing required keys) -> nag re-enables."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {"reason": "x"}}  # missing resolver/since
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None, (
-            "Malformed flag must fail open to nag — not silently suppress"
-        )
-
-    def test_tz_naive_since_fails_loud(self):
-        """tz-naive since is always a bug -> nag re-enables."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": "2026-04-21T15:30:00",  # tz-naive
-            }}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None
-
-    def test_future_since_is_not_stale(self):
-        """Future-dated since -> conservative not-stale; skip suppresses nag."""
-        from teammate_idle import detect_stall
-
-        future = datetime.now(timezone.utc) + timedelta(hours=2)
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": _iso_seconds(future),
-            }}
-        )]
-        assert detect_stall(tasks, "coder-a") is None
-
-    def test_intentional_wait_stale_at_exactly_30_min(self):
-        """Boundary: age == 30 min is stale per >= comparison."""
-        from teammate_idle import detect_stall
-
-        at_threshold = datetime.now(timezone.utc) - timedelta(minutes=30, seconds=1)
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": _iso_seconds(at_threshold),
-            }}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        assert result is not None
-
-    def test_metadata_type_still_silences_independently(self):
-        """Row 12: type=blocker silences even when intentional_wait absent.
-
-        Verifies the three metadata-keyed skips remain independent after the
-        fix — each is sufficient on its own.
-        """
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"type": "blocker"}
-        )]
-        assert detect_stall(tasks, "coder-a") is None
-
-    def test_stalled_flag_still_silences_independently(self):
-        """Row 12: metadata.stalled=true silences even when intentional_wait absent."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"stalled": True}
-        )]
-        assert detect_stall(tasks, "coder-a") is None
-
-    def test_intentional_wait_silences_even_when_stalled_false(self):
-        """Regression: fresh intentional_wait silences even if stalled explicitly False."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={
-                "stalled": False,
-                "intentional_wait": _fresh_wait_payload(),
-            }
-        )]
-        assert detect_stall(tasks, "coder-a") is None
-
-
-class TestIntentionalWaitIdlePredicateCounterTest:
-    """Counter-test-by-revert documentation: these tests MUST fail if the
-    intentional_wait skip is removed from detect_stall. Asserts load-bearingness.
-
-    Not a counter-test themselves — they are the same tests as the class above
-    but structured as a single parametrized batch so the cardinality (tests that
-    flip RED under `git show HEAD~N:teammate_idle.py` revert) is legible in CI.
-    """
-
-    @pytest.mark.parametrize("since_offset_minutes,expected_stall", [
-        (-1, False),     # fresh -> no stall
-        (-15, False),    # mid-life -> no stall
-        (-29, False),    # just under threshold -> no stall
-        (-31, True),     # past threshold -> stall
-        (-60, True),     # way past -> stall
-    ])
-    def test_age_sweep_cardinality_pin(self, since_offset_minutes, expected_stall):
-        """Age sweep: -1/-15/-29 min fresh -> no stall; -31/-60 min stale -> stall.
-
-        5-test cardinality pin. Revert of intentional_wait skip flips 3 tests
-        (the fresh ones) RED; the 2 stale ones stay GREEN regardless.
-        """
-        from teammate_idle import detect_stall
-
-        since = datetime.now(timezone.utc) + timedelta(minutes=since_offset_minutes)
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": _iso_seconds(since),
-            }}
-        )]
-        result = detect_stall(tasks, "coder-a")
-        if expected_stall:
-            assert result is not None, f"offset {since_offset_minutes} min must nag"
-        else:
-            assert result is None, f"offset {since_offset_minutes} min must suppress"
-
-
-class TestIntentionalWaitConsultantModeUnchanged:
-    """Row 18: consultant-mode teammates (no owned in_progress task) are
-    unaffected by intentional_wait — predicate only fires on in_progress tasks.
-    """
-
-    def test_completed_task_with_wait_does_not_trigger_stall(self):
-        """Completed task + intentional_wait -> still not a stall (completed path)."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(
-            status="completed", owner="coder-a",
-            metadata={"intentional_wait": _fresh_wait_payload()}
-        )]
-        assert detect_stall(tasks, "coder-a") is None
-
-    def test_no_owned_task_is_unchanged(self):
-        """No owned task -> no stall, intentional_wait is not even reached."""
-        from teammate_idle import detect_stall
-
-        tasks = [make_task(owner="other-coder")]
-        assert detect_stall(tasks, "coder-a") is None
-
-
-class TestIntentionalWaitAC9CheckIdleCleanupUnchanged:
-    """Row 21-22 (AC #9): check_idle_cleanup must be UNCHANGED by the fix.
-
-    Completed tasks with intentional_wait must still accumulate idle counts
-    and hit suggest/force thresholds exactly as before — consultants shouldn't
-    be given a stealth shutdown-immunity via the wait flag.
-    """
-
-    def test_completed_with_wait_accumulates_idle_count(self, tmp_path):
-        """AC #9: completed task + intentional_wait still increments idle count."""
-        from teammate_idle import check_idle_cleanup, read_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        tasks = [make_task(
-            task_id="1", status="completed", owner="coder-a",
-            metadata={"intentional_wait": _fresh_wait_payload()}
-        )]
-        # 3 consecutive idles -> suggest threshold
-        for _ in range(3):
-            check_idle_cleanup(tasks, "coder-a", counts_path)
-        counts = read_idle_counts(counts_path)
-        entry = counts["coder-a"]
-        assert entry["count"] == 3, (
-            "AC #9: intentional_wait must NOT block idle-count accumulation "
-            "on completed tasks"
-        )
-
-    def test_completed_with_wait_hits_suggest_threshold(self, tmp_path):
-        """AC #9: suggest threshold still fires at count=3 for consultants."""
-        from teammate_idle import check_idle_cleanup, write_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 2})  # will become 3
-        tasks = [make_task(
-            status="completed", owner="coder-a",
-            metadata={"intentional_wait": _fresh_wait_payload()}
-        )]
-        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
-        assert msg is not None
-        assert "idle" in msg.lower()
-        assert should_shutdown is False
-
-    def test_completed_with_wait_hits_force_shutdown(self, tmp_path):
-        """AC #9: force shutdown at count=5 still fires — wait flag does not
-        bleed into cleanup logic."""
-        from teammate_idle import check_idle_cleanup, write_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        write_idle_counts(counts_path, {"coder-a": 4})  # will become 5
-        tasks = [make_task(
-            status="completed", owner="coder-a",
-            metadata={"intentional_wait": _fresh_wait_payload()}
-        )]
-        msg, should_shutdown = check_idle_cleanup(tasks, "coder-a", counts_path)
-        assert should_shutdown is True
-
-    def test_stale_wait_on_completed_also_accumulates(self, tmp_path):
-        """AC #9 belt-and-suspenders: even a stale wait flag doesn't affect
-        cleanup on completed tasks.
-        """
-        from teammate_idle import check_idle_cleanup, read_idle_counts
-
-        counts_path = str(tmp_path / "idle_counts.json")
-        stale_since = datetime.now(timezone.utc) - timedelta(hours=2)
-        tasks = [make_task(
-            task_id="1", status="completed", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": _iso_seconds(stale_since),
-            }}
-        )]
-        for _ in range(2):
-            check_idle_cleanup(tasks, "coder-a", counts_path)
-        counts = read_idle_counts(counts_path)
-        entry = counts["coder-a"]
-        assert entry["count"] == 2
-
-
-class TestIntentionalWaitMainIntegration:
-    """Row 25 precursor: main() produces no systemMessage for a teammate with
-    fresh intentional_wait on an in_progress task (livelock-loop root path).
-    """
-
-    def test_main_suppresses_nag_for_fresh_wait(self, capsys, tmp_path):
-        import io
-        from teammate_idle import main
-
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": _fresh_wait_payload()}
-        )]
-
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks), \
-             patch("teammate_idle.Path.home", return_value=tmp_path):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        # Suppressed: no systemMessage
-        if captured.out.strip():
-            output = json.loads(captured.out)
-            assert "systemMessage" not in output, (
-                f"Expected suppressOutput for fresh wait, got: {output}"
-            )
-
-    def test_main_emits_nag_for_stale_wait(self, capsys, tmp_path):
-        import io
-        from teammate_idle import main
-
-        stale_since = datetime.now(timezone.utc) - timedelta(hours=2)
-        tasks = [make_task(
-            status="in_progress", owner="coder-a",
-            metadata={"intentional_wait": {
-                "reason": "awaiting_teachback_approved",
-                "expected_resolver": "lead",
-                "since": _iso_seconds(stale_since),
-            }}
-        )]
-
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
-             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "coder-a"}))), \
-             patch("teammate_idle.get_task_list", return_value=tasks), \
-             patch("teammate_idle.Path.home", return_value=tmp_path):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
+        assert captured.out.strip(), "Force-shutdown should emit a systemMessage"
         output = json.loads(captured.out)
-        assert "stall" in output.get("systemMessage", "").lower()
+        msg = output.get("systemMessage", "")
+        assert "ACTION REQUIRED" in msg
+        assert "shutdown_request" in msg

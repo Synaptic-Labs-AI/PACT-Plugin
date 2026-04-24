@@ -85,12 +85,12 @@ def _get_context_file_path() -> Path | None:
 def is_initialized() -> bool:
     """Return True iff init() (or write_context()) has set _context_path.
 
-    Used by callers (notably session_journal's implicit API and
-    memory_adhoc_reminder) to detect the "hook ran before pact_context was
-    initialized" failure mode without coupling to the private module
-    attribute. False means subsequent reads/writes derived from session
-    context will silently fail-open (empty list, None, False) and the
-    caller may want to take an alternate path.
+    Used by callers (notably session_journal's implicit API) to detect the
+    "hook ran before pact_context was initialized" failure mode without
+    coupling to the private module attribute. False means subsequent
+    reads/writes derived from session context will silently fail-open
+    (empty list, None, False) and the caller may want to take an alternate
+    path.
     """
     return _context_path is not None
 
