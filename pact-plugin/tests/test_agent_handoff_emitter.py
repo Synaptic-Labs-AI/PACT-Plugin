@@ -991,18 +991,28 @@ class TestPathSanitization:
             from agent_handoff_emitter import _sanitize_path_component
             assert _sanitize_path_component("") == ""
 
-    class TestDegenerateTaskIdDoesNotCreateMarker:
+    class TestDegenerateInputsDoNotCreateMarker:
         """Integration coverage — depends on security-reviewer's task #24
-        guard. Degenerate post-sanitize values (`''`, `'.'`, `'..'`) must
-        NOT create a marker file, but MUST still emit the journal event
-        (fail-open data-integrity per architect §2.4).
+        guard. Degenerate post-sanitize values (`''`, `'.'`, `'..'`) in
+        EITHER axis (task_id OR team_name) must NOT create a marker file,
+        but MUST still emit the journal event (fail-open data-integrity
+        per architect §2.4).
 
-        Pre-#24 bug: `marker_dir / '.'` resolves to `marker_dir` itself,
-        which `os.open(O_CREAT|O_EXCL)` rejects with EEXIST. The EEXIST
-        branch interpreted that as "prior fire owns the marker" and
-        permanently suppressed every future emit for the degenerate key.
-        Post-#24: guard returns False before reaching the marker open,
-        preserving emit + skipping the marker.
+        The bug class is SYMMETRIC across both axes:
+        - task_id degenerate: `marker_dir / '.'` → marker_dir itself;
+          EEXIST collapses to "marker already exists" → permanent
+          suppression of the degenerate key.
+        - team_name='..' (WORSE): `home/.claude/teams/../.agent_handoff_emitted`
+          normalizes to `home/.claude/.agent_handoff_emitted` — marker
+          created OUTSIDE any team's scope, polluting user home root.
+        - team_name='.': `home/.claude/teams/./.agent_handoff_emitted`
+          normalizes to `home/.claude/teams/.agent_handoff_emitted` —
+          cross-team pollution (marker directly under teams/, visible to
+          every team's enumeration).
+
+        Pre-#24 guard: `if not team_name or not task_id` caught empty
+        string only. Post-#24: extended to `task_id/team_name in
+        ("", ".", "..")` — catches the full degenerate set per axis.
         """
 
         @pytest.mark.parametrize(
@@ -1151,14 +1161,36 @@ class TestPathSanitization:
             )
             assert len(calls) == 1
 
-        def test_degenerate_team_name_also_guarded(
-            self, tmp_path, monkeypatch
+        @pytest.mark.parametrize(
+            "raw_team_name,expected_sanitized",
+            [
+                ("..", ""),     # pre-#24 guarded (empty branch)
+                ("..\\..", ""), # pre-#24 guarded
+                (".", "."),     # NEWLY guarded by #24 — cross-team pollution without guard
+                ("...", "."),   # NEWLY guarded by #24
+                ("/./", "."),   # NEWLY guarded by #24 — same root cause as task_id case
+            ],
+        )
+        def test_degenerate_team_name_values_guarded(
+            self, raw_team_name, expected_sanitized, tmp_path, monkeypatch
         ):
-            """Symmetry pin: the guard covers both team_name AND task_id.
-            A degenerate team_name must also emit-without-marker. In
-            production, team_name comes from `get_team_name()` which
-            sanitizes on read, but a crafted stdin team_name could
-            reach the helper."""
+            """team_name axis symmetry.
+
+            Pre-#24 with team_name='..': marker_dir resolves to
+            `home/.claude/teams/../.agent_handoff_emitted`, which Path-
+            normalizes to `home/.claude/.agent_handoff_emitted` — a
+            marker file created directly under the user's home .claude
+            dir (OUTSIDE any team's scope). This is the home-root
+            pollution case.
+
+            Pre-#24 with team_name='.': marker_dir resolves to
+            `home/.claude/teams/./.agent_handoff_emitted`, normalizing
+            to `home/.claude/teams/.agent_handoff_emitted` — a marker
+            file directly under teams/, visible to every team.
+
+            Post-#24 guard catches all degenerate team_name values in
+            `("", ".", "..")` and returns False before marker creation.
+            """
             monkeypatch.setenv("HOME", str(tmp_path))
             calls: list[dict] = []
             _run_main(
@@ -1166,7 +1198,7 @@ class TestPathSanitization:
                     "task_id": "42",
                     "task_subject": "degenerate team probe",
                     "teammate_name": "probe-agent",
-                    "team_name": "..",  # sanitizes to ''
+                    "team_name": raw_team_name,
                 },
                 task_data={
                     "status": "completed",
@@ -1176,10 +1208,87 @@ class TestPathSanitization:
                 append_calls=calls,
             )
             assert len(calls) == 1, (
-                "degenerate team_name '..' must also emit via the #24 "
-                "guard — team_name and task_id must be symmetrically "
-                "protected."
+                f"degenerate team_name {raw_team_name!r} (sanitizes to "
+                f"{expected_sanitized!r}) must emit the journal event via "
+                f"the #24 guard. team_name and task_id are symmetrically "
+                f"protected."
             )
+            # Critical home-root-pollution assertions — the bug's
+            # WORST-case form is marker creation OUTSIDE any team's
+            # scope. Guard must prevent all three escape paths:
+            home_root_marker = (
+                tmp_path / ".claude" / ".agent_handoff_emitted"
+            )
+            assert not home_root_marker.exists(), (
+                f"home-root pollution detected: degenerate team_name "
+                f"{raw_team_name!r} created marker at {home_root_marker} "
+                f"(OUTSIDE any team's scope). The #24 guard failed."
+            )
+            teams_root_marker = (
+                tmp_path / ".claude" / "teams" / ".agent_handoff_emitted"
+            )
+            assert not teams_root_marker.exists(), (
+                f"cross-team pollution detected: degenerate team_name "
+                f"{raw_team_name!r} created marker at {teams_root_marker} "
+                f"(directly under teams/, visible to every team)."
+            )
+            # And no marker file bearing the task_id basename was
+            # created at either escape path.
+            assert not (home_root_marker / "42").exists()
+            assert not (teams_root_marker / "42").exists()
+
+        @pytest.mark.parametrize(
+            "raw_task_id,raw_team_name",
+            [
+                ("", "."),
+                (".", ""),
+                ("..", "."),
+                (".", ".."),
+                ("...", "..."),
+                ("/./", "/./"),
+            ],
+        )
+        def test_combined_degenerate_both_axes_guarded(
+            self, raw_task_id, raw_team_name, tmp_path, monkeypatch
+        ):
+            """Combined-axis matrix: both task_id AND team_name degenerate
+            simultaneously. Emit invariant must still hold (fail-open
+            wins over the compound-pollution failure mode).
+
+            Pre-#24: either axis alone could trigger the collapse bug;
+            both together produce either home-root pollution (if
+            team_name='..') or permanent suppression (if task_id
+            collapses). Post-#24 guard returns False on EITHER axis
+            being degenerate, so the compound case short-circuits via
+            the first matched branch.
+            """
+            monkeypatch.setenv("HOME", str(tmp_path))
+            calls: list[dict] = []
+            _run_main(
+                stdin_payload={
+                    "task_id": raw_task_id,
+                    "task_subject": "compound degenerate probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": raw_team_name,
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            assert len(calls) == 1, (
+                f"compound degenerate (task_id={raw_task_id!r}, "
+                f"team_name={raw_team_name!r}) must emit via #24 guard."
+            )
+            # Neither home-root nor teams-root pollution.
+            home_root_marker = tmp_path / ".claude" / ".agent_handoff_emitted"
+            teams_root_marker = (
+                tmp_path / ".claude" / "teams" / ".agent_handoff_emitted"
+            )
+            assert not home_root_marker.exists()
+            assert not teams_root_marker.exists()
 
     class TestIntegrationPathTraversalAttempts:
         """Path-traversal inputs must NOT escape the team's marker dir.
