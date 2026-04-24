@@ -1100,14 +1100,18 @@ class TestTeammateBootstrapCommand:
     PLUGIN_ROOT = Path(__file__).parent.parent
     COMMAND_PATH = PLUGIN_ROOT / "commands" / "teammate-bootstrap.md"
 
-    # Required @-references — at least these four must be present so the
-    # spawned teammate gets team-tools, teachback, on-demand context, and
-    # algedonic content loaded into context at command-invocation time.
+    # Required @-references — each of these must be present so the spawned
+    # teammate gets team-tools, teachback, on-demand context, algedonic
+    # content, and the communication charter loaded into context at
+    # command-invocation time. The charter is eager-loaded because every
+    # teammate turn involves SendMessage and the delivery-model discipline
+    # must be available without a follow-up Read hop.
     REQUIRED_REFS = (
         "skills/pact-agent-teams/SKILL.md",
         "skills/pact-teachback/SKILL.md",
         "skills/request-more-context/SKILL.md",
         "protocols/algedonic.md",
+        "protocols/pact-communication-charter.md",
     )
 
     def test_command_file_exists(self):
@@ -1138,8 +1142,8 @@ class TestTeammateBootstrapCommand:
         assert not missing, (
             f"teammate-bootstrap.md missing eager-load references: "
             f"{missing}. Required for the teammate to receive the team "
-            f"protocol, teachback, request-more-context, and algedonic "
-            f"content at command invocation."
+            f"protocol, teachback, request-more-context, algedonic, and "
+            f"communication-charter content at command invocation."
         )
 
     def test_command_referenced_files_exist(self):
@@ -1151,23 +1155,28 @@ class TestTeammateBootstrapCommand:
                 f"does not exist at {path}."
             )
 
-    def test_command_contains_exactly_four_at_references(self):
-        """Spec Section 6.8 requires exactly 4 @${CLAUDE_PLUGIN_ROOT}/ references
-        in teammate-bootstrap.md — no more, no less.
+    def test_command_contains_exactly_five_at_references(self):
+        """teammate-bootstrap.md must contain exactly 5
+        @${CLAUDE_PLUGIN_ROOT}/ references — no more, no less.
 
         Presence-only checks (test_command_contains_required_at_references)
-        would silently accept the addition of a 5th or 6th ref, which would
+        would silently accept the addition of a 6th or 7th ref, which would
         cost every spawned teammate extra context tokens on every bootstrap
         call. The cardinality pin locks the eager-load footprint.
+
+        The five accepted eager-loads are: pact-agent-teams (team protocol),
+        pact-teachback (verification gate), request-more-context (on-demand
+        secretary queries), algedonic (emergency bypass), and
+        pact-communication-charter (SendMessage delivery-model discipline,
+        load-bearing for every teammate turn that sends a message).
         """
         text = self.COMMAND_PATH.read_text(encoding="utf-8")
         count = text.count("@${CLAUDE_PLUGIN_ROOT}/")
-        assert count == 4, (
-            f"teammate-bootstrap.md must contain exactly 4 "
-            f"@${{CLAUDE_PLUGIN_ROOT}}/ references (spec Section 6.8). "
-            f"Found {count}. The eager-load footprint is load-bearing — "
-            f"every spawned teammate pays the cost of each extra ref on "
-            f"every invocation."
+        assert count == 5, (
+            f"teammate-bootstrap.md must contain exactly 5 "
+            f"@${{CLAUDE_PLUGIN_ROOT}}/ references. Found {count}. "
+            f"The eager-load footprint is load-bearing — every spawned "
+            f"teammate pays the cost of each extra ref on every invocation."
         )
 
 
