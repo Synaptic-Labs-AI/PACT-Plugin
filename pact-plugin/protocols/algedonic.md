@@ -81,6 +81,20 @@ Apply the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.m
 
 **Protocol-level, not architectural**: Agents emit algedonic signals through the same communication channel (to orchestrator), but the SIGNAL FORMAT itself demands immediate user escalation. The orchestrator is **REQUIRED** to surface algedonic signals to user immediately—it cannot triage, delay, or suppress them.
 
+### Latency Caveat
+
+Algedonic signals travel over `SendMessage` and are subject to the standard
+delivery model: messages land in the recipient's inbox at their next idle
+boundary, not instantaneously.
+
+- **Lead's "surface to user immediately"** means at the lead's next idle — the lead cannot preempt itself mid-tool-call to deliver the signal.
+- **HALT broadcast to teammates** via `SendMessage(to="*", ...)` reaches each teammate at that teammate's next idle boundary; a teammate currently mid-tool-call continues until their tool returns and they next check inbox.
+- **Immediate halt of in-flight teammate work** requires user-side manual interrupt (Esc / stop in the host UI). The in-band broadcast cannot stop work that is already executing a tool call.
+
+When emitting a HALT, assume non-zero latency before affected teammates see
+it and act on it. Plan recovery on the assumption that some in-flight work
+may complete before the HALT is observed.
+
 ### Task System Integration
 
 With PACT Task integration, algedonic signals create **signal Tasks** that persist and block affected work.
@@ -160,7 +174,7 @@ On receiving an algedonic signal:
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Broadcast stop** — `SendMessage(to="*", ...)` ensures all teammates receive the HALT simultaneously (see step 2 above)
+1. **Broadcast stop** — `SendMessage(to="*", ...)` delivers the HALT to each teammate's inbox at their next idle boundary (see step 2 above and the Latency Caveat under Signal Delivery Mechanism); for immediate halt of in-flight work, user-side manual interrupt is required
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress
