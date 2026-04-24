@@ -18,9 +18,12 @@ Commands:
     save <json>          Save a memory object (or --stdin for piped input)
     search <query>       Semantic search across memories
     list [--limit N]     List recent memories (default: 20)
-    get <id|prefix>      Retrieve a memory by full ID or unique prefix (>= 4 chars)
-    update <id> <json>   Update an existing memory (or --stdin for piped input)
-    delete <id>          Delete a memory by ID
+    get <id|prefix>      Retrieve a memory by full ID or unique prefix (>= 7 chars)
+    update <id|prefix> <json>
+                         Update an existing memory by full ID or unique prefix
+                         (or --stdin for piped input). Ambiguous prefix is refused.
+    delete <id|prefix>   Delete a memory by full ID or unique prefix.
+                         Ambiguous prefix is refused.
     status               Show memory system status
     setup                Initialize/verify memory system
 """
@@ -143,9 +146,9 @@ def cmd_list(args, db_path=None):
 def cmd_get(args, db_path=None):
     """Handle the 'get' subcommand.
 
-    Accepts a full 32-char memory ID or a prefix of >= 4 chars. A unique
-    prefix returns the matching memory. An ambiguous prefix returns an
-    AMBIGUOUS_PREFIX error envelope with the full list of matching IDs.
+    Accepts a full 32-char memory ID or a unique prefix. Ambiguous prefix
+    surfaces as an AMBIGUOUS_PREFIX envelope including a capped match list,
+    truncation flag, and total match count.
     """
     memory = PACTMemory(db_path=db_path)
     try:
@@ -162,6 +165,8 @@ def cmd_get(args, db_path=None):
             str(exc),
             prefix=exc.prefix,
             matches=exc.matches,
+            truncated=exc.truncated,
+            total_matches=exc.total_matches,
         )
     if result is None:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
@@ -190,7 +195,11 @@ def cmd_setup(args, db_path=None):
 
 
 def cmd_update(args, db_path=None):
-    """Handle the 'update' subcommand."""
+    """Handle the 'update' subcommand.
+
+    Accepts a full 32-char memory ID or a unique prefix. Ambiguous prefix
+    refuses the update and surfaces an AMBIGUOUS_PREFIX envelope.
+    """
     if args.stdin:
         raw = sys.stdin.read()
     elif args.json_data:
@@ -209,6 +218,19 @@ def cmd_update(args, db_path=None):
     memory = PACTMemory(db_path=db_path)
     try:
         success = memory.update(args.memory_id, updates, replace=args.replace)
+    except PrefixTooShortError as exc:
+        # Order: PrefixTooShortError IS a ValueError; catch it before the
+        # field-validation ValueError handler below.
+        _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
+    except AmbiguousPrefixError as exc:
+        _error(
+            "AMBIGUOUS_PREFIX",
+            str(exc),
+            prefix=exc.prefix,
+            matches=exc.matches,
+            truncated=exc.truncated,
+            total_matches=exc.total_matches,
+        )
     except ValueError as exc:
         _error(
             "ValueError",
@@ -223,9 +245,25 @@ def cmd_update(args, db_path=None):
 
 
 def cmd_delete(args, db_path=None):
-    """Handle the 'delete' subcommand."""
+    """Handle the 'delete' subcommand.
+
+    Accepts a full 32-char memory ID or a unique prefix. Ambiguous prefix
+    refuses the delete and surfaces an AMBIGUOUS_PREFIX envelope.
+    """
     memory = PACTMemory(db_path=db_path)
-    success = memory.delete(args.memory_id)
+    try:
+        success = memory.delete(args.memory_id)
+    except PrefixTooShortError as exc:
+        _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
+    except AmbiguousPrefixError as exc:
+        _error(
+            "AMBIGUOUS_PREFIX",
+            str(exc),
+            prefix=exc.prefix,
+            matches=exc.matches,
+            truncated=exc.truncated,
+            total_matches=exc.total_matches,
+        )
     if not success:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
     _success({"deleted": True, "memory_id": args.memory_id})
@@ -291,20 +329,21 @@ def build_parser():
     # get
     get_parser = subparsers.add_parser(
         "get",
-        help="Get a memory by full ID or unique prefix (>= 4 chars)",
+        help="Get a memory by full ID or unique prefix (>= 7 chars)",
         description=(
             "Retrieve a memory by its full 32-char ID or a unique prefix of "
-            "at least 4 characters. A unique prefix returns the matching "
+            "at least 7 characters. A unique prefix returns the matching "
             "memory; an ambiguous prefix returns an AMBIGUOUS_PREFIX error "
-            "with the full list of matching IDs; a prefix shorter than 4 "
-            "characters returns a PREFIX_TOO_SHORT error; no match returns "
-            "NOT_FOUND."
+            "with a capped list of matching IDs (truncated/total_matches "
+            "fields indicate when the cap was applied); a prefix shorter "
+            "than 7 characters returns a PREFIX_TOO_SHORT error; no match "
+            "returns NOT_FOUND. Prefix is case-insensitive."
         ),
         parents=[parent],
     )
     get_parser.add_argument(
         "memory_id",
-        help="Full 32-char memory ID, or a unique prefix of >= 4 characters",
+        help="Full 32-char memory ID, or a unique prefix of >= 7 characters",
     )
 
     # status
@@ -319,9 +358,21 @@ def build_parser():
 
     # update
     update_parser = subparsers.add_parser(
-        "update", help="Update an existing memory", parents=[parent]
+        "update",
+        help="Update a memory by full ID or unique prefix (>= 7 chars)",
+        description=(
+            "Update an existing memory by its full 32-char ID or a unique "
+            "prefix of at least 7 characters. An ambiguous prefix is refused "
+            "(AMBIGUOUS_PREFIX error with a capped match list); a prefix "
+            "shorter than 7 characters returns PREFIX_TOO_SHORT; no match "
+            "returns NOT_FOUND. Prefix is case-insensitive."
+        ),
+        parents=[parent],
     )
-    update_parser.add_argument("memory_id", help="Memory ID to update")
+    update_parser.add_argument(
+        "memory_id",
+        help="Full 32-char memory ID, or a unique prefix of >= 7 characters",
+    )
     update_parser.add_argument("json_data", nargs="?", help="JSON with fields to update")
     update_parser.add_argument(
         "--stdin", action="store_true", help="Read JSON from stdin"
@@ -338,9 +389,21 @@ def build_parser():
 
     # delete
     delete_parser = subparsers.add_parser(
-        "delete", help="Delete a memory", parents=[parent]
+        "delete",
+        help="Delete a memory by full ID or unique prefix (>= 7 chars)",
+        description=(
+            "Delete a memory by its full 32-char ID or a unique prefix of "
+            "at least 7 characters. An ambiguous prefix is refused "
+            "(AMBIGUOUS_PREFIX error with a capped match list); a prefix "
+            "shorter than 7 characters returns PREFIX_TOO_SHORT; no match "
+            "returns NOT_FOUND. Prefix is case-insensitive."
+        ),
+        parents=[parent],
     )
-    delete_parser.add_argument("memory_id", help="Memory ID to delete")
+    delete_parser.add_argument(
+        "memory_id",
+        help="Full 32-char memory ID, or a unique prefix of >= 7 characters",
+    )
 
     return parser
 

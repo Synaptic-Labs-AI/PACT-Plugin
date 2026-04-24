@@ -732,12 +732,12 @@ class TestCliGetPrefixResolution:
     def test_get_ambiguous_prefix_returns_match_list(self, mock_pact_memory, capsys):
         from scripts.database import AmbiguousPrefixError
         matches = [
-            {"id": "abcd0001" + "0" * 24, "context": "first"},
-            {"id": "abcd0002" + "0" * 24, "context": "second"},
+            {"id": "abcd123" + "1" + "0" * 24, "context": "first"},
+            {"id": "abcd123" + "2" + "0" * 24, "context": "second"},
         ]
-        mock_pact_memory.get.side_effect = AmbiguousPrefixError("abcd", matches)
+        mock_pact_memory.get.side_effect = AmbiguousPrefixError("abcd123", matches)
         parser = build_parser()
-        args = parser.parse_args(["get", "abcd"])
+        args = parser.parse_args(["get", "abcd123"])
 
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit) as exc_info:
@@ -747,14 +747,16 @@ class TestCliGetPrefixResolution:
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
         assert err_output["error"] == "AMBIGUOUS_PREFIX"
-        assert err_output["prefix"] == "abcd"
+        assert err_output["prefix"] == "abcd123"
         assert err_output["matches"] == matches
 
     def test_get_too_short_prefix_returns_error(self, mock_pact_memory, capsys):
-        from scripts.database import PrefixTooShortError
-        mock_pact_memory.get.side_effect = PrefixTooShortError("abc", minimum=4)
+        from scripts.database import PrefixTooShortError, MIN_PREFIX_LENGTH
+        mock_pact_memory.get.side_effect = PrefixTooShortError(
+            "abc123", minimum=MIN_PREFIX_LENGTH
+        )
         parser = build_parser()
-        args = parser.parse_args(["get", "abc"])
+        args = parser.parse_args(["get", "abc123"])
 
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit) as exc_info:
@@ -763,7 +765,7 @@ class TestCliGetPrefixResolution:
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "PREFIX_TOO_SHORT"
-        assert err_output["minimum"] == 4
+        assert err_output["minimum"] == MIN_PREFIX_LENGTH
 
     def test_get_full_hash_unchanged(self, mock_pact_memory, capsys):
         """Full 32-char IDs continue to work unchanged."""
@@ -1362,6 +1364,247 @@ class TestCliSubprocess:
         get_output = json.loads(get_result.stdout)
         assert get_output["ok"] is True
         assert get_output["result"]["context"] == memory_dict["context"]
+
+    def test_get_unique_prefix_resolves_via_subprocess(self, cli_script_path, cli_db):
+        """E2E: real cli.py → memory_api → database → SQL roundtrip on a unique prefix."""
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+
+        full_id = "fa11ce5" + "1" + "0" * 24  # 32 chars; prefix "fa11ce5" is 7 chars
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {"id": full_id, "context": "unique-prefix-roundtrip"})
+        conn.commit()
+        conn.close()
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", "fa11ce5",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["ok"] is True
+        assert output["result"]["id"] == full_id
+        assert output["result"]["context"] == "unique-prefix-roundtrip"
+
+    def test_get_ambiguous_prefix_envelope_via_subprocess(self, cli_script_path, cli_db):
+        """E2E: ambiguous prefix returns AMBIGUOUS_PREFIX envelope with full match list."""
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+
+        id_a = "ambig00" + "a" + "0" * 24
+        id_b = "ambig00" + "b" + "0" * 24
+        conn = sqlite3.connect(str(cli_db))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {"id": id_a, "context": "first"})
+            create_memory(conn, {"id": id_b, "context": "second"})
+        conn.commit()
+        conn.close()
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", "ambig00",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, f"stdout: {result.stdout}, stderr: {result.stderr}"
+        err_output = json.loads(result.stderr)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "AMBIGUOUS_PREFIX"
+        assert err_output["prefix"] == "ambig00"
+        match_ids = sorted(m["id"] for m in err_output["matches"])
+        assert match_ids == sorted([id_a, id_b])
+
+    def test_get_too_short_prefix_envelope_via_subprocess(self, cli_script_path, cli_db):
+        """E2E: prefix shorter than minimum returns PREFIX_TOO_SHORT envelope.
+
+        Uses a 6-char prefix — exactly MIN_PREFIX_LENGTH - 1 — to exercise
+        the gate at its sharpest boundary rather than a trivially-short input.
+        """
+        from scripts.database import MIN_PREFIX_LENGTH
+        too_short = "abcdef"  # exactly MIN_PREFIX_LENGTH - 1
+        assert len(too_short) == MIN_PREFIX_LENGTH - 1
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "get", too_short,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 1, f"stdout: {result.stdout}, stderr: {result.stderr}"
+        err_output = json.loads(result.stderr)
+        assert err_output["ok"] is False
+        assert err_output["error"] == "PREFIX_TOO_SHORT"
+        assert err_output["minimum"] == MIN_PREFIX_LENGTH
+
+    # ----- F7: update/delete prefix resolution (subprocess E2E) -----
+
+    def _seed_memory(self, db_path, memory_id, context):
+        """Helper: insert one memory via storage primitive (bypasses CLI ingress strip)."""
+        from scripts.database import create_memory
+        try:
+            import pysqlite3 as sqlite3
+        except ImportError:
+            import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        with patch("scripts.database.ensure_initialized"):
+            create_memory(conn, {"id": memory_id, "context": context})
+        conn.commit()
+        conn.close()
+
+    def test_update_unique_prefix_resolves_and_mutates(self, cli_script_path, cli_db):
+        """E2E: update by unique prefix resolves to full ID and mutates the memory."""
+        full_id = "upd1nfo" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id, "before-update")
+
+        update_payload = json.dumps({"context": "after-update"})
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", "upd1nfo", update_payload,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        assert json.loads(update_result.stdout)["ok"] is True
+
+        # Verify the mutation landed by reading the FULL ID
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0
+        assert json.loads(get_result.stdout)["result"]["context"] == "after-update"
+
+    def test_update_ambiguous_prefix_refuses_with_envelope(self, cli_script_path, cli_db):
+        """E2E: ambiguous prefix on update refuses with AMBIGUOUS_PREFIX, leaves both rows untouched."""
+        id_a = "updambi" + "a" + "0" * 24
+        id_b = "updambi" + "b" + "0" * 24
+        self._seed_memory(cli_db, id_a, "original-a")
+        self._seed_memory(cli_db, id_b, "original-b")
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", "updambi",
+             json.dumps({"context": "should-not-land"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 1, f"stdout: {update_result.stdout}"
+        err = json.loads(update_result.stderr)
+        assert err["error"] == "AMBIGUOUS_PREFIX"
+        assert err["prefix"] == "updambi"
+        assert err["truncated"] is False
+        assert err["total_matches"] == 2
+        match_ids = sorted(m["id"] for m in err["matches"])
+        assert match_ids == sorted([id_a, id_b])
+
+        # Verify NEITHER row was mutated
+        for fid, original in [(id_a, "original-a"), (id_b, "original-b")]:
+            get_result = subprocess.run(
+                [sys.executable, cli_script_path, "get", fid,
+                 "--db-path", str(cli_db)],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert json.loads(get_result.stdout)["result"]["context"] == original
+
+    def test_update_full_hash_unchanged(self, cli_script_path, cli_db):
+        """E2E: full 32-char ID on update bypasses resolver and works as before."""
+        full_id = "fu11upd0" + "0" * 24
+        self._seed_memory(cli_db, full_id, "pre")
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", full_id,
+             json.dumps({"context": "post"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(get_result.stdout)["result"]["context"] == "post"
+
+    def test_delete_unique_prefix_resolves_and_removes(self, cli_script_path, cli_db):
+        """E2E: delete by unique prefix resolves to full ID and removes the memory."""
+        full_id = "del1nfo" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id, "to-be-deleted")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", "del1nfo",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        out = json.loads(delete_result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["deleted"] is True
+
+        # Verify it's actually gone via full ID
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
+
+    def test_delete_ambiguous_prefix_refuses_with_envelope(self, cli_script_path, cli_db):
+        """E2E: ambiguous prefix on delete refuses, leaves both rows present."""
+        id_a = "delambi" + "a" + "0" * 24
+        id_b = "delambi" + "b" + "0" * 24
+        self._seed_memory(cli_db, id_a, "stays-a")
+        self._seed_memory(cli_db, id_b, "stays-b")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", "delambi",
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 1, f"stdout: {delete_result.stdout}"
+        err = json.loads(delete_result.stderr)
+        assert err["error"] == "AMBIGUOUS_PREFIX"
+        assert err["prefix"] == "delambi"
+        assert err["truncated"] is False
+        assert err["total_matches"] == 2
+
+        # Verify BOTH rows survive
+        for fid in (id_a, id_b):
+            get_result = subprocess.run(
+                [sys.executable, cli_script_path, "get", fid,
+                 "--db-path", str(cli_db)],
+                capture_output=True, text=True, timeout=60,
+            )
+            assert get_result.returncode == 0, f"row {fid} was unexpectedly deleted"
+
+    def test_delete_full_hash_unchanged(self, cli_script_path, cli_db):
+        """E2E: full 32-char ID on delete bypasses resolver and works as before."""
+        full_id = "fu11del0" + "0" * 24
+        self._seed_memory(cli_db, full_id, "doomed")
+
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", full_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 1
+        assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
 
     def test_save_via_stdin(self, cli_script_path, cli_db):
         memory_dict = make_cli_memory_dict(context="stdin test")

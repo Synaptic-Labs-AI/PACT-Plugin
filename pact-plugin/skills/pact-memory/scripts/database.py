@@ -38,11 +38,16 @@ from .config import DB_PATH, PACT_MEMORY_DIR
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Memory IDs are 32-char hex (secrets.token_hex(16) — see generate_id).
+# Memory IDs are 32-char lowercase hex (secrets.token_hex(16) — see generate_id).
 # Prefix resolution accepts any input shorter than the full ID, but enforces
-# a minimum of 4 characters to keep ambiguity manageable on growing stores.
+# a minimum of 7 characters to match git's default core.abbrev and keep
+# false-ambiguity rare on stores of practical size.
 MEMORY_ID_LENGTH = 32
-MIN_PREFIX_LENGTH = 4
+MIN_PREFIX_LENGTH = 7
+
+# Cap for the disambiguation match list. Two queries fire only on the
+# ambiguous branch (rare); the unique-match common path is unaffected.
+AMBIGUOUS_MATCH_CAP = 50
 
 
 class PrefixTooShortError(ValueError):
@@ -57,14 +62,28 @@ class PrefixTooShortError(ValueError):
 
 
 class AmbiguousPrefixError(LookupError):
-    """Raised when a memory-ID prefix matches multiple stored memories."""
+    """Raised when a memory-ID prefix matches multiple stored memories.
 
-    def __init__(self, prefix: str, matches: List[Dict[str, Any]]):
+    The `matches` attribute is a list of {"id", "context"} dicts capped at
+    AMBIGUOUS_MATCH_CAP entries. `total_matches` is the true row count and
+    `truncated` is True when the cap was applied.
+    """
+
+    def __init__(
+        self,
+        prefix: str,
+        matches: List[Dict[str, Any]],
+        *,
+        truncated: bool = False,
+        total_matches: Optional[int] = None,
+    ):
         self.prefix = prefix
-        # Each match is {"id": <full_id>, "context": <first 60 chars or "">}
         self.matches = matches
+        self.truncated = truncated
+        self.total_matches = total_matches if total_matches is not None else len(matches)
+        suffix = f" (showing {len(matches)} of {self.total_matches})" if truncated else ""
         super().__init__(
-            f"Prefix '{prefix}' is ambiguous — {len(matches)} memories match."
+            f"Prefix '{prefix}' is ambiguous — {self.total_matches} memories match.{suffix}"
         )
 
 
@@ -859,11 +878,17 @@ def resolve_memory_id_prefix(
     """
     Resolve a memory-ID prefix to a single full ID, git-style.
 
+    The prefix is lowercased before lookup so `ABCD1234` and `abcd1234`
+    resolve identically. IDs are stored as lowercase hex.
+
     Args:
         conn: Active database connection.
         prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
         descriptor_chars: Length of the context snippet attached to each match
-            on ambiguity (for terse disambiguation output).
+            on ambiguity (for terse disambiguation output). Security-relevant
+            knob if multi-tenant access is ever introduced — context may carry
+            tenant data the disambiguation reader is not entitled to read; in
+            that case shorten or drop the snippet, or scope it by tenant.
 
     Returns:
         The full memory ID when the prefix uniquely matches one row, or None
@@ -871,17 +896,26 @@ def resolve_memory_id_prefix(
 
     Raises:
         PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
-        AmbiguousPrefixError: prefix matches more than one row. The exception's
-            `matches` attribute is a list of {"id", "context"} dicts.
+        AmbiguousPrefixError: prefix matches more than one row. The exception
+            carries `matches` (list capped at AMBIGUOUS_MATCH_CAP),
+            `truncated` (True if the cap was applied), and `total_matches`
+            (the true row count).
     """
     ensure_initialized(conn)
 
     if len(prefix) < MIN_PREFIX_LENGTH:
         raise PrefixTooShortError(prefix)
 
-    # Escape SQL LIKE wildcards in the prefix so a literal '%' or '_' from a
-    # malformed input never expands. Memory IDs are hex, so this is defensive
-    # — it costs nothing and removes a foot-gun for future non-hex IDs.
+    # Trust boundary: `prefix` arrives untrusted from CLI argv. The escape
+    # below + parameter binding below are the only barriers between user
+    # input and a SQL LIKE clause. Do not bypass either.
+    # Case-fold to match the lowercase hex IDs produced by generate_id.
+    prefix = prefix.lower()
+
+    # SQL LIKE escape. Order is load-bearing: backslash MUST be doubled
+    # FIRST, because the subsequent `%` and `_` substitutions introduce new
+    # backslashes that must NOT themselves be re-escaped. The `ESCAPE '\\'`
+    # clause on the SELECT pairs with this.
     escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     # LIMIT 2 short-circuits the common case (unique match): we only need to
@@ -897,19 +931,39 @@ def resolve_memory_id_prefix(
     if len(rows) == 1:
         return rows[0]["id"]
 
-    # Ambiguous — fetch the full match list with a short context descriptor.
+    # Ambiguous — fetch a capped match list with a short context descriptor
+    # plus a separate COUNT for the true total. Both queries fire only on
+    # this branch; the unique-match path above is single-query.
+    pattern = escaped + "%"
     cursor = conn.execute(
-        "SELECT id, context FROM memories WHERE id LIKE ? ESCAPE '\\' ORDER BY id",
-        (escaped + "%",),
+        "SELECT id, context FROM memories WHERE id LIKE ? ESCAPE '\\' "
+        "ORDER BY id LIMIT ?",
+        (pattern, AMBIGUOUS_MATCH_CAP),
     )
-    matches = [
-        {
+    matches = []
+    for row in cursor.fetchall():
+        full_context = row["context"] or ""
+        snippet = full_context[:descriptor_chars]
+        matches.append({
             "id": row["id"],
-            "context": (row["context"] or "")[:descriptor_chars],
-        }
-        for row in cursor.fetchall()
-    ]
-    raise AmbiguousPrefixError(prefix, matches)
+            "context": snippet,
+            # Per-match flag distinct from the list-level `truncated` on the
+            # exception: signals that THIS row's `context` was clipped to
+            # `descriptor_chars`, not that the match list itself was capped.
+            "context_truncated": len(full_context) > descriptor_chars,
+        })
+    count_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM memories WHERE id LIKE ? ESCAPE '\\'",
+        (pattern,),
+    ).fetchone()
+    total_matches = count_row["n"]
+    truncated = total_matches > len(matches)
+    raise AmbiguousPrefixError(
+        prefix,
+        matches,
+        truncated=truncated,
+        total_matches=total_matches,
+    )
 
 
 def get_memory(

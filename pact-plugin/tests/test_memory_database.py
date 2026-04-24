@@ -213,16 +213,20 @@ class TestResolveMemoryIdPrefix:
             resolve_memory_id_prefix,
             AmbiguousPrefixError,
         )
-        id_a = "abcd0001" + "0" * 24
-        id_b = "abcd0002" + "0" * 24
-        create_memory(db_conn, {"id": id_a, "context": "first match"})
+        id_a = "abcd123" + "1" + "0" * 24
+        id_b = "abcd123" + "2" + "0" * 24
+        # Inserted in REVERSE lexicographic order to verify ORDER BY id sorts
+        # the matches independently of insert order.
         create_memory(db_conn, {"id": id_b, "context": "second match"})
+        create_memory(db_conn, {"id": id_a, "context": "first match"})
 
         with pytest.raises(AmbiguousPrefixError) as exc_info:
-            resolve_memory_id_prefix(db_conn, "abcd")
+            resolve_memory_id_prefix(db_conn, "abcd123")
 
-        match_ids = sorted(m["id"] for m in exc_info.value.matches)
-        assert match_ids == sorted([id_a, id_b])
+        # Direct list equality preserves the ORDER BY id contract — sorting
+        # both sides would mask a regression that drops the ORDER BY clause.
+        match_ids = [m["id"] for m in exc_info.value.matches]
+        assert match_ids == [id_a, id_b]
         # Descriptor snippet attached for terse disambiguation
         contexts = {m["id"]: m["context"] for m in exc_info.value.matches}
         assert contexts[id_a] == "first match"
@@ -230,7 +234,7 @@ class TestResolveMemoryIdPrefix:
 
     def test_no_match_returns_none(self, db_conn):
         from scripts.database import resolve_memory_id_prefix
-        assert resolve_memory_id_prefix(db_conn, "ffff") is None
+        assert resolve_memory_id_prefix(db_conn, "fffffff") is None
 
     def test_too_short_prefix_raises(self, db_conn):
         from scripts.database import (
@@ -238,17 +242,113 @@ class TestResolveMemoryIdPrefix:
             PrefixTooShortError,
         )
         with pytest.raises(PrefixTooShortError) as exc_info:
-            resolve_memory_id_prefix(db_conn, "abc")
-        assert exc_info.value.prefix == "abc"
-        assert exc_info.value.minimum == 4
+            resolve_memory_id_prefix(db_conn, "abc123")
+        assert exc_info.value.prefix == "abc123"
+        assert exc_info.value.minimum == 7
 
     def test_like_wildcard_in_prefix_is_escaped(self, db_conn):
         """A literal '%' in the prefix must not expand as a SQL wildcard."""
         from scripts.database import create_memory, resolve_memory_id_prefix
         # Real memory whose ID does NOT contain '%' (IDs are hex)
         create_memory(db_conn, {"id": "deadbeef" + "0" * 24, "context": "x"})
-        # '%dead' would match 'deadbeef...' if '%' were not escaped
-        assert resolve_memory_id_prefix(db_conn, "%dead") is None
+        # '%deadbe' would match 'deadbeef...' if '%' were not escaped
+        assert resolve_memory_id_prefix(db_conn, "%deadbe") is None
+
+    def test_empty_string_prefix_raises_too_short(self, db_conn):
+        """Empty input hits the minimum-length gate before the SQL query."""
+        from scripts.database import (
+            resolve_memory_id_prefix,
+            PrefixTooShortError,
+        )
+        with pytest.raises(PrefixTooShortError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "")
+        assert exc_info.value.prefix == ""
+        assert exc_info.value.minimum == 7
+
+    def test_exactly_min_length_unique_match(self, db_conn):
+        """A 7-char prefix (the boundary) resolves when the match is unique."""
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            MIN_PREFIX_LENGTH,
+        )
+        mem_id = create_memory(
+            db_conn,
+            {"id": "feed123" + "0" * 25, "context": "boundary"},
+        )
+        # Exactly MIN_PREFIX_LENGTH chars — no padding above the floor
+        prefix = "feed123"
+        assert len(prefix) == MIN_PREFIX_LENGTH
+        assert resolve_memory_id_prefix(db_conn, prefix) == mem_id
+
+    def test_exactly_full_length_no_match_returns_none(self, db_conn):
+        """A 32-char input bypasses the resolver but still returns None on miss.
+
+        Guards against an off-by-one regression in the `len < MEMORY_ID_LENGTH`
+        gate: a 32-char nonexistent ID must not raise, must return None.
+        """
+        from scripts.database import resolve_memory_id_prefix
+        full_length_miss = "f" * 32
+        assert resolve_memory_id_prefix(db_conn, full_length_miss) is None
+
+    def test_uppercase_prefix_resolves_to_lowercase_stored_id(self, db_conn):
+        """Prefix lookup is case-insensitive; the returned ID is the stored form.
+
+        Memory IDs are produced by secrets.token_hex (lowercase). A user
+        typing an uppercase prefix must still resolve to the canonical
+        lowercase ID — disambiguation, downstream API calls, and CLI
+        envelopes all key off the storage form.
+        """
+        from scripts.database import create_memory, resolve_memory_id_prefix
+        stored_id = "abcd1234" + "0" * 24
+        create_memory(db_conn, {"id": stored_id, "context": "case test"})
+        resolved = resolve_memory_id_prefix(db_conn, "ABCD1234")
+        assert resolved == stored_id
+
+    def test_ambiguous_small_set_not_truncated(self, db_conn):
+        """Ambiguous match below the cap reports truncated=False, exact total."""
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+        )
+        ids = [f"smalset{i}" + "0" * 24 for i in range(3)]  # 7-char shared prefix
+        for mid in ids:
+            create_memory(db_conn, {"id": mid, "context": f"row-{mid[-25]}"})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "smalset")
+
+        assert exc_info.value.truncated is False
+        assert exc_info.value.total_matches == 3
+        assert len(exc_info.value.matches) == 3
+
+    def test_ambiguous_pathological_set_truncated_at_cap(self, db_conn):
+        """When matches exceed AMBIGUOUS_MATCH_CAP, list is capped + truncated=True.
+
+        total_matches reflects the actual COUNT(*) from the storage layer,
+        not len(matches). Guards regression where the cap query and the
+        count query diverge.
+        """
+        from scripts.database import (
+            create_memory,
+            resolve_memory_id_prefix,
+            AmbiguousPrefixError,
+            AMBIGUOUS_MATCH_CAP,
+        )
+        # Seed AMBIGUOUS_MATCH_CAP + 1 rows under shared 7-char prefix "patho00"
+        seeded = AMBIGUOUS_MATCH_CAP + 1
+        for i in range(seeded):
+            mid = f"patho00{i:025d}"  # 7-char prefix + 25-char numeric pad = 32
+            assert len(mid) == 32
+            create_memory(db_conn, {"id": mid, "context": f"row-{i}"})
+
+        with pytest.raises(AmbiguousPrefixError) as exc_info:
+            resolve_memory_id_prefix(db_conn, "patho00")
+
+        assert exc_info.value.truncated is True
+        assert exc_info.value.total_matches == seeded
+        assert len(exc_info.value.matches) == AMBIGUOUS_MATCH_CAP
 
 
 class TestUpdateMemory:

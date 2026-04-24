@@ -528,17 +528,47 @@ class PACTMemory:
 
         return search_by_file(file_path, self._project_id, limit)
 
+    def _resolve_id_or_full(
+        self, conn, memory_id: str
+    ) -> Optional[str]:
+        """
+        Resolve a caller-supplied ID into a full 32-char memory ID.
+
+        Full-length input is returned unchanged (no DB query). Shorter
+        input is treated as a prefix and resolved via the storage-layer
+        resolver: a unique prefix returns the full ID; ambiguity raises
+        AmbiguousPrefixError; too-short raises PrefixTooShortError; no
+        match returns None.
+
+        Caller already owns an open `conn` (inside a `db_connection`
+        context manager). This helper does not open or close connections.
+
+        Args:
+            conn: Active database connection.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
+
+        Returns:
+            The full memory ID, or None if the prefix matches no row.
+
+        Raises:
+            PrefixTooShortError: prefix shorter than MIN_PREFIX_LENGTH.
+            AmbiguousPrefixError: prefix matches more than one memory.
+        """
+        if len(memory_id) >= MEMORY_ID_LENGTH:
+            return memory_id
+        return resolve_memory_id_prefix(conn, memory_id)
+
     def get(self, memory_id: str) -> Optional[MemoryObject]:
         """
         Get a specific memory by ID or unique prefix.
 
-        Accepts a full 32-char memory ID or a prefix of at least 4
-        characters. A unique prefix resolves to the matching memory. The
-        minimum-length gate and ambiguous-prefix surfacing are enforced by
-        the storage-layer resolver via exceptions.
+        Accepts a full 32-char memory ID or a prefix of at least
+        MIN_PREFIX_LENGTH characters. A unique prefix resolves to the
+        matching memory; ambiguity and too-short input surface as
+        exceptions from the storage-layer resolver.
 
         Args:
-            memory_id: Full 32-char ID or a prefix >= 4 chars.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
 
         Returns:
             MemoryObject if found, None if no match.
@@ -553,11 +583,10 @@ class PACTMemory:
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
 
-            if len(memory_id) < MEMORY_ID_LENGTH:
-                resolved = resolve_memory_id_prefix(conn, memory_id)
-                if resolved is None:
-                    return None
-                memory_id = resolved
+            resolved = self._resolve_id_or_full(conn, memory_id)
+            if resolved is None:
+                return None
+            memory_id = resolved
 
             memory_dict = get_memory(conn, memory_id)
             if memory_dict is None:
@@ -577,10 +606,15 @@ class PACTMemory:
         replace: bool = False,
     ) -> bool:
         """
-        Update an existing memory.
+        Update an existing memory by ID or unique prefix.
+
+        Accepts a full 32-char memory ID or a prefix of at least
+        MIN_PREFIX_LENGTH characters. A unique prefix resolves to the
+        matching memory; ambiguous prefixes are refused (the update is
+        rejected via AmbiguousPrefixError so the caller can disambiguate).
 
         Args:
-            memory_id: The memory ID.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
             updates: Dictionary of fields to update.
             replace: If True, list-valued fields are replaced wholesale
                 instead of merged additively (default False = additive merge
@@ -592,12 +626,19 @@ class PACTMemory:
         Raises:
             ValueError: If updates contains unknown field names, or if any
                 dict-list item contains unknown sub-object keys.
+            PrefixTooShortError: prefix is shorter than the minimum.
+            AmbiguousPrefixError: prefix matches more than one memory.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
+
+            resolved = self._resolve_id_or_full(conn, memory_id)
+            if resolved is None:
+                return False
+            memory_id = resolved
 
             # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
             # update so we can detect whether the merge actually changed
@@ -625,19 +666,33 @@ class PACTMemory:
 
     def delete(self, memory_id: str) -> bool:
         """
-        Delete a memory.
+        Delete a memory by ID or unique prefix.
+
+        Accepts a full 32-char memory ID or a prefix of at least
+        MIN_PREFIX_LENGTH characters. A unique prefix resolves to the
+        matching memory; ambiguous prefixes are refused (the delete is
+        rejected via AmbiguousPrefixError so the caller can disambiguate).
 
         Args:
-            memory_id: The memory ID.
+            memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
 
         Returns:
             True if deleted, False if not found.
+
+        Raises:
+            PrefixTooShortError: prefix is shorter than the minimum.
+            AmbiguousPrefixError: prefix matches more than one memory.
         """
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
         with db_connection(self._db_path) as conn:
             ensure_initialized(conn)
+
+            resolved = self._resolve_id_or_full(conn, memory_id)
+            if resolved is None:
+                return False
+            memory_id = resolved
 
             # Also remove from vector table
             try:
