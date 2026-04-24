@@ -25,10 +25,14 @@ field in the TaskCompleted stdin payload (architect §2.3 [MEDIUM] flagged
 this gap). Claude Code fires the `TaskCompleted` hook event on ANY
 TaskUpdate call — not only on transitions to `completed` (verified
 empirically in session pact-114c988a / preparer-538 §R1). Trusting the
-event name as the transition signal is the #528 regression — see that
-issue for the secretary-task-#1 dogfood evidence of hundreds of nags on
-metadata-only TaskUpdates. The on-disk status read is the only source of
-truth for "did this TaskUpdate actually flip status to completed."
+event name as the transition signal is the regression class where
+metadata-only TaskUpdates (claim flags, intentional_wait toggles,
+briefing_delivered tracking, etc.) generate spurious agent_handoff
+events on tasks still in_progress. The on-disk status read is the only
+source of truth for "did this TaskUpdate actually flip status to
+completed." (Regression class filed as #528; dogfood evidence at
+secretary-task-#1 in pact-114c988a — hundreds of spurious nags from
+metadata-only updates.)
 
 Idempotency: sidecar O_EXCL marker at
 ~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. Claude Code's
@@ -45,7 +49,11 @@ that would otherwise pass the marker's first-fire check.
 # gated on on-disk status == "completed", and exits 0 suppressOutput on
 # every code path. Does NOT consume intentional_wait, does NOT emit
 # systemMessage or stderr prompts, and does NOT block completion.
-# Satisfies #538 AC #8 by construction.
+# The five properties above ARE the hook-class categorical standard's
+# acceptance contract (pure journal-writer, zero emission sinks,
+# at-most-once per key, exit-0 on every code path, no intentional_wait
+# consumption). Satisfied by construction — see #538 AC #8 for the
+# canonical statement.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name (TaskCompleted schema).
@@ -117,8 +125,9 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
     ENOSPC, filesystem race), returns False so the caller emits the
     event anyway. Data-integrity (preserving the HANDOFF in the journal)
     outweighs duplication-prevention when the marker subsystem itself
-    breaks; worst case the caller falls back to pre-#538 duplication
-    behavior for this one task.
+    breaks; worst case the caller falls back to the per-fire emission
+    behavior the previous hook implementation exhibited (up to 37× per
+    task; see #538 for the empirical measurement) for this one task.
     """
     # Degenerate post-sanitization values collapse the marker path onto an
     # existing directory:
@@ -171,14 +180,18 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
 
 
 def main() -> None:
-    # Outer catch-all preserves the exit-0 suppressOutput contract (#538 AC #8)
-    # against any unexpected exception (malformed task.json with non-dict
-    # metadata, import-time race, filesystem errors past the inner guards).
-    # The bare `except Exception` is deliberate — livelock-safety via the
-    # "exits 0 on every code path" invariant outweighs observability for
-    # unexpected errors here. Callers of this hook (Claude Code's TaskCompleted
-    # dispatch) treat nonzero exit as a hook-error UI surface; that would
-    # re-introduce exactly the #538-class failure mode.
+    # Outer catch-all preserves the exit-0 suppressOutput contract (see
+    # docstring; #538 AC #8) against any unexpected exception (malformed
+    # task.json with non-dict metadata, import-time race, filesystem errors
+    # past the inner guards). The bare `except Exception` is deliberate —
+    # livelock-safety via the "exits 0 on every code path" invariant
+    # outweighs observability for unexpected errors here. Callers of this
+    # hook (Claude Code's TaskCompleted dispatch) treat nonzero exit as a
+    # hook-error UI surface; that would re-introduce the livelock-capable
+    # failure class — TeammateIdle/TaskCompleted/Stop hooks emitting
+    # systemMessage or error output on every event dispatch until the
+    # owner task resolves — which the categorical standard was introduced
+    # to eliminate (see #538).
     try:
         try:
             input_data = json.load(sys.stdin)
@@ -237,9 +250,12 @@ def main() -> None:
 
         # Status gate — substitute for the missing `previous_status` field in
         # TaskCompleted stdin. Claude Code fires this hook on ANY TaskUpdate,
-        # not only on transitions to `completed` (regression of #528 if we
-        # trust the event name as the transition signal). The on-disk
-        # `status` is the only reliable source of truth for "did this
+        # not only on transitions to `completed`; trusting the event name as
+        # the transition signal would re-emit agent_handoff events on every
+        # metadata-only TaskUpdate (claim flags, intentional_wait toggles,
+        # briefing_delivered tracking, etc.) — the regression class filed
+        # as #528. The on-disk `status` is the only reliable source of
+        # truth for "did this
         # TaskUpdate actually flip status to completed." Metadata-only
         # TaskUpdates (claim flags, briefing_delivered, intentional_wait
         # toggles, etc.) keep status=in_progress and MUST NOT emit.
