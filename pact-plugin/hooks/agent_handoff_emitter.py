@@ -46,10 +46,6 @@ that would otherwise pass the marker's first-fire check.
 # gated on on-disk status == "completed", and exits 0 suppressOutput on
 # every code path. Does NOT consume intentional_wait, does NOT emit
 # systemMessage or stderr prompts, and does NOT block completion.
-# The five properties above ARE the hook-class categorical standard's
-# acceptance contract (pure journal-writer, zero emission sinks,
-# at-most-once per key, exit-0 on every code path, no intentional_wait
-# consumption). Satisfied by construction.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name (TaskCompleted schema).

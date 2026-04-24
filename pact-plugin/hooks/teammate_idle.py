@@ -7,33 +7,13 @@ Summary: TeammateIdle hook — resource-management for zombie teammates.
          shutdown via shutdown_request.
 Used by: hooks.json TeammateIdle hook
 
-# livelock-safe: threshold-escalation, not a nag. Below
-# IDLE_SUGGEST_THRESHOLD=3 no message fires; at 3-4 a "consider shutting
-# down" suggestion fires; at count >= IDLE_FORCE_THRESHOLD=5 a
-# shutdown_request is emitted every subsequent idle tick until the lead
-# processes the request and the platform terminates the agent.
-# Emission above threshold is NOT structurally capped — a per-task
-# emission cap would require code change, which was out of scope for
-# the partial-keep refactor of this hook (the refactor removed
-# detect_stall but preserved check_idle_cleanup; a per-task cap would
-# have been a separate, additive change). Safety is protocol-level
-# (orchestrator responds to shutdown_request -> agent killed), not
-# structural bounded-above-N. Does NOT consume intentional_wait —
-# those are legitimate waits on completed tasks and the escalation
-# still correctly reclaims the agent resource once the wait
-# stabilizes. Satisfies the categorical-standard contract for hooks
-# on TeammateIdle/TaskCompleted/Stop events as manifested for this
-# hook: threshold-bounded escalation (the message text and severity
+# livelock-safe: threshold-escalation, not a nag. Message emissions
 # transition only at the IDLE_SUGGEST_THRESHOLD and IDLE_FORCE_THRESHOLD
-# boundaries — not on every tick); above IDLE_FORCE_THRESHOLD a
-# shutdown_request is re-emitted per tick, but the re-emission
-# terminates when the lead processes the request and the platform
-# kills the agent (protocol-level termination, not structural cap);
-# exits deterministically on every code path. The categorical standard
-# itself is a general "no livelock capability" contract whose concrete
-# manifestation differs per hook — see the emitter's docstring for
-# the TaskCompleted hook's version (pure-journal-writer + O_EXCL
-# marker + disk-status gate + exit-0).
+# boundaries — not every idle tick. Above IDLE_FORCE_THRESHOLD a
+# shutdown_request is re-emitted per tick until the lead processes it and
+# the platform terminates the agent (safety is protocol-level, not a
+# structural cap). Exits deterministically on every code path. Does NOT
+# consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, request shutdown via shutdown_request.
