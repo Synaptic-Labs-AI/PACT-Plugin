@@ -86,6 +86,8 @@ Full protocol, trigger conditions, and signal format: `algedonic.md` (loaded at 
 
 When waiting for teammates to complete their tasks, **do not narrate waiting** — saying "Waiting on X..." is a waste of your context window. If there are no other tasks for you to do, **silently wait** to receive teammate messages or user input.
 
+Idle notifications arrive as conversation turns. When a turn carries no actionable content — no blocker, no stage-ready, no question, no user input — emit no reply. Acknowledging every incoming turn is the reflex that produces narrate-the-wait noise. The next meaningful transition triggers the next meaningful reply.
+
 #### State Recovery (After Compaction or Session Resume)
 
 Reconstruct state:
