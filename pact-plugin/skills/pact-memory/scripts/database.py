@@ -900,8 +900,7 @@ def resolve_memory_id_prefix(
             on ambiguity (for terse disambiguation output). Security-relevant
             knob if multi-tenant access is ever introduced — context may carry
             tenant data the disambiguation reader is not entitled to read; in
-            that case shorten or drop the snippet, or scope it by tenant
-            (see issue #548).
+            that case shorten or drop the snippet, or scope it by tenant.
 
     Returns:
         The full memory ID when the prefix uniquely matches one row, or None
