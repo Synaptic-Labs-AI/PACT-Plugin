@@ -120,7 +120,25 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
     breaks; worst case the caller falls back to pre-#538 duplication
     behavior for this one task.
     """
-    if not team_name or not task_id:
+    # Degenerate post-sanitization values collapse the marker path onto an
+    # existing directory:
+    #   `Path(marker_dir) / "."`  → marker_dir itself
+    #   `Path(marker_dir) / ".."` → marker_dir's parent
+    # In either case `os.open(..., O_CREAT | O_EXCL)` on that existing
+    # directory returns EEXIST, which the catch below interprets as "prior
+    # fire owns the marker" and PERMANENTLY SUPPRESSES every future emit for
+    # the degenerate key. The regex in _sanitize_path_component strips `/`,
+    # `\`, and `..` substrings but leaves single `.` segments untouched — so
+    # inputs like `"."`, `"..."`, `"/./"` and the two-segment form `"/./."`
+    # (which sanitizes to `".."`) all reach this site as `.` or `..`. Guard
+    # both task_id and team_name: emit the event, accept the rare-degenerate
+    # duplication risk over silent event loss.
+    if (
+        not team_name
+        or team_name in (".", "..")
+        or not task_id
+        or task_id in (".", "..")
+    ):
         # No valid marker key → cannot dedupe. Emit rather than suppress.
         return False
 

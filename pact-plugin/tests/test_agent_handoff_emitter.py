@@ -876,3 +876,377 @@ class TestUnexpectedExceptionSuppression:
             "a protocol-level signal on an error path would re-introduce "
             "the livelock-capability category #538 removed."
         )
+
+
+class TestPathSanitization:
+    """Direct coverage for `_sanitize_path_component` helper + integration
+    coverage for degenerate post-sanitize values.
+
+    Gap addressed (4-reviewer corroboration: architect-blind Y1 +
+    backend-blind Y3 + test-blind TB-Y1 + test-blind TB-Y2): the helper
+    shipped in dd6e434 with zero direct unit coverage. All cycle-1 testing
+    went through integration. The helper uses `re.sub(r"[/\\\\]|\\.\\.", "", v)`
+    which strips `/`, `\\`, and `..` substrings — but leaves single-dot
+    segments untouched. This creates degenerate post-sanitize values
+    (`''`, `'.'`, `'..'`) which, pre-guard, collapsed the marker path onto
+    an existing directory (`marker_dir / '.'` → marker_dir itself),
+    permanently suppressing future emits for the degenerate key.
+
+    Security-reviewer's task #24 adds the guard:
+        if team_name in ("", ".", "..") or task_id in ("", ".", ".."):
+            return False  # emit without marker
+
+    This class covers:
+      - SanitizeHelper: direct unit tests pin the regex's stripping behavior
+        AND the documented single-dot preservation quirk.
+      - DegenerateTaskIdDoesNotCreateMarker: integration tests verify the
+        guard — degenerate post-sanitize values emit the journal event but
+        do NOT create a marker file (paired with task #24 guard).
+      - IntegrationPathTraversalAttempts: integration tests confirm that
+        path-traversal inputs produce markers inside the team dir, never
+        escaping to parent/sibling paths.
+    """
+
+    class TestSanitizeHelper:
+        """Direct unit tests against _sanitize_path_component. Independent
+        of task #24 guard — these exercise the regex behavior alone."""
+
+        @pytest.mark.parametrize(
+            "legitimate",
+            ["42", "12345", "feature-task-5", "task_5", "abc-def"],
+        )
+        def test_sanitize_preserves_legitimate_task_ids(self, legitimate):
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component(legitimate) == legitimate, (
+                f"legitimate task_id {legitimate!r} was altered by sanitizer; "
+                f"the regex must only strip `/`, `\\\\`, and `..` substrings."
+            )
+
+        def test_sanitize_strips_forward_slash(self):
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component("foo/bar") == "foobar"
+
+        def test_sanitize_strips_backslash(self):
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component("foo\\bar") == "foobar"
+
+        @pytest.mark.parametrize(
+            "input_value,expected",
+            [
+                ("../foo", "foo"),
+                ("..", ""),
+                ("a..b", "ab"),
+                ("..\\..", ""),
+                ("...", "."),  # first two dots stripped; third survives
+                ("....", ""),  # two consecutive `..` pairs strip to empty
+            ],
+        )
+        def test_sanitize_strips_dotdot_sequences(self, input_value, expected):
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component(input_value) == expected, (
+                f"sanitize({input_value!r}) expected {expected!r}; "
+                f"regex may have drifted."
+            )
+
+        @pytest.mark.parametrize(
+            "traversal_attempt",
+            [
+                "/etc/passwd",
+                "./etc/passwd",
+                "../../../../etc/shadow",
+                "\\..\\..\\foo",
+                "/../../../../root/.ssh/id_rsa",
+            ],
+        )
+        def test_sanitize_strips_path_traversal_combinations(self, traversal_attempt):
+            """Compound attack inputs — the output must contain no `/`,
+            no `\\`, and no `..` substring. Exact value is less
+            important than the absence of traversal primitives."""
+            from agent_handoff_emitter import _sanitize_path_component
+            out = _sanitize_path_component(traversal_attempt)
+            assert "/" not in out, f"forward slash survived in {out!r}"
+            assert "\\" not in out, f"backslash survived in {out!r}"
+            assert ".." not in out, f"parent-dir sequence survived in {out!r}"
+
+        def test_sanitize_preserves_single_dot(self):
+            """Documented quirk: single `.` is NOT stripped (regex only
+            matches `..`). Caller guards against this degenerate shape
+            separately (#24 guard). This test pins the current contract
+            so a future regex tightening is a deliberate decision."""
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component(".") == "."
+
+        def test_sanitize_preserves_whitespace(self):
+            """Whitespace is not a path-traversal primitive — regex doesn't
+            strip it. Whitespace-only values create filesystem-valid
+            (if unusual) filenames, so the guard does NOT need to treat
+            them as degenerate."""
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component(" ") == " "
+            assert _sanitize_path_component("  ") == "  "
+
+        def test_sanitize_empty_string_unchanged(self):
+            """Empty input returns empty — pinned for guard-paired tests
+            that rely on the empty sentinel reaching _already_emitted."""
+            from agent_handoff_emitter import _sanitize_path_component
+            assert _sanitize_path_component("") == ""
+
+    class TestDegenerateTaskIdDoesNotCreateMarker:
+        """Integration coverage — depends on security-reviewer's task #24
+        guard. Degenerate post-sanitize values (`''`, `'.'`, `'..'`) must
+        NOT create a marker file, but MUST still emit the journal event
+        (fail-open data-integrity per architect §2.4).
+
+        Pre-#24 bug: `marker_dir / '.'` resolves to `marker_dir` itself,
+        which `os.open(O_CREAT|O_EXCL)` rejects with EEXIST. The EEXIST
+        branch interpreted that as "prior fire owns the marker" and
+        permanently suppressed every future emit for the degenerate key.
+        Post-#24: guard returns False before reaching the marker open,
+        preserving emit + skipping the marker.
+        """
+
+        @pytest.mark.parametrize(
+            "raw_task_id",
+            ["..", "..\\..", "...."],
+            # All sanitize to `''`. Note `''` itself can't be sent directly
+            # — the main() fallback substitutes "unknown" before sanitize,
+            # so we test the PRE-sanitize inputs that produce empty output.
+            # Empty post-sanitize was ALREADY guarded pre-#24 via the
+            # original `if not team_name or not task_id` branch; these
+            # tests pin that behavior and serve as regression guards.
+        )
+        def test_empty_post_sanitize_task_id_emits_without_marker(
+            self, raw_task_id, tmp_path, monkeypatch
+        ):
+            monkeypatch.setenv("HOME", str(tmp_path))
+            calls: list[dict] = []
+            _run_main(
+                stdin_payload={
+                    "task_id": raw_task_id,
+                    "task_subject": "degenerate-empty probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            assert len(calls) == 1, (
+                f"degenerate task_id {raw_task_id!r} (sanitizes to empty) "
+                f"must still emit the journal event per fail-open data-"
+                f"integrity invariant. Pre-#24 guard, EEXIST on "
+                f"`marker_dir / ''` permanently suppressed the emit."
+            )
+            # Marker directory may exist (created by _already_emitted before
+            # the guard returned False), but it must contain NO file named
+            # with the degenerate sanitized value.
+            marker_dir = (
+                tmp_path / ".claude" / "teams" / "pact-test"
+                / ".agent_handoff_emitted"
+            )
+            if marker_dir.exists():
+                # The guard must prevent any degenerate marker file from
+                # being created inside. Empty-string filename isn't a valid
+                # path component; check no stray file landed here.
+                files_in_dir = list(marker_dir.iterdir())
+                assert files_in_dir == [], (
+                    f"guard failed — degenerate task_id {raw_task_id!r} "
+                    f"produced stray files in marker dir: {files_in_dir}"
+                )
+
+        @pytest.mark.parametrize(
+            "raw_task_id",
+            [".", "...", "/./"],  # all sanitize to '.'
+            # These are the NEWLY-guarded cases in #24. Pre-#24 the guard
+            # was `if not task_id` which missed post-sanitize `.` — it's
+            # truthy. These tests are the paired-regression proof that
+            # #24's extended check (`task_id in ("", ".", "..")`) closes
+            # the collapse-onto-marker_dir bug.
+        )
+        def test_dot_only_post_sanitize_emits_without_marker(
+            self, raw_task_id, tmp_path, monkeypatch
+        ):
+            monkeypatch.setenv("HOME", str(tmp_path))
+            calls: list[dict] = []
+            _run_main(
+                stdin_payload={
+                    "task_id": raw_task_id,
+                    "task_subject": "degenerate-dot probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            assert len(calls) == 1, (
+                f"degenerate task_id {raw_task_id!r} (sanitizes to '.') "
+                f"must still emit — the #24 guard protects against the "
+                f"`marker_dir / '.'` collapse that otherwise permanently "
+                f"suppresses future emits via spurious EEXIST."
+            )
+            marker_dir = (
+                tmp_path / ".claude" / "teams" / "pact-test"
+                / ".agent_handoff_emitted"
+            )
+            # Crucial invariant: marker_dir itself must not have been
+            # interpreted as THE marker. If it was, a subsequent fire
+            # with the same degenerate key would see EEXIST and suppress.
+            # Verify by firing a SECOND time with the same degenerate key
+            # and asserting a second event is written.
+            _run_main(
+                stdin_payload={
+                    "task_id": raw_task_id,
+                    "task_subject": "degenerate-dot probe second fire",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            # Post-#24, degenerate keys are UN-DEDUPABLE (no marker
+            # created → every fire emits). This is the intentional
+            # accepted trade-off: rare duplication for degenerate keys
+            # beats silent permanent event loss for ALL future fires.
+            assert len(calls) == 2, (
+                f"degenerate key {raw_task_id!r} second fire was suppressed "
+                f"— the #24 guard is missing or the pre-guard EEXIST-on-dir "
+                f"bug has resurfaced."
+            )
+
+        def test_dotdot_post_sanitize_emits_via_guard(
+            self, tmp_path, monkeypatch
+        ):
+            """`task_id='..'` sanitizes to `''`; covered by the empty-case
+            parametrize above. This test pins the separate `.` vs `..`
+            concern in the guard: both must be caught. The guard check
+            `task_id in ("", ".", "..")` covers all three; we verify
+            the post-sanitize `''` path specifically by passing pre-
+            sanitize `'..'` and asserting emit."""
+            monkeypatch.setenv("HOME", str(tmp_path))
+            calls: list[dict] = []
+            _run_main(
+                stdin_payload={
+                    "task_id": "..",
+                    "task_subject": "dotdot probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            assert len(calls) == 1
+
+        def test_degenerate_team_name_also_guarded(
+            self, tmp_path, monkeypatch
+        ):
+            """Symmetry pin: the guard covers both team_name AND task_id.
+            A degenerate team_name must also emit-without-marker. In
+            production, team_name comes from `get_team_name()` which
+            sanitizes on read, but a crafted stdin team_name could
+            reach the helper."""
+            monkeypatch.setenv("HOME", str(tmp_path))
+            calls: list[dict] = []
+            _run_main(
+                stdin_payload={
+                    "task_id": "42",
+                    "task_subject": "degenerate team probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "..",  # sanitizes to ''
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            assert len(calls) == 1, (
+                "degenerate team_name '..' must also emit via the #24 "
+                "guard — team_name and task_id must be symmetrically "
+                "protected."
+            )
+
+    class TestIntegrationPathTraversalAttempts:
+        """Path-traversal inputs must NOT escape the team's marker dir.
+        Independent of #24 guard — these test the sanitizer's stripping
+        behavior integrated through main(). Input with traversal primitives
+        sanitizes to a legitimate basename that lives inside the team dir.
+        """
+
+        @pytest.mark.parametrize(
+            "attack_task_id,expected_sanitized",
+            [
+                ("../../../etc/shadow", "etcshadow"),
+                ("/etc/passwd", "etcpasswd"),
+                ("\\..\\..\\foo", "foo"),
+                ("../../secrets", "secrets"),
+            ],
+        )
+        def test_path_traversal_task_ids_contained_in_team_dir(
+            self, attack_task_id, expected_sanitized, tmp_path, monkeypatch
+        ):
+            monkeypatch.setenv("HOME", str(tmp_path))
+            calls: list[dict] = []
+            _run_main(
+                stdin_payload={
+                    "task_id": attack_task_id,
+                    "task_subject": "path-traversal probe",
+                    "teammate_name": "probe-agent",
+                    "team_name": "pact-test",
+                },
+                task_data={
+                    "status": "completed",
+                    "owner": "probe-agent",
+                    "metadata": {"handoff": VALID_HANDOFF},
+                },
+                append_calls=calls,
+            )
+            assert len(calls) == 1
+            # Marker file (if created) lives at the sanitized basename
+            # INSIDE the team's .agent_handoff_emitted dir — never at
+            # an escape path.
+            expected_marker = (
+                tmp_path / ".claude" / "teams" / "pact-test"
+                / ".agent_handoff_emitted" / expected_sanitized
+            )
+            assert expected_marker.exists(), (
+                f"path-traversal attempt {attack_task_id!r} sanitized to "
+                f"{expected_sanitized!r}; marker must exist at expected "
+                f"location but was not found at {expected_marker}."
+            )
+            # Escape-path check: nothing was created outside the team dir.
+            # Any path containing "etc/shadow", "etc/passwd", or absolute
+            # leakage is a failure.
+            escape_targets = [
+                tmp_path.parent / "etc" / "shadow",
+                tmp_path / "etc" / "passwd",
+                Path("/etc/shadow"),
+                Path("/etc/passwd"),
+            ]
+            for escape in escape_targets:
+                # Skip absolute system paths if they happen to pre-exist
+                # (e.g., /etc/passwd on macOS is real — we can't assert
+                # it doesn't exist; we assert we didn't CREATE it by
+                # asserting our sanitized marker exists inside tmp_path
+                # above, which is sufficient).
+                if escape.is_absolute() and escape.exists():
+                    continue
+                assert not escape.exists(), (
+                    f"path-traversal attempt {attack_task_id!r} created "
+                    f"a file at escape path {escape}."
+                )
