@@ -188,11 +188,14 @@ def main() -> None:
 
         pact_context.init(input_data)
 
-        # Fallback substitution preserves pre-#538 behavior: the journal
-        # schema rejects empty strings on str-typed required fields, so if
-        # the platform ever omits task_id/task_subject, fall back to
-        # sentinels so the event still persists (preserving the HANDOFF is
-        # strictly better than dropping it).
+        # Fallback substitution attempts preservation of the agent_handoff
+        # event when the platform omits required fields: the journal schema
+        # rejects empty strings on str-typed required fields, so if task_id
+        # or task_subject is missing we substitute sentinels. Note asymmetry:
+        # a missing task_subject still emits (status gate reads the real
+        # task.json via raw_task_id), but a missing task_id falls through
+        # to read_task_json("unknown", team_name) → {} → status gate exits
+        # early. "Preservation" is best-effort, not guaranteed.
         raw_task_id = input_data.get("task_id")
         raw_task_subject = input_data.get("task_subject")
         task_id_was_missing = not raw_task_id
@@ -205,7 +208,7 @@ def main() -> None:
                 f"TaskCompleted payload "
                 f"(task_id={'MISSING' if task_id_was_missing else 'present'}, "
                 f"task_subject={'MISSING' if task_subject_was_missing else 'present'}); "
-                f"using fallback values to preserve agent_handoff event",
+                f"using fallback values to attempt preservation of agent_handoff event",
                 file=sys.stderr,
             )
 

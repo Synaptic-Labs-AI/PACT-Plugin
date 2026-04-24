@@ -3,9 +3,9 @@ Location: pact-plugin/hooks/shared/intentional_wait.py
 Summary: `intentional_wait` metadata schema — the teammate-facing contract
          for signalling a legitimate wait on an in_progress task (teachback
          approval, inter-commit hold, peer reply, etc.).
-Used by: teammate-authored metadata on Task records. No hook reads this
-         schema post-#538; the schema survives as the teammate-facing
-         contract documented in skills/pact-agent-teams/SKILL.md.
+Used by: teammate-authored metadata on Task records. No in-plugin consumers
+         post-#538; the schema primitives are retained as the teammate-facing
+         metadata contract documented in skills/pact-agent-teams/SKILL.md.
 
 Contract: pure functions; never raise. Malformed flags fail loud — e.g.
 `wait_stale` returns True on any parse error so a broken flag cannot

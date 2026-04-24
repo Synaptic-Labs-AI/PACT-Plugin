@@ -7,13 +7,20 @@ Summary: TeammateIdle hook — resource-management for zombie teammates.
          shutdown via shutdown_request.
 Used by: hooks.json TeammateIdle hook
 
-# livelock-safe: threshold-escalation (max IDLE_FORCE_THRESHOLD=5 events
-# per task), not a nag. Each task escalates at most N times before the
-# agent is shut down and the state is reclaimed; emission is bounded
-# above by count >= threshold branches that each fire exactly once per
-# task. Does NOT consume intentional_wait — those are legitimate waits
-# on completed tasks and the escalation still correctly reclaims the
-# agent resource once the wait stabilizes. Satisfies #538 AC #8.
+# livelock-safe: threshold-escalation, not a nag. Below
+# IDLE_SUGGEST_THRESHOLD=3 no message fires; at 3-4 a "consider shutting
+# down" suggestion fires; at count >= IDLE_FORCE_THRESHOLD=5 a
+# shutdown_request is emitted every subsequent idle tick until the lead
+# processes the request and the platform terminates the agent.
+# Emission above threshold is NOT structurally capped — a per-task
+# emission cap would require code change; #538's partial-keep scope
+# excluded this. Safety is protocol-level (orchestrator responds to
+# shutdown_request -> agent killed), not structural bounded-above-N.
+# Does NOT consume intentional_wait — those are legitimate waits on
+# completed tasks and the escalation still correctly reclaims the
+# agent resource once the wait stabilizes. Satisfies #538 AC #8 on
+# the categorical-standard axis (emits only escalation, never nags
+# below threshold).
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, request shutdown via shutdown_request.

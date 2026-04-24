@@ -323,8 +323,8 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent completes (handoff) | `TaskUpdate(taskId, status: "completed")` |
 | Reading agent's full HANDOFF | `TaskGet(taskId).metadata.handoff` (on-demand, not automatic) |
 | Creating downstream phase task | Include upstream task IDs in description for chain-read |
-| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — downstream consumers (`agent_handoff_emitter.py`, `shared/task_utils.py:is-signal-task helper`, `shared/session_resume.py`) inline-check `metadata.type in ("blocker", "algedonic")` to suppress journal emission and recovery replay; the subject prefix has no special meaning. |
-| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. **`metadata.type` is required** for signal-task bypass in the same three consumers (see blocker row). |
+| Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — `agent_handoff_emitter.py` inline-checks `metadata.type in ("blocker", "algedonic")` and SUPPRESSES journal emission for signal tasks; `shared/task_utils.py` and `shared/session_resume.py` use the same literal to CATEGORIZE signal tasks for recovery display (they do not suppress anything). The three sites share the literal as a convention, not a common suppression mechanism. The subject prefix has no special meaning. |
+| Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. **`metadata.type` is required** — same three-site behavior as the blocker row (emitter suppresses; task_utils + session_resume categorize). |
 
 **Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals, progress signals). You create tasks and monitor via `TaskList` and incoming `SendMessage` signals. Agents can send brief mid-task status updates (`[sender→lead] Progress: {done}/{remaining}, {status}`) when requested.
 
@@ -433,8 +433,11 @@ Exceptions:
 
 Teammates signal protocol-defined waits via the `intentional_wait` task metadata
 (see `pact-agent-teams/SKILL.md::Intentional Waiting` for the teammate-side
-SET/CLEAR contract). Under the flag, teammates stay silent until their wait
-resolves — no nag reminders. Your responsibilities:
+SET/CLEAR contract). Post-#538 there are no in-plugin consumers of the flag;
+teammate silence during a wait is a consequence of the Idle Discipline they
+follow (no new output when nothing advances the work), not of any hook reading
+the flag. The flag is audit metadata — it documents the wait for your
+inspection and session review. Your responsibilities:
 
 - **Don't interpret silence as stall.** Read the task metadata before
   dispatching `/PACT:imPACT`.
@@ -445,9 +448,11 @@ resolves — no nag reminders. Your responsibilities:
 - **Reading the flag**: `TaskGet` does NOT surface task metadata. Read the
   task file directly: `cat ~/.claude/tasks/{team}/{taskId}.json | jq .metadata.intentional_wait`.
   Fields: `reason`, `expected_resolver`, `since`.
-- **Staleness signal**: the 30-min threshold re-enables the nag as safety
-  valve. If a previously-silent teammate starts nagging again, check whether
-  state changed or the wait expired — different dispositions.
+- **Staleness signal**: the 30-min threshold (`wait_stale` in
+  `shared.intentional_wait`) renders the flag stale for your audit and
+  inspection purposes; no hook fires on expiry. If a flagged wait has been
+  pending past 30 min, the teammate should re-SET with a fresh `since` — or
+  the wait has hung and you should investigate and drive resolution.
 - **Don't SET the `intentional_wait` task metadata on your own lead task.**
   TeammateIdle hooks filter by task owner; they don't inspect lead state.
 

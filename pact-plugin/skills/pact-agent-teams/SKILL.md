@@ -191,11 +191,11 @@ If you have nothing to say that advances the work, say nothing.
 When your task is `in_progress` but you are legitimately idle awaiting a message
 (teachback approval, inter-commit hold, peer reply, user decision, blocker
 resolution), signal it via the `intentional_wait` task metadata BEFORE going idle.
-Post-#538, no hook currently reads this flag — the TeammateIdle nag-path was removed —
-but the flag remains the teammate-facing metadata contract for protocol-defined waits,
-and the schema primitives (`KNOWN_REASONS`, `KNOWN_RESOLVERS`, `wait_stale`) in
-`shared.intentional_wait` are preserved for future consumers. Using it documents the
-wait intent for the lead's TaskGet inspection and for post-hoc session review.
+Post-#538 there are no in-plugin consumers of this flag; the schema primitives
+(`KNOWN_REASONS`, `KNOWN_RESOLVERS`, `wait_stale`) in `shared.intentional_wait`
+are retained as the teammate-facing metadata contract for protocol-defined
+waits. Using the flag documents the wait intent for the lead's TaskGet
+inspection and for post-hoc session review.
 
 ### SET — before going idle
 
@@ -210,7 +210,7 @@ TaskUpdate(taskId=taskId, metadata={
 })
 ```
 
-`since` must be tz-aware ISO-8601. A naive timestamp re-enables the nag (fail-loud).
+`since` must be tz-aware ISO-8601. A naive timestamp fails `validate_wait` and will be surfaced as malformed to any reader of the flag (lead TaskGet, audit, future consumers). Fail-loud.
 
 ### CLEAR — when the wait resolves
 

@@ -16,8 +16,6 @@ Functions:
     find_blockers: Find blocker/algedonic tasks
     build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
     read_task_json: Read the raw task JSON by id + team_name (path-traversal safe)
-    read_task_metadata: Read task metadata dict by id + team_name
-    read_task_owner: Read task owner string by id + team_name
 """
 
 import json
@@ -315,28 +313,3 @@ def read_task_json(
                 return {}
 
     return {}
-
-
-def read_task_metadata(
-    task_id: str,
-    team_name: str | None,
-    tasks_base_dir: str | None = None,
-) -> dict:
-    """
-    Read task metadata dict by id + team_name. Fail-open (empty dict).
-    """
-    return read_task_json(task_id, team_name, tasks_base_dir).get("metadata", {})
-
-
-def read_task_owner(
-    task_id: str,
-    team_name: str | None,
-    tasks_base_dir: str | None = None,
-) -> str | None:
-    """
-    Read task owner string by id + team_name.
-
-    Used as fallback when the platform doesn't provide teammate_name in
-    hook input (e.g., lead marks task completed on behalf of an agent).
-    """
-    return read_task_json(task_id, team_name, tasks_base_dir).get("owner")
