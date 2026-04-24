@@ -83,7 +83,7 @@ Apply the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.m
 
 ### Latency Caveat
 
-See the Communication Charter Part I — Algedonic-Signal Latency Caveat ([pact-communication-charter.md](pact-communication-charter.md)) for the delivery-model implications (idle-boundary HALT latency; immediate in-flight halt needs user interrupt; lead's "surface immediately" = lead's next idle).
+See [Communication Charter Part I — Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat) for the delivery-model implications (idle-boundary HALT latency; immediate in-flight halt needs user interrupt; lead's "surface immediately" = lead's next idle).
 
 ### Task System Integration
 
