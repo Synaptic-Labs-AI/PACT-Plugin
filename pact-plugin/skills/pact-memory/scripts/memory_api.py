@@ -604,7 +604,7 @@ class PACTMemory:
         updates: Dict[str, Any],
         *,
         replace: bool = False,
-    ) -> bool:
+    ) -> Optional[str]:
         """
         Update an existing memory by ID or unique prefix.
 
@@ -621,7 +621,10 @@ class PACTMemory:
                 with content-hash dedup).
 
         Returns:
-            True if updated, False if memory not found.
+            The resolved full 32-char memory ID on successful update, or
+            None when the input matched no row. Callers that invoked with a
+            prefix get the canonical ID back so downstream operations key off
+            the storage form.
 
         Raises:
             ValueError: If updates contains unknown field names, or if any
@@ -637,7 +640,7 @@ class PACTMemory:
 
             resolved = self._resolve_id_or_full(conn, memory_id)
             if resolved is None:
-                return False
+                return None
             memory_id = resolved
 
             # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
@@ -662,9 +665,9 @@ class PACTMemory:
                 ):
                     self._store_embedding(conn, memory_id, memory_dict)
 
-            return success
+            return memory_id if success else None
 
-    def delete(self, memory_id: str) -> bool:
+    def delete(self, memory_id: str) -> Optional[str]:
         """
         Delete a memory by ID or unique prefix.
 
@@ -677,7 +680,10 @@ class PACTMemory:
             memory_id: Full 32-char ID or a prefix >= MIN_PREFIX_LENGTH.
 
         Returns:
-            True if deleted, False if not found.
+            The resolved full 32-char memory ID on successful delete, or
+            None when the input matched no row. Callers that invoked with a
+            prefix get the canonical ID back so downstream operations key off
+            the storage form.
 
         Raises:
             PrefixTooShortError: prefix is shorter than the minimum.
@@ -691,7 +697,7 @@ class PACTMemory:
 
             resolved = self._resolve_id_or_full(conn, memory_id)
             if resolved is None:
-                return False
+                return None
             memory_id = resolved
 
             # Also remove from vector table
@@ -703,7 +709,7 @@ class PACTMemory:
             except Exception:
                 pass  # Vector table might not exist
 
-            return delete_memory(conn, memory_id)
+            return memory_id if delete_memory(conn, memory_id) else None
 
     def list(
         self,

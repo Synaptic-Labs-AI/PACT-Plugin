@@ -217,7 +217,7 @@ def cmd_update(args, db_path=None):
 
     memory = PACTMemory(db_path=db_path)
     try:
-        success = memory.update(args.memory_id, updates, replace=args.replace)
+        resolved_id = memory.update(args.memory_id, updates, replace=args.replace)
     except PrefixTooShortError as exc:
         # Order: PrefixTooShortError IS a ValueError; catch it before the
         # field-validation ValueError handler below.
@@ -239,9 +239,9 @@ def cmd_update(args, db_path=None):
             exit_code=2,
             allowed_fields=sorted(CALLER_FACING_UPDATE_FIELDS),
         )
-    if not success:
+    if resolved_id is None:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
-    _success({"memory_id": args.memory_id})
+    _success({"memory_id": resolved_id})
 
 
 def cmd_delete(args, db_path=None):
@@ -252,7 +252,7 @@ def cmd_delete(args, db_path=None):
     """
     memory = PACTMemory(db_path=db_path)
     try:
-        success = memory.delete(args.memory_id)
+        resolved_id = memory.delete(args.memory_id)
     except PrefixTooShortError as exc:
         _error("PREFIX_TOO_SHORT", str(exc), minimum=exc.minimum)
     except AmbiguousPrefixError as exc:
@@ -264,9 +264,9 @@ def cmd_delete(args, db_path=None):
             truncated=exc.truncated,
             total_matches=exc.total_matches,
         )
-    if not success:
+    if resolved_id is None:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
-    _success({"deleted": True, "memory_id": args.memory_id})
+    _success({"deleted": True, "memory_id": resolved_id})
 
 
 def _positive_int(value):

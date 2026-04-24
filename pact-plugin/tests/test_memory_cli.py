@@ -39,6 +39,14 @@ from scripts.memory_api import PACTMemory
 # Fixtures
 # ---------------------------------------------------------------------------
 
+# Stable 32-char fake memory ID used by mock_pact_memory defaults so tests
+# asserting on the success envelope's `memory_id` field have a known value
+# to compare against. Distinct from any prefix used in test args so that
+# assertions catch regressions where the user-supplied prefix is echoed
+# instead of the resolved full ID.
+_FAKE_RESOLVED_ID = "fa1ce1d" + "0" * 25  # 32 chars, lowercase hex pattern
+
+
 @pytest.fixture
 def mock_pact_memory():
     """Create a mock PACTMemory instance with standard return values."""
@@ -49,6 +57,10 @@ def mock_pact_memory():
     # Non-None default so save verification in PACTMemory.save() passes;
     # override to None in tests that need NOT_FOUND behavior.
     mock.get.return_value = MagicMock()
+    # update/delete return Optional[str] (resolved full ID). Explicit defaults
+    # match the API contract; tests for not-found paths override to None.
+    mock.update.return_value = _FAKE_RESOLVED_ID
+    mock.delete.return_value = _FAKE_RESOLVED_ID
     mock.get_status.return_value = {
         "project_id": "test-project",
         "memory_count": 5,
@@ -862,24 +874,26 @@ class TestCliUpdateCommand:
     """Test the update subcommand handler."""
 
     def test_update_existing_memory(self, mock_pact_memory, capsys):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
-        args = parser.parse_args(["update", "abc123", '{"context": "updated"}'])
+        args = parser.parse_args(["update", "abc1234", '{"context": "updated"}'])
 
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_update(args)
         assert exc_info.value.code == 0
         mock_pact_memory.update.assert_called_once_with(
-            "abc123", {"context": "updated"}, replace=False
+            "abc1234", {"context": "updated"}, replace=False
         )
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["ok"] is True
-        assert output["result"]["memory_id"] == "abc123"
+        # Envelope echoes the RESOLVED full ID returned by the API, not the
+        # user-supplied prefix — locks the cycle-2 echo fix.
+        assert output["result"]["memory_id"] == _FAKE_RESOLVED_ID
 
     def test_update_not_found(self, mock_pact_memory, capsys):
-        mock_pact_memory.update.return_value = False
+        mock_pact_memory.update.return_value = None
         parser = build_parser()
         args = parser.parse_args(["update", "nonexistent", '{"context": "x"}'])
 
@@ -892,7 +906,7 @@ class TestCliUpdateCommand:
         assert err_output["error"] == "NOT_FOUND"
 
     def test_update_with_stdin(self, mock_pact_memory, monkeypatch):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         monkeypatch.setattr("sys.stdin", StringIO('{"context": "from stdin"}'))
         parser = build_parser()
         args = parser.parse_args(["update", "abc123", "--stdin"])
@@ -939,7 +953,7 @@ class TestCliUpdateCommand:
         assert err_output["error"] == "MISSING_INPUT"
 
     def test_update_passes_db_path(self, mock_pact_memory):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(["update", "abc123", '{"context": "x"}', "--db-path", "/tmp/t.db"])
 
@@ -953,7 +967,7 @@ class TestCliUpdateReplaceFlag:
     """Test the --replace flag and ValueError envelope on the update subcommand."""
 
     def test_replace_flag_forwards_true(self, mock_pact_memory):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(
             ["update", "abc123", '{"lessons": ["x"]}', "--replace"]
@@ -968,7 +982,7 @@ class TestCliUpdateReplaceFlag:
         )
 
     def test_replace_default_is_false(self, mock_pact_memory):
-        mock_pact_memory.update.return_value = True
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(["update", "abc123", '{"lessons": ["x"]}'])
 
@@ -1143,23 +1157,24 @@ class TestCliDeleteCommand:
     """Test the delete subcommand handler."""
 
     def test_delete_existing_memory(self, mock_pact_memory, capsys):
-        mock_pact_memory.delete.return_value = True
+        mock_pact_memory.delete.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
-        args = parser.parse_args(["delete", "abc123"])
+        args = parser.parse_args(["delete", "abc1234"])
 
         with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_delete(args)
         assert exc_info.value.code == 0
-        mock_pact_memory.delete.assert_called_once_with("abc123")
+        mock_pact_memory.delete.assert_called_once_with("abc1234")
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["ok"] is True
         assert output["result"]["deleted"] is True
-        assert output["result"]["memory_id"] == "abc123"
+        # Envelope echoes the RESOLVED full ID, not the user-supplied prefix.
+        assert output["result"]["memory_id"] == _FAKE_RESOLVED_ID
 
     def test_delete_not_found(self, mock_pact_memory, capsys):
-        mock_pact_memory.delete.return_value = False
+        mock_pact_memory.delete.return_value = None
         parser = build_parser()
         args = parser.parse_args(["delete", "nonexistent"])
 
@@ -1172,7 +1187,7 @@ class TestCliDeleteCommand:
         assert err_output["error"] == "NOT_FOUND"
 
     def test_delete_passes_db_path(self, mock_pact_memory):
-        mock_pact_memory.delete.return_value = True
+        mock_pact_memory.delete.return_value = _FAKE_RESOLVED_ID
         parser = build_parser()
         args = parser.parse_args(["delete", "abc123", "--db-path", "/tmp/t.db"])
 
@@ -1605,6 +1620,53 @@ class TestCliSubprocess:
         )
         assert get_result.returncode == 1
         assert json.loads(get_result.stderr)["error"] == "NOT_FOUND"
+
+    # ----- Cycle 2: echo-fix regression — envelope must echo resolved full ID -----
+
+    def test_update_success_envelope_returns_resolved_full_id(self, cli_script_path, cli_db):
+        """E2E: update success envelope echoes the resolved full ID, not the user prefix.
+
+        Calling `pact-memory update <prefix>` and then chaining a follow-up
+        operation against the returned ID must work without re-running prefix
+        resolution. Locks the cycle-2 echo fix.
+        """
+        full_id = "ech0upd" + "1" + "0" * 24  # 32 chars
+        self._seed_memory(cli_db, full_id, "before")
+
+        prefix = "ech0upd"
+        assert prefix != full_id  # The whole point: caller passed a prefix
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", prefix,
+             json.dumps({"context": "after"}),
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        out = json.loads(update_result.stdout)
+        assert out["ok"] is True
+        # Regression assertion: envelope must surface the RESOLVED full ID,
+        # not the user-supplied prefix.
+        assert out["result"]["memory_id"] == full_id
+        assert out["result"]["memory_id"] != prefix
+
+    def test_delete_success_envelope_returns_resolved_full_id(self, cli_script_path, cli_db):
+        """E2E: delete success envelope echoes the resolved full ID, not the user prefix."""
+        full_id = "ech0del" + "1" + "0" * 24
+        self._seed_memory(cli_db, full_id, "to-go")
+
+        prefix = "ech0del"
+        assert prefix != full_id
+        delete_result = subprocess.run(
+            [sys.executable, cli_script_path, "delete", prefix,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert delete_result.returncode == 0, f"stderr: {delete_result.stderr}"
+        out = json.loads(delete_result.stdout)
+        assert out["ok"] is True
+        assert out["result"]["deleted"] is True
+        assert out["result"]["memory_id"] == full_id
+        assert out["result"]["memory_id"] != prefix
 
     def test_save_via_stdin(self, cli_script_path, cli_db):
         memory_dict = make_cli_memory_dict(context="stdin test")
