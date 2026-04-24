@@ -356,6 +356,96 @@ class TestMarkerFailOpen:
             "agent_handoff event — data-integrity carve-out per §2.4."
         )
 
+    def test_journal_write_failure_loses_event_but_marker_persists(
+        self, tmp_path, monkeypatch
+    ):
+        """Document the marker-before-emit ordering asymmetry
+        (backend-reviewer LOW #2, task #12).
+
+        `_already_emitted` creates the sidecar marker BEFORE `append_event`
+        is called. If `append_event` silently fails (session_journal.py
+        fail-open contract — returns None/False rather than raising), the
+        marker persists but the event is lost from the journal. This is
+        the intentional trade-off: avoiding 37× duplicate emission (the
+        #528 amplification class) is strictly more important than
+        recovering a rare single-event loss on journal-write failure.
+
+        This test pins the CURRENT behavior so a future reviewer reading
+        `_already_emitted` → `append_event` → `_mark_emitted` ordering
+        does not mistake it for a bug. If the ordering is ever inverted
+        (journal-write first, marker second) — e.g., to try to prevent
+        the loss — this test would fail and force the change to be
+        justified against the amplification-prevention property.
+
+        Mock choice: `append_event` returning None simulates
+        session_journal's silent fail-open. An exception path from
+        append_event would be caught by the outer try/except (task #16
+        fix) and is covered by TestUnexpectedExceptionSuppression —
+        we specifically exercise the NON-exception failure here.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import main
+
+        append_call_count = {"n": 0}
+
+        def _append_silent_fail(event):
+            append_call_count["n"] += 1
+            return None  # session_journal's silent fail-open
+
+        task_data = {
+            "status": "completed",
+            "owner": "probe-agent",
+            "metadata": {"handoff": VALID_HANDOFF},
+        }
+        payload = {
+            "task_id": "journal-fail-probe",
+            "task_subject": "journal write fails silently",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }
+
+        # First invocation: marker gets created (by _already_emitted),
+        # append_event returns None (silent failure), event is lost.
+        with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
+             patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
+             patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            with pytest.raises(SystemExit) as exc1:
+                main()
+        assert exc1.value.code == 0, (
+            "AC #8: silent journal-write failure must not break exit-0 invariant"
+        )
+        assert append_call_count["n"] == 1, (
+            "append_event must be called exactly once on first invocation — "
+            "the journal-write path IS attempted, not skipped"
+        )
+        marker = (
+            tmp_path / ".claude" / "teams" / "pact-test"
+            / ".agent_handoff_emitted" / "journal-fail-probe"
+        )
+        assert marker.exists(), (
+            "marker persists despite journal-write failure — this is the "
+            "intentional asymmetry. `_already_emitted` creates the marker "
+            "BEFORE `append_event` is called; a silent fail in append_event "
+            "does NOT unwind the marker. Trade-off: prevents 37× duplicate "
+            "emission at the cost of rare single-event loss."
+        )
+
+        # Second invocation with same (team, task_id): marker-based dedup
+        # engages, append_event is NOT called again, exit 0 suppressOutput.
+        # This property is what the trade-off buys us — dedup remains
+        # intact despite the lost event.
+        with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
+             patch("agent_handoff_emitter.append_event", side_effect=_append_silent_fail), \
+             patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            with pytest.raises(SystemExit) as exc2:
+                main()
+        assert exc2.value.code == 0
+        assert append_call_count["n"] == 1, (
+            "second invocation with same (team, task_id) must NOT retry "
+            "append_event — marker-based dedup engaged. If this assertion "
+            "fails, the dedup property is broken and amplification returns."
+        )
+
 
 class TestConcurrentFireRace:
     """O_EXCL marker must deterministically deduplicate concurrent

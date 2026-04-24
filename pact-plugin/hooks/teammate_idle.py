@@ -24,6 +24,7 @@ Output: JSON with systemMessage (shutdown suggestion / force request)
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -144,7 +145,7 @@ def write_idle_counts(idle_counts_path: str, counts: dict) -> None:
 
 def _atomic_update_idle_counts(
     idle_counts_path: str,
-    mutator: "Callable[[dict], dict]",
+    mutator: Callable[[dict], dict],
 ) -> dict:
     """
     Atomically read, mutate, and write the idle counts file under a single lock.
