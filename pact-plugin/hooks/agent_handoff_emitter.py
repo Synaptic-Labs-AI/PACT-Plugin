@@ -16,30 +16,38 @@ NOT responsible for:
 - Stall / nag detection (not this hook's responsibility).
 
 Emission invariant: write exactly once iff
-(1) disk-read task status == "completed" AND
+(1) the platform asserts `hook_event_name == "TaskCompleted"` in stdin
+    OR (fallback) disk-read task status == "completed", AND
 (2) the per-(team, task_id) sidecar marker does not yet exist.
 
-The disk-status check is the substitute for the missing `previous_status`
-field in the TaskCompleted stdin payload (architect §2.3 [MEDIUM] flagged
-this gap). Claude Code fires the `TaskCompleted` hook event on ANY
-TaskUpdate call — not only on transitions to `completed` (verified
-empirically in session pact-114c988a / preparer-538 §R1). Trusting the
-event name as the transition signal is the regression class where
-metadata-only TaskUpdates (claim flags, intentional_wait toggles,
-briefing_delivered tracking, etc.) generate spurious agent_handoff
-events on tasks still in_progress. The on-disk status read is the only
-source of truth for "did this TaskUpdate actually flip status to
-completed."
+The status-disk-gate is retained as a FALLBACK only — when stdin lacks
+`hook_event_name`. The PRIMARY transition signal is the platform-supplied
+`hook_event_name == "TaskCompleted"` field, captured verbatim across all
+3 real-platform probes in PREPARE phase of #551 (see
+docs/preparation/551-emitter-regression-diagnostic.md § "Real-platform
+stdin shape").
+
+The disk-state read CANNOT be the primary transition signal because the
+platform's persistence of `status="completed"` to disk is async relative
+to the hook fire (#551 root cause; 3/3 probes in PREPARE confirmed
+`status="in_progress"` on disk at hook-fire time, then `status="completed"`
+moments later when the same TaskUpdate finished writing).
+
+Memory `21b4576b` documents 200+ phantom TaskCompleted fires pre-#538
+during metadata-only TaskUpdates against the OLD handoff_gate.py. If
+that platform behavior recurs (every metadata-only TaskUpdate carrying
+`hook_event_name="TaskCompleted"`), the line-277 O_EXCL marker absorbs
+the phantom storm: one phantom event per (team, task_id) lifetime, then
+suppressed forever. Net cost under revert: one phantom per task — strictly
+better than current 0/51 silent loss.
 
 Idempotency: sidecar O_EXCL marker at
 ~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. Claude Code's
 stopHooks.ts dispatches TaskCompleted on every matching owner during a
 Stop flow; without the marker the journal would see the same completion
 up to 37× per task (empirically sampled across 36 sessions).
-The marker and the status gate defend orthogonal failure modes: the
-marker dedupes repeated fires of the SAME (team, task_id) completion;
-the status gate rejects metadata-only TaskUpdates on in-progress tasks
-that would otherwise pass the marker's first-fire check.
+The marker is load-bearing under both genuine completions and the
+phantom-fire-revert scenario.
 
 # livelock-safe: pure journal-writer; zero emission sinks. Writes at most
 # one agent_handoff event per (team, task_id) via an O_EXCL sidecar marker
@@ -238,19 +246,25 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        # Status gate — substitute for the missing `previous_status` field in
-        # TaskCompleted stdin. Claude Code fires this hook on ANY TaskUpdate,
-        # not only on transitions to `completed`; trusting the event name as
-        # the transition signal would re-emit agent_handoff events on every
-        # metadata-only TaskUpdate (claim flags, intentional_wait toggles,
-        # briefing_delivered tracking, etc.). The on-disk `status` is the
-        # only reliable source of truth for "did this TaskUpdate actually
-        # flip status to completed." Metadata-only TaskUpdates (claim flags,
-        # briefing_delivered, intentional_wait toggles, etc.) keep
-        # status=in_progress and MUST NOT emit.
-        if task_data.get("status") != "completed":
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
+        # Transition signal — primary is the platform-supplied
+        # `hook_event_name == "TaskCompleted"`. PREPARE-phase probes for #551
+        # captured this field verbatim in 3/3 real-platform fires
+        # (docs/preparation/551-emitter-regression-diagnostic.md). The disk
+        # read at line 229 races the platform's own write of status=completed
+        # — at hook-fire time the disk frequently still shows in_progress,
+        # which is the #551 0/51-cumulative regression. We trust the platform
+        # event-name signal and let the line-277 O_EXCL marker dedupe per
+        # (team, task_id) for the phantom-fire-revert scenario (memory
+        # `21b4576b`: pre-#538, 200+ TaskCompleted fires on a single
+        # in_progress task during metadata-only TaskUpdates).
+        #
+        # The disk-status fallback fires only when stdin lacks
+        # hook_event_name (forward-compat / malformed payload).
+        hook_event = input_data.get("hook_event_name", "")
+        if hook_event != "TaskCompleted":
+            if task_data.get("status") != "completed":
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
 
         # `or {}` handles explicit JSON null in addition to missing key —
         # .get("metadata", {}) returns None when the key is present with a
