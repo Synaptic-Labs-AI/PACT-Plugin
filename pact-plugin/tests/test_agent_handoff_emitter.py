@@ -1853,8 +1853,9 @@ class TestRealDiskRead:
     """The existing 25-method suite mocks read_task_json. None exercise
     the actual on-disk read path that ships in production. This class
     fires main() against a real ~/.claude/tasks/{team}/{id}.json file
-    written under tmp_path — verifies sanitization, path-join, and JSON
-    parse on the read path that all current tests bypass.
+    written under tmp_path — verifies path-join and JSON parse on the
+    read path that all current tests bypass. (Sanitization is unit-tested
+    separately in TestPathSanitization; these tests use safe inputs.)
 
     Without this coverage, a regression in read_task_json's path
     construction (e.g., team-scoped vs base directory ordering) would
@@ -1890,6 +1891,9 @@ class TestRealDiskRead:
 
         original_read = task_utils.read_task_json
 
+        # Belt-and-suspenders: explicit tasks_base_dir override + HOME
+        # monkeypatch route to the same path; intentional defense-in-depth
+        # against future fixture-isolation changes.
         def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None):
             return original_read(
                 task_id, team_name,
@@ -1954,6 +1958,9 @@ class TestRealDiskRead:
 
         original_read = task_utils.read_task_json
 
+        # Belt-and-suspenders: explicit tasks_base_dir override + HOME
+        # monkeypatch route to the same path; intentional defense-in-depth
+        # against future fixture-isolation changes.
         def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None):
             return original_read(
                 task_id, team_name,
