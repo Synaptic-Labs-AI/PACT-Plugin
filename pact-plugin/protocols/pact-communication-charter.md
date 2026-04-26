@@ -20,8 +20,18 @@ The rules below govern how messages delivered via this tool actually behave.
 - The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
 
 ### Lead-Side Discipline — Verify Before Dispatching
-- Before sending a course-correction, check actual state (`git status`, `TaskList`, read files). The lead's mental model of teammate state diverges every time the teammate takes a tool action.
-- Do not rapid-fire corrections while a teammate is mid-turn. Each queues and executes in order at their idle boundary, by which point the earlier message's premise may be stale.
+
+#### Verify State Before Correction
+
+Before sending a course-correction, check actual state (`git status`, `TaskList`, read files). The lead's mental model of teammate state diverges every time the teammate takes a tool action.
+
+*Failure shape: lead corrects against a `git status` snapshot from three tool calls ago; the teammate has committed and moved on since. The correction targets a no-longer-existing diff, and the teammate must surface the mismatch instead of acting on it.*
+
+#### Hold Fire During Mid-Turn
+
+Do not rapid-fire corrections while a teammate is mid-turn. Each queues and executes in order at their idle boundary, by which point the earlier message's premise may be stale.
+
+*Failure shape: lead fires correction B before correction A has cleared; A and B both queue. Distinct from the No-Supersede rule (which governs what happens once corrections collide); this is the upstream discipline of not firing them in the first place.*
 
 #### No Supersede Primitive
 
@@ -72,15 +82,30 @@ Before composing any outbound SendMessage (peer-to-peer or to lead), wait for yo
 
 *Failure shape: backend-coder mid-task with a pending Bash result; a peer pings; backend-coder drafts a peer-to-peer reply now and an addendum after the Bash returns. Two messages queue at the peer's idle; the first is composed against framing the Bash result would have shaped.*
 
-#### Inbound — Verify Before Acting
-- On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
-- When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a lead-side rapid-fire-correction violation; surface it to the lead rather than silently picking one. Ambiguous middle: "investigate auth flow" followed by "start with the session-token path" — narrower-additive (a starting point) or different-assumption-contradictory (auth flow ≠ session-token path)? Default to surfacing.
+#### Verify Before Executing
 
-#### Outbound — Assume Eventually-Seen
-- Your outbound messages are delivered at the recipient's idle — not immediately. `intentional_wait` means "nothing advances until a resolver arrives," not "my message was read."
-- Before resending an apparently-unacknowledged message, verify the addressee has reached idle at least once since the original send. Otherwise the original is still queued and resending just duplicates it.
+On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
+
+*Failure shape: teammate receives "fix foo.py:42" at idle; their last action already routed past that location (a refactor moved it; tests passed). Without the state-check, the teammate runs a redundant or conflicting operation, undoing prior valid work.*
+
+#### Additive vs Corrective
+
+When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a lead-side rapid-fire-correction violation; surface it to the lead rather than silently picking one. Ambiguous middle: "investigate auth flow" followed by "start with the session-token path" — narrower-additive (a starting point) or different-assumption-contradictory (auth flow ≠ session-token path)? Default to surfacing.
+
+#### Eventually-Seen, Not Read
+
+Your outbound messages are delivered at the recipient's idle — not immediately. `intentional_wait` means "nothing advances until a resolver arrives," not "my message was read."
+
+*Failure shape: teammate sets `intentional_wait` expecting the addressee to read and respond. The addressee hasn't idled since the message was sent (still mid-turn, stuck, or shut down); the wait stalls on a message the addressee literally hasn't seen yet.*
+
+#### Resend Only After Addressee Idles
+
+Before resending an apparently-unacknowledged message, verify the addressee has reached idle at least once since the original send. Otherwise the original is still queued and resending just duplicates it.
+
+*Failure shape: peer is busy mid-task; their idle hasn't fired since the original send. The resend queues a second identical message that lands at their first idle alongside the original — peer reads two copies in FIFO order.*
+
 - Peer-to-peer: do not assume a peer saw your message before their next tool call. Peer's in-flight action runs to completion before they read inbound.
-- Prefer peer-to-peer for context forwarding. If your work produces info another teammate would benefit from, send directly to them with a brief CC-summary to the lead — don't route through the lead unless the lead specifically owns the routing decision. Reduces total idle-boundary latency.
+- Prefer peer-to-peer for context forwarding — see [the lead-side Forwarding-Chain Hygiene rule](#forwarding-chain-hygiene). If your work produces info another teammate would benefit from, send directly to them with a brief CC-summary to the lead.
 - Apply the **Pre-Send Self-Check** above before any outbound SendMessage — the questions are universal to any sender, not lead-only.
 
 ### Algedonic-Signal Latency Caveat
