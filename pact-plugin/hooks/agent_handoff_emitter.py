@@ -16,10 +16,13 @@ NOT responsible for:
 - Stall / nag detection (not this hook's responsibility).
 
 Emission invariant: write exactly once iff
-(1) the platform asserts `hook_event_name == "TaskCompleted"` in stdin
-    OR (fallback) disk-read task status == "completed", AND
-(2) `task_metadata.get("handoff")` is truthy (handoff stored on disk), AND
-(3) the per-(team, task_id) sidecar marker does not yet exist.
+((1a) hook_event_name == "TaskCompleted" in stdin
+      OR
+ (1b) (fallback) disk-read task status == "completed")
+AND
+(2)  task_metadata.get("handoff") is truthy (handoff stored on disk)
+AND
+(3)  the per-(team, task_id) sidecar marker does not yet exist.
 
 The status-disk-gate is retained as a FALLBACK only — when stdin lacks
 `hook_event_name`. The PRIMARY transition signal is the platform-supplied
@@ -81,8 +84,9 @@ from shared.task_utils import read_task_json
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Signal-task types — inline literal, matches task_utils.py:188 and
-# session_resume.py:525 convention. Do NOT import is_signal_task: no
+# Signal-task types — inline literal, matches the
+# `task_type in ("blocker", "algedonic")` check inside task_utils.find_blockers
+# and the session_resume convention. Do NOT import is_signal_task: no
 # such helper exists.
 _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 
@@ -91,9 +95,9 @@ def _sanitize_path_component(value: str) -> str:
     """
     Strip path-traversal fragments from a value destined for filesystem joins.
 
-    Mirrors the regex used inside task_utils.read_task_json (task_utils.py:295)
-    so the gate site (status read) and the write site (O_EXCL marker create)
-    apply symmetric sanitization. Without this, an attacker-crafted task_id or
+    Mirrors the regex used inside task_utils.read_task_json so the gate
+    site (status read) and the write site (O_EXCL marker create) apply
+    symmetric sanitization. Without this, an attacker-crafted task_id or
     team_name that happens to sanitize (in read_task_json) into a matching
     existing completed-task file could still carry raw "../" fragments into
     the marker-path join and cause zero-byte file creation outside the team's
@@ -165,7 +169,7 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
 
     marker_path = marker_dir / task_id
     # O_NOFOLLOW defends against a pre-planted symlink at the marker path —
-    # mirrors the Sec-M1 pattern at session_init.py:191-196. POSIX O_CREAT|O_EXCL
+    # mirrors the Sec-M1 pattern in session_init's symlink-defense path. POSIX O_CREAT|O_EXCL
     # already refuses to follow a trailing symlink; O_NOFOLLOW is defense-in-depth
     # against any future flag-combination divergence and against intermediate-symlink
     # variants. getattr graceful-degrades on platforms that lack the flag.
@@ -230,11 +234,11 @@ def main() -> None:
             )
 
         # Sanitize path-joining components symmetrically with
-        # task_utils.read_task_json (task_utils.py:295). task_id and team_name
-        # both flow into filesystem paths (read_task_json for the status read,
-        # _marker_dir / marker_path for the O_EXCL dedup marker). A helper
-        # applied at a single producer-side site ensures the two sink paths
-        # can never diverge.
+        # task_utils.read_task_json. task_id and team_name both flow into
+        # filesystem paths (read_task_json for the status read, _marker_dir /
+        # marker_path for the O_EXCL dedup marker). A helper applied at a
+        # single producer-side site ensures the two sink paths can never
+        # diverge.
         task_id = _sanitize_path_component(str(task_id))
         team_name = _sanitize_path_component(
             str(input_data.get("team_name") or get_team_name()).lower()
@@ -255,18 +259,31 @@ def main() -> None:
         # Transition signal — primary is the platform-supplied
         # `hook_event_name == "TaskCompleted"`. PREPARE-phase probes for #551
         # captured this field verbatim in 3/3 real-platform fires
-        # (docs/preparation/551-emitter-regression-diagnostic.md). The disk
-        # read at line 229 races the platform's own write of status=completed
-        # — at hook-fire time the disk frequently still shows in_progress,
-        # which is the #551 0/51-cumulative regression. We trust the platform
-        # event-name signal and let the line-277 O_EXCL marker dedupe per
-        # (team, task_id) for the phantom-fire-revert scenario (memory
-        # `21b4576b`: pre-#538, 200+ TaskCompleted fires on a single
-        # in_progress task during metadata-only TaskUpdates).
+        # (docs/preparation/551-emitter-regression-diagnostic.md). The
+        # `read_task_json` call above races the platform's own write of
+        # status=completed — at hook-fire time the disk frequently still
+        # shows in_progress, which is the #551 0/51-cumulative regression.
+        # We trust the platform event-name signal and let the
+        # `_already_emitted` O_EXCL marker dedupe per (team, task_id) for
+        # the phantom-fire-revert scenario (memory `21b4576b`: pre-#538,
+        # 200+ TaskCompleted fires on a single in_progress task during
+        # metadata-only TaskUpdates).
+        #
+        # See pact-plugin/hooks/shared/HOOK_INPUT_CONVENTIONS.md for the
+        # routing convention this hook codifies (string-literal compare;
+        # never used as a path component; fail-closed on non-string values).
         #
         # The disk-status fallback fires only when stdin lacks
         # hook_event_name (forward-compat / malformed payload).
+        # DO NOT DELETE the fallback branch — it is the forward-compat
+        # path for platforms that omit hook_event_name; pinned by
+        # TestStatusFallbackGate (and TestProductionShapeMetadataOnly
+        # exercises the post-Option-B production shape).
         hook_event = input_data.get("hook_event_name", "")
+        # Comparison with string literal naturally fail-closes on non-string
+        # values; do not cast or trim. A non-string `hook_event` (None, int,
+        # bool) compares unequal to "TaskCompleted" and falls through to the
+        # disk-status fallback.
         if hook_event != "TaskCompleted":
             if task_data.get("status") != "completed":
                 print(_SUPPRESS_OUTPUT)
@@ -311,6 +328,11 @@ def main() -> None:
             sys.exit(0)
 
         # Journal-write — the sole purpose of this hook.
+        # DO NOT forward additional stdin fields beyond these 4 — the
+        # journal event payload contract is intentionally minimal, and
+        # TestStdinShapePin asserts no leakage of session_id /
+        # transcript_path / cwd / hook_event_name / team_name /
+        # teammate_name / task_description into the event.
         append_event(
             make_event(
                 "agent_handoff",
