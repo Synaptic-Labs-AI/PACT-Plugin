@@ -750,7 +750,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(to="*")`, preserve work-in-progress, do NOT commit partial work
+- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT

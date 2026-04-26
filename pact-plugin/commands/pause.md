@@ -105,7 +105,7 @@ The timestamp (`ts`) is set automatically by `make_event()` and serves the same 
 
 ### 6. Shut Down Teammates
 
-Send `shutdown_request` individually to each active teammate **by name** and wait for responses (do NOT broadcast structured messages via `to: "*"` — broadcasts only support plain text). The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
+Send `shutdown_request` individually to each active teammate **by name** and wait for responses. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
 
 ```
 For each active teammate:

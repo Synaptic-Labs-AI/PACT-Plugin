@@ -136,7 +136,7 @@ Orchestrator creates algedonic Task + blocks agent's task (addBlockedBy)
     ↓
 Orchestrator amplifies scope (blocks phase or feature Task)
     ↓
-[HALT only] Orchestrator broadcasts stop to all teammates
+[HALT only] Orchestrator sends stop individually to each in-progress teammate
     ↓
 Orchestrator IMMEDIATELY presents to user (no other work continues)
     ↓
@@ -152,19 +152,14 @@ Work resumes (or stops) based on user decision
 On receiving an algedonic signal:
 
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
-2. For **HALT**: Broadcast stop to all teammates, then await user acknowledgment:
-   ```
-   SendMessage(to="*",
-     message="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
-     summary="HALT: {category}")
-   ```
+2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see lead-side fan-out idiom in [skills/orchestration/SKILL.md::Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)). Then await user acknowledgment.
 3. For **ALERT**: Pause current work, present options to user
 4. **Log** the signal in session record
 
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Broadcast stop** — `SendMessage(to="*", ...)` delivers the HALT to each teammate's inbox at their next idle boundary (see step 2 above and the Latency Caveat under Signal Delivery Mechanism); for immediate halt of in-flight work, user-side manual interrupt is required
+1. **Stop in-progress teammates by name** — for each teammate with `status="in_progress"`, send the HALT individually (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)). Each message lands at that teammate's next idle boundary; for immediate halt of in-flight work, user-side manual interrupt is required (see [Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat)).
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress

@@ -84,7 +84,7 @@ When the lead requests progress monitoring in your dispatch, send brief progress
 
 ## Message Prefix Convention
 
-**Prefix all `SendMessage` `message`** with `[{sender}→{recipient}]` (use `all` as recipient when `to="*"`). Do not prefix `summary`.
+**Prefix all `SendMessage` `message`** with `[{sender}→{recipient}]`. Do not prefix `summary`.
 
 ### Message Authenticity
 
