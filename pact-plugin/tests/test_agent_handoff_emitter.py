@@ -780,7 +780,7 @@ class TestNullMetadata:
         # Crafted task_data with metadata explicitly null (not missing).
         # This shape can land on disk if a teammate/platform writes
         # task.json with `"metadata": null` — valid JSON but crashes
-        # `.get("type")` chain pre-fix.
+        # `.get("type")` chain without the `or {}` coercion fix.
         exit_code = _run_main(
             stdin_payload={
                 "task_id": "null-meta-probe",
@@ -802,15 +802,17 @@ class TestNullMetadata:
             "present in agent_handoff_emitter for this test to pass."
         )
         assert "suppressOutput" in captured.out
-        # Event is still written — metadata absent is NOT a signal-task
-        # bypass; it's a missing-metadata happy path with empty handoff.
-        assert len(calls) == 1, (
-            "metadata:null collapses to empty-metadata path; journal "
-            "event still persists with empty handoff."
-        )
-        assert calls[0]["handoff"] == {}, (
-            "post-fix: null metadata collapses to `{}` via `or {}`; "
-            "handoff field is empty dict, not None"
+        # Under Option E (handoff-presence gate), metadata=None coerces
+        # to {} via `or {}`, then `task_metadata.get("handoff")` is
+        # falsy → suppress emission. No event is written. The crash-
+        # invariant (exit 0, suppressOutput) is what this test pins;
+        # the empty-handoff path is now correctly suppressed instead
+        # of producing a content-less journal entry.
+        assert calls == [], (
+            "Option E: metadata=None collapses to {} via `or {}`, then "
+            "the handoff-presence gate suppresses emission. A journal "
+            "entry with empty handoff is exactly the B1 failure mode "
+            "Option E was added to prevent."
         )
 
 
@@ -1439,13 +1441,24 @@ class TestRaceShapeRegression:
     @pytest.mark.parametrize(
         "race_kind,disk_status,disk_metadata",
         [
-            # (a) v3.19.2 race — platform write of status=completed has
-            #     not yet hit disk; metadata.handoff also not yet on disk.
-            ("v3_19_2_race_pre_persist", "in_progress", {}),
-            # (b) phantom-fire-revert — metadata-only TaskUpdate fires
-            #     TaskCompleted; status really is in_progress on disk;
-            #     metadata.handoff may or may not be present (we test
-            #     with handoff present so the journal entry has content).
+            # (a) v3.19.2 race — platform fires TaskCompleted BEFORE
+            #     persisting status=completed to disk, but the teammate
+            #     has already stored metadata.handoff (the same TaskUpdate
+            #     that flips status carries handoff in its metadata write).
+            #     Disk shows status=in_progress; handoff is on disk.
+            #     Option E gate passes (handoff present); hook_event_name
+            #     primary signal triggers emission despite stale status.
+            (
+                "v3_19_2_race_pre_persist",
+                "in_progress",
+                {"handoff": VALID_HANDOFF},
+            ),
+            # (b) phantom-fire-revert — completion already happened;
+            #     the disk reflects it (status=completed, handoff stored);
+            #     and a follow-up TaskCompleted fires (e.g., from
+            #     stopHooks.ts re-dispatch). Both signals positive,
+            #     handoff present, marker dedup absorbs duplicate fires
+            #     (covered by TestIdempotency).
             (
                 "phantom_fire_revert_metadata_only",
                 "in_progress",
@@ -1484,40 +1497,137 @@ class TestRaceShapeRegression:
         assert calls[0]["agent"] == "probe-agent"
         assert calls[0]["task_id"] == "race-probe"
 
-    def test_phantom_fire_dedup_suppresses_subsequent_fires(
+    def test_handoff_presence_gate_two_fire_sequence_real_revert(
         self, tmp_path, monkeypatch
     ):
-        """Phantom-fire-revert worst-case: under Option B, every
-        metadata-only TaskUpdate carrying hook_event_name="TaskCompleted"
-        fires the journal write once, then the O_EXCL marker dedupes
-        subsequent fires for the same (team, task_id). Net cost: one
-        phantom event per task lifetime, then suppressed forever.
+        """Phantom-fire-revert realistic two-fire sequence under Option E
+        handoff-presence gate. This pins the B1 fix from PR #563 review
+        (review-architect): under platform revert, the FIRST fire arrives
+        BEFORE the teammate has stored metadata.handoff (the fire is for
+        a metadata-only TaskUpdate like briefing_delivered=true). The
+        emitter MUST suppress that fire WITHOUT consuming the marker —
+        otherwise the LATER genuine completion (with full handoff) gets
+        suppressed by an empty-content marker, producing 51 empty journal
+        entries instead of 51 substantive ones.
 
-        Pin this property because it's the load-bearing argument for
-        accepting Option B over Option A (retry+sleep) — the marker
-        absorbs the phantom storm so the worst case is bounded.
+        Sequence:
+          Fire 1: metadata={"briefing_delivered": True}, no handoff
+                  → handoff-presence gate suppresses, NO marker, NO event.
+          Fire 2: metadata={"handoff": VALID_HANDOFF, "briefing_delivered": True}
+                  → handoff present, marker claimed, ONE event with full
+                    handoff content lands in journal.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         calls: list[dict] = []
         payload = {
             "hook_event_name": "TaskCompleted",
-            "task_id": "phantom-storm",
-            "task_subject": "phantom-fire dedup probe",
+            "task_id": "two-fire-revert",
+            "task_subject": "two-fire revert sequence probe",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }
+
+        # Fire 1: early metadata-only TaskUpdate fires TaskCompleted under
+        # platform revert. Disk shows status=in_progress AND no handoff
+        # key in metadata. Option E gate must suppress emission AND skip
+        # marker creation.
+        _run_main(
+            payload,
+            task_data={
+                "status": "in_progress",
+                "owner": "probe-agent",
+                "metadata": {"briefing_delivered": True},  # NO handoff
+            },
+            append_calls=calls,
+        )
+        assert calls == [], (
+            "Fire 1: handoff-presence gate failed to suppress an early "
+            "metadata-only fire (no handoff key on disk). The B1 trace "
+            "(review-architect, PR #563) would resurface — empty-content "
+            "marker would suppress the later genuine completion."
+        )
+        marker = (
+            tmp_path / ".claude" / "teams" / "pact-test"
+            / ".agent_handoff_emitted" / "two-fire-revert"
+        )
+        assert not marker.exists(), (
+            "Fire 1: marker MUST NOT be created when handoff is absent. "
+            "If marker exists here, the genuine completion's later fire "
+            "will hit EEXIST and silently drop the substantive HANDOFF — "
+            "the exact B1 failure mode."
+        )
+
+        # Fire 2: genuine completion. Teammate has now stored
+        # metadata.handoff; status flipped to completed. Option E gate
+        # passes (handoff present), marker is claimed, journal write
+        # produces the substantive entry.
+        _run_main(
+            payload,
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {
+                    "handoff": VALID_HANDOFF,
+                    "briefing_delivered": True,
+                },
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1, (
+            "Fire 2: genuine completion failed to emit. Either the "
+            "handoff-presence gate is over-suppressing (rejected a "
+            "valid completion) or the gate ordering is wrong relative "
+            "to the marker check."
+        )
+        assert calls[0]["handoff"] == VALID_HANDOFF, (
+            "Fire 2: journal entry has empty/incorrect handoff. The "
+            "gate suppressed Fire 1 correctly but the marker subsystem "
+            "or append_event flow lost the handoff content."
+        )
+        assert marker.exists(), (
+            "Fire 2: marker MUST be created on the genuine completion. "
+            "Subsequent fires for the same (team, task_id) need it for "
+            "dedup."
+        )
+
+    def test_handoff_presence_gate_suppresses_all_metadata_only_fires(
+        self, tmp_path, monkeypatch
+    ):
+        """Worst-case: 5 sequential metadata-only fires (all without
+        handoff stored). All must suppress; marker MUST NOT be created.
+        This pins the property that no number of phantom fires can
+        consume the marker prematurely.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        payload = {
+            "hook_event_name": "TaskCompleted",
+            "task_id": "no-handoff-storm",
+            "task_subject": "metadata-only storm probe",
             "teammate_name": "probe-agent",
             "team_name": "pact-test",
         }
         task_data = {
-            "status": "in_progress",  # never flips — pure phantom storm
+            "status": "in_progress",
             "owner": "probe-agent",
-            "metadata": {"handoff": VALID_HANDOFF},
+            "metadata": {"briefing_delivered": True},  # never has handoff
         }
-        # Fire 5× — simulates a phantom storm of metadata-only TaskUpdates
         for _ in range(5):
             _run_main(payload, task_data, calls)
-        assert len(calls) == 1, (
-            "phantom-fire dedup broken: O_EXCL marker did not suppress "
-            "subsequent fires. Net cost under platform revert would be "
-            "unbounded duplication, breaking the Option B trade-off."
+        assert calls == [], (
+            "metadata-only storm produced phantom journal events. The "
+            "Option E handoff-presence gate is the load-bearing defense "
+            "against B1; if any of the 5 fires emitted, the marker "
+            "would be consumed with empty content."
+        )
+        marker = (
+            tmp_path / ".claude" / "teams" / "pact-test"
+            / ".agent_handoff_emitted" / "no-handoff-storm"
+        )
+        assert not marker.exists(), (
+            "marker created during a metadata-only storm — B1 root "
+            "cause. The genuine completion's later fire would be "
+            "silently dropped."
         )
 
     def test_disk_status_fallback_when_hook_event_name_absent(

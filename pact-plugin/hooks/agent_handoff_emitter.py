@@ -18,7 +18,8 @@ NOT responsible for:
 Emission invariant: write exactly once iff
 (1) the platform asserts `hook_event_name == "TaskCompleted"` in stdin
     OR (fallback) disk-read task status == "completed", AND
-(2) the per-(team, task_id) sidecar marker does not yet exist.
+(2) `task_metadata.get("handoff")` is truthy (handoff stored on disk), AND
+(3) the per-(team, task_id) sidecar marker does not yet exist.
 
 The status-disk-gate is retained as a FALLBACK only — when stdin lacks
 `hook_event_name`. The PRIMARY transition signal is the platform-supplied
@@ -36,24 +37,29 @@ moments later when the same TaskUpdate finished writing).
 Memory `21b4576b` documents 200+ phantom TaskCompleted fires pre-#538
 during metadata-only TaskUpdates against the OLD handoff_gate.py. If
 that platform behavior recurs (every metadata-only TaskUpdate carrying
-`hook_event_name="TaskCompleted"`), the line-277 O_EXCL marker absorbs
-the phantom storm: one phantom event per (team, task_id) lifetime, then
-suppressed forever. Net cost under revert: one phantom per task — strictly
-better than current 0/51 silent loss.
+`hook_event_name="TaskCompleted"`), the handoff-presence gate (Option E)
+suppresses every fire that arrives BEFORE the teammate has stored
+`metadata.handoff` — early metadata-only fires (briefing_delivered,
+intentional_wait toggles, claim flags) all skip the marker creation.
+The genuine completion (which has `metadata.handoff` populated) is the
+fire that claims the marker and writes the journal entry with full
+handoff content. Net cost under revert: zero empty-handoff entries; the
+marker is consumed exactly by the substantive completion. Strictly
+better than 0/51 in the genuine sense — the journal carries real
+HANDOFF data, not phantom counts.
 
 Idempotency: sidecar O_EXCL marker at
 ~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. Claude Code's
 stopHooks.ts dispatches TaskCompleted on every matching owner during a
 Stop flow; without the marker the journal would see the same completion
 up to 37× per task (empirically sampled across 36 sessions).
-The marker is load-bearing under both genuine completions and the
-phantom-fire-revert scenario.
 
 # livelock-safe: pure journal-writer; zero emission sinks. Writes at most
 # one agent_handoff event per (team, task_id) via an O_EXCL sidecar marker
-# gated on on-disk status == "completed", and exits 0 suppressOutput on
-# every code path. Does NOT consume intentional_wait, does NOT emit
-# systemMessage or stderr prompts, and does NOT block completion.
+# gated on (a) hook_event_name OR disk-status, (b) handoff-presence in
+# task_metadata, and exits 0 suppressOutput on every code path. Does NOT
+# consume intentional_wait, does NOT emit systemMessage or stderr prompts,
+# and does NOT block completion.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name (TaskCompleted schema).
@@ -276,6 +282,18 @@ def main() -> None:
         # agent_handoff event (would pollute read_events("agent_handoff") +
         # mis-route secretary harvest).
         if task_metadata.get("type") in _SIGNAL_TASK_TYPES:
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
+        # Handoff-presence gate (Option E) — under platform-revert, an early
+        # metadata-only TaskUpdate fires TaskCompleted BEFORE the teammate
+        # has stored metadata.handoff. Without this guard, the early fire
+        # would consume the O_EXCL marker with empty handoff content,
+        # suppressing the later genuine completion's full-handoff write.
+        # By suppressing emission AND skipping marker creation when handoff
+        # is missing, the genuine completion (which has handoff stored)
+        # claims the marker and writes the substantive journal entry.
+        if not task_metadata.get("handoff"):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
