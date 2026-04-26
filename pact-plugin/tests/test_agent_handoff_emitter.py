@@ -936,18 +936,19 @@ class TestMalformedStdin:
 
 
 class TestNullMetadata:
-    """#4 pair (per task #16): security-reviewer's fix at
-    agent_handoff_emitter.py guards `task_data.get("metadata")` against
-    JSON `null` via `or {}` coercion. Without the fix, a crafted
-    task.json with `"metadata": null` (valid JSON, valid semantically as
-    "no metadata") would raise AttributeError on `.get("type")` or
-    `.get("handoff")`, crashing the emitter mid-main() — violating AC #8.
+    """Pin two invariants for the `metadata: null` task.json shape:
 
-    This test pins the post-fix invariant. Against pre-fix emitter, this
-    test WILL fail (AttributeError propagates through main's try/except
-    wrapper, depending on #16 fix order). That RED-initial state IS the
-    counter-test-by-revert load-bearingness proof per the #538 dogfood
-    discipline.
+    1. `or {}` coercion: `task_data.get("metadata") or {}` collapses
+       JSON-null metadata to an empty dict, so subsequent `.get("type")`
+       and `.get("handoff")` calls do not raise AttributeError. Without
+       this coercion the emitter crashes mid-main(), violating the
+       exit-0 invariant.
+
+    2. Option E suppression: with metadata coerced to `{}`,
+       `task_metadata.get("handoff")` is falsy and the handoff-presence
+       gate suppresses emission. No journal entry is written for a
+       null-metadata task — the empty-handoff fire is exactly the
+       failure mode Option E was added to prevent.
     """
 
     def test_null_metadata_field_does_not_crash_exit_zero_invariant_holds(
@@ -1170,6 +1171,76 @@ class TestPathSanitization:
             that rely on the empty sentinel reaching _already_emitted."""
             from agent_handoff_emitter import _sanitize_path_component
             assert _sanitize_path_component("") == ""
+
+        @pytest.mark.parametrize(
+            "control_input",
+            [
+                "\x00",
+                "\n",
+                "\r",
+                "\t",
+                "\x01\x02\x03",
+                "task\x00id",
+                "task\nid",
+                "task\rid",
+                "\x00..\x00",
+                "..\x00..",
+            ],
+        )
+        def test_sanitize_strips_c0_control_characters(self, control_input):
+            """C0 control characters (NUL, CR/LF, 0x00-0x1f) are stripped
+            at the producer boundary. Without stripping, control chars
+            would survive into filesystem path joins, enabling
+            log-injection (CR/LF) and path-truncation (NUL on some
+            filesystems) attacks."""
+            from agent_handoff_emitter import _sanitize_path_component
+            out = _sanitize_path_component(control_input)
+            for ch in out:
+                assert ord(ch) >= 0x20 or ch == "\x7f", (
+                    f"control char {ord(ch):#x} survived in {out!r}"
+                )
+
+        @pytest.mark.parametrize(
+            "raw_input",
+            [
+                "\x00",
+                ".",
+                "..",
+                "...",
+                "\x00..\x00",
+                "task\x00../etc/passwd",
+                "\n\r\t",
+                "../\x00/..",
+            ],
+        )
+        def test_post_sanitize_marker_key_is_safe_or_degenerate(
+            self, raw_input, tmp_path, monkeypatch
+        ):
+            """Property-style invariant: for any input value, the
+            post-sanitization-then-marker-key is either rejected by the
+            dot/empty guard (degenerate path → emit without marker) OR
+            is filesystem-safe (no `/`, no `\\`, no control chars, no
+            `..`). Either branch preserves the fail-open data-integrity
+            contract; neither branch can leak path-traversal primitives
+            to the marker write."""
+            from agent_handoff_emitter import _sanitize_path_component
+            sanitized = _sanitize_path_component(raw_input)
+
+            if sanitized in ("", ".", ".."):
+                # Caught by the degenerate guard in _already_emitted —
+                # emit without marker creation. No filesystem write,
+                # no traversal risk.
+                return
+
+            # Otherwise the value flows into the marker join; assert it
+            # carries no traversal or injection primitives.
+            assert "/" not in sanitized
+            assert "\\" not in sanitized
+            assert ".." not in sanitized
+            for ch in sanitized:
+                assert ord(ch) >= 0x20 or ch == "\x7f", (
+                    f"control char {ord(ch):#x} in marker key {sanitized!r}"
+                )
 
     class TestDegenerateInputsDoNotCreateMarker:
         """Integration coverage — depends on security-reviewer's task #24
@@ -2003,6 +2074,9 @@ class TestStdinShapePin:
     § "Real-platform stdin shape". Fields:
       session_id, transcript_path, cwd, hook_event_name, task_id,
       task_subject, task_description, teammate_name, team_name.
+
+    Scope: assertions verify the emitter→append_event boundary (the
+    emitter IS the boundary), not the journal-file-on-disk E2E path.
     """
 
     def test_platform_stdin_shape_emits_event_under_option_b(

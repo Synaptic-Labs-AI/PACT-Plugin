@@ -1,4 +1,4 @@
-# Hook Input Conventions
+# hook_event_name routing convention
 
 Input-validation conventions for plugin hooks consuming Claude Code stdin
 fields.
