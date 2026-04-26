@@ -25,27 +25,35 @@ The rules below govern how messages delivered via this tool actually behave.
 - Supersede-the-last-message does not exist. If message A is wrong and you send B, both will execute.
 - For in-flight damage that is unacceptable, escalate to the user for manual interrupt — do not attempt to fake sync interrupt via rapid-fire SendMessage.
 - Treat task creation + `TaskUpdate(owner)` as the dispatch commit point; SendMessage is supplemental context.
-- Wait for in-flight context before composing your dispatch. If a peer is gathering info you'll need (query in flight, dispatch pending, tool result imminent), wait for delivery and send one consolidated message. Sending early-and-supplementing is rapid-fire by another name. Example: a preparer's secretary query is outstanding — hold the dispatch until the response lands rather than sending an initial brief and a follow-up addendum.
+
+#### Wait for In-Flight Context
+
+Wait for in-flight context before composing your dispatch. If a peer has an outstanding query you can see in the team thread, an unfulfilled dispatch you yourself issued, or your own pending Read/Bash result you have not yet read, wait for delivery and send one consolidated message. This is a distinct anti-pattern from rapid-fire correction (concurrent corrections during teammate execution); call it **premature-dispatch** — the message is composed before the inputs that would shape it have arrived.
+
+*Failure shape: a preparer's secretary query is outstanding. Sending a dispatch brief now and an addendum after the response lands queues two messages where one would have sufficed; the teammate processes the stale framing first.*
 
 #### Pre-Send Self-Check
 
 Before every SendMessage, run through:
 
 1. **Is the teammate idle?** If not, my message queues; accept that or wait.
-2. **Is more context likely incoming?** Query in flight, peer working on related task, pending tool result — wait for it.
+2. **Is more context likely incoming?** A peer's outstanding query, an unfulfilled dispatch I issued, or my own pending Read/Bash result I have not yet read — wait for it.
 3. **Would this message *supersede* an earlier one I sent?** If yes, escalate to user-interrupt; both will execute regardless.
 4. **Could this be a peer-to-peer message**, avoiding a routing hop through me?
-5. **Have I verified my framing against the final phase output** (the doc, the HANDOFF, the diagnostic file), or am I working from an interim progress signal? Progress signals are pre-revision snapshots; post-progress information the agent absorbed before completion may have superseded them.
+5. **Have I verified my framing against the final phase output** (the doc, the HANDOFF, the diagnostic file), or am I working from an interim progress signal? Progress signals are pre-revision snapshots; post-progress information the agent absorbed before completion may have superseded them. *(Failure shape: a teammate's mid-task progress signal flags concern X; their final HANDOFF resolves X; a course-correction dispatched off the progress signal lands as obsolete instruction.)*
 
 #### Forwarding-Chain Hygiene
 
 If teammate A produces info teammate B needs, prefer direct A→B SendMessage with a brief CC-summary to the lead, rather than A→lead→B routing. Halves idle-boundary latency. Reserve lead-routing for cases where the lead specifically owns the routing decision (priority arbitration, scope reassignment).
 
+- **DON'T** relay design notes, query results, or HANDOFF excerpts from one teammate to another — that's a routing hop with no lead-owned decision in it. Send direct.
+- **DO** ask the lead to choose which of two teammates should take a task, or to arbitrate a scope conflict — those are decisions the lead owns.
+
 ### Teammate-Side Discipline — Verify Before Acting + Assume Eventually-Seen
 
 #### Inbound — Verify Before Acting
 - On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
-- When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a lead-side rapid-fire-correction violation; surface it to the lead rather than silently picking one.
+- When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a lead-side rapid-fire-correction violation; surface it to the lead rather than silently picking one. Ambiguous middle: "investigate auth flow" followed by "start with the session-token path" — narrower-additive (a starting point) or different-assumption-contradictory (auth flow ≠ session-token path)? Default to surfacing.
 
 #### Outbound — Assume Eventually-Seen
 - Your outbound messages are delivered at the recipient's idle — not immediately. `intentional_wait` means "nothing advances until a resolver arrives," not "my message was read."
