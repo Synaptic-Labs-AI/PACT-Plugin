@@ -20,42 +20,27 @@ Emission invariant: write exactly once iff
       OR
  (1b) (fallback) disk-read task status == "completed")
 AND
-(2)  task_metadata.get("handoff") is truthy (handoff stored on disk)
+(2)  task_metadata.get("handoff") is truthy
 AND
 (3)  the per-(team, task_id) sidecar marker does not yet exist.
 
-The status-disk-gate is retained as a FALLBACK only — when stdin lacks
-`hook_event_name`. The PRIMARY transition signal is the platform-supplied
-`hook_event_name == "TaskCompleted"` field, captured verbatim across all
-3 real-platform probes in PREPARE phase of #551 (see
-docs/preparation/551-emitter-regression-diagnostic.md § "Real-platform
-stdin shape").
+The transition signal is `hook_event_name`. The disk-status read is a
+fallback only — used when stdin lacks `hook_event_name`. The disk-state
+read cannot serve as the primary transition signal because the platform's
+persistence of `status="completed"` to disk is asynchronous relative to
+the hook fire.
 
-The disk-state read CANNOT be the primary transition signal because the
-platform's persistence of `status="completed"` to disk is async relative
-to the hook fire (#551 root cause; 3/3 probes in PREPARE confirmed
-`status="in_progress"` on disk at hook-fire time, then `status="completed"`
-moments later when the same TaskUpdate finished writing).
-
-Memory `21b4576b` documents 200+ phantom TaskCompleted fires pre-#538
-during metadata-only TaskUpdates against the OLD handoff_gate.py. If
-that platform behavior recurs (every metadata-only TaskUpdate carrying
-`hook_event_name="TaskCompleted"`), the handoff-presence gate (Option E)
-suppresses every fire that arrives BEFORE the teammate has stored
-`metadata.handoff` — early metadata-only fires (briefing_delivered,
-intentional_wait toggles, claim flags) all skip the marker creation.
-The genuine completion (which has `metadata.handoff` populated) is the
-fire that claims the marker and writes the journal entry with full
-handoff content. Net cost under revert: zero empty-handoff entries; the
-marker is consumed exactly by the substantive completion. Strictly
-better than 0/51 in the genuine sense — the journal carries real
-HANDOFF data, not phantom counts.
+The handoff-presence gate suppresses fires that arrive before
+`metadata.handoff` is stored on disk. Metadata-only TaskUpdates
+(briefing flags, intentional_wait toggles, claim flags) skip marker
+creation; only the fire with `metadata.handoff` populated claims the
+marker and writes the journal entry.
 
 Idempotency: sidecar O_EXCL marker at
-~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. Claude Code's
-stopHooks.ts dispatches TaskCompleted on every matching owner during a
-Stop flow; without the marker the journal would see the same completion
-up to 37× per task (empirically sampled across 36 sessions).
+~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. The platform's
+Stop flow dispatches TaskCompleted on every matching owner; the marker
+deduplicates these so the journal records exactly one entry per
+(team, task_id).
 
 # livelock-safe: pure journal-writer; zero emission sinks. Writes at most
 # one agent_handoff event per (team, task_id) via an O_EXCL sidecar marker
@@ -256,34 +241,23 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        # Transition signal — primary is the platform-supplied
-        # `hook_event_name == "TaskCompleted"`. PREPARE-phase probes for #551
-        # captured this field verbatim in 3/3 real-platform fires
-        # (docs/preparation/551-emitter-regression-diagnostic.md). The
-        # `read_task_json` call above races the platform's own write of
-        # status=completed — at hook-fire time the disk frequently still
-        # shows in_progress, which is the #551 0/51-cumulative regression.
-        # We trust the platform event-name signal and let the
-        # `_already_emitted` O_EXCL marker dedupe per (team, task_id) for
-        # the phantom-fire-revert scenario (memory `21b4576b`: pre-#538,
-        # 200+ TaskCompleted fires on a single in_progress task during
-        # metadata-only TaskUpdates).
+        # Transition signal: `hook_event_name == "TaskCompleted"` is the
+        # primary signal; the disk-status check is a fallback used only
+        # when stdin omits `hook_event_name`.
         #
         # See pact-plugin/hooks/shared/HOOK_INPUT_CONVENTIONS.md for the
-        # routing convention this hook codifies (string-literal compare;
-        # never used as a path component; fail-closed on non-string values).
+        # routing convention (string-literal compare; never used as a path
+        # component; fail-closed on non-string values).
         #
-        # The disk-status fallback fires only when stdin lacks
-        # hook_event_name (forward-compat / malformed payload).
-        # DO NOT DELETE the fallback branch — it is the forward-compat
-        # path for platforms that omit hook_event_name; pinned by
-        # TestStatusFallbackGate (and TestProductionShapeMetadataOnly
-        # exercises the post-Option-B production shape).
+        # The fallback branch is required for forward compatibility with
+        # platforms that omit `hook_event_name`. It is pinned by
+        # TestStatusFallbackGate; TestProductionShapeMetadataOnly pins the
+        # production-shape path.
         hook_event = input_data.get("hook_event_name", "")
-        # Comparison with string literal naturally fail-closes on non-string
-        # values; do not cast or trim. A non-string `hook_event` (None, int,
-        # bool) compares unequal to "TaskCompleted" and falls through to the
-        # disk-status fallback.
+        # Comparison with the string literal fail-closes on non-string
+        # values; do not cast or trim. A non-string `hook_event` (None,
+        # int, bool) compares unequal to "TaskCompleted" and falls through
+        # to the disk-status fallback.
         if hook_event != "TaskCompleted":
             if task_data.get("status") != "completed":
                 print(_SUPPRESS_OUTPUT)
@@ -302,14 +276,11 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        # Handoff-presence gate (Option E) — under platform-revert, an early
-        # metadata-only TaskUpdate fires TaskCompleted BEFORE the teammate
-        # has stored metadata.handoff. Without this guard, the early fire
-        # would consume the O_EXCL marker with empty handoff content,
-        # suppressing the later genuine completion's full-handoff write.
-        # By suppressing emission AND skipping marker creation when handoff
-        # is missing, the genuine completion (which has handoff stored)
-        # claims the marker and writes the substantive journal entry.
+        # Handoff-presence gate. Suppress emission AND skip marker creation
+        # when `metadata.handoff` is absent or empty. Required so that a
+        # fire arriving before the teammate has stored handoff cannot claim
+        # the O_EXCL marker with empty content; the substantive completion
+        # (with handoff populated) claims it instead.
         if not task_metadata.get("handoff"):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
@@ -351,10 +322,10 @@ def main() -> None:
         # _SUPPRESS_OUTPUT emission side-effect on those paths.
         raise
     except Exception:
-        # AC #8: exit 0 suppressOutput on every code path. Any unexpected
-        # error (including malformed task_data shapes not caught by the
-        # `or {}` guard above) falls back to a clean no-op to preserve the
-        # livelock-safe invariant.
+        # Outer catch-all: every code path must exit 0 suppressOutput. Any
+        # unexpected error (including malformed task_data shapes not caught
+        # by the `or {}` guard above) falls back to a clean no-op to
+        # preserve the livelock-safe invariant.
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 

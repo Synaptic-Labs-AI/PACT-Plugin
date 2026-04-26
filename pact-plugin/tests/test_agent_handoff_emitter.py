@@ -1825,9 +1825,9 @@ class TestRaceShapeRegression:
     ):
         """Symmetric pair: stdin without hook_event_name AND disk shows
         status=completed → fallback gate passes → event emits. This is
-        the path the existing 25-method suite exercises (none pass
-        hook_event_name), so this test confirms the existing tests'
-        happy-path semantics still hold under Option B.
+        the path the suite's mocked-read tests exercise (none pass
+        hook_event_name), so this test confirms their happy-path
+        semantics still hold.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         calls: list[dict] = []
@@ -1850,11 +1850,11 @@ class TestRaceShapeRegression:
 
 
 class TestRealDiskRead:
-    """The existing 25-method suite mocks read_task_json. None exercise
-    the actual on-disk read path that ships in production. This class
-    fires main() against a real ~/.claude/tasks/{team}/{id}.json file
-    written under tmp_path — verifies path-join and JSON parse on the
-    read path that all current tests bypass. (Sanitization is unit-tested
+    """The suite's mocked-read tests patch read_task_json and never
+    exercise the actual on-disk read path that ships in production. This
+    class fires main() against a real ~/.claude/tasks/{team}/{id}.json
+    file written under tmp_path — verifies path-join and JSON parse on
+    the read path that mocked tests bypass. (Sanitization is unit-tested
     separately in TestPathSanitization; these tests use safe inputs.)
 
     Without this coverage, a regression in read_task_json's path
