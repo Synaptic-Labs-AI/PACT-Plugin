@@ -25,16 +25,33 @@ The rules below govern how messages delivered via this tool actually behave.
 - Supersede-the-last-message does not exist. If message A is wrong and you send B, both will execute.
 - For in-flight damage that is unacceptable, escalate to the user for manual interrupt — do not attempt to fake sync interrupt via rapid-fire SendMessage.
 - Treat task creation + `TaskUpdate(owner)` as the dispatch commit point; SendMessage is supplemental context.
+- Wait for in-flight context before composing your dispatch. If a peer is gathering info you'll need (query in flight, dispatch pending, tool result imminent), wait for delivery and send one consolidated message. Sending early-and-supplementing is rapid-fire by another name. Example: a preparer's secretary query is outstanding — hold the dispatch until the response lands rather than sending an initial brief and a follow-up addendum.
+
+#### Pre-Send Self-Check
+
+Before every SendMessage, run through:
+
+1. **Is the teammate idle?** If not, my message queues; accept that or wait.
+2. **Is more context likely incoming?** Query in flight, peer working on related task, pending tool result — wait for it.
+3. **Would this message *supersede* an earlier one I sent?** If yes, escalate to user-interrupt; both will execute regardless.
+4. **Could this be a peer-to-peer message**, avoiding a routing hop through me?
+5. **Have I verified my framing against the final phase output** (the doc, the HANDOFF, the diagnostic file), or am I working from an interim progress signal? Progress signals are pre-revision snapshots; post-progress information the agent absorbed before completion may have superseded them.
+
+#### Forwarding-Chain Hygiene
+
+If teammate A produces info teammate B needs, prefer direct A→B SendMessage with a brief CC-summary to the lead, rather than A→lead→B routing. Halves idle-boundary latency. Reserve lead-routing for cases where the lead specifically owns the routing decision (priority arbitration, scope reassignment).
 
 ### Teammate-Side Discipline — Verify Before Acting + Assume Eventually-Seen
 
 #### Inbound — Verify Before Acting
 - On receiving a state-dependent message, check actual state before executing. If state has advanced past the message's premise, no-op and report.
+- When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a lead-side rapid-fire-correction violation; surface it to the lead rather than silently picking one.
 
 #### Outbound — Assume Eventually-Seen
 - Your outbound messages are delivered at the recipient's idle — not immediately. `intentional_wait` means "nothing advances until a resolver arrives," not "my message was read."
 - Before resending an apparently-unacknowledged message, verify the addressee has reached idle at least once since the original send. Otherwise the original is still queued and resending just duplicates it.
 - Peer-to-peer: do not assume a peer saw your message before their next tool call. Peer's in-flight action runs to completion before they read inbound.
+- Prefer peer-to-peer for context forwarding. If your work produces info another teammate would benefit from, send directly to them with a brief CC-summary to the lead — don't route through the lead unless the lead specifically owns the routing decision. Reduces total idle-boundary latency.
 
 ### Algedonic-Signal Latency Caveat
 - HALT signals via SendMessage have idle-boundary latency like any other message.
