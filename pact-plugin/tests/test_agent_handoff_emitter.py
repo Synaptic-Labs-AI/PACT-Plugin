@@ -21,6 +21,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 
+# --- Pinned fixtures ---
+
 VALID_HANDOFF = {
     "produced": ["src/auth.ts"],
     "decisions": ["Used JWT"],
@@ -28,6 +30,43 @@ VALID_HANDOFF = {
     "integration": ["UserService"],
     "open_questions": [],
 }
+
+
+# Verbatim 9-field stdin shape captured by 3 real-platform probes during #551
+# PREPARE phase (docs/preparation/551-emitter-regression-diagnostic.md
+# § "Real-platform stdin shape"). Pinned as a fixture so future emitter
+# changes are tested against what the platform actually delivers, not
+# against a synthetic shape that test authors guessed.
+PLATFORM_STDIN_SHAPE = {
+    "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
+    "transcript_path": (
+        "/Users/mj/.claude/projects/"
+        "-Users-mj-Sites-collab-PACT-prompt/"
+        "1fb6500d-25ba-48c6-af00-5f92024644d0.jsonl"
+    ),
+    "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+    "hook_event_name": "TaskCompleted",
+    "task_id": "12",
+    "task_subject": "PROBE: capture real TaskCompleted stdin shape",
+    "task_description": "diagnostic probe payload",
+    "teammate_name": "preparer",
+    "team_name": "pact-1fb6500d",
+}
+
+
+def _write_task_json(tmp_path, team, task_id, payload):
+    """Helper for TestRealDiskRead — write a task.json under the
+    team-scoped path that read_task_json checks first.
+
+    Returns the Path to the written file. Caller is responsible for
+    setting `monkeypatch.setenv("HOME", str(tmp_path))` so HOME-relative
+    resolution lands under tmp_path.
+    """
+    tasks_dir = tmp_path / ".claude" / "tasks" / team
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    task_json = tasks_dir / f"{task_id}.json"
+    task_json.write_text(json.dumps(payload), encoding="utf-8")
+    return task_json
 
 
 def _run_main(stdin_payload, task_data, append_calls):
@@ -92,10 +131,19 @@ class TestHappyPath:
         assert calls[0]["agent"] == "secretary"
 
 
-class TestStatusGate:
-    """#528 regression guard: TaskCompleted fires on ANY TaskUpdate, not just
-    status transitions to completed. The on-disk status read MUST gate
-    emission or metadata-only TaskUpdates will journal phantom events."""
+class TestStatusFallbackGate:
+    """Fallback-path regression guard. Covers the disk-status gate that
+    fires ONLY when stdin lacks `hook_event_name` (forward-compat path).
+    The production-shape path (with hook_event_name=TaskCompleted) is
+    covered by TestProductionShapeMetadataOnly.
+
+    Origin: #528 regression guard — TaskCompleted fires on ANY TaskUpdate,
+    not just status transitions to completed. The on-disk status read
+    MUST gate emission or metadata-only TaskUpdates will journal phantom
+    events. Renamed to TestStatusFallbackGate post-Option-B (PR #563)
+    because the disk-status check is now the FALLBACK, not the primary
+    transition signal.
+    """
 
     def test_metadata_only_taskupdate_in_progress_no_event_written(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -159,6 +207,136 @@ class TestStatusGate:
             append_calls=calls,
         )
         assert calls == []
+
+
+class TestProductionShapeMetadataOnly:
+    """Production-shape coverage post-Option-B. Stdin carries
+    `hook_event_name="TaskCompleted"` (the platform's actual signal),
+    NOT the bare-payload shape that TestStatusFallbackGate exercises.
+
+    Two property bundles:
+    1. **Option E gate** — when `metadata.handoff` is missing/empty,
+       suppress emission AND skip marker creation regardless of
+       on-disk status. Covers the B1 failure mode: early metadata-only
+       fires under platform-revert MUST NOT consume the marker.
+    2. **S7 best-effort delta** — under Option B, status values that
+       previously suppressed (deleted, pending) now emit when
+       hook_event_name is TaskCompleted AND handoff is present.
+       Architect-accepted as best-effort preservation; pinned here so
+       the behavior delta is a deliberate test contract.
+    """
+
+    @pytest.mark.parametrize(
+        "disk_status",
+        ["in_progress", "completed", "pending", "deleted"],
+    )
+    def test_no_handoff_suppresses_under_production_stdin(
+        self, disk_status, tmp_path, monkeypatch
+    ):
+        """Under production-shape stdin (hook_event_name=TaskCompleted)
+        with NO handoff in metadata, Option E gate suppresses regardless
+        of on-disk status. Pins the B1 fix property across all 4
+        observable status values."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        _run_main(
+            stdin_payload={
+                "session_id": "test-session-1",
+                "hook_event_name": "TaskCompleted",
+                "task_id": f"no-handoff-{disk_status}",
+                "task_subject": f"production-shape probe: status={disk_status}",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": disk_status,
+                "owner": "probe-agent",
+                "metadata": {"briefing_delivered": True},  # NO handoff
+            },
+            append_calls=calls,
+        )
+        assert calls == [], (
+            f"production-shape stdin + status={disk_status!r} + no handoff "
+            f"should suppress. Option E handoff-presence gate is the B1 "
+            f"defense; if any status value emits without handoff, the "
+            f"genuine completion's marker is at risk."
+        )
+        marker = (
+            tmp_path / ".claude" / "teams" / "pact-test"
+            / ".agent_handoff_emitted" / f"no-handoff-{disk_status}"
+        )
+        assert not marker.exists(), (
+            f"marker created with status={disk_status!r} despite no "
+            f"handoff — B1 root cause; the genuine completion would be "
+            f"silently dropped."
+        )
+
+    def test_status_deleted_with_handoff_emits(
+        self, tmp_path, monkeypatch
+    ):
+        """Behavior delta from Option B adoption: status=deleted +
+        hook_event_name=TaskCompleted + handoff present now emits
+        ONE event. Pre-Option-B the disk-status gate would have
+        suppressed (status != completed). Architect-accepted as
+        best-effort preservation; pinned so a future status-strict
+        regression is caught.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        _run_main(
+            stdin_payload={
+                "session_id": "test-session-1",
+                "hook_event_name": "TaskCompleted",
+                "task_id": "deleted-with-handoff",
+                "task_subject": "deleted-status emit pin",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "deleted",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1, (
+            "S7 behavior delta: status=deleted + hook_event_name + "
+            "handoff present must emit under Option B. If this fails, "
+            "a status-strict regression was introduced — Option B "
+            "intentionally accepts non-completed statuses as valid "
+            "transition signals when hook_event_name asserts."
+        )
+        assert calls[0]["handoff"] == VALID_HANDOFF
+
+    def test_status_pending_with_handoff_emits(
+        self, tmp_path, monkeypatch
+    ):
+        """Symmetric pin to the deleted-status case. Pre-Option-B,
+        status=pending was suppressed; post-Option-B + handoff present
+        + hook_event_name=TaskCompleted emits ONE event."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        _run_main(
+            stdin_payload={
+                "session_id": "test-session-1",
+                "hook_event_name": "TaskCompleted",
+                "task_id": "pending-with-handoff",
+                "task_subject": "pending-status emit pin",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "pending",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1, (
+            "S7 behavior delta: status=pending + hook_event_name + "
+            "handoff present must emit under Option B."
+        )
+        assert calls[0]["handoff"] == VALID_HANDOFF
 
 
 class TestBypasses:
@@ -444,6 +622,88 @@ class TestMarkerFailOpen:
             "second invocation with same (team, task_id) must NOT retry "
             "append_event — marker-based dedup engaged. If this assertion "
             "fails, the dedup property is broken and amplification returns."
+        )
+
+
+class TestMarkerDirSymlinkGuard:
+    """Pin the symlink-containment pre-check at the marker_dir creation
+    site. If `~/.claude/teams/{team}/.agent_handoff_emitted` already
+    exists as a symlink, `_already_emitted` MUST return False (fail-open
+    emit) without following the symlink — refusing to create the marker
+    file at an attacker-controlled location.
+
+    Pairs with the existing fail-open tests in `TestMarkerFailOpen`:
+    a corrupted/hostile marker layer never causes silent suppression
+    (data-integrity over duplication-prevention) AND never causes a
+    write through a redirected path (containment over emit-at-any-cost).
+    """
+
+    def test_marker_dir_symlink_returns_false_no_traversal(
+        self, tmp_path, monkeypatch
+    ):
+        """A pre-planted symlink at the marker_dir path must be detected
+        and short-circuited. The function returns False (fail-open emit)
+        and creates no file at the symlink target."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import _already_emitted
+
+        team = "pact-test"
+        task_id = "t1"
+
+        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir.mkdir(parents=True)
+        attacker_target = tmp_path / "attacker_target"
+        attacker_target.mkdir()
+
+        marker_dir_path = team_dir / ".agent_handoff_emitted"
+        marker_dir_path.symlink_to(attacker_target, target_is_directory=True)
+
+        result = _already_emitted(team, task_id)
+
+        assert result is False, (
+            "symlink at marker_dir must fail-open emit (return False); "
+            "removing the is_symlink() guard would let the marker create "
+            "via the symlink and return False/True based on EEXIST race."
+        )
+        assert not (attacker_target / task_id).exists(), (
+            "no file may be created at the symlink target — the guard "
+            "must short-circuit BEFORE any os.open call follows the link."
+        )
+
+    def test_marker_dir_ordinary_directory_not_misclassified(
+        self, tmp_path, monkeypatch
+    ):
+        """A pre-existing ordinary (non-symlink) directory at the
+        marker_dir path must NOT be flagged by the guard. The first
+        call creates the marker file inside it (returns False); the
+        second call observes the marker via O_EXCL EEXIST (returns
+        True). Confirms the guard discriminates symlink vs ordinary
+        dir rather than treating any pre-existing dir as hostile."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import _already_emitted
+
+        team = "pact-test"
+        task_id = "t1"
+
+        marker_dir_path = (
+            tmp_path / ".claude" / "teams" / team / ".agent_handoff_emitted"
+        )
+        marker_dir_path.mkdir(parents=True)
+
+        first = _already_emitted(team, task_id)
+        second = _already_emitted(team, task_id)
+
+        assert first is False, (
+            "first call against an ordinary marker_dir must create the "
+            "marker file and return False (winner / emit path)."
+        )
+        assert second is True, (
+            "second call must observe EEXIST on the existing marker and "
+            "return True (suppress duplicate emission)."
+        )
+        assert (marker_dir_path / task_id).exists(), (
+            "winner must have created a real marker file inside the "
+            "ordinary marker_dir."
         )
 
 
@@ -758,18 +1018,19 @@ class TestMalformedStdin:
 
 
 class TestNullMetadata:
-    """#4 pair (per task #16): security-reviewer's fix at
-    agent_handoff_emitter.py guards `task_data.get("metadata")` against
-    JSON `null` via `or {}` coercion. Without the fix, a crafted
-    task.json with `"metadata": null` (valid JSON, valid semantically as
-    "no metadata") would raise AttributeError on `.get("type")` or
-    `.get("handoff")`, crashing the emitter mid-main() — violating AC #8.
+    """Pin two invariants for the `metadata: null` task.json shape:
 
-    This test pins the post-fix invariant. Against pre-fix emitter, this
-    test WILL fail (AttributeError propagates through main's try/except
-    wrapper, depending on #16 fix order). That RED-initial state IS the
-    counter-test-by-revert load-bearingness proof per the #538 dogfood
-    discipline.
+    1. `or {}` coercion: `task_data.get("metadata") or {}` collapses
+       JSON-null metadata to an empty dict, so subsequent `.get("type")`
+       and `.get("handoff")` calls do not raise AttributeError. Without
+       this coercion the emitter crashes mid-main(), violating the
+       exit-0 invariant.
+
+    2. Option E suppression: with metadata coerced to `{}`,
+       `task_metadata.get("handoff")` is falsy and the handoff-presence
+       gate suppresses emission. No journal entry is written for a
+       null-metadata task — the empty-handoff fire is exactly the
+       failure mode Option E was added to prevent.
     """
 
     def test_null_metadata_field_does_not_crash_exit_zero_invariant_holds(
@@ -780,7 +1041,7 @@ class TestNullMetadata:
         # Crafted task_data with metadata explicitly null (not missing).
         # This shape can land on disk if a teammate/platform writes
         # task.json with `"metadata": null` — valid JSON but crashes
-        # `.get("type")` chain pre-fix.
+        # `.get("type")` chain without the `or {}` coercion fix.
         exit_code = _run_main(
             stdin_payload={
                 "task_id": "null-meta-probe",
@@ -802,15 +1063,17 @@ class TestNullMetadata:
             "present in agent_handoff_emitter for this test to pass."
         )
         assert "suppressOutput" in captured.out
-        # Event is still written — metadata absent is NOT a signal-task
-        # bypass; it's a missing-metadata happy path with empty handoff.
-        assert len(calls) == 1, (
-            "metadata:null collapses to empty-metadata path; journal "
-            "event still persists with empty handoff."
-        )
-        assert calls[0]["handoff"] == {}, (
-            "post-fix: null metadata collapses to `{}` via `or {}`; "
-            "handoff field is empty dict, not None"
+        # Under Option E (handoff-presence gate), metadata=None coerces
+        # to {} via `or {}`, then `task_metadata.get("handoff")` is
+        # falsy → suppress emission. No event is written. The crash-
+        # invariant (exit 0, suppressOutput) is what this test pins;
+        # the empty-handoff path is now correctly suppressed instead
+        # of producing a content-less journal entry.
+        assert calls == [], (
+            "Option E: metadata=None collapses to {} via `or {}`, then "
+            "the handoff-presence gate suppresses emission. A journal "
+            "entry with empty handoff is exactly the B1 failure mode "
+            "Option E was added to prevent."
         )
 
 
@@ -990,6 +1253,76 @@ class TestPathSanitization:
             that rely on the empty sentinel reaching _already_emitted."""
             from agent_handoff_emitter import _sanitize_path_component
             assert _sanitize_path_component("") == ""
+
+        @pytest.mark.parametrize(
+            "control_input",
+            [
+                "\x00",
+                "\n",
+                "\r",
+                "\t",
+                "\x01\x02\x03",
+                "task\x00id",
+                "task\nid",
+                "task\rid",
+                "\x00..\x00",
+                "..\x00..",
+            ],
+        )
+        def test_sanitize_strips_c0_control_characters(self, control_input):
+            """C0 control characters (NUL, CR/LF, 0x00-0x1f) are stripped
+            at the producer boundary. Without stripping, control chars
+            would survive into filesystem path joins, enabling
+            log-injection (CR/LF) and path-truncation (NUL on some
+            filesystems) attacks."""
+            from agent_handoff_emitter import _sanitize_path_component
+            out = _sanitize_path_component(control_input)
+            for ch in out:
+                assert ord(ch) >= 0x20 or ch == "\x7f", (
+                    f"control char {ord(ch):#x} survived in {out!r}"
+                )
+
+        @pytest.mark.parametrize(
+            "raw_input",
+            [
+                "\x00",
+                ".",
+                "..",
+                "...",
+                "\x00..\x00",
+                "task\x00../etc/passwd",
+                "\n\r\t",
+                "../\x00/..",
+            ],
+        )
+        def test_post_sanitize_marker_key_is_safe_or_degenerate(
+            self, raw_input, tmp_path, monkeypatch
+        ):
+            """Property-style invariant: for any input value, the
+            post-sanitization-then-marker-key is either rejected by the
+            dot/empty guard (degenerate path → emit without marker) OR
+            is filesystem-safe (no `/`, no `\\`, no control chars, no
+            `..`). Either branch preserves the fail-open data-integrity
+            contract; neither branch can leak path-traversal primitives
+            to the marker write."""
+            from agent_handoff_emitter import _sanitize_path_component
+            sanitized = _sanitize_path_component(raw_input)
+
+            if sanitized in ("", ".", ".."):
+                # Caught by the degenerate guard in _already_emitted —
+                # emit without marker creation. No filesystem write,
+                # no traversal risk.
+                return
+
+            # Otherwise the value flows into the marker join; assert it
+            # carries no traversal or injection primitives.
+            assert "/" not in sanitized
+            assert "\\" not in sanitized
+            assert ".." not in sanitized
+            for ch in sanitized:
+                assert ord(ch) >= 0x20 or ch == "\x7f", (
+                    f"control char {ord(ch):#x} in marker key {sanitized!r}"
+                )
 
     class TestDegenerateInputsDoNotCreateMarker:
         """Integration coverage — depends on security-reviewer's task #24
@@ -1385,3 +1718,514 @@ class TestPathSanitization:
                     f"path-traversal attempt {attack_task_id!r} created "
                     f"a file at escape path {escape}."
                 )
+
+
+class TestRaceShapeRegression:
+    """#551 root-cause regression guard. Platform fires TaskCompleted with
+    `hook_event_name="TaskCompleted"` BEFORE persisting status="completed"
+    to disk. Pre-Option-B, the (then-primary) disk-status gate read
+    status="in_progress", aborted, and the journal write was never reached
+    (3/3 PREPARE-phase probes confirmed; 0/51 cumulative production loss).
+
+    Under Option B, hook_event_name="TaskCompleted" is the PRIMARY
+    transition signal — disk-status is fallback only when stdin lacks
+    hook_event_name. The journal write succeeds despite the on-disk
+    status mismatch.
+
+    Parametrized across two race shapes:
+      (a) v3.19.2 race — disk shows in_progress because platform write
+          hasn't persisted yet; this is the empirically-confirmed shape
+          producing 0/51.
+      (b) phantom-fire-revert — disk shows in_progress because the
+          TaskUpdate was metadata-only (memory `21b4576b` documents 200+
+          such fires pre-#538). Under Option B this also emits one event,
+          then the `_already_emitted` O_EXCL marker suppresses any
+          subsequent fires for the same (team, task_id).
+
+    BOTH cases must produce exactly one append_event call. The marker
+    persists either way, so subsequent fires for the same task are
+    suppressed regardless of which race shape produced the first fire.
+    """
+
+    @pytest.mark.parametrize(
+        "race_kind,disk_status,disk_metadata",
+        [
+            # (a) v3.19.2 race — platform fires TaskCompleted BEFORE
+            #     persisting status=completed to disk, but the teammate
+            #     has already stored metadata.handoff (the same TaskUpdate
+            #     that flips status carries handoff in its metadata write).
+            #     Disk shows status=in_progress; handoff is on disk.
+            #     Option E gate passes (handoff present); hook_event_name
+            #     primary signal triggers emission despite stale status.
+            (
+                "v3_19_2_race_pre_persist",
+                "in_progress",
+                {"handoff": VALID_HANDOFF},
+            ),
+            # (b) phantom-fire-revert — completion already happened;
+            #     the disk reflects it (status=completed, handoff stored);
+            #     and a follow-up TaskCompleted fires (e.g., from
+            #     stopHooks.ts re-dispatch). Both signals positive,
+            #     handoff present, marker dedup absorbs duplicate fires
+            #     (covered by TestIdempotency).
+            (
+                "phantom_fire_revert_metadata_only",
+                "in_progress",
+                {"handoff": VALID_HANDOFF},
+            ),
+        ],
+    )
+    def test_hook_event_name_primary_signal_emits_despite_disk_in_progress(
+        self, race_kind, disk_status, disk_metadata, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        exit_code = _run_main(
+            stdin_payload={
+                "hook_event_name": "TaskCompleted",
+                "task_id": "race-probe",
+                "task_subject": f"race-shape probe: {race_kind}",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": disk_status,
+                "owner": "probe-agent",
+                "metadata": disk_metadata,
+            },
+            append_calls=calls,
+        )
+        assert exit_code == 0
+        assert len(calls) == 1, (
+            f"#551 regression: race-shape {race_kind!r} (disk status="
+            f"{disk_status!r}) should emit when hook_event_name="
+            f"'TaskCompleted' is present. Pre-Option-B, the disk-status "
+            f"gate aborted before reaching append_event — that is the "
+            f"0/51 cumulative production loss this test pins."
+        )
+        assert calls[0]["agent"] == "probe-agent"
+        assert calls[0]["task_id"] == "race-probe"
+
+    def test_handoff_presence_gate_two_fire_sequence_real_revert(
+        self, tmp_path, monkeypatch
+    ):
+        """Phantom-fire-revert realistic two-fire sequence under Option E
+        handoff-presence gate. This pins the B1 fix from PR #563 review
+        (review-architect): under platform revert, the FIRST fire arrives
+        BEFORE the teammate has stored metadata.handoff (the fire is for
+        a metadata-only TaskUpdate like briefing_delivered=true). The
+        emitter MUST suppress that fire WITHOUT consuming the marker —
+        otherwise the LATER genuine completion (with full handoff) gets
+        suppressed by an empty-content marker, producing 51 empty journal
+        entries instead of 51 substantive ones.
+
+        Sequence:
+          Fire 1: metadata={"briefing_delivered": True}, no handoff
+                  → handoff-presence gate suppresses, NO marker, NO event.
+          Fire 2: metadata={"handoff": VALID_HANDOFF, "briefing_delivered": True}
+                  → handoff present, marker claimed, ONE event with full
+                    handoff content lands in journal.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        payload = {
+            "hook_event_name": "TaskCompleted",
+            "task_id": "two-fire-revert",
+            "task_subject": "two-fire revert sequence probe",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }
+
+        # Fire 1: early metadata-only TaskUpdate fires TaskCompleted under
+        # platform revert. Disk shows status=in_progress AND no handoff
+        # key in metadata. Option E gate must suppress emission AND skip
+        # marker creation.
+        _run_main(
+            payload,
+            task_data={
+                "status": "in_progress",
+                "owner": "probe-agent",
+                "metadata": {"briefing_delivered": True},  # NO handoff
+            },
+            append_calls=calls,
+        )
+        assert calls == [], (
+            "Fire 1: handoff-presence gate failed to suppress an early "
+            "metadata-only fire (no handoff key on disk). The B1 trace "
+            "(review-architect, PR #563) would resurface — empty-content "
+            "marker would suppress the later genuine completion."
+        )
+        marker = (
+            tmp_path / ".claude" / "teams" / "pact-test"
+            / ".agent_handoff_emitted" / "two-fire-revert"
+        )
+        assert not marker.exists(), (
+            "Fire 1: marker MUST NOT be created when handoff is absent. "
+            "If marker exists here, the genuine completion's later fire "
+            "will hit EEXIST and silently drop the substantive HANDOFF — "
+            "the exact B1 failure mode."
+        )
+
+        # Fire 2: genuine completion. Teammate has now stored
+        # metadata.handoff; status flipped to completed. Option E gate
+        # passes (handoff present), marker is claimed, journal write
+        # produces the substantive entry.
+        _run_main(
+            payload,
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {
+                    "handoff": VALID_HANDOFF,
+                    "briefing_delivered": True,
+                },
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1, (
+            "Fire 2: genuine completion failed to emit. Either the "
+            "handoff-presence gate is over-suppressing (rejected a "
+            "valid completion) or the gate ordering is wrong relative "
+            "to the marker check."
+        )
+        assert calls[0]["handoff"] == VALID_HANDOFF, (
+            "Fire 2: journal entry has empty/incorrect handoff. The "
+            "gate suppressed Fire 1 correctly but the marker subsystem "
+            "or append_event flow lost the handoff content."
+        )
+        assert marker.exists(), (
+            "Fire 2: marker MUST be created on the genuine completion. "
+            "Subsequent fires for the same (team, task_id) need it for "
+            "dedup."
+        )
+
+    def test_handoff_presence_gate_suppresses_all_metadata_only_fires(
+        self, tmp_path, monkeypatch
+    ):
+        """Worst-case: 5 sequential metadata-only fires (all without
+        handoff stored). All must suppress; marker MUST NOT be created.
+        This pins the property that no number of phantom fires can
+        consume the marker prematurely.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        payload = {
+            "hook_event_name": "TaskCompleted",
+            "task_id": "no-handoff-storm",
+            "task_subject": "metadata-only storm probe",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }
+        task_data = {
+            "status": "in_progress",
+            "owner": "probe-agent",
+            "metadata": {"briefing_delivered": True},  # never has handoff
+        }
+        for _ in range(5):
+            _run_main(payload, task_data, calls)
+        assert calls == [], (
+            "metadata-only storm produced phantom journal events. The "
+            "Option E handoff-presence gate is the load-bearing defense "
+            "against B1; if any of the 5 fires emitted, the marker "
+            "would be consumed with empty content."
+        )
+        marker = (
+            tmp_path / ".claude" / "teams" / "pact-test"
+            / ".agent_handoff_emitted" / "no-handoff-storm"
+        )
+        assert not marker.exists(), (
+            "marker created during a metadata-only storm — B1 root "
+            "cause. The genuine completion's later fire would be "
+            "silently dropped."
+        )
+
+    def test_disk_status_fallback_when_hook_event_name_absent(
+        self, tmp_path, monkeypatch
+    ):
+        """Forward-compat: stdin without hook_event_name should fall back
+        to the disk-status gate. This preserves correctness if a future
+        platform shape omits the field, AND it pins the fallback path so
+        a future refactor cannot silently delete it.
+
+        With status=in_progress on disk AND no hook_event_name in stdin,
+        the fallback gate aborts and no event is written.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        _run_main(
+            stdin_payload={
+                # hook_event_name intentionally absent
+                "task_id": "no-event-name",
+                "task_subject": "stdin lacks hook_event_name",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "in_progress",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert calls == [], (
+            "fallback disk-status gate failed to fire when hook_event_name "
+            "absent. The Option B fallback path is load-bearing for forward "
+            "compatibility — do not delete it without a replacement."
+        )
+
+    def test_disk_status_fallback_emits_when_disk_completed(
+        self, tmp_path, monkeypatch
+    ):
+        """Symmetric pair: stdin without hook_event_name AND disk shows
+        status=completed → fallback gate passes → event emits. This is
+        the path the suite's mocked-read tests exercise (none pass
+        hook_event_name), so this test confirms their happy-path
+        semantics still hold.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        _run_main(
+            stdin_payload={
+                # hook_event_name intentionally absent
+                "task_id": "fallback-happy",
+                "task_subject": "fallback path happy case",
+                "teammate_name": "probe-agent",
+                "team_name": "pact-test",
+            },
+            task_data={
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1
+
+
+class TestRealDiskRead:
+    """The suite's mocked-read tests patch read_task_json and never
+    exercise the actual on-disk read path that ships in production. This
+    class fires main() against a real ~/.claude/tasks/{team}/{id}.json
+    file written under tmp_path — verifies path-join and JSON parse on
+    the read path that mocked tests bypass. (Sanitization is unit-tested
+    separately in TestPathSanitization; these tests use safe inputs.)
+
+    Without this coverage, a regression in read_task_json's path
+    construction (e.g., team-scoped vs base directory ordering) would
+    not be caught by the unit suite — exactly the test-vs-production
+    gap that masked #551.
+    """
+
+    def test_real_disk_read_completed_task_emits_event(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Write a real task.json at the team-scoped path that
+        # read_task_json checks first (the team-scoped branch in
+        # task_utils.read_task_json's `for task_dir in task_dirs:` loop).
+        _write_task_json(
+            tmp_path, "pact-test", "real-disk-1",
+            {
+                "id": "real-disk-1",
+                "subject": "real disk read probe",
+                "status": "completed",
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+        )
+
+        # Patch the tasks_base_dir to point at our tmp tree. read_task_json
+        # accepts the override; we go through main() so the full pipeline
+        # (init, sanitize, status gate, marker, append) is exercised
+        # except for the bare read_task_json call site, which we redirect
+        # to use our tmp path.
+        from agent_handoff_emitter import main
+        from shared import task_utils
+
+        original_read = task_utils.read_task_json
+
+        # Belt-and-suspenders: explicit tasks_base_dir override + HOME
+        # monkeypatch route to the same path; intentional defense-in-depth
+        # against future fixture-isolation changes.
+        def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None):
+            return original_read(
+                task_id, team_name,
+                tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+            )
+
+        calls: list[dict] = []
+
+        def _append_spy(event):
+            calls.append(event)
+            return True
+
+        with patch(
+            "agent_handoff_emitter.read_task_json",
+            side_effect=_read_with_tmp_base,
+        ), patch(
+            "agent_handoff_emitter.append_event",
+            side_effect=_append_spy,
+        ), patch("sys.stdin", io.StringIO(json.dumps({
+            "session_id": "test-session-1",
+            "hook_event_name": "TaskCompleted",
+            "task_id": "real-disk-1",
+            "task_subject": "real disk read probe",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }))):
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        assert exc.value.code == 0
+        assert len(calls) == 1, (
+            "real-disk-read path failed to emit event despite valid "
+            "task.json on disk. Sanitization, path-join, or JSON parse "
+            "regression — investigate read_task_json in shared/task_utils.py."
+        )
+        assert calls[0]["task_id"] == "real-disk-1"
+        assert calls[0]["agent"] == "probe-agent"
+        assert calls[0]["handoff"] == VALID_HANDOFF
+
+    def test_real_disk_read_in_progress_with_hook_event_name_still_emits(
+        self, tmp_path, monkeypatch
+    ):
+        """The #551 race shape, fully end-to-end with a real on-disk
+        task.json showing status=in_progress. Under Option B,
+        hook_event_name primary signal trumps disk-status, journal
+        write succeeds. This is the most direct production-fidelity
+        regression guard."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _write_task_json(
+            tmp_path, "pact-test", "real-disk-race",
+            {
+                "id": "real-disk-race",
+                "subject": "race shape on real disk",
+                "status": "in_progress",  # THE #551 race
+                "owner": "probe-agent",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+        )
+
+        from agent_handoff_emitter import main
+        from shared import task_utils
+
+        original_read = task_utils.read_task_json
+
+        # Belt-and-suspenders: explicit tasks_base_dir override + HOME
+        # monkeypatch route to the same path; intentional defense-in-depth
+        # against future fixture-isolation changes.
+        def _read_with_tmp_base(task_id, team_name, tasks_base_dir=None):
+            return original_read(
+                task_id, team_name,
+                tasks_base_dir=str(tmp_path / ".claude" / "tasks"),
+            )
+
+        calls: list[dict] = []
+
+        with patch(
+            "agent_handoff_emitter.read_task_json",
+            side_effect=_read_with_tmp_base,
+        ), patch(
+            "agent_handoff_emitter.append_event",
+            side_effect=lambda e: (calls.append(e), True)[1],
+        ), patch("sys.stdin", io.StringIO(json.dumps({
+            "session_id": "test-session-1",
+            "hook_event_name": "TaskCompleted",
+            "task_id": "real-disk-race",
+            "task_subject": "race shape on real disk",
+            "teammate_name": "probe-agent",
+            "team_name": "pact-test",
+        }))):
+            with pytest.raises(SystemExit):
+                main()
+
+        assert len(calls) == 1, (
+            "#551 race against REAL disk + hook_event_name primary signal "
+            "must emit. If this fails, Option B is not actually wired up "
+            "to the production read path."
+        )
+
+
+class TestStdinShapePin:
+    """Pin the verbatim 9-field platform stdin shape captured during
+    PREPARE-phase probes (3/3 fires identical structure). Future emitter
+    changes are now tested against what the platform actually delivers,
+    not against a synthetic shape that may drift.
+
+    Diagnostic capture: docs/preparation/551-emitter-regression-diagnostic.md
+    § "Real-platform stdin shape". Fields:
+      session_id, transcript_path, cwd, hook_event_name, task_id,
+      task_subject, task_description, teammate_name, team_name.
+
+    Scope: assertions verify the emitter→append_event boundary (the
+    emitter IS the boundary), not the journal-file-on-disk E2E path.
+    """
+
+    def test_platform_stdin_shape_emits_event_under_option_b(
+        self, tmp_path, monkeypatch
+    ):
+        """The platform stdin always carries hook_event_name; under
+        Option B the primary signal fires and the event lands. This is
+        the realistic-shape equivalent of TestRaceShapeRegression's
+        synthetic minimal payload — same Option B path, real fields."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        # Use the verbatim shape but ensure task_data shows in_progress
+        # (the empirical race) so we prove the primary signal works on
+        # the real shape, not just on the synthetic one.
+        _run_main(
+            stdin_payload=PLATFORM_STDIN_SHAPE,
+            task_data={
+                "status": "in_progress",
+                "owner": "preparer",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        assert len(calls) == 1
+        assert calls[0]["agent"] == "preparer"
+        assert calls[0]["task_id"] == "12"
+        assert calls[0]["task_subject"] == (
+            "PROBE: capture real TaskCompleted stdin shape"
+        )
+
+    def test_platform_stdin_shape_extra_fields_do_not_break_main(
+        self, tmp_path, monkeypatch
+    ):
+        """The platform delivers `transcript_path`, `cwd`, and
+        `task_description` — fields the emitter does not consume. Pin
+        that their presence does NOT crash main() (e.g. via a stricter
+        future schema check). If a regression makes the emitter strict
+        about unknown stdin fields, this test catches it before
+        production."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls: list[dict] = []
+        # All 9 fields present, including the ones the emitter ignores.
+        _run_main(
+            stdin_payload=PLATFORM_STDIN_SHAPE,
+            task_data={
+                "status": "completed",
+                "owner": "preparer",
+                "metadata": {"handoff": VALID_HANDOFF},
+            },
+            append_calls=calls,
+        )
+        # Event emits cleanly — no exception, no extra fields leaked
+        # into the journal entry beyond what the emitter explicitly
+        # forwards (agent, task_id, task_subject, handoff).
+        assert len(calls) == 1
+        event = calls[0]
+        assert set(event.keys()) >= {
+            "type", "agent", "task_id", "task_subject", "handoff",
+        }
+        # transcript_path / cwd / task_description / session_id /
+        # team_name / teammate_name / hook_event_name from stdin must
+        # NOT leak into the journal event payload.
+        for leaked_field in (
+            "transcript_path", "cwd", "task_description",
+            "session_id", "team_name", "teammate_name", "hook_event_name",
+        ):
+            assert leaked_field not in event, (
+                f"stdin field {leaked_field!r} leaked into journal "
+                f"event — emitter is forwarding too much data."
+            )

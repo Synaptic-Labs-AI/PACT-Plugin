@@ -16,36 +16,38 @@ NOT responsible for:
 - Stall / nag detection (not this hook's responsibility).
 
 Emission invariant: write exactly once iff
-(1) disk-read task status == "completed" AND
-(2) the per-(team, task_id) sidecar marker does not yet exist.
+((1a) hook_event_name == "TaskCompleted" in stdin
+      OR
+ (1b) (fallback) disk-read task status == "completed")
+AND
+(2)  task_metadata.get("handoff") is truthy
+AND
+(3)  the per-(team, task_id) sidecar marker does not yet exist.
 
-The disk-status check is the substitute for the missing `previous_status`
-field in the TaskCompleted stdin payload (architect §2.3 [MEDIUM] flagged
-this gap). Claude Code fires the `TaskCompleted` hook event on ANY
-TaskUpdate call — not only on transitions to `completed` (verified
-empirically in session pact-114c988a / preparer-538 §R1). Trusting the
-event name as the transition signal is the regression class where
-metadata-only TaskUpdates (claim flags, intentional_wait toggles,
-briefing_delivered tracking, etc.) generate spurious agent_handoff
-events on tasks still in_progress. The on-disk status read is the only
-source of truth for "did this TaskUpdate actually flip status to
-completed."
+The transition signal is `hook_event_name`. The disk-status read is a
+fallback only — used when stdin lacks `hook_event_name`. The disk-state
+read cannot serve as the primary transition signal because the platform's
+persistence of `status="completed"` to disk is asynchronous relative to
+the hook fire.
+
+The handoff-presence gate suppresses fires that arrive before
+`metadata.handoff` is stored on disk. Metadata-only TaskUpdates
+(briefing flags, intentional_wait toggles, claim flags) skip marker
+creation; only the fire with `metadata.handoff` populated claims the
+marker and writes the journal entry.
 
 Idempotency: sidecar O_EXCL marker at
-~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. Claude Code's
-stopHooks.ts dispatches TaskCompleted on every matching owner during a
-Stop flow; without the marker the journal would see the same completion
-up to 37× per task (empirically sampled across 36 sessions).
-The marker and the status gate defend orthogonal failure modes: the
-marker dedupes repeated fires of the SAME (team, task_id) completion;
-the status gate rejects metadata-only TaskUpdates on in-progress tasks
-that would otherwise pass the marker's first-fire check.
+~/.claude/teams/{team}/.agent_handoff_emitted/{task_id}. The platform's
+Stop flow dispatches TaskCompleted on every matching owner; the marker
+deduplicates these so the journal records exactly one entry per
+(team, task_id).
 
 # livelock-safe: pure journal-writer; zero emission sinks. Writes at most
 # one agent_handoff event per (team, task_id) via an O_EXCL sidecar marker
-# gated on on-disk status == "completed", and exits 0 suppressOutput on
-# every code path. Does NOT consume intentional_wait, does NOT emit
-# systemMessage or stderr prompts, and does NOT block completion.
+# gated on (a) hook_event_name OR disk-status, (b) handoff-presence in
+# task_metadata, and exits 0 suppressOutput on every code path. Does NOT
+# consume intentional_wait, does NOT emit systemMessage or stderr prompts,
+# and does NOT block completion.
 
 Input: JSON from stdin with task_id, task_subject, task_description,
        teammate_name, team_name (TaskCompleted schema).
@@ -67,9 +69,12 @@ from shared.task_utils import read_task_json
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
-# Signal-task types — inline literal, matches task_utils.py:188 and
-# session_resume.py:525 convention. Do NOT import is_signal_task: no
+# Signal-task types — inline literal, matches the
+# `task_type in ("blocker", "algedonic")` check inside task_utils.find_blockers
+# and the session_resume convention. Do NOT import is_signal_task: no
 # such helper exists.
+# Forward-anchor: extract to a shared `is_signal_task` predicate when a
+# 2nd consumer of this tuple appears.
 _SIGNAL_TASK_TYPES = ("blocker", "algedonic")
 
 
@@ -77,15 +82,20 @@ def _sanitize_path_component(value: str) -> str:
     """
     Strip path-traversal fragments from a value destined for filesystem joins.
 
-    Mirrors the regex used inside task_utils.read_task_json (task_utils.py:295)
-    so the gate site (status read) and the write site (O_EXCL marker create)
-    apply symmetric sanitization. Without this, an attacker-crafted task_id or
+    Mirrors the regex used inside task_utils.read_task_json so the gate
+    site (status read) and the write site (O_EXCL marker create) apply
+    symmetric sanitization. Without this, an attacker-crafted task_id or
     team_name that happens to sanitize (in read_task_json) into a matching
     existing completed-task file could still carry raw "../" fragments into
     the marker-path join and cause zero-byte file creation outside the team's
     marker directory.
+
+    Strips path-traversal primitives (`/`, `\\`, `..`) and C0 control
+    characters (NUL, CR/LF, and 0x00-0x1f range) at the producer
+    boundary. Control-char stripping defends against log-injection and
+    embedded-newline attacks on values that flow into filesystem paths.
     """
-    return re.sub(r"[/\\]|\.\.", "", value)
+    return re.sub(r"[/\\\x00-\x1f]|\.\.", "", value)
 
 
 def _marker_dir(team_name: str) -> Path:
@@ -119,6 +129,15 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
     outweighs duplication-prevention when the marker subsystem itself
     breaks; worst case the caller falls back to per-fire emission for
     this one task (up to 37× per task, empirically measured).
+
+    Graceful-degrade caveat: a pre-existing non-symlink file at the
+    marker path (e.g., from a manually-created file or stale state
+    surviving an unclean cleanup) also returns True via EEXIST and
+    suppresses emission permanently for that (team, task_id) — the
+    O_EXCL test cannot distinguish "prior fire owns it" from "external
+    file was placed here." Acceptable trade-off versus the alternative
+    (read-the-file-to-verify, which races and complicates the atomic
+    test-and-set).
     """
     # Degenerate post-sanitization values collapse the marker path onto an
     # existing directory:
@@ -143,6 +162,12 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
         return False
 
     marker_dir = _marker_dir(team_name)
+    # Symlink-containment pre-check: if marker_dir already exists as a
+    # symlink, refuse to use it (a pre-planted symlink could redirect
+    # marker creation outside the team directory). Fail-open emit rather
+    # than risk writing to an attacker-controlled location.
+    if marker_dir.is_symlink():
+        return False
     try:
         marker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError:
@@ -151,7 +176,7 @@ def _already_emitted(team_name: str, task_id: str) -> bool:
 
     marker_path = marker_dir / task_id
     # O_NOFOLLOW defends against a pre-planted symlink at the marker path —
-    # mirrors the Sec-M1 pattern at session_init.py:191-196. POSIX O_CREAT|O_EXCL
+    # mirrors the Sec-M1 pattern in session_init's symlink-defense path. POSIX O_CREAT|O_EXCL
     # already refuses to follow a trailing symlink; O_NOFOLLOW is defense-in-depth
     # against any future flag-combination divergence and against intermediate-symlink
     # variants. getattr graceful-degrades on platforms that lack the flag.
@@ -189,6 +214,14 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # Type-guard: a non-dict stdin payload (JSON array, string, number,
+        # null) would crash the subsequent `.get(...)` calls and violate
+        # the exit-0 invariant. Cross-hook pattern follow-up tracked
+        # separately.
+        if not isinstance(input_data, dict):
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
         pact_context.init(input_data)
 
         # Fallback substitution attempts preservation of the agent_handoff
@@ -199,28 +232,23 @@ def main() -> None:
         # task.json via raw_task_id), but a missing task_id falls through
         # to read_task_json("unknown", team_name) → {} → status gate exits
         # early. "Preservation" is best-effort, not guaranteed.
+        # The "MISSING required field(s)" stderr warning fires below, only
+        # after all bypass gates clear and a journal write is actually
+        # attempted — silencing the noise on signal-task / handoff-absent /
+        # no-owner paths that suppress emission anyway.
         raw_task_id = input_data.get("task_id")
         raw_task_subject = input_data.get("task_subject")
         task_id_was_missing = not raw_task_id
         task_subject_was_missing = not raw_task_subject
         task_id = raw_task_id or "unknown"
         task_subject = raw_task_subject or "(no subject)"
-        if task_id_was_missing or task_subject_was_missing:
-            print(
-                f"agent_handoff_emitter: missing required field(s) in "
-                f"TaskCompleted payload "
-                f"(task_id={'MISSING' if task_id_was_missing else 'present'}, "
-                f"task_subject={'MISSING' if task_subject_was_missing else 'present'}); "
-                f"using fallback values to attempt preservation of agent_handoff event",
-                file=sys.stderr,
-            )
 
         # Sanitize path-joining components symmetrically with
-        # task_utils.read_task_json (task_utils.py:295). task_id and team_name
-        # both flow into filesystem paths (read_task_json for the status read,
-        # _marker_dir / marker_path for the O_EXCL dedup marker). A helper
-        # applied at a single producer-side site ensures the two sink paths
-        # can never diverge.
+        # task_utils.read_task_json. task_id and team_name both flow into
+        # filesystem paths (read_task_json for the status read, _marker_dir /
+        # marker_path for the O_EXCL dedup marker). A helper applied at a
+        # single producer-side site ensures the two sink paths can never
+        # diverge.
         task_id = _sanitize_path_component(str(task_id))
         team_name = _sanitize_path_component(
             str(input_data.get("team_name") or get_team_name()).lower()
@@ -238,19 +266,27 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        # Status gate — substitute for the missing `previous_status` field in
-        # TaskCompleted stdin. Claude Code fires this hook on ANY TaskUpdate,
-        # not only on transitions to `completed`; trusting the event name as
-        # the transition signal would re-emit agent_handoff events on every
-        # metadata-only TaskUpdate (claim flags, intentional_wait toggles,
-        # briefing_delivered tracking, etc.). The on-disk `status` is the
-        # only reliable source of truth for "did this TaskUpdate actually
-        # flip status to completed." Metadata-only TaskUpdates (claim flags,
-        # briefing_delivered, intentional_wait toggles, etc.) keep
-        # status=in_progress and MUST NOT emit.
-        if task_data.get("status") != "completed":
-            print(_SUPPRESS_OUTPUT)
-            sys.exit(0)
+        # Transition signal: `hook_event_name == "TaskCompleted"` is the
+        # primary signal; the disk-status check is a fallback used only
+        # when stdin omits `hook_event_name`.
+        #
+        # See pact-plugin/hooks/shared/HOOK_INPUT_CONVENTIONS.md for the
+        # routing convention (string-literal compare; never used as a path
+        # component; fail-closed on non-string values).
+        #
+        # DO NOT DELETE the fallback branch — forward-compat path for
+        # platforms that omit `hook_event_name`. It is pinned by
+        # TestStatusFallbackGate (TestProductionShapeMetadataOnly
+        # exercises the production-shape path).
+        hook_event = input_data.get("hook_event_name", "")
+        # Comparison with the string literal fail-closes on non-string
+        # values; do not cast or trim. A non-string `hook_event` (None,
+        # int, bool) compares unequal to "TaskCompleted" and falls through
+        # to the disk-status fallback.
+        if hook_event != "TaskCompleted":  # Invariant (1a) primary check
+            if task_data.get("status") != "completed":  # Invariant (1b) fallback
+                print(_SUPPRESS_OUTPUT)
+                sys.exit(0)
 
         # `or {}` handles explicit JSON null in addition to missing key —
         # .get("metadata", {}) returns None when the key is present with a
@@ -265,27 +301,51 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # Handoff-presence gate. Suppress emission AND skip marker creation
+        # when `metadata.handoff` is absent or empty. Required so that a
+        # fire arriving before the teammate has stored handoff cannot claim
+        # the O_EXCL marker with empty content; the substantive completion
+        # (with handoff populated) claims it instead.
+        if not task_metadata.get("handoff"):
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+
         # Idempotency guard — suppress duplicate fires for the same
-        # (team, task_id). Ordering: the marker is created OPTIMISTICALLY
-        # BEFORE append_event completes. If the subsequent journal write
-        # fails (session_journal is fail-open and may silently no-op on
-        # write errors), the marker persists and any retry will see it
-        # and suppress — the event is lost on disk AND marked as
-        # already-emitted. Intentional trade-off: preventing 37× duplicate
-        # emission (empirically measured) outweighs the rare single-event
-        # loss under write failure.
+        # (team, task_id). The marker is created ONLY when handoff-presence
+        # is verified above; the optimistic ordering (marker created before
+        # append_event completes) trades one rare write-failure event loss
+        # against repeated duplicate emission (see `_already_emitted` for
+        # empirical basis).
         if _already_emitted(team_name, task_id):
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
+        # Stderr warning fires here — after all bypass gates clear and
+        # the marker is claimed, so noise is limited to fires that
+        # actually attempt a journal write.
+        if task_id_was_missing or task_subject_was_missing:
+            print(
+                f"agent_handoff_emitter: missing required field(s) in "
+                f"TaskCompleted payload "
+                f"(task_id={'MISSING' if task_id_was_missing else 'present'}, "
+                f"task_subject={'MISSING' if task_subject_was_missing else 'present'}); "
+                f"using fallback values to attempt preservation of agent_handoff event",
+                file=sys.stderr,
+            )
+
         # Journal-write — the sole purpose of this hook.
+        # DO NOT forward additional stdin fields beyond these 4 — the
+        # journal event payload contract is intentionally minimal, and
+        # TestStdinShapePin asserts no leakage of session_id /
+        # transcript_path / cwd / hook_event_name / team_name /
+        # teammate_name / task_description into the event.
         append_event(
             make_event(
                 "agent_handoff",
                 agent=teammate_name,
                 task_id=task_id,
                 task_subject=task_subject,
-                handoff=task_metadata.get("handoff") or {},
+                handoff=task_metadata.get("handoff"),
             ),
         )
 
@@ -297,10 +357,10 @@ def main() -> None:
         # _SUPPRESS_OUTPUT emission side-effect on those paths.
         raise
     except Exception:
-        # AC #8: exit 0 suppressOutput on every code path. Any unexpected
-        # error (including malformed task_data shapes not caught by the
-        # `or {}` guard above) falls back to a clean no-op to preserve the
-        # livelock-safe invariant.
+        # Outer catch-all: every code path must exit 0 suppressOutput. Any
+        # unexpected error (including malformed task_data shapes not caught
+        # by the `or {}` guard above) falls back to a clean no-op to
+        # preserve the livelock-safe invariant.
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
