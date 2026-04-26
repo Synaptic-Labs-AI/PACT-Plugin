@@ -625,6 +625,88 @@ class TestMarkerFailOpen:
         )
 
 
+class TestMarkerDirSymlinkGuard:
+    """Pin the symlink-containment pre-check at the marker_dir creation
+    site. If `~/.claude/teams/{team}/.agent_handoff_emitted` already
+    exists as a symlink, `_already_emitted` MUST return False (fail-open
+    emit) without following the symlink — refusing to create the marker
+    file at an attacker-controlled location.
+
+    Pairs with the existing fail-open tests in `TestMarkerFailOpen`:
+    a corrupted/hostile marker layer never causes silent suppression
+    (data-integrity over duplication-prevention) AND never causes a
+    write through a redirected path (containment over emit-at-any-cost).
+    """
+
+    def test_marker_dir_symlink_returns_false_no_traversal(
+        self, tmp_path, monkeypatch
+    ):
+        """A pre-planted symlink at the marker_dir path must be detected
+        and short-circuited. The function returns False (fail-open emit)
+        and creates no file at the symlink target."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import _already_emitted
+
+        team = "pact-test"
+        task_id = "t1"
+
+        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir.mkdir(parents=True)
+        attacker_target = tmp_path / "attacker_target"
+        attacker_target.mkdir()
+
+        marker_dir_path = team_dir / ".agent_handoff_emitted"
+        marker_dir_path.symlink_to(attacker_target, target_is_directory=True)
+
+        result = _already_emitted(team, task_id)
+
+        assert result is False, (
+            "symlink at marker_dir must fail-open emit (return False); "
+            "removing the is_symlink() guard would let the marker create "
+            "via the symlink and return False/True based on EEXIST race."
+        )
+        assert not (attacker_target / task_id).exists(), (
+            "no file may be created at the symlink target — the guard "
+            "must short-circuit BEFORE any os.open call follows the link."
+        )
+
+    def test_marker_dir_ordinary_directory_not_misclassified(
+        self, tmp_path, monkeypatch
+    ):
+        """A pre-existing ordinary (non-symlink) directory at the
+        marker_dir path must NOT be flagged by the guard. The first
+        call creates the marker file inside it (returns False); the
+        second call observes the marker via O_EXCL EEXIST (returns
+        True). Confirms the guard discriminates symlink vs ordinary
+        dir rather than treating any pre-existing dir as hostile."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from agent_handoff_emitter import _already_emitted
+
+        team = "pact-test"
+        task_id = "t1"
+
+        marker_dir_path = (
+            tmp_path / ".claude" / "teams" / team / ".agent_handoff_emitted"
+        )
+        marker_dir_path.mkdir(parents=True)
+
+        first = _already_emitted(team, task_id)
+        second = _already_emitted(team, task_id)
+
+        assert first is False, (
+            "first call against an ordinary marker_dir must create the "
+            "marker file and return False (winner / emit path)."
+        )
+        assert second is True, (
+            "second call must observe EEXIST on the existing marker and "
+            "return True (suppress duplicate emission)."
+        )
+        assert (marker_dir_path / task_id).exists(), (
+            "winner must have created a real marker file inside the "
+            "ordinary marker_dir."
+        )
+
+
 class TestConcurrentFireRace:
     """O_EXCL marker must deterministically deduplicate concurrent
     `_already_emitted` calls for the same (team, task_id). One caller
