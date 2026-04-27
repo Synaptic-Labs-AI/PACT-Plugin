@@ -478,13 +478,27 @@ inspection and session review. Your responsibilities:
 
 ### Completion Authority
 
-You — the lead — are the **only** actor who marks teammate-owned tasks `completed`. Acceptance is a **two-call atomic pair (BOTH required)**: `TaskUpdate(taskId, status="completed")` + paired wake-signal SendMessage. Rejection is dual-channel: write `metadata.{teachback,handoff}_rejection` `{reason, corrections, since, revision_number}` + paired wake-signal SendMessage. Skipping the SendMessage strands the idle teammate — `blockedBy` is pull-only at the platform level, so the wake is load-bearing. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal. Carve-outs (rare, narrow): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`); imPACT force-termination (`metadata.terminated == true`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py`.
+You — the lead — are the **only** actor who marks teammate-owned tasks `completed`. `blockedBy` is pull-only at the platform level — idle teammates cannot self-wake to re-poll, so the wake-signal SendMessage paired with each metadata/status write is load-bearing.
 
-**TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty. See [pact-completion-authority.md](../../protocols/pact-completion-authority.md) for the full recipes and recovery semantics.
+**Acceptance — two-call atomic pair (BOTH required)**
+1. `TaskUpdate(taskId, status="completed")`
+2. `SendMessage(to=<teammate>, "[lead→<teammate>] Task #<id> accepted...", summary="Task accepted")`
+
+Both calls are required. Skipping the SendMessage leaves the teammate idle on `awaiting_lead_completion`; `blockedBy` resolution is invisible without the wake.
+
+**Rejection — two-call atomic pair (BOTH required)**
+1. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` OR `metadata={"handoff_rejection": {...}}` — payload `{reason, corrections, since, revision_number}`
+2. `SendMessage(to=<teammate>, "[lead→<teammate>] Rejected on Task #<id>. See metadata...; revise.")`
+
+Both calls are required. Skipping the SendMessage leaves the teammate idle on stale `awaiting_lead_completion`, never seeing the corrections — symmetric failure to skipping wake on acceptance. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
+
+Carve-outs (rare, narrow): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`); imPACT force-termination (`metadata.terminated == true`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py`.
+
+**TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty. See [pact-completion-authority.md](../../protocols/pact-completion-authority.md) for full recipes (teachback review flow, rejection corrections schema, carve-out rationale).
 
 ### Teachback Review
 
-Each specialist dispatch creates a Task A (teachback) + Task B (primary work) pair with `blockedBy=[A]`. The teammate claims A, writes `metadata.teachback_submit` (4 fields: understanding / most_likely_wrong / least_confident_item / first_action), idles on `awaiting_lead_completion`. You read the payload (`cat ~/.claude/tasks/{team}/{A_id}.json | jq .metadata.teachback_submit`), apply the validation discipline from [Validating Incoming Teachbacks](#validating-incoming-teachbacks) below, then accept via the two-call atomic pair from §Completion Authority above. Acceptance auto-unblocks Task B; do NOT mark Task B `completed` or `pending` yourself — the teammate claims it on wake. See [pact-completion-authority.md §Teachback Review](../../protocols/pact-completion-authority.md#teachback-review) for the complete approval recipe.
+Each specialist dispatch creates a Task A (teachback) + Task B (primary work) pair with `blockedBy=[A]`. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply [Validating Incoming Teachbacks](#validating-incoming-teachbacks) below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake. See [pact-completion-authority.md §Teachback Review](../../protocols/pact-completion-authority.md#teachback-review) for the full review flow.
 
 ### Recommended Agent Prompting Structure
 
@@ -514,32 +528,11 @@ A list of things that include the following:
 
 #### Validating Incoming Teachbacks
 
-When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
-
-Once you've reviewed and decided, follow the [Teachback Review](#teachback-review) acceptance recipe. Do NOT mark Task A `completed` without the paired wake-signal SendMessage — see [Completion Authority](#completion-authority) for the two-call atomic pair.
+When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF stored in task metadata. Read via `TaskGet(taskId).metadata.handoff` when needed:
-
-```
-HANDOFF:
-1. Produced: Files created/modified
-2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
-4. Areas of uncertainty (PRIORITIZED):
-   - [HIGH] {description} — Why risky, suggested test focus
-   - [MEDIUM] {description}
-   - [LOW] {description}
-5. Integration points: Other components touched
-6. Open questions: Unresolved items
-```
-
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
-
-If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
-
-On HANDOFF receipt, inspect `metadata.handoff` (raw JSON read; `TaskGet` does not surface metadata) and follow the [Completion Authority](#completion-authority) two-call atomic pair to flip the task to `completed` and wake the teammate. Do NOT dispatch downstream phases against a teammate-owned task that you have not yet marked completed — the teammate is idle awaiting your acceptance, and the task graph has not unblocked dependents.
+Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, inspect `metadata.handoff` (raw JSON read; `TaskGet` is metadata-blind) and follow the [Completion Authority](#completion-authority) two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed — the teammate is idle awaiting your acceptance, and dependents have not unblocked.
 
 ### How to Delegate
 

@@ -8,20 +8,23 @@
 
 ## Completion Authority
 
-You — the lead — are the **only** actor who marks teammate-owned tasks `completed`. Teammates write HANDOFFs to `metadata.handoff`, idle on `intentional_wait{reason=awaiting_lead_completion}`, and wait for your acceptance. The `TaskUpdate(status="completed")` flip is the load-bearing approval action; the wake-signal SendMessage is the load-bearing wake.
+You — the lead — are the **only** actor who marks teammate-owned tasks `completed`. Teammates write HANDOFFs to `metadata.handoff`, idle on `intentional_wait{reason=awaiting_lead_completion}`, and wait for your acceptance. The `TaskUpdate(status="completed")` flip is the load-bearing approval action; the paired wake-signal SendMessage is the load-bearing wake.
 
-**Acceptance recipe — two-call atomic pair (BOTH required)**:
+`blockedBy` is pull-only at the platform level — the platform does NOT push a wake on blocker resolution; `blockedBy` is computed at TaskList query time. Idle teammates cannot self-wake to re-poll, so the wake-signal SendMessage is paired with each metadata or status write that resolves their wait.
 
-```
-TaskUpdate(taskId, status="completed")
-SendMessage(
-    to="<teammate>",
-    message="[lead→<teammate>] Task #<id> accepted. Work complete.",
-    summary="Task accepted"
-)
-```
+### Acceptance — two-call atomic pair (BOTH required)
 
-Both calls are **required**. The `TaskUpdate` flips status (which auto-unblocks any tasks with `blockedBy=[<id>]`); the `SendMessage` wakes the idle teammate so they can claim the next task. The platform does NOT push a wake on blocker resolution — `blockedBy` is computed at TaskList query time. An idle teammate cannot self-wake to re-poll. Skipping the SendMessage strands the teammate idle until something else (peer message, your next dispatch) wakes them.
+1. `TaskUpdate(taskId, status="completed")` — status flip; auto-unblocks any tasks with `blockedBy=[<id>]`
+2. `SendMessage(to="<teammate>", "[lead→<teammate>] Task #<id> accepted. Work complete.", summary="Task accepted")` — wakes the idle teammate so they can claim the next task
+
+Both calls are **required**. Skipping the SendMessage strands the teammate idle on `awaiting_lead_completion` until something else (peer message, your next dispatch) wakes them; `blockedBy` resolution is invisible without the wake.
+
+### Rejection — two-call atomic pair (BOTH required)
+
+1. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` (Task A) OR `TaskUpdate(taskId, metadata={"handoff_rejection": {...}})` (Task B) — payload `{reason, corrections, since, revision_number}`
+2. `SendMessage(to="<teammate>", "[lead→<teammate>] Rejected on Task #<id>. See metadata.{teachback,handoff}_rejection. Revise.", summary="Rejected; revise")` — wakes the teammate so they read the corrections
+
+Both calls are **required**. Skipping the SendMessage leaves the teammate idle on stale `awaiting_lead_completion`, never seeing the corrections — symmetric failure to skipping wake on acceptance. The teammate's `intentional_wait` does not auto-clear when you write rejection metadata; only the wake-signal triggers their CLEAR-and-revise flow. **3+ rejection cycles** on the same task is an imPACT META-BLOCK signal.
 
 **Carve-outs** (rare, narrow):
 
