@@ -530,6 +530,19 @@ A list of things that include the following:
 
 When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
+**Structured `teachback_approved` at every dispatch.** Every teachback you
+validate — on every dispatch, no exceptions — MUST include a
+`teachback_approved` metadata write via `TaskUpdate` with the sub-fields
+`scanned_candidate`, `response_to_assumption`, `response_to_least_confident`,
+`first_action_check`, and `conditions_met`. All 5 sub-fields are required
+on every approval. Writing the structured form is how you genuinely engage
+with the teammate's teachback — the substring-inequality, citation-shape,
+and grounding-reference requirements force actual reading rather than
+rubber-stamp approval. An approval without these fields is not an approval.
+If a teammate sent a bare-text teachback without the structured
+`teachback_submit` metadata, reply via `SendMessage` asking them to
+re-submit via `TaskUpdate` — the structured form is what you respond to.
+
 #### Expected Agent HANDOFF Format
 
 Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, inspect `metadata.handoff` (raw JSON read; `TaskGet` is metadata-blind) and follow the [Completion Authority](#completion-authority) two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed — the teammate is idle awaiting your acceptance, and dependents have not unblocked.

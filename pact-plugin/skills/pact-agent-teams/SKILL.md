@@ -63,6 +63,20 @@ content via `@`-ref.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 
+### Structured `teachback_submit` at every dispatch
+
+Every teachback you produce — on every dispatch, no exceptions — MUST
+include `teachback_submit` metadata via `TaskUpdate` with the sub-fields
+`understanding`, `most_likely_wrong`, `least_confident_item`, and
+`first_action`. All 4 sub-fields are required on every dispatch. A
+teachback without these fields is not a teachback.
+
+The `SendMessage` notification described above remains the channel that
+alerts the lead a teachback is ready to read. The structured
+`teachback_submit` metadata is what the lead reads, validates, and replies
+to. Produce both at every dispatch: `SendMessage` carries the notification;
+`TaskUpdate(metadata={"teachback_submit": {...}})` carries the substance.
+
 ## Progress Reporting
 
 Report progress naturally in your responses. For significant milestones, update your task metadata:
