@@ -1058,7 +1058,8 @@ class TestCompletionAuthorityNote:
 # Spawn-able teammate agent types — these are the surfaces that should
 # receive the completion-authority directive when a peer is injected.
 # Sourced from agents/ directory; if a new pact-* agent is added, this
-# list should grow to match.
+# list should grow to match. The drift-detection test below asserts the
+# list ⊇ agents/ directory listing so additions are caught at test-time.
 _PACT_AGENT_TYPES = [
     "pact-architect",
     "pact-backend-coder",
@@ -1069,6 +1070,9 @@ _PACT_AGENT_TYPES = [
     "pact-auditor",
     "pact-preparer",
     "pact-secretary",
+    "pact-n8n",
+    "pact-qa-engineer",
+    "pact-security-engineer",
 ]
 
 
@@ -1139,6 +1143,24 @@ class TestCompletionAuthorityNoteParametrizedAgents:
             f"Ordering invariant broken for agent_type={agent_type}: "
             f"teachback at {teachback_pos}, completion-note at {completion_pos}. "
             "Completion-note must trail teachback-reminder."
+        )
+
+    def test_pact_agent_types_list_covers_agents_directory(self):
+        """Drift guard: _PACT_AGENT_TYPES must cover every pact-*.md in agents/.
+
+        Catches new agent additions that forget to update the parametrize list.
+        Without this, a new role would silently miss the parametrized sweep
+        and could ship without verified completion-authority directive
+        delivery. Set comparison (⊇) tolerates the list being a superset
+        if a future agent type is registered before its file lands.
+        """
+        agents_dir = Path(__file__).parent.parent / "agents"
+        files = sorted(p.stem for p in agents_dir.glob("pact-*.md"))
+        missing = set(files) - set(_PACT_AGENT_TYPES)
+        assert not missing, (
+            f"_PACT_AGENT_TYPES is missing agents present in {agents_dir}: "
+            f"{sorted(missing)}. Add them to the list so the parametrized "
+            "sweep covers every spawnable role."
         )
 
 
