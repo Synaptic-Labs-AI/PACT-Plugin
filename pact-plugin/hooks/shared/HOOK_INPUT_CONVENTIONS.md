@@ -49,7 +49,7 @@ Tests that consume the production stdin shape pin two properties:
   real platform fires, used as a fixture so future hook changes are
   tested against what the platform actually delivers (not a synthetic
   shape the test author guessed). See
-  `test_agent_handoff_emitter.py::TestStdinShapePin`.
+  `test_emitter_real_disk.py::TestStdinShapePin`.
 
 - **No-leakage invariant**: the journal event payload (or whatever the
   hook produces) must NOT forward fields the contract didn't promise.
@@ -73,8 +73,9 @@ When adding a new hook that consumes stdin, follow the same pattern:
   consumer. Shows the routing pattern
   (`if hook_event != "TaskCompleted":`) with the fallback branch for
   forward-compat.
-- `pact-plugin/tests/test_agent_handoff_emitter.py` — pins the
-  conventions via `TestStdinShapePin` (verbatim shape + no-leakage),
-  `TestStatusFallbackGate` (forward-compat fallback path), and
-  `TestProductionShapeMetadataOnly` (production-shape behavior including
-  the handoff-presence gate).
+- `pact-plugin/tests/test_emitter_real_disk.py::TestStdinShapePin` —
+  pins the verbatim shape + no-leakage invariant.
+- `pact-plugin/tests/test_emitter_happy_and_gates.py::TestStatusFallbackGate` —
+  pins the forward-compat fallback path (stdin lacks `hook_event_name`).
+- `pact-plugin/tests/test_emitter_happy_and_gates.py::TestProductionShapeMetadataOnly` —
+  pins production-shape behavior including the handoff-presence gate.
