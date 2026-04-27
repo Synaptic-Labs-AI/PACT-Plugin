@@ -1163,7 +1163,7 @@ class TestPathSync:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "abc-12345"
-        project_dir = "/Users/test/PACT-prompt"
+        project_dir = "/Users/test/PACT-Plugin"
         slug = Path(project_dir).name
 
         expected = (
@@ -1386,7 +1386,7 @@ class TestSessionScopedPathE2E:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "e2e-session-42"
-        project_dir = "/Users/test/PACT-prompt"
+        project_dir = "/Users/test/PACT-Plugin"
 
         # write_context with _context_path=None computes session-scoped path
         ctx_module.write_context(
@@ -1396,7 +1396,7 @@ class TestSessionScopedPathE2E:
         )
 
         # Verify file exists at expected session-scoped path
-        slug = "PACT-prompt"  # Path(project_dir).name
+        slug = "PACT-Plugin"  # Path(project_dir).name
         expected_path = (
             tmp_path / ".claude" / "pact-sessions"
             / slug / session_id / "pact-session-context.json"
@@ -1450,12 +1450,12 @@ class TestPactSessionPath:
 
         result = _context_file_path(
             session_id="abc-session-123",
-            project_dir="/Users/test/PACT-prompt",
+            project_dir="/Users/test/PACT-Plugin",
         )
 
         expected = (
             tmp_path / ".claude" / "pact-sessions"
-            / "PACT-prompt" / "abc-session-123" / "pact-session-context.json"
+            / "PACT-Plugin" / "abc-session-123" / "pact-session-context.json"
         )
         assert result == expected
 

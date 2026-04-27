@@ -41,10 +41,10 @@ PLATFORM_STDIN_SHAPE = {
     "session_id": "1fb6500d-25ba-48c6-af00-5f92024644d0",
     "transcript_path": (
         "/Users/mj/.claude/projects/"
-        "-Users-mj-Sites-collab-PACT-prompt/"
+        "-Users-mj-Sites-collab-PACT-Plugin/"
         "1fb6500d-25ba-48c6-af00-5f92024644d0.jsonl"
     ),
-    "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+    "cwd": "/Users/mj/Sites/collab/PACT-Plugin",
     "hook_event_name": "TaskCompleted",
     "task_id": "12",
     "task_subject": "PROBE: capture real TaskCompleted stdin shape",

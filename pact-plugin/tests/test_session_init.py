@@ -2240,7 +2240,7 @@ class TestExtractPrevSessionDirDualLocation:
         dot_claude_dir.mkdir()
         expected = str(
             (tmp_path / "home") / ".claude" / "pact-sessions"
-            / "PACT-prompt" / "aaaaaaaa-1111-2222-3333-444444444444"
+            / "PACT-Plugin" / "aaaaaaaa-1111-2222-3333-444444444444"
         )
         (dot_claude_dir / "CLAUDE.md").write_text(
             self._make_content("aaaaaaaa-1111-2222-3333-444444444444", expected),
@@ -2261,7 +2261,7 @@ class TestExtractPrevSessionDirDualLocation:
 
         expected = str(
             (tmp_path / "home") / ".claude" / "pact-sessions"
-            / "PACT-prompt" / "bbbbbbbb-1111-2222-3333-444444444444"
+            / "PACT-Plugin" / "bbbbbbbb-1111-2222-3333-444444444444"
         )
         (tmp_path / "CLAUDE.md").write_text(
             self._make_content("bbbbbbbb-1111-2222-3333-444444444444", expected),
@@ -2284,10 +2284,10 @@ class TestExtractPrevSessionDirDualLocation:
         dot_claude_dir.mkdir()
         sessions_root = (tmp_path / "home") / ".claude" / "pact-sessions"
         preferred = str(
-            sessions_root / "PACT-prompt" / "cccccccc-1111-2222-3333-444444444444"
+            sessions_root / "PACT-Plugin" / "cccccccc-1111-2222-3333-444444444444"
         )
         legacy = str(
-            sessions_root / "PACT-prompt" / "dddddddd-1111-2222-3333-444444444444"
+            sessions_root / "PACT-Plugin" / "dddddddd-1111-2222-3333-444444444444"
         )
 
         (dot_claude_dir / "CLAUDE.md").write_text(
@@ -2616,7 +2616,7 @@ class TestExtractPrevSessionDirDualLocation:
         prefix = str(tmp_path / "home" / ".claude" / "pact-sessions")
 
         # Inside the prefix — should pass.
-        good = f"{prefix}/PACT-prompt/aaaa"
+        good = f"{prefix}/PACT-Plugin/aaaa"
         assert _validate_under_pact_sessions(good) == good
 
         # Exactly the prefix root — should pass (edge case).
@@ -2682,7 +2682,7 @@ class TestExtractPrevSessionDirDualLocation:
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
 
         prefix = str(tmp_path / "home" / ".claude" / "pact-sessions")
-        legitimate = f"{prefix}/PACT-prompt/aaaaaaaa-1111-2222-3333-444444444444"
+        legitimate = f"{prefix}/PACT-Plugin/aaaaaaaa-1111-2222-3333-444444444444"
         assert _validate_under_pact_sessions(legitimate) == legitimate
 
     def test_validator_rejects_sibling_prefix_collision_regression(
