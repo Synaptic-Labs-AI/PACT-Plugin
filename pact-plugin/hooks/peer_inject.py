@@ -167,11 +167,12 @@ def get_peer_context(
         )
 
     prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=safe_name)
-    # Surface plugin manifest diagnostic (#500). Banner is a single line
-    # with no leading/trailing newlines; add an explicit "\n\n" separator
-    # between peer_context and the banner. _TEACHBACK_REMINDER already
-    # begins with "\n\n", which preserves the existing visual spacing
-    # between the banner and the teachback reminder.
+    # Output ordering: prelude → peer_context → "\n\n" → plugin banner →
+    # _TEACHBACK_REMINDER → _COMPLETION_AUTHORITY_NOTE. The plugin banner
+    # is a single line with no leading/trailing newlines, so an explicit
+    # "\n\n" separator goes between peer_context and the banner.
+    # _TEACHBACK_REMINDER and _COMPLETION_AUTHORITY_NOTE each begin with
+    # "\n\n", preserving visual spacing through the trailing reminders.
     return (
         prelude
         + peer_context
