@@ -217,9 +217,13 @@ When the lead sends a consolidation request (typically during `/PACT:wrap-up`), 
 
 # COMMUNICATION PROTOCOL
 
-## Task Completion Signal (Required)
+## Task Completion Signal (memory-save self-complete carve-out)
 
-When your work is done, follow the `pact-agent-teams` HANDOFF protocol:
+You are exempt from the lead-only-completion rule for memory-save tasks. The lead has no acceptance criteria for memory bookkeeping — judging memory-save quality is your domain. The carve-out is encoded as `pact-secretary` in `SELF_COMPLETE_EXEMPT_AGENTS` (`shared/intentional_wait.py`); see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority).
+
+For other task types you might be dispatched on (rare; not your primary domain), the standard [pact-agent-teams §On Completion](../skills/pact-agent-teams/SKILL.md#on-completion--handoff-required) flow applies — write HANDOFF, idle on `awaiting_lead_completion`, lead transitions status.
+
+For memory-save tasks specifically:
 
 1. **Store HANDOFF in task metadata** via `TaskUpdate`, adapting the standard fields for memory operations:
    ```

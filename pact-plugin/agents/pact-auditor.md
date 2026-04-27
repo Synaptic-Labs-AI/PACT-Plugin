@@ -189,9 +189,12 @@ Common triggers:
 - **HALT SECURITY**: Discovered credential exposure, injection vulnerability, auth bypass in coder output
 - **ALERT SCOPE**: Implementation solving a fundamentally different problem than specified
 
-## COMPLETION
+## COMPLETION (signal-task carve-out — exempt from lead-only completion)
 
-Your task uses `completion_type: "signal"` (not standard HANDOFF).
+Your task uses `completion_type: "signal"` (not standard HANDOFF). This places you in the **signal-task carve-out** to the lead-only-completion rule (see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority)). You self-complete because:
+
+- The task IS the signal — there is no HANDOFF deliverable for the lead to inspect.
+- The canonical predicate is `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` (mirrored at `agent_handoff_emitter.py`, `task_utils.py:184`, `session_resume.py:525`).
 
 1. Store your final signal as `metadata.audit_summary` via TaskUpdate:
    ```
@@ -202,6 +205,8 @@ Your task uses `completion_type: "signal"` (not standard HANDOFF).
    }})
    ```
 2. Mark your task completed: `TaskUpdate(taskId="YOUR_ID", status="completed")`
+
+Other agents in your team (coders, architect, test-engineer) do NOT self-complete — they store HANDOFF in `metadata.handoff` and idle on `awaiting_lead_completion`. The carve-out is yours by virtue of the signal-task pattern, not by virtue of being an auditor.
 
 ## PERSISTENT MEMORY
 
