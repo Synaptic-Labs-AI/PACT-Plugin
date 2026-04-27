@@ -105,3 +105,55 @@ class TestSkillMdFiles:
             _, _, body = text.partition("---")
             _, _, body = body.partition("---")
             assert len(body.strip()) > 100, f"{d.name}/SKILL.md body too short"
+
+
+class TestPreResponseChannelCheckGate:
+    """Both pact-agent-teams and orchestration skills carry the
+    Pre-Response Channel Check gate (issue family: instruction-surface-leak)."""
+
+    AGENT_TEAMS_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
+    ORCHESTRATION_PATH = SKILLS_DIR / "orchestration" / "SKILL.md"
+
+    INVARIANT_HEADER = "Pre-Response Channel Check"
+    INVARIANT_USER_ADDRESSEE = "Addressee is **user**"
+    INVARIANT_AGENT_ADDRESSEE = "Addressee is **lead, peer, or any other agent**"
+    INVARIANT_BOTH_ADDRESSEE = "Addressee is **both**"
+    INVARIANT_FORMAT_CUE = "Format-cue hijack"
+    INVARIANT_CANDOR = "Candor-question"
+    LEAD_GRAY_AREA_PHRASE = "Lead-side gray-area trap"
+
+    def test_teammate_side_has_gate(self):
+        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        for phrase in (
+            self.INVARIANT_HEADER,
+            self.INVARIANT_USER_ADDRESSEE,
+            self.INVARIANT_AGENT_ADDRESSEE,
+            self.INVARIANT_BOTH_ADDRESSEE,
+            self.INVARIANT_FORMAT_CUE,
+            self.INVARIANT_CANDOR,
+        ):
+            assert phrase in text, f"pact-agent-teams missing gate phrase: {phrase!r}"
+
+    def test_lead_side_has_gate(self):
+        text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        for phrase in (
+            self.INVARIANT_HEADER,
+            self.INVARIANT_USER_ADDRESSEE,
+            self.INVARIANT_AGENT_ADDRESSEE,
+            self.INVARIANT_BOTH_ADDRESSEE,
+            self.INVARIANT_FORMAT_CUE,
+            self.INVARIANT_CANDOR,
+        ):
+            assert phrase in text, f"orchestration missing gate phrase: {phrase!r}"
+
+    def test_lead_side_has_gray_area_addendum(self):
+        text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        assert self.LEAD_GRAY_AREA_PHRASE in text, (
+            "orchestration must include the lead-side gray-area trap addendum"
+        )
+
+    def test_teammate_side_does_not_have_lead_addendum(self):
+        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        assert self.LEAD_GRAY_AREA_PHRASE not in text, (
+            "lead-side gray-area trap belongs only in orchestration/SKILL.md"
+        )
