@@ -9,6 +9,8 @@ L5. Review calibration save step in peer-review.md
 L6. Agent state model cross-reference in pact-agent-stall.md
 L7. Worktree CLAUDE.md scope warnings in dispatch templates and agent-teams skill
 L8. Custom start flows note in agent-teams SKILL.md cross-references pact-secretary.md
+L9. Dead-reference guard for #452 file relocation
+L10. Lead-Side HALT Fan-Out slug stability — canonical heading + 5 cross-refs
 """
 from pathlib import Path
 
@@ -28,6 +30,10 @@ PEER_REVIEW_PATH = COMMANDS_DIR / "peer-review.md"
 AGENT_STALL_PATH = PROTOCOLS_DIR / "pact-agent-stall.md"
 AGENT_TEAMS_SKILL_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
 SECRETARY_PATH = AGENTS_DIR / "pact-secretary.md"
+ORCHESTRATION_SKILL_PATH = SKILLS_DIR / "orchestration" / "SKILL.md"
+ALGEDONIC_PATH = PROTOCOLS_DIR / "algedonic.md"
+PACT_PROTOCOLS_PATH = PROTOCOLS_DIR / "pact-protocols.md"
+COMM_CHARTER_PATH = PROTOCOLS_DIR / "pact-communication-charter.md"
 
 
 class TestConversationFailureTaxonomy:
@@ -253,4 +259,75 @@ class TestDeadReferencesToMovedOrchestratorCore:
             f"These are either missed-update sites from #452 or forked "
             f"copies of the moved content; both break the dual-purpose "
             f"SSOT invariant for the orchestration skill. Hits: {hits}"
+        )
+
+
+class TestLeadSideHaltFanOutSlugStability:
+    """L10: Stability of the `lead-side-halt-fan-out` slug.
+
+    The canonical `#### Lead-Side HALT Fan-Out` heading lives in
+    skills/orchestration/SKILL.md and is referenced by 5 sites via the
+    GitHub-rendered slug `lead-side-halt-fan-out`. Renaming the heading
+    silently breaks every cross-reference (link still resolves to the
+    file, just lands at the page top instead of the section). This test
+    pins the slug by asserting:
+
+    - the canonical heading text is present at the SSOT site, and
+    - each of the 5 consumer sites contains the exact slug fragment.
+
+    Counter-test-by-revert: rename the canonical heading (e.g., to
+    "Lead-Side Halt Fanout") — the SSOT assertion fails. Drop the slug
+    from any consumer file — that site's assertion fails.
+    """
+
+    CANONICAL_HEADING = "#### Lead-Side HALT Fan-Out"
+    SLUG = "lead-side-halt-fan-out"
+
+    CROSS_REF_FILES = [
+        ("protocols/algedonic.md", ALGEDONIC_PATH),
+        ("commands/orchestrate.md", ORCHESTRATE_PATH),
+        ("protocols/pact-protocols.md", PACT_PROTOCOLS_PATH),
+        ("protocols/pact-communication-charter.md", COMM_CHARTER_PATH),
+    ]
+
+    def test_canonical_heading_present_in_orchestration_skill(self):
+        content = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
+        assert self.CANONICAL_HEADING in content, (
+            f"skills/orchestration/SKILL.md missing canonical heading "
+            f"{self.CANONICAL_HEADING!r}. Renaming this heading breaks "
+            "every cross-reference to the slug "
+            f"{self.SLUG!r}; restore the exact text or update all 5 "
+            "consumer sites in lockstep."
+        )
+
+    def test_canonical_heading_renders_to_expected_slug(self):
+        """GitHub auto-slugs `#### Lead-Side HALT Fan-Out` to
+        `lead-side-halt-fan-out` (lowercased, spaces → hyphens, special
+        chars stripped). Verify the canonical site itself contains the
+        slug as a self-anchor in its consumer body — `[…](#lead-side-halt-fan-out)` —
+        which transitively confirms the lower-casing/hyphenation rule
+        the consumers rely on.
+        """
+        content = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
+        assert f"#{self.SLUG}" in content, (
+            f"skills/orchestration/SKILL.md does not contain the self-anchor "
+            f"`#{self.SLUG}` that proves the slug-rendering rule. The "
+            "canonical heading must use exactly the casing/punctuation "
+            "that GitHub auto-slugs to "
+            f"{self.SLUG!r}."
+        )
+
+    @pytest.mark.parametrize(
+        "label,path",
+        CROSS_REF_FILES,
+        ids=[label for label, _ in CROSS_REF_FILES],
+    )
+    def test_cross_ref_uses_slug(self, label, path):
+        content = path.read_text(encoding="utf-8")
+        assert f"#{self.SLUG}" in content, (
+            f"{label} missing cross-reference to slug "
+            f"{self.SLUG!r}. The HALT fan-out idiom lives at "
+            "skills/orchestration/SKILL.md and is referenced from this "
+            "file via a slug-link; if the heading was renamed, propagate "
+            "the new slug to every consumer site."
         )
