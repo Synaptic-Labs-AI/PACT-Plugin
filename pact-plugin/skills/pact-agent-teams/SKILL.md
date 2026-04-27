@@ -169,7 +169,7 @@ If the lead rejects your teachback or HANDOFF, you wake on the inbound SendMessa
 3. **Revise**. For teachback rejection: rewrite `metadata.teachback_submit` per the corrections. For HANDOFF rejection: revise the deliverable (re-edit files, re-run tests, etc.) and rewrite `metadata.handoff`.
 
 4. **Re-submit on the SAME task** (do NOT create a new task):
-   - Increment `metadata.revision_number` (start at 1 on first revision; the lead writes `revision_number` into the rejection record, you increment to N+1 on each subsequent revision).
+   - Increment `metadata.revision_number`. The lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. The harvest path reads `metadata.handoff` directly when `revision_number > 1` to surface revised content; setting `revision_number=1` would route harvest to the rejected journal event and silently lose the revised content.
    - SendMessage the lead: `"[{sender}→lead] Revised teachback/HANDOFF on Task #{id}. See metadata.{teachback_submit|handoff} (revision {N})."`
    - Re-SET `intentional_wait{reason=awaiting_lead_completion, since=<fresh canonical_since() output>}`.
    - Idle.
@@ -309,7 +309,7 @@ If you cannot proceed:
 1. **Stop work immediately**
 2. **`SendMessage`** the blocker to the lead:
    ```
-   SendMessage(to="lead",
+   SendMessage(to="team-lead",
      message="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
@@ -325,7 +325,7 @@ When you detect a viability threat (security, data integrity, ethics):
 1. **Stop work immediately**
 2. **`SendMessage`** the signal to the lead:
    ```
-   SendMessage(to="lead",
+   SendMessage(to="team-lead",
      message="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
