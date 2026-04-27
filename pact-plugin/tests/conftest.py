@@ -1,10 +1,13 @@
 """
-Shared test fixtures for the refresh system tests.
+Shared test fixtures for the refresh system tests AND the
+agent_handoff_emitter test suite (test_emitter_*.py).
 
-Provides factories for generating realistic JSONL transcripts and
-common fixtures used across multiple test modules.
+Provides factories for generating realistic JSONL transcripts, common
+pytest fixtures, and the emitter-suite helpers (``VALID_HANDOFF``,
+``_run_main``) used across all test_emitter_*.py files.
 """
 
+import io
 import json
 import os
 import sys
@@ -23,6 +26,43 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 # Add pact-memory scripts to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'skills', 'pact-memory'))
+
+
+# =============================================================================
+# Emitter Suite Helpers (agent_handoff_emitter tests)
+# =============================================================================
+#
+# Hosts symbols used across all test_emitter_*.py files:
+# - ``VALID_HANDOFF``: pinned handoff payload (36+ usages across 17 classes)
+# - ``_run_main``: emitter main() invocation helper (41+ usages)
+#
+# Per-file co-located helpers (NOT lifted here):
+# - ``PLATFORM_STDIN_SHAPE`` and ``_write_task_json`` live in
+#   ``test_emitter_real_disk.py`` — single-file consumers.
+
+VALID_HANDOFF = {
+    "produced": ["src/auth.ts"],
+    "decisions": ["Used JWT"],
+    "uncertainty": [],
+    "integration": ["UserService"],
+    "open_questions": [],
+}
+
+
+def _run_main(stdin_payload, task_data, append_calls):
+    """Invoke agent_handoff_emitter.main() with patched IO/deps."""
+    from agent_handoff_emitter import main
+
+    def _append_spy(event):
+        append_calls.append(event)
+        return True
+
+    with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
+         patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
+         patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+    return exc_info.value.code
 
 
 # =============================================================================
