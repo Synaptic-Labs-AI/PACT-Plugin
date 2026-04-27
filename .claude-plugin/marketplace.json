@@ -1,8 +1,8 @@
 {
   "name": "pact-marketplace",
   "owner": {
-    "name": "Synaptic-Labs-AI",
-    "email": "profsynapse@github.com"
+    "name": "Synaptic Labs",
+    "url": "https://github.com/Synaptic-Labs-AI"
   },
   "metadata": {
     "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents"
