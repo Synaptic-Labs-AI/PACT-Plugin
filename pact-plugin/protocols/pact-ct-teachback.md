@@ -89,7 +89,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 5. Orchestrator proceeds with verified understanding (commit, create PR, etc.)
 ```
 
-For multiple concurrent specialists: broadcast your understanding of all deliverables. Each specialist confirms their piece.
+For multiple concurrent specialists: send your understanding of all deliverables to each specialist individually. Each specialist confirms their piece.
 
 #### Fallback: Specialist Unavailable
 
