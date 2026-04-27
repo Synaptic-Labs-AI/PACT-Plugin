@@ -52,6 +52,12 @@ def _isolate_walkup_to(monkeypatch, tmp_path):
     for any path that is NOT inside `tmp_path`. Within tmp_path, the
     original behavior is preserved. Effect: walk-up across ancestors above
     tmp_path always sees "no markers" regardless of ambient state.
+
+    Caveat: patches `Path.exists` and `Path.is_dir` at the CLASS level via
+    monkeypatch — affects ALL Path operations in the test's scope, not just
+    `_find_project_root_under_test` walks. Bounded by monkeypatch teardown.
+    Future test authors extending tests that rely on Path methods for
+    non-walk purposes should be aware.
     """
     tmp_resolved = tmp_path.resolve()
     original_exists = Path.exists

@@ -1145,22 +1145,27 @@ class TestCompletionAuthorityNoteParametrizedAgents:
             "Completion-note must trail teachback-reminder."
         )
 
-    def test_pact_agent_types_list_covers_agents_directory(self):
-        """Drift guard: _PACT_AGENT_TYPES must cover every pact-*.md in agents/.
+    def test_pact_agent_types_list_matches_agents_directory(self):
+        """Drift guard: _PACT_AGENT_TYPES must equal the set of pact-*.md in agents/.
 
-        Catches new agent additions that forget to update the parametrize list.
-        Without this, a new role would silently miss the parametrized sweep
-        and could ship without verified completion-authority directive
-        delivery. Set comparison (⊇) tolerates the list being a superset
-        if a future agent type is registered before its file lands.
+        Bidirectional check:
+        - Catches NEW agents added to agents/ but missing from _PACT_AGENT_TYPES
+          (parametrized sweep would silently skip them, shipping a new role
+          without verified completion-authority directive delivery).
+        - Catches TYPOS or stale entries in _PACT_AGENT_TYPES (e.g.,
+          `pact-architecte`) that parametrize against non-existent agent
+          files and silently pass.
         """
         agents_dir = Path(__file__).parent.parent / "agents"
-        files = sorted(p.stem for p in agents_dir.glob("pact-*.md"))
-        missing = set(files) - set(_PACT_AGENT_TYPES)
-        assert not missing, (
-            f"_PACT_AGENT_TYPES is missing agents present in {agents_dir}: "
-            f"{sorted(missing)}. Add them to the list so the parametrized "
-            "sweep covers every spawnable role."
+        files = set(p.stem for p in agents_dir.glob("pact-*.md"))
+        listed = set(_PACT_AGENT_TYPES)
+        missing = files - listed
+        unexpected = listed - files
+        assert not (missing or unexpected), (
+            f"_PACT_AGENT_TYPES drift vs {agents_dir}: "
+            f"missing (in agents/ but not list): {sorted(missing)}; "
+            f"unexpected (in list but no agent file): {sorted(unexpected)}. "
+            "Update _PACT_AGENT_TYPES to match the agents/ directory exactly."
         )
 
 
