@@ -909,7 +909,7 @@ CalibrationRecord:
 | `/PACT:plan-mode` | None (consultant writes consultation HANDOFF, idles) | All consultant tasks; the plan-mode parent task |
 | `/PACT:imPACT` | None (triage agent writes triage HANDOFF, idles) | All triage tasks; the imPACT parent task |
 
-Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) for the canonical table.
+Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) holds the slim lead-side summary.
 
 ---
 

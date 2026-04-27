@@ -221,6 +221,8 @@ When the lead sends a consolidation request (typically during `/PACT:wrap-up`), 
 
 You are exempt from the lead-only-completion rule for memory-save tasks. The lead has no acceptance criteria for memory bookkeeping — judging memory-save quality is your domain. The carve-out is encoded as `pact-secretary` in `SELF_COMPLETE_EXEMPT_AGENTS` (`shared/intentional_wait.py`); see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority).
 
+> Memory-save self-complete bypasses the lead inspection window by design — judging memory-save quality is the secretary's domain (per orchestration §Completion Authority carve-out rationale).
+
 For other task types you might be dispatched on (rare; not your primary domain), the standard [pact-agent-teams §On Completion](../skills/pact-agent-teams/SKILL.md#on-completion--handoff-required) flow applies — write HANDOFF, idle on `awaiting_lead_completion`, lead transitions status.
 
 For memory-save tasks specifically:

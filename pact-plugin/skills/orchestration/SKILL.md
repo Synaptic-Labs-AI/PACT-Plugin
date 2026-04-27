@@ -492,7 +492,7 @@ Both calls are required. Skipping the SendMessage leaves the teammate idle on `a
 
 Both calls are required. Skipping the SendMessage leaves the teammate idle on stale `awaiting_lead_completion`, never seeing the corrections — symmetric failure to skipping wake on acceptance. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
 
-Carve-outs (rare, narrow): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`); imPACT force-termination (`metadata.terminated == true`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py`.
+Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py` — covers ONLY these two surfaces. Separate path: imPACT force-termination (`metadata.terminated == true`) is lead-driven (you write `status=completed` directly via `TaskStop` + `TaskUpdate`); the `terminated` marker is recognized by audit/inspection, NOT by the predicate.
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty. See [pact-completion-authority.md](../../protocols/pact-completion-authority.md) for full recipes (teachback review flow, rejection corrections schema, carve-out rationale).
 

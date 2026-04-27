@@ -26,15 +26,20 @@ Both calls are **required**. Skipping the SendMessage strands the teammate idle 
 
 Both calls are **required**. Skipping the SendMessage leaves the teammate idle on stale `awaiting_lead_completion`, never seeing the corrections — symmetric failure to skipping wake on acceptance. The teammate's `intentional_wait` does not auto-clear when you write rejection metadata; only the wake-signal triggers their CLEAR-and-revise flow. **3+ rejection cycles** on the same task is an imPACT META-BLOCK signal.
 
-**Carve-outs** (rare, narrow):
+**Teammate self-completion carve-outs (predicate-witnessed)** — narrow exemptions where the teammate marks `completed` themselves:
 
 | Carve-out | Trigger | Rule |
 |---|---|---|
 | Signal-tasks | `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` | Auditor + algedonic-emitting agents self-complete; the task IS the signal, no HANDOFF to judge. |
 | Memory-save | Owner is `secretary` (or `pact-secretary`) | Secretary self-completes memory-save tasks; lead has no acceptance criteria for memory bookkeeping. |
-| imPACT termination | `metadata.terminated == true` | You force-complete an unrecoverable agent's task via `TaskStop` + `TaskUpdate(status="completed", metadata={"terminated": true, "reason": "..."})`. See [imPACT.md](../commands/imPACT.md). |
 
-The canonical predicate is `is_self_complete_exempt(task)` in `shared/intentional_wait.py` — pure function for your TaskGet inspection and audit tooling. No hook reads it.
+The canonical predicate `is_self_complete_exempt(task)` in `shared/intentional_wait.py` witnesses ONLY these two surfaces — pure function for your TaskGet inspection and audit tooling. No hook reads it.
+
+**Lead-driven force-completion (separate path, not predicate-witnessed)**:
+
+| Path | Trigger | Rule |
+|---|---|---|
+| imPACT termination | `metadata.terminated == true` | You force-complete an unrecoverable agent's task via `TaskStop` + `TaskUpdate(status="completed", metadata={"terminated": true, "reason": "..."})`. See [imPACT.md](../commands/imPACT.md). The `terminated` marker is recognized directly by audit/inspection; `is_self_complete_exempt` does NOT cover this surface (the lead writes status=completed directly). |
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly:
 
@@ -65,13 +70,20 @@ cat ~/.claude/tasks/{team_name}/{A_id}.json | jq .metadata.teachback_submit
 
 Compare against the dispatched task description. Apply the validation discipline from [orchestration §Validating Incoming Teachbacks](../skills/orchestration/SKILL.md#validating-incoming-teachbacks) — check for both misstatements AND omissions.
 
-**Approving the teachback — two-call atomic pair (BOTH required)**:
+**Optional audit step** — write a `teachback_resolution` record before flipping status:
 
 ```
 TaskUpdate(A_id, metadata={"teachback_resolution": {
     "conditions_met": true,
     "resolution_comment": "<optional one-line rationale>"
 }})
+```
+
+This write is optional but recommended for audit. It is NOT one of the required calls below.
+
+**Approving the teachback — two-call atomic pair (BOTH required)**:
+
+```
 TaskUpdate(A_id, status="completed")
 SendMessage(
     to="<teammate>",
@@ -83,7 +95,7 @@ SendMessage(
 )
 ```
 
-The `teachback_resolution` write is optional but recommended for audit. The status flip is the load-bearing approval action; the SendMessage is the load-bearing wake.
+The status flip is the load-bearing approval action; the SendMessage is the load-bearing wake.
 
 **Rejecting the teachback** — see [Rejection Flow](#rejection-flow) below.
 
