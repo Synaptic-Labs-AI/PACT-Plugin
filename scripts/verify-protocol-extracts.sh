@@ -32,8 +32,12 @@ extract_section() {
     local outfile="$3"
 
     awk -v start="## $start" -v end="## $end" '
-        $0 == start { capture = 1 }
-        capture && $0 == end { capture = 0; exit }
+        # Toggle fence state on lines beginning with ```; ignore start/end
+        # heading matches inside fences so in-fence ## lines (e.g. template
+        # bodies in pact-protocols.md) cannot be confused for sentinels.
+        /^```/ { in_fence = !in_fence }
+        !in_fence && $0 == start { capture = 1 }
+        !in_fence && capture && $0 == end { capture = 0; exit }
         capture { buf[++n] = $0 }
         END {
             # Strip exactly one trailing blank line if present.
@@ -61,6 +65,9 @@ verify() {
 
     local tmpfile
     tmpfile=$(mktemp)
+    # RETURN trap assumes verify() is called from script-top-level; nesting
+    # verify() inside another bash function with its own RETURN trap may
+    # produce unexpected cleanup behavior.
     trap 'rm -f "$tmpfile"' RETURN
 
     local first=1
