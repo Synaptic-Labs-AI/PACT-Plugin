@@ -27,7 +27,7 @@ from refresh.step_extractor import (
     _extract_orchestrate_context,
 )
 
-from conftest import (
+from fixtures.refresh_system import (
     create_peer_review_transcript,
     create_orchestrate_transcript,
     make_user_message,

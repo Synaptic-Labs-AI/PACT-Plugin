@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from refresh import extract_workflow_state
-from conftest import (
+from fixtures.refresh_system import (
     create_peer_review_transcript,
     create_orchestrate_transcript,
     create_no_workflow_transcript,

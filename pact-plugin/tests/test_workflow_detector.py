@@ -24,7 +24,7 @@ from refresh.workflow_detector import (
     detect_active_workflow,
 )
 
-from conftest import (
+from fixtures.refresh_system import (
     create_peer_review_transcript,
     create_orchestrate_transcript,
     create_no_workflow_transcript,

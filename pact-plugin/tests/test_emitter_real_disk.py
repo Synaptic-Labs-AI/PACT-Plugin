@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from conftest import VALID_HANDOFF, _run_main
+from fixtures.emitter import VALID_HANDOFF, _run_main
 
 
 # Verbatim 9-field stdin shape captured by 3 real-platform probes during #551
