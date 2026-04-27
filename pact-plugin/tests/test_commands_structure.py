@@ -195,3 +195,58 @@ class TestPactRoleTeammateInConsumerCommands:
             "'Canonical Task() dispatch is mirrored inline at every consumer "
             "site' pinned-context entry for context."
         )
+
+
+class TestTwoTaskDispatchShapeInConsumerCommands:
+    """The Task A + Task B dispatch shape must be encoded in every consumer
+    command file that spawns teammates.
+
+    Why this is structural, not behavioral: the dispatch shape is described
+    in skills/orchestration/SKILL.md but consumer commands inline it because
+    LLM readers under token pressure don't follow cross-references reliably
+    (same rationale as the canonical PACT ROLE marker test above). If a
+    consumer command silently drops the inline anchor, lead-side dispatch
+    for that workflow degrades to single-task form and the teachback gate
+    becomes optional rather than mandatory.
+
+    Pinned literals:
+    - "Two-Task Dispatch Shape" — the section heading anchor in each file.
+    - "addBlockedBy" — the API call shape that creates the blockedBy chain.
+
+    Distinct from `addBlockedBy=[A]` which the architect spec used as
+    illustrative shorthand; production form is the API call name itself
+    (e.g. `addBlockedBy=[A_id]` or `addBlockedBy=[<Task A id>]`).
+    """
+
+    CONSUMER_COMMANDS = [
+        "orchestrate",
+        "peer-review",
+        "comPACT",
+        "rePACT",
+        "plan-mode",
+    ]
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_contains_two_task_dispatch_shape_anchor(self, name):
+        path = COMMANDS_DIR / f"{name}.md"
+        text = path.read_text(encoding="utf-8")
+        assert "Two-Task Dispatch Shape" in text, (
+            f"{name}.md must contain 'Two-Task Dispatch Shape' section anchor "
+            "(inline per architect D7 — canonical Task() prompt preserved, "
+            "dispatch shape mirrored at consumer sites). Drop signals "
+            "either reverted #491 work or a refactor that compressed the "
+            "anchor into a cross-reference; both fail the agent-reader-primary "
+            "axiom (LLM readers under token pressure don't follow xrefs)."
+        )
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_contains_add_blocked_by_call(self, name):
+        path = COMMANDS_DIR / f"{name}.md"
+        text = path.read_text(encoding="utf-8")
+        assert "addBlockedBy" in text, (
+            f"{name}.md must contain 'addBlockedBy' (the API call that wires "
+            "Task B's blockedBy=[A] dependency). Without this, the data-layer "
+            "unblock that resolves on Task A completion is never created — "
+            "Task B becomes immediately claimable and the teachback gate "
+            "is bypassed."
+        )

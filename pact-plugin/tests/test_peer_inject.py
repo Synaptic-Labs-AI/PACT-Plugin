@@ -1054,3 +1054,138 @@ class TestCompletionAuthorityNote:
         # Teachback reminder precedes completion-authority note.
         assert result.index(_TEACHBACK_REMINDER) < result.index(_COMPLETION_AUTHORITY_NOTE)
 
+
+# Spawn-able teammate agent types — these are the surfaces that should
+# receive the completion-authority directive when a peer is injected.
+# Sourced from agents/ directory; if a new pact-* agent is added, this
+# list should grow to match.
+_PACT_AGENT_TYPES = [
+    "pact-architect",
+    "pact-backend-coder",
+    "pact-frontend-coder",
+    "pact-database-engineer",
+    "pact-devops-engineer",
+    "pact-test-engineer",
+    "pact-auditor",
+    "pact-preparer",
+    "pact-secretary",
+]
+
+
+class TestCompletionAuthorityNoteParametrizedAgents:
+    """The completion-authority directive must reach EVERY spawnable pact-*
+    agent type. Single-shape mistake = one role gets phantom-approved
+    self-completion authority.
+    """
+
+    @pytest.mark.parametrize("agent_type", _PACT_AGENT_TYPES)
+    def test_note_present_for_each_agent_type(self, agent_type, tmp_path):
+        from peer_inject import get_peer_context, _COMPLETION_AUTHORITY_NOTE
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        agent_name = agent_type.replace("pact-", "")
+        config = {
+            "members": [
+                {"name": agent_name, "agentType": agent_type},
+                {"name": "other-peer", "agentType": "pact-architect"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        result = get_peer_context(
+            agent_type=agent_type,
+            team_name="pact-test",
+            agent_name=agent_name,
+            teams_dir=str(tmp_path / "teams"),
+        )
+
+        assert _COMPLETION_AUTHORITY_NOTE in result, (
+            f"Completion-authority directive missing for agent_type={agent_type}; "
+            "every spawnable pact-* role must receive it via peer_inject."
+        )
+
+    @pytest.mark.parametrize("agent_type", _PACT_AGENT_TYPES)
+    def test_ordering_invariant_for_each_agent_type(self, agent_type, tmp_path):
+        # For every agent type, completion-note still trails teachback-reminder.
+        # Index-based comparison: catches a swap that endswith would phantom-pass.
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        agent_name = agent_type.replace("pact-", "")
+        config = {
+            "members": [
+                {"name": agent_name, "agentType": agent_type},
+                {"name": "other-peer", "agentType": "pact-architect"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        result = get_peer_context(
+            agent_type=agent_type,
+            team_name="pact-test",
+            agent_name=agent_name,
+            teams_dir=str(tmp_path / "teams"),
+        )
+
+        teachback_pos = result.index(_TEACHBACK_REMINDER)
+        completion_pos = result.index(_COMPLETION_AUTHORITY_NOTE)
+        assert teachback_pos < completion_pos, (
+            f"Ordering invariant broken for agent_type={agent_type}: "
+            f"teachback at {teachback_pos}, completion-note at {completion_pos}. "
+            "Completion-note must trail teachback-reminder."
+        )
+
+
+class TestCompletionAuthorityLiteralPhraseRegressionGuard:
+    """Pin the load-bearing phrases against silent softening.
+
+    Background: a prior session shipped completion-authority guidance
+    using softer wording ("teammates should generally...") that LLM
+    readers parsed as advisory rather than mandatory. Pinning the
+    "do NOT mark your own tasks" literal at the test level prevents
+    a future "improve clarity" rewrite from accidentally softening it.
+    """
+
+    def test_directive_says_do_not_mark_own_tasks(self):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        # Exact case-sensitive phrase. NOT "should not", NOT "shouldn't",
+        # NOT "avoid marking". The capitalized "NOT" is load-bearing for
+        # LLM-reader emphasis under token pressure.
+        assert "do NOT mark your own tasks" in _COMPLETION_AUTHORITY_NOTE, (
+            "_COMPLETION_AUTHORITY_NOTE must contain the literal capitalized "
+            "phrase 'do NOT mark your own tasks' — softening to 'should not' "
+            "or 'avoid' has been observed to lose enforcement weight."
+        )
+
+    def test_directive_names_lead_as_completion_authority(self):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        # The directive must name the lead explicitly as the actor that
+        # transitions status — not vague "the team" or "someone".
+        assert "lead" in _COMPLETION_AUTHORITY_NOTE.lower()
+        assert "transitions status" in _COMPLETION_AUTHORITY_NOTE.lower() \
+            or "completed" in _COMPLETION_AUTHORITY_NOTE
+
+    def test_directive_references_intentional_wait_completion_reason(self):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        # The directive instructs teammates to use the new
+        # `awaiting_lead_completion` reason. Pin the literal so a
+        # rename in shared.intentional_wait surfaces here.
+        assert "awaiting_lead_completion" in _COMPLETION_AUTHORITY_NOTE
+
+    def test_directive_describes_two_task_pair(self):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        # Both halves of the dispatch pair must be named — single-half
+        # phrasing has been observed to leave Task B context under-described.
+        assert "Task A" in _COMPLETION_AUTHORITY_NOTE
+        assert "Task B" in _COMPLETION_AUTHORITY_NOTE
+

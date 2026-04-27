@@ -418,3 +418,173 @@ class TestIsSelfCompleteExempt:
         assert is_self_complete_exempt({"owner": 42, "metadata": {}}) is False
 
 
+class TestIsSelfCompleteExemptMalformedTaskShapes:
+    """Edge cases for malformed task dicts — defensive defaults must hold."""
+
+    def test_no_metadata_key_returns_false(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # `metadata` key absent entirely. owner is non-exempt.
+        assert is_self_complete_exempt({"owner": "backend-coder"}) is False
+
+    def test_metadata_explicit_none_returns_false(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # metadata=None coalesces to {} via `metadata = task.get("metadata") or {}`.
+        # Owner is non-exempt → returns False.
+        assert is_self_complete_exempt({"owner": "backend-coder", "metadata": None}) is False
+
+    def test_metadata_none_with_secretary_owner_still_exempt(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # Surface 1 (owner) still triggers even with metadata=None.
+        assert is_self_complete_exempt({"owner": "secretary", "metadata": None}) is True
+
+    def test_owner_none_returns_false(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # owner=None is not a string → isinstance check fails → no exemption.
+        assert is_self_complete_exempt({"owner": None, "metadata": {}}) is False
+
+    def test_owner_empty_string_returns_false(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # Empty string is not in SELF_COMPLETE_EXEMPT_AGENTS → no exemption.
+        assert is_self_complete_exempt({"owner": "", "metadata": {}}) is False
+
+    def test_dispatch_agent_none_falls_through_to_owner(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # dispatch_agent=None → not str → skip; owner=secretary → exempt.
+        task = {"owner": "secretary", "metadata": {"dispatch_agent": None}}
+        assert is_self_complete_exempt(task) is True
+
+    def test_dispatch_agent_non_str_falls_through_to_owner(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # dispatch_agent=int → not str → skip; owner=secretary → exempt.
+        task = {"owner": "secretary", "metadata": {"dispatch_agent": 42}}
+        assert is_self_complete_exempt(task) is True
+
+    def test_dispatch_agent_empty_string_returns_false(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        # Empty string is not in SELF_COMPLETE_EXEMPT_AGENTS; non-exempt owner.
+        task = {"owner": "backend-coder", "metadata": {"dispatch_agent": ""}}
+        assert is_self_complete_exempt(task) is False
+
+
+class TestIsSelfCompleteExemptDualCarveOutIndependence:
+    """Both exemption surfaces must work independently AND together.
+
+    Surface 1: SELF_COMPLETE_EXEMPT_AGENTS membership (by agent type).
+    Surface 2: signal-task pattern (completion_type=signal + type in {blocker, algedonic}).
+
+    Reverting EITHER surface in production must surface as independent test failures.
+    """
+
+    def test_only_signal_task_path_no_exempt_agent(self):
+        # Auditor signal-task: agent NOT in exempt set, but signal pattern exempts.
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = {
+            "owner": "pact-auditor",
+            "metadata": {"completion_type": "signal", "type": "algedonic"},
+        }
+        assert is_self_complete_exempt(task) is True
+
+    def test_only_exempt_agent_path_no_signal_task(self):
+        # Secretary memory-save: agent in exempt set, no signal-task metadata.
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = {"owner": "secretary", "metadata": {"completion_type": "regular"}}
+        assert is_self_complete_exempt(task) is True
+
+    def test_both_paths_match_still_exempt(self):
+        # Defense-in-depth: secretary on a signal-task is exempt via either surface.
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = {
+            "owner": "secretary",
+            "metadata": {"completion_type": "signal", "type": "blocker"},
+        }
+        assert is_self_complete_exempt(task) is True
+
+    def test_neither_path_matches_not_exempt(self):
+        # Backend-coder doing regular work is NOT exempt via either surface.
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = {
+            "owner": "backend-coder",
+            "metadata": {"completion_type": "regular", "type": "feature"},
+        }
+        assert is_self_complete_exempt(task) is False
+
+
+class TestSelfCompleteExemptAgentsImmutability:
+    """frozenset chosen specifically to prevent accidental mutation; pin that."""
+
+    def test_add_raises_attribute_error(self):
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+
+        with pytest.raises(AttributeError):
+            SELF_COMPLETE_EXEMPT_AGENTS.add("new-agent")
+
+    def test_remove_raises_attribute_error(self):
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+
+        with pytest.raises(AttributeError):
+            SELF_COMPLETE_EXEMPT_AGENTS.remove("secretary")
+
+    def test_clear_raises_attribute_error(self):
+        from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+
+        with pytest.raises(AttributeError):
+            SELF_COMPLETE_EXEMPT_AGENTS.clear()
+
+    def test_known_reasons_immutable(self):
+        # KNOWN_REASONS must also be frozen — same accidental-mutation concern.
+        from shared.intentional_wait import KNOWN_REASONS
+
+        with pytest.raises(AttributeError):
+            KNOWN_REASONS.add("awaiting_something_new")
+
+
+class TestKnownReasonsLiteralRegressionGuard:
+    """Pin the exact set of known reasons. Any silent removal/rename must fail loudly.
+
+    This is a documentation-in-code test: the contract published to teammates
+    via the pact-agent-teams skill names these strings. Silent renaming would
+    break in-flight teammate metadata writes without surfacing a build error.
+    """
+
+    EXPECTED_REASONS = {
+        "awaiting_teachback_approved",
+        "awaiting_lead_commit",
+        "awaiting_amendment_review",
+        "awaiting_post_handoff_decision",
+        "awaiting_peer_response",
+        "awaiting_user_decision",
+        "awaiting_blocker_resolution",
+        "awaiting_lead_completion",
+    }
+
+    def test_exact_set(self):
+        from shared.intentional_wait import KNOWN_REASONS
+
+        assert set(KNOWN_REASONS) == self.EXPECTED_REASONS
+
+    @pytest.mark.parametrize("reason", sorted(EXPECTED_REASONS))
+    def test_each_reason_validates(self, reason):
+        from shared.intentional_wait import validate_wait
+
+        payload = _fresh_wait(reason=reason)
+        assert validate_wait(payload) is True
+
+    def test_awaiting_lead_completion_is_present(self):
+        # Specifically pin the new addition — guards against revert.
+        from shared.intentional_wait import KNOWN_REASONS
+
+        assert "awaiting_lead_completion" in KNOWN_REASONS
+
+
