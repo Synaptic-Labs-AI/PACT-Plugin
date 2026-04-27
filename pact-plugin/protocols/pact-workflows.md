@@ -180,4 +180,3 @@ See the [Concurrent Audit Protocol](pact-audit.md) for full details.
 3. May escalate to `/PACT:orchestrate` if task exceeds single-specialist scope
 
 ---
-

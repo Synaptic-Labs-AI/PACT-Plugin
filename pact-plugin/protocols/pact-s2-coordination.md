@@ -173,4 +173,3 @@ When dispatching agents during parallel execution, the codebase may have changed
 **Collaboration**: If Backend needs a complex query, ask Database. If Database needs to know access patterns, ask Backend.
 
 ---
-

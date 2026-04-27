@@ -1,6 +1,10 @@
 #!/bin/bash
 # scripts/verify-protocol-extracts.sh
-# Verifies that protocol extract files match their SSOT sections verbatim
+# Verifies that protocol extract files match their SSOT sections verbatim.
+#
+# Sections are anchored by H2 heading text (start) + the next H2 heading text
+# (end sentinel), not by line numbers. This prevents the line-shift regression
+# class that occurs when content is added or removed in the SSOT.
 
 set -e
 
@@ -18,13 +22,36 @@ fi
 PASS=0
 FAIL=0
 
-# Function to verify verbatim match
-# Args: extract_file, description, line_ranges (space-separated sed ranges)
+# Extract bytes from SSOT spanning `## <start>` (inclusive) up to the line
+# before `## <end>` (exclusive), then strip a single trailing blank line if
+# present. Heading match is exact-string on the H2 line minus the leading
+# `## ` prefix. Output appended to the file path passed as $3.
+extract_section() {
+    local start="$1"
+    local end="$2"
+    local outfile="$3"
+
+    awk -v start="## $start" -v end="## $end" '
+        $0 == start { capture = 1 }
+        capture && $0 == end { capture = 0; exit }
+        capture { buf[++n] = $0 }
+        END {
+            # Strip exactly one trailing blank line if present.
+            if (n > 0 && buf[n] == "") n--
+            for (i = 1; i <= n; i++) print buf[i]
+        }
+    ' "$SOURCE" >> "$outfile"
+}
+
+# Verify a standalone extract against one or more (start_heading, end_heading)
+# pairs. Combined extracts pass multiple pairs; each pair's bytes are appended
+# in order to the temp file before diff -q against the standalone.
+#
+# Args: extract_file description start_heading end_heading [start_heading end_heading ...]
 verify() {
     local file="$1"
     local name="$2"
     shift 2
-    local ranges="$@"
 
     if [ ! -f "$PROTOCOLS_DIR/$file" ]; then
         echo "✗ $name: FILE NOT FOUND ($PROTOCOLS_DIR/$file)"
@@ -32,15 +59,20 @@ verify() {
         return
     fi
 
-    # Extract SSOT content using sed ranges to a temp file
-    local tmpfile=$(mktemp)
+    local tmpfile
+    tmpfile=$(mktemp)
     trap 'rm -f "$tmpfile"' RETURN
 
-    for range in $ranges; do
-        sed -n "${range}p" "$SOURCE" >> "$tmpfile"
+    local first=1
+    while [ $# -ge 2 ]; do
+        if [ $first -eq 0 ]; then
+            echo "" >> "$tmpfile"
+        fi
+        extract_section "$1" "$2" "$tmpfile"
+        first=0
+        shift 2
     done
 
-    # Compare with extract file
     if diff -q "$PROTOCOLS_DIR/$file" "$tmpfile" > /dev/null 2>&1; then
         echo "✓ $name: MATCH"
         PASS=$((PASS + 1))
@@ -52,27 +84,32 @@ verify() {
     fi
 }
 
-# Single-range extracts
-verify "pact-s5-policy.md" "S5 Policy (lines 13-156)" "13,156"
-verify "pact-s4-checkpoints.md" "S4 Checkpoints (lines 158-237)" "158,237"
-verify "pact-s4-environment.md" "S4 Environment (lines 239-311)" "239,311"
-verify "pact-s4-tension.md" "S4 Tension (lines 313-376)" "313,376"
-verify "pact-ct-teachback.md" "CT Teachback (lines 378-484)" "378,484"
-verify "pact-s1-autonomy.md" "S1 Autonomy (lines 647-720)" "647,720"
-verify "pact-variety.md" "Variety (lines 766-888)" "766,888"
+# Single-section extracts: (start_heading, end_heading_sentinel)
+verify "pact-s5-policy.md"        "S5 Policy"               "S5 Policy Layer (Governance)"           "S4 Checkpoint Protocol"
+verify "pact-s4-checkpoints.md"   "S4 Checkpoints"          "S4 Checkpoint Protocol"                 "S4 Environment Model"
+verify "pact-s4-environment.md"   "S4 Environment"          "S4 Environment Model"                   "S3/S4 Tension Detection and Resolution"
+verify "pact-s4-tension.md"       "S4 Tension"              "S3/S4 Tension Detection and Resolution" "Conversation Theory: Teachback Protocol"
+verify "pact-ct-teachback.md"     "CT Teachback"            "Conversation Theory: Teachback Protocol" "S2 Coordination Layer"
+verify "pact-s1-autonomy.md"      "S1 Autonomy"             "S1 Autonomy & Recursion"                "Algedonic Signals (Emergency Bypass)"
+verify "pact-variety.md"          "Variety"                 "Variety Management"                     "The PACT Workflow Family"
+verify "pact-workflows.md"        "Workflows"               "The PACT Workflow Family"               "Phase Handoffs"
+verify "pact-task-hierarchy.md"   "Task Hierarchy"          "Task Hierarchy"                         "Backend ↔ Database Boundary"
+verify "pact-agent-stall.md"      "Agent Stall Detection"   "Agent Stall Detection"                  "Incompleteness Signals"
+verify "pact-completeness.md"     "Completeness Signals"    "Incompleteness Signals"                 "Scope Detection"
+verify "pact-scope-detection.md"  "Scope Detection"         "Scope Detection"                        "Scope Contract"
+verify "pact-scope-contract.md"   "Scope Contract"          "Scope Contract"                         "Scoped Phases (ATOMIZE and CONSOLIDATE)"
+verify "pact-scope-phases.md"     "Scoped Phases"           "Scoped Phases (ATOMIZE and CONSOLIDATE)" "Concurrent Audit Protocol"
+verify "pact-audit.md"            "Concurrent Audit"        "Concurrent Audit Protocol"              "Documentation Locations"
+verify "pact-state-recovery.md"   "State Recovery"          "State Recovery Protocol"                "Session Continuity"
 
-# Combined-range extracts
-verify "pact-s2-coordination.md" "S2 Coordination (lines 486-646 + 1211-1225)" "486,646" "1211,1225"
-verify "pact-workflows.md" "Workflows (lines 890-1072)" "890,1072"
-verify "pact-task-hierarchy.md" "Task Hierarchy (lines 1084-1209)" "1084,1209"
-verify "pact-phase-transitions.md" "Phase Transitions (lines 1073-1082 + 1225-1305)" "1073,1082" "1225,1305"
-verify "pact-agent-stall.md" "Agent Stall Detection (lines 1306-1337)" "1306,1337"
-verify "pact-completeness.md" "Completeness Signals (lines 1339-1377)" "1339,1377"
-verify "pact-scope-detection.md" "Scope Detection (lines 1379-1513)" "1379,1513"
-verify "pact-scope-contract.md" "Scope Contract (lines 1515-1672)" "1515,1672"
-verify "pact-scope-phases.md" "Scoped Phases (lines 1674-1755)" "1674,1755"
-verify "pact-audit.md" "Concurrent Audit (lines 1757-1923)" "1757,1923"
-verify "pact-state-recovery.md" "State Recovery (lines 1941-2039)" "1941,2039"
+# Combined-section extracts: two heading-pairs concatenated in order.
+verify "pact-s2-coordination.md"  "S2 Coordination" \
+    "S2 Coordination Layer"       "S1 Autonomy & Recursion" \
+    "Backend ↔ Database Boundary" "Test Engagement"
+
+verify "pact-phase-transitions.md" "Phase Transitions" \
+    "Phase Handoffs"              "Task Hierarchy" \
+    "Test Engagement"             "Agent Stall Detection"
 
 echo ""
 echo "=== Summary ==="
