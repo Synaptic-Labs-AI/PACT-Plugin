@@ -238,7 +238,7 @@ def make_send_message_call(
     Create a SendMessage tool call block for Agent Teams communication.
 
     Args:
-        recipient: Target teammate name (e.g., "lead", "backend-coder")
+        recipient: Target teammate name (e.g., "team-lead", "backend-coder")
         content: Message content
         summary: Short summary for UI preview
         msg_type: Message type ("message", "shutdown_request")

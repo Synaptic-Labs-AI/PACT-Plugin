@@ -194,9 +194,9 @@ If no patterns found: "No calibration data or known patterns for this domain."
 
 | Failure Mode | Response |
 |-------------|----------|
-| Single missing HANDOFF | Normal message to lead: "No HANDOFF metadata for task #N. Skipping." Continue with remaining. |
+| Single missing HANDOFF | Normal message to team-lead: "No HANDOFF metadata for task #N. Skipping." Continue with remaining. |
 | Partial/malformed HANDOFF | Save what's available, note gaps in summary. |
-| Multiple missing (>50% of workflow) | ALERT QUALITY to lead: "Most HANDOFFs missing. Possible systemic issue." |
+| Multiple missing (>50% of workflow) | ALERT QUALITY to team-lead: "Most HANDOFFs missing. Possible systemic issue." |
 | `TaskGet` fails | Expected for old tasks in long sessions (garbage-collected). Use inline content from `session-journal.jsonl` when available. Report gap only if journal also lacks the HANDOFF. |
 | Specialist query about unknown topic | Respond with "No memories found for this query. Proceeding without historical context is fine." |
 

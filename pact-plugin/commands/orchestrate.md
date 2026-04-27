@@ -90,7 +90,7 @@ B_id = TaskCreate(
     subject="{role}: {primary mission}",
     description="{full mission per Recommended Agent Prompting Structure}\n\n"
                 "Per dogfood directive: DO NOT mark this task completed yourself. "
-                "After staging artifacts, write metadata.handoff, send notify SendMessage to lead, "
+                "After staging artifacts, write metadata.handoff, send notify SendMessage to team-lead, "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "
                 "completed after HANDOFF validation. If team-lead rejects, team-lead writes metadata.handoff_rejection; "
                 "revise on this same task.\n\nUpstream: TEACHBACK Task #{A_id}."

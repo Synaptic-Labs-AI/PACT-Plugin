@@ -169,7 +169,7 @@ Triggered after remediation completes — processes only the delta since the las
 6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
 7. **Do NOT delete the session journal** — it may still be accumulating entries from ongoing work
 8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`). Remember: default `update` is additive merge — pass `--replace` only when the prior list items need to be discarded, not amended.
-9. **Report delta summary** to lead — only report what changed in this incremental pass
+9. **Report delta summary** to team-lead — only report what changed in this incremental pass
 
 ---
 
@@ -288,7 +288,7 @@ For direct save requests from the team-lead outside of workflow HANDOFF review (
 This is the Layer 4 fallback for completed handoffs left behind by sessions that ended without wrap-up or where Layer 2 triggers were missed.
 
 1. Look for `session-journal.jsonl` in `~/.claude/pact-sessions/*/*/` directories. **Exclude the current session's directory** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session_id}/pact-session-context.json`, or the session dir provided in your dispatch prompt) — that session's data is active, not orphaned.
-2. If found: report to lead "Found N orphaned HANDOFFs from prior session {session_dir}"
+2. If found: report to team-lead "Found N orphaned HANDOFFs from prior session {session_dir}"
 3. Attempt to process them — prefer `agent_handoff` events from the session journal (full HANDOFF inline, read via `read_events_from(session_dir, 'agent_handoff')`); fall back to `TaskGet` (may fail for garbage-collected tasks)
 4. Delete processed files after recovery (use `python3 -c "from pathlib import Path; Path(...).unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts)
 5. Report summary of recovered knowledge (or gaps where all sources failed)

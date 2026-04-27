@@ -18,7 +18,7 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES). If upstream tasks are referenced, read them via `TaskGet`.
-4. **GATE — Send teachback**: Send a teachback to lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
+4. **GATE — Send teachback**: Send a teachback to team-lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
    - **DO NOT** call `Edit`, `Write`, or `Bash` before sending your teachback
    - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
    - Non-blocking: proceed immediately after sending — do not wait for the team-lead's reply

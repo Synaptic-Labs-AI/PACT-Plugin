@@ -29,7 +29,7 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via `TaskGet(#5)`
-3. Agent sends teachback to lead via `SendMessage`:
+3. Agent sends teachback to team-lead via `SendMessage`:
    "[{sender}→team-lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
 5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it

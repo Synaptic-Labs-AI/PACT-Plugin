@@ -1022,7 +1022,7 @@ class TestCompletionAuthorityNote:
         assert "awaiting_lead_completion" in _COMPLETION_AUTHORITY_NOTE
         assert "Task A" in _COMPLETION_AUTHORITY_NOTE
         assert "Task B" in _COMPLETION_AUTHORITY_NOTE
-        assert "lead" in _COMPLETION_AUTHORITY_NOTE.lower()
+        assert "team-lead" in _COMPLETION_AUTHORITY_NOTE.lower()
 
     def test_note_appears_after_teachback_reminder(self, tmp_path):
         """Ordering: prelude → peer_context → banner → teachback → completion-note."""
@@ -1196,7 +1196,7 @@ class TestCompletionAuthorityLiteralPhraseRegressionGuard:
 
         # The directive must name the team-lead explicitly as the actor that
         # transitions status — not vague "the team" or "someone".
-        assert "lead" in _COMPLETION_AUTHORITY_NOTE.lower()
+        assert "team-lead" in _COMPLETION_AUTHORITY_NOTE.lower()
         assert "transitions status" in _COMPLETION_AUTHORITY_NOTE.lower() \
             or "completed" in _COMPLETION_AUTHORITY_NOTE
 

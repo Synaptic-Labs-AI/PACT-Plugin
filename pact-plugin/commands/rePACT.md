@@ -260,7 +260,7 @@ Task(
 
 For multi-domain: spawn multiple specialists in parallel.
 Apply S2 coordination if parallel work.
-Output: Code + HANDOFF in task metadata (summary via `SendMessage` to lead).
+Output: Code + HANDOFF in task metadata (summary via `SendMessage` to team-lead).
 
 ### Phase 4: Mini-Test
 

@@ -218,7 +218,7 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
 **Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per consultant:
 
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
-   - Add to description: "Send a teachback to lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
+   - Add to description: "Send a teachback to team-lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. Spawn the consultant with the canonical dispatch form:
 
