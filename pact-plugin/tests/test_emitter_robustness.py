@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from conftest import VALID_HANDOFF, _run_main
+from fixtures.emitter import VALID_HANDOFF, _run_main
 
 
 class TestMalformedStdin:

@@ -8,7 +8,7 @@ Both classes share the "field-resolution under partial input" thread:
 - TestFallbackFieldStderr: missing task_id / task_subject — stderr fires
   exactly once, exit-0 invariant holds, no systemMessage on stdout.
 """
-from conftest import VALID_HANDOFF, _run_main
+from fixtures.emitter import VALID_HANDOFF, _run_main
 
 
 class TestTeammateNamePrecedence:
