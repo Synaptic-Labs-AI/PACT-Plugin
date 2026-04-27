@@ -152,7 +152,7 @@ Work resumes (or stops) based on user decision
 On receiving an algedonic signal:
 
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
-2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see lead-side fan-out idiom in [skills/orchestration/SKILL.md::Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)). Then await user acknowledgment.
+2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see lead-side fan-out idiom in [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)). Then await user acknowledgment.
 3. For **ALERT**: Pause current work, present options to user
 4. **Log** the signal in session record
 

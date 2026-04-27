@@ -436,7 +436,7 @@ Exceptions:
 
 To stop all in-progress teammates (HALT, shutdown, or any other lead-to-many signal), iterate `TaskList` for tasks with `status="in_progress"` and send the signal individually to each owner:
 
-    in_progress = [t for t in TaskList() if t.status == "in_progress" and t.owner]
+    in_progress = [t for t in TaskList() if t["status"] == "in_progress" and t["owner"]]
     for task in in_progress:
         SendMessage(
             to=task.owner,
