@@ -19,17 +19,31 @@ Feature Task (created by orchestrator)
 |-------|------------|----------|-----------|
 | Feature | Orchestrator | Orchestrator | Spans entire workflow |
 | Phase | Orchestrator | Orchestrator | Active during phase |
-| Agent | Orchestrator | Specialist (self-managed) | Specialist claims via `TaskUpdate(status="in_progress")`, completes via `TaskUpdate(status="completed")` |
+| Agent | Orchestrator | Specialist (claim-only); Orchestrator (completion authority) | Specialist claims via `TaskUpdate(status="in_progress")`; orchestrator completes via `TaskUpdate(status="completed")` paired with a wake-signal SendMessage |
 
-Under Agent Teams, specialists self-manage their agent task lifecycle. The orchestrator creates tasks via `TaskCreate` and assigns ownership, but the specialist teammate claims the task (sets `in_progress`) and marks it `completed` upon finishing. This differs from the background task model where the orchestrator managed all task state transitions.
+Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority).
 
 ### Task States
 
 Tasks progress through: `pending` → `in_progress` → `completed`
 
 - **pending**: Created but not started
-- **in_progress**: Active work underway
-- **completed**: Work finished (success or documented failure)
+- **in_progress**: Active work underway (also covers "done-awaiting-review" — teammate has stored HANDOFF and idles on `awaiting_lead_completion`)
+- **completed**: Work finished (success or documented failure); transition is **lead-only** on teammate-owned tasks
+
+### Status-by-Actor
+
+| Transition | Actor | Conditions |
+|---|---|---|
+| `pending → in_progress` (claim) | Teammate | Owns the task; `blockedBy` is empty |
+| `in_progress → in_progress` (metadata work) | Teammate | Writes `metadata.handoff` / `metadata.teachback_submit` |
+| `in_progress → in_progress` (rejection metadata) | Lead | Writes `metadata.teachback_rejection` / `metadata.handoff_rejection` + sends wake-signal SendMessage |
+| `in_progress → completed` | **LEAD ONLY** on teammate-owned tasks | Pairs with wake-signal SendMessage; carve-outs: signal-tasks, secretary memory-save, imPACT force-term |
+| `pending → completed` (skip) | Lead | Phase-skip with `metadata.skipped = true` |
+
+### Task A + Task B Dispatch Shape
+
+Every specialist dispatch creates a Task A (teachback) + Task B (primary work) pair. Task B has `blockedBy=[A]`. Lead-completion of Task A auto-unblocks Task B in the task graph; the lead pairs the status flip with a wake-signal SendMessage so the idle teammate (on `intentional_wait{reason=awaiting_lead_completion}`) wakes to claim B. The platform does not push a wake on blocker resolution — `blockedBy` is computed at TaskList query time, so the wake-signal SendMessage is required.
 
 ### Blocking Relationships
 
