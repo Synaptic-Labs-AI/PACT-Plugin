@@ -142,7 +142,35 @@ Select the domain coder based on PR focus:
 - Infrastructure changes → **pact-devops-engineer** (CI/CD quality, Docker best practices, script safety)
 - Multiple domains → Coder for domain with most significant changes, or all relevant domain coders if changes are equally significant
 
-**Dispatch reviewers**:
+**Two-Task Dispatch Shape (TEACHBACK + WORK)**
+
+Each reviewer dispatch creates **two tasks**, not one:
+
+- **Task A** — TEACHBACK gate. `subject = "{reviewer-type}: TEACHBACK for review of {feature}"`, owner = reviewer. Description: state which review angle the reviewer is taking (consistency check vs adversarial vs design coherence) before reading the diff.
+- **Task B** — primary review work. `subject = "{reviewer-type}: review {feature}"`, owner = reviewer, `blockedBy = [<Task A id>]`.
+
+Both are created BEFORE the `Task(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
+
+```
+A_id = TaskCreate(
+    subject="{reviewer-type}: TEACHBACK for review of {feature}",
+    description="DOGFOOD TEACHBACK GATE.\n\n"
+                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
+                "DO NOT mark this task completed — lead-only completion.\n\n"
+                "Mission for Task B: see Task #{B_id}."
+)
+TaskUpdate(A_id, owner="{reviewer-name}")
+B_id = TaskCreate(subject="{reviewer-type}: review {feature}", description="<full review mission>")
+TaskUpdate(B_id, owner="{reviewer-name}", addBlockedBy=[A_id])
+TaskUpdate(A_id, addBlocks=[B_id])
+```
+
+The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence.
+
+---
+
+**Dispatch reviewers** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per reviewer:
 
 For each reviewer:
 1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`

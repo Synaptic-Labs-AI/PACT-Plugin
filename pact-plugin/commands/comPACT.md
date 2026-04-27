@@ -161,11 +161,52 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 
 ---
 
+## Two-Task Dispatch Shape (TEACHBACK + WORK)
+
+Every specialist dispatch creates **two tasks**, not one:
+
+- **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for {sub-task}"`, owner = teammate. Description: teachback expectations + dispatch context.
+- **Task B** — primary work. `subject = "{specialist}: {sub-task}"`, owner = teammate, `blockedBy = [<Task A id>]`.
+
+Both are created BEFORE the `Task(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the teammate wakes to claim B.
+
+**Dispatch sequence (replaces single-task dispatch)**:
+
+```
+# 1. Create Task A (teachback gate)
+A_id = TaskCreate(
+    subject="{specialist}: TEACHBACK for {sub-task}",
+    description="DOGFOOD TEACHBACK GATE for {sub-task}.\n\n"
+                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead}. Idle. "
+                "DO NOT mark this task completed — lead-only completion. Lead will mark completed "
+                "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable.\n\n"
+                "Mission for Task B: see Task #{B_id}."
+)
+TaskUpdate(A_id, owner="{specialist-name}")
+
+# 2. Create Task B (primary work)
+B_id = TaskCreate(subject="{specialist}: {sub-task}", description="<full mission>")
+TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])
+TaskUpdate(A_id, addBlocks=[B_id])
+
+# 3. Spawn the teammate via the canonical Task() form (shown in §Invocation below).
+```
+
+The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Task()` call.
+
+**Carve-outs** — single-task dispatch still applies for:
+
+- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B.
+- **Secretary memory-save tasks**: secretary self-completes via `SELF_COMPLETE_EXEMPT_AGENTS` in `shared/intentional_wait.py`.
+
+---
+
 ## Invocation
 
 ### Multiple Specialists Concurrently (Default)
 
-When the task contains multiple independent items, invoke multiple specialists together with boundary context:
+When the task contains multiple independent items, invoke multiple specialists together with boundary context. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per specialist:
 
 For each specialist needed:
 1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [this agent's specific sub-task]")`
@@ -206,7 +247,8 @@ Use a single specialist agent only when:
 - Sub-tasks have dependencies on each other
 - Conventions haven't been established yet (run one first to set patterns)
 
-**Dispatch the specialist**:
+**Dispatch the specialist** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above:
+
 1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [user's task description]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
