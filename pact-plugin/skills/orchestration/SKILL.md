@@ -474,6 +474,140 @@ inspection and session review. Your responsibilities:
   the wait has hung and you should investigate and drive resolution.
 - **Don't SET the `intentional_wait` task metadata on your own lead task.**
   TeammateIdle hooks filter by task owner; they don't inspect lead state.
+- **`awaiting_lead_completion` is the most common wait you'll see** — set by every teammate after they store HANDOFF or teachback metadata. Resolution = your two-call acceptance pair (or rejection dual-channel pair). See [Completion Authority](#completion-authority) below.
+
+### Completion Authority
+
+You — the lead — are the **only** actor who marks teammate-owned tasks `completed`. Teammates write HANDOFFs to `metadata.handoff`, idle on `intentional_wait{reason=awaiting_lead_completion}`, and wait for your acceptance. The `TaskUpdate(status="completed")` flip is the load-bearing approval action; the wake-signal SendMessage is the load-bearing wake.
+
+**Acceptance recipe — two-call atomic pair (BOTH required)**:
+
+```
+TaskUpdate(taskId, status="completed")
+SendMessage(
+    to="<teammate>",
+    message="[lead→<teammate>] Task #<id> accepted. Work complete.",
+    summary="Task accepted"
+)
+```
+
+Both calls are **required**. The `TaskUpdate` flips status (which auto-unblocks any tasks with `blockedBy=[<id>]`); the `SendMessage` wakes the idle teammate so they can claim the next task. The platform does NOT push a wake on blocker resolution — `blockedBy` is computed at TaskList query time. An idle teammate cannot self-wake to re-poll. Skipping the SendMessage strands the teammate idle until something else (peer message, your next dispatch) wakes them.
+
+**Carve-outs** (rare, narrow):
+
+| Carve-out | Trigger | Rule |
+|---|---|---|
+| Signal-tasks | `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` | Auditor + algedonic-emitting agents self-complete; the task IS the signal, no HANDOFF to judge. |
+| Memory-save | Owner is `secretary` (or `pact-secretary`) | Secretary self-completes memory-save tasks; lead has no acceptance criteria for memory bookkeeping. |
+| imPACT termination | `metadata.terminated == true` | You force-complete an unrecoverable agent's task via `TaskStop` + `TaskUpdate(status="completed", metadata={"terminated": true, "reason": "..."})`. See [imPACT.md](../../commands/imPACT.md). |
+
+The canonical predicate is `is_self_complete_exempt(task)` in `shared/intentional_wait.py` — pure function for your TaskGet inspection and audit tooling. No hook reads it.
+
+**TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly:
+
+```
+cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff
+```
+
+Inspect the HANDOFF before flipping status. If `metadata.handoff` is missing or empty, do NOT mark the task completed — request the teammate write the HANDOFF first.
+
+### Teachback Review
+
+The Task A + Task B dispatch shape gates implementation work behind teachback approval. When dispatching, you create:
+
+- **Task A**: `subject="<role>: TEACHBACK for <feature>"`, owner = teammate. Description states: "Submit teachback via `metadata.teachback_submit`. SET `intentional_wait{reason=awaiting_lead_completion}`. Do NOT begin Task B."
+- **Task B**: `subject="<role>: <primary mission>"`, owner = teammate, `blockedBy=[<Task A id>]`.
+
+Both tasks are created at dispatch time; the teammate receives both in their initial TaskList view, with B greyed out by `blockedBy`.
+
+**Reviewing the teachback**:
+
+Read `metadata.teachback_submit` directly:
+
+```
+cat ~/.claude/tasks/{team_name}/{A_id}.json | jq .metadata.teachback_submit
+```
+
+Compare against the dispatched task description. Apply the validation discipline from [Validating Incoming Teachbacks](#validating-incoming-teachbacks) below — check for both misstatements AND omissions.
+
+**Approving the teachback — two-call atomic pair (BOTH required)**:
+
+```
+TaskUpdate(A_id, metadata={"teachback_resolution": {
+    "conditions_met": true,
+    "resolution_comment": "<optional one-line rationale>"
+}})
+TaskUpdate(A_id, status="completed")
+SendMessage(
+    to="<teammate>",
+    message=(
+        "[lead→<teammate>] Teachback accepted on Task #<A_id>. "
+        "Task B (#<B_id>) is now claimable."
+    ),
+    summary="Teachback accepted; Task B claimable"
+)
+```
+
+The `teachback_resolution` write is optional but recommended for audit. The status flip is the load-bearing approval action; the SendMessage is the load-bearing wake.
+
+**Rejecting the teachback** — see [Rejection Flow](#rejection-flow) below.
+
+> ⚠️ DO NOT mark Task B `completed` and DO NOT mark Task B `pending`. Task B stays `pending` (its initial state) until the teammate claims it (`status=in_progress`) after wake. Your acceptance affects Task A only; Task B's lifecycle is the teammate's to drive (claim → work → submit HANDOFF → idle for your HANDOFF acceptance).
+
+### Rejection Flow
+
+Teachback or HANDOFF inadequate? Reject with **dual-channel delivery** (metadata + SendMessage). Same shape for both rejection types:
+
+**Teachback rejection**:
+
+```
+TaskUpdate(A_id, metadata={"teachback_rejection": {
+    "reason": "<one-line summary>",
+    "corrections": ["<correction 1>", "<correction 2>", ...],
+    "since": "<canonical_since() output>",
+    "revision_number": 1
+}})
+SendMessage(
+    to="<teammate>",
+    message=(
+        "[lead→<teammate>] Teachback rejected on Task #<A_id>. "
+        "See metadata.teachback_rejection. Revise and re-submit. "
+        "Task A remains in_progress."
+    ),
+    summary="Teachback rejected; revise"
+)
+```
+
+**HANDOFF rejection** (Task B):
+
+```
+TaskUpdate(B_id, metadata={"handoff_rejection": {
+    "reason": "...",
+    "corrections": [...],
+    "since": "<canonical_since() output>",
+    "revision_number": 1
+}})
+SendMessage(
+    to="<teammate>",
+    message=(
+        "[lead→<teammate>] HANDOFF rejected on Task #<B_id>. "
+        "See metadata.handoff_rejection. Revise."
+    ),
+    summary="HANDOFF rejected; revise"
+)
+```
+
+**Why dual-channel**: metadata gives the durable revision spec the teammate reads on wake; SendMessage gives the wake itself. Single-channel via metadata only fails because the idle teammate can't self-wake to read it. Single-channel via SendMessage only loses durability — the corrections need to survive teammate compaction or agent restart.
+
+**Recovery flow on rejection**:
+
+1. Lead writes rejection metadata + sends wake-signal.
+2. Teammate wakes, CLEARs `intentional_wait`, reads rejection metadata.
+3. Teammate revises (`metadata.teachback_submit` for A, or revises deliverable + `metadata.handoff` for B).
+4. Teammate re-SETs `intentional_wait` with fresh `since`, increments `metadata.revision_number`, SendMessage notifies lead "revised."
+5. Lead reviews; either accepts (per [Completion Authority](#completion-authority)) or rejects again (revision_number = N+1).
+
+> **Cycle limit**: 3+ rejection cycles on the same task is an imPACT META-BLOCK signal. See [imPACT.md](../../commands/imPACT.md).
 
 ### Recommended Agent Prompting Structure
 
@@ -505,6 +639,8 @@ A list of things that include the following:
 
 When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
 
+Once you've reviewed and decided, follow the [Teachback Review](#teachback-review) acceptance recipe. Do NOT mark Task A `completed` without the paired wake-signal SendMessage — see [Completion Authority](#completion-authority) for the two-call atomic pair.
+
 #### Expected Agent HANDOFF Format
 
 Every agent delivers a structured HANDOFF stored in task metadata. Read via `TaskGet(taskId).metadata.handoff` when needed:
@@ -526,7 +662,7 @@ Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — incl
 
 If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
 
-On HANDOFF receipt, verify task completion via `TaskList` before dispatching downstream phases — mechanical gates catch missed completions later, but `TaskList` is the gate-truth at receipt time. If the task is not marked completed, ask the agent to update task status via `SendMessage` before dispatching downstream phases.
+On HANDOFF receipt, inspect `metadata.handoff` (raw JSON read; `TaskGet` does not surface metadata) and follow the [Completion Authority](#completion-authority) two-call atomic pair to flip the task to `completed` and wake the teammate. Do NOT dispatch downstream phases against a teammate-owned task that you have not yet marked completed — the teammate is idle awaiting your acceptance, and the task graph has not unblocked dependents.
 
 ### How to Delegate
 
