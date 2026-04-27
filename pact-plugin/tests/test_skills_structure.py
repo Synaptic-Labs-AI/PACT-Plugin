@@ -157,3 +157,12 @@ class TestPreResponseChannelCheckGate:
         assert self.LEAD_GRAY_AREA_PHRASE not in text, (
             "lead-side gray-area trap belongs only in orchestration/SKILL.md"
         )
+
+    def test_gate_appears_before_anchor_section(self):
+        teammate = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        assert teammate.index("## Pre-Response Channel Check") < teammate.index("## On Start"), \
+            "pact-agent-teams: gate must appear before On Start"
+
+        lead = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        assert lead.index("### Pre-Response Channel Check") < lead.index("### Communication"), \
+            "orchestration: gate must appear before Communication"
