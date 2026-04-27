@@ -162,25 +162,29 @@ def is_self_complete_exempt(task: Any) -> bool:
     Return True iff this task is exempt from the lead-only-completion rule.
 
     Two exemption surfaces (OR-combined):
-    1. By dispatched agent type: task.metadata.dispatch_agent (or task.owner)
-       in SELF_COMPLETE_EXEMPT_AGENTS. Lead-declared at dispatch time via the
-       agent's subagent_type / owner field.
+    1. By owner: task.owner in SELF_COMPLETE_EXEMPT_AGENTS. Lead-declared
+       at dispatch time via the agent's owner field.
     2. By signal-task metadata: task.metadata.completion_type == "signal" AND
        task.metadata.type in {"blocker", "algedonic"}. Mirrors the inline
        literal at agent_handoff_emitter.py / task_utils.py:184 /
        session_resume.py:525.
 
-    Pure function; never raises; defaults to False on missing or malformed
-    fields (conservative — never silently exempt).
+    Pure function; never raises on plain dicts (PACT task representation
+    via json.loads); defaults to False on missing or malformed fields
+    (conservative — never silently exempt).
 
     NOT a hook predicate. There is no hook reading this — the function is
     the canonical predicate for lead-side TaskGet inspection, audit tooling,
     and future consumers. Hooks must use the inline-literal mirror to avoid
     reintroducing livelock-capable hook surface.
 
-    TRUST BOUNDARY: dispatch_agent must originate from lead-side trusted
-    writes. The carve-out trusts the lead's intent at dispatch time;
-    no runtime verification of owner-matches-dispatch_agent.
+    TRUST BOUNDARY: `owner` is teammate-writable via TaskUpdate(owner=...).
+    The carve-out is bounded by SELF_COMPLETE_EXEMPT_AGENTS being a curated
+    short list (currently `secretary` / `pact-secretary` only); a non-exempt
+    teammate cannot self-promote without writing one of those curated names.
+    No in-plugin consumer reads this predicate at runtime — instructions and
+    audit tooling are the defense. Future extensions adding new agents to
+    SELF_COMPLETE_EXEMPT_AGENTS must re-evaluate this boundary.
     """
     if not isinstance(task, dict):
         return False
@@ -189,10 +193,7 @@ def is_self_complete_exempt(task: Any) -> bool:
     if not isinstance(metadata, dict):
         return False
 
-    # Surface 1: dispatched agent type.
-    dispatch_agent = metadata.get("dispatch_agent")
-    if isinstance(dispatch_agent, str) and dispatch_agent in SELF_COMPLETE_EXEMPT_AGENTS:
-        return True
+    # Surface 1: owner in curated exempt set.
     owner = task.get("owner")
     if isinstance(owner, str) and owner in SELF_COMPLETE_EXEMPT_AGENTS:
         return True

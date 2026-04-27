@@ -362,12 +362,6 @@ class TestIsSelfCompleteExempt:
         assert is_self_complete_exempt({"owner": "secretary", "metadata": {}}) is True
         assert is_self_complete_exempt({"owner": "pact-secretary", "metadata": {}}) is True
 
-    def test_dispatch_agent_metadata_is_exempt(self):
-        from shared.intentional_wait import is_self_complete_exempt
-
-        task = {"owner": "secretary-3", "metadata": {"dispatch_agent": "pact-secretary"}}
-        assert is_self_complete_exempt(task) is True
-
     def test_backend_coder_is_not_exempt(self):
         from shared.intentional_wait import is_self_complete_exempt
 
@@ -451,27 +445,6 @@ class TestIsSelfCompleteExemptMalformedTaskShapes:
 
         # Empty string is not in SELF_COMPLETE_EXEMPT_AGENTS → no exemption.
         assert is_self_complete_exempt({"owner": "", "metadata": {}}) is False
-
-    def test_dispatch_agent_none_falls_through_to_owner(self):
-        from shared.intentional_wait import is_self_complete_exempt
-
-        # dispatch_agent=None → not str → skip; owner=secretary → exempt.
-        task = {"owner": "secretary", "metadata": {"dispatch_agent": None}}
-        assert is_self_complete_exempt(task) is True
-
-    def test_dispatch_agent_non_str_falls_through_to_owner(self):
-        from shared.intentional_wait import is_self_complete_exempt
-
-        # dispatch_agent=int → not str → skip; owner=secretary → exempt.
-        task = {"owner": "secretary", "metadata": {"dispatch_agent": 42}}
-        assert is_self_complete_exempt(task) is True
-
-    def test_dispatch_agent_empty_string_returns_false(self):
-        from shared.intentional_wait import is_self_complete_exempt
-
-        # Empty string is not in SELF_COMPLETE_EXEMPT_AGENTS; non-exempt owner.
-        task = {"owner": "backend-coder", "metadata": {"dispatch_agent": ""}}
-        assert is_self_complete_exempt(task) is False
 
 
 class TestIsSelfCompleteExemptDualCarveOutIndependence:
