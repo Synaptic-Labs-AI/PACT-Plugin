@@ -439,8 +439,8 @@ To stop all in-progress teammates (HALT, shutdown, or any other lead-to-many sig
     in_progress = [t for t in TaskList() if t["status"] == "in_progress" and t["owner"]]
     for task in in_progress:
         SendMessage(
-            to=task.owner,
-            message=f"[lead→{task.owner}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+            to=task["owner"],
+            message=f"[lead→{task['owner']}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
             summary=f"HALT: {category}",
         )
 
