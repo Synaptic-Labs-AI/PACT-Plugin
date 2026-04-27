@@ -42,7 +42,7 @@ class TestWorktreeGuard:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/project/src/auth.ts",
+            file_path="/Users/example/project/src/auth.ts",
             worktree_path="/tmp/worktrees/feat-auth"
         )
         assert result is not None
@@ -72,7 +72,7 @@ class TestWorktreeGuard:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/.claude/CLAUDE.md",
+            file_path="/Users/example/.claude/CLAUDE.md",
             worktree_path="/tmp/worktrees/feat-auth"
         )
         assert result is None
@@ -81,7 +81,7 @@ class TestWorktreeGuard:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/project/docs/architecture/design.md",
+            file_path="/Users/example/project/docs/architecture/design.md",
             worktree_path="/tmp/worktrees/feat-auth"
         )
         assert result is None
@@ -90,7 +90,7 @@ class TestWorktreeGuard:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/project/src/auth.ts",
+            file_path="/Users/example/project/src/auth.ts",
             worktree_path=""
         )
         assert result is None
@@ -99,7 +99,7 @@ class TestWorktreeGuard:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/project/CLAUDE.md",
+            file_path="/Users/example/project/CLAUDE.md",
             worktree_path="/tmp/worktrees/feat-auth"
         )
         assert result is None
@@ -261,10 +261,10 @@ class TestMainEntryPoint:
         from worktree_guard import main
 
         input_data = json.dumps({
-            "tool_input": {"file_path": "/Users/mj/project/src/auth.ts"}
+            "tool_input": {"file_path": "/Users/example/project/src/auth.ts"}
         })
 
-        error_msg = "Edit blocked: /Users/mj/project/src/auth.ts is outside the active worktree"
+        error_msg = "Edit blocked: /Users/example/project/src/auth.ts is outside the active worktree"
         with patch.dict("os.environ", {"PACT_WORKTREE_PATH": "/tmp/worktrees/feat-auth"}), \
              patch("worktree_guard.check_worktree_boundary", return_value=error_msg), \
              patch("sys.stdin", io.StringIO(input_data)):
@@ -311,20 +311,20 @@ class TestIsAllowedPathEdgeCases:
         """Deeply nested .claude path should still be allowed."""
         from worktree_guard import is_allowed_path
 
-        assert is_allowed_path("/Users/mj/.claude/some/deep/path/file.md") is True
+        assert is_allowed_path("/Users/example/.claude/some/deep/path/file.md") is True
 
     def test_docs_nested_deep(self):
         """Deeply nested docs path should still be allowed."""
         from worktree_guard import is_allowed_path
 
-        assert is_allowed_path("/Users/mj/project/docs/architecture/v2/design.md") is True
+        assert is_allowed_path("/Users/example/project/docs/architecture/v2/design.md") is True
 
     def test_gitignore_anywhere(self):
         """'.gitignore' file should be allowed regardless of location."""
         from worktree_guard import is_allowed_path
 
-        assert is_allowed_path("/Users/mj/project/.gitignore") is True
-        assert is_allowed_path("/Users/mj/project/subdir/.gitignore") is True
+        assert is_allowed_path("/Users/example/project/.gitignore") is True
+        assert is_allowed_path("/Users/example/project/subdir/.gitignore") is True
 
     def test_docs_as_substring_not_matched(self):
         """A path component 'mydocs' should NOT match the 'docs' pattern
@@ -332,13 +332,13 @@ class TestIsAllowedPathEdgeCases:
         from worktree_guard import is_allowed_path
 
         # 'mydocs' should NOT match 'docs' pattern
-        assert is_allowed_path("/Users/mj/project/mydocs/file.md") is False
+        assert is_allowed_path("/Users/example/project/mydocs/file.md") is False
 
     def test_claude_as_substring_not_matched(self):
         """A directory named 'not-claude' should NOT match '.claude' pattern."""
         from worktree_guard import is_allowed_path
 
-        assert is_allowed_path("/Users/mj/not-claude/file.md") is False
+        assert is_allowed_path("/Users/example/not-claude/file.md") is False
 
     def test_claude_md_in_any_directory(self):
         """CLAUDE.md should be allowed anywhere."""
@@ -395,7 +395,7 @@ class TestCheckWorktreeBoundaryEdgeCases:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/project/notes.txt",
+            file_path="/Users/example/project/notes.txt",
             worktree_path="/tmp/worktrees/feat-auth"
         )
         assert result is None  # Not blocked
@@ -425,7 +425,7 @@ class TestCheckWorktreeBoundaryEdgeCases:
         from worktree_guard import check_worktree_boundary
 
         result = check_worktree_boundary(
-            file_path="/Users/mj/project/hooks/session_init.py",
+            file_path="/Users/example/project/hooks/session_init.py",
             worktree_path="/tmp/worktrees/feat-auth"
         )
         assert result is not None

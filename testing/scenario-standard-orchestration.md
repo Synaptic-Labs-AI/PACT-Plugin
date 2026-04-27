@@ -10,7 +10,7 @@ Verify the full PACT orchestration lifecycle: PREPARE, ARCHITECT, CODE, TEST pha
 
 ## Prerequisites
 
-1. PACT plugin installed at `~/.claude/plugins/cache/pact-marketplace/PACT/`
+1. PACT plugin installed at `~/.claude/plugins/cache/pact-plugin/PACT/`
 2. A git repository with `CLAUDE.md` containing the PACT orchestrator configuration
 3. No active worktrees for the test feature branch (run `git worktree list` to verify)
 4. All four verification scripts passing: `bash scripts/verify-scope-integrity.sh`, `bash scripts/verify-protocol-extracts.sh`, `bash scripts/verify-task-hierarchy.sh`, `bash scripts/verify-worktree-protocol.sh`

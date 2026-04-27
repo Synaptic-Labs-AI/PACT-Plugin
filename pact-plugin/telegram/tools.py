@@ -34,9 +34,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from telegram.config import load_config_safe
 from telegram.telegram_client import TelegramClient, TelegramAPIError
-from telegram.voice import VoiceTranscriber, VoiceTranscriptionError
+from telegram.voice import VoiceTranscriber
 
 logger = logging.getLogger("pact-telegram.tools")
 
@@ -93,7 +92,7 @@ def _get_project_name() -> str:
     """
     Get the project name from CLAUDE_PROJECT_DIR environment variable.
 
-    Returns the basename of the project directory (e.g. 'PACT-prompt'),
+    Returns the basename of the project directory (e.g. 'PACT-Plugin'),
     falling back to the basename of the current working directory when
     CLAUDE_PROJECT_DIR is not available (e.g. in MCP server processes),
     and finally to 'unknown' if neither yields a useful name.
@@ -365,7 +364,7 @@ class ToolContext:
             await self.voice.close()
 
         # Cancel any pending futures
-        for msg_id, future in self.pending_replies.items():
+        for future in self.pending_replies.values():
             if not future.done():
                 future.cancel()
         self.pending_replies.clear()

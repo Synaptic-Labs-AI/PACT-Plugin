@@ -53,11 +53,11 @@ class TestGetEncodedProjectPath:
 
     def test_extract_from_transcript_path(self):
         """Test extracting encoded path from transcript path."""
-        transcript_path = "/Users/test/.claude/projects/-Users-test-myproject/session-123/session.jsonl"
+        transcript_path = "/Users/example/.claude/projects/-Users-example-myproject/session-123/session.jsonl"
 
         encoded = get_encoded_project_path(transcript_path)
 
-        assert encoded == "-Users-test-myproject"
+        assert encoded == "-Users-example-myproject"
 
     def test_extract_nested_project_path(self):
         """Test extracting deeply nested project path."""
@@ -71,11 +71,11 @@ class TestGetEncodedProjectPath:
         """Test fallback to CLAUDE_PROJECT_DIR when extraction fails."""
         transcript_path = "/invalid/path/without/projects"
 
-        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/Users/test/myproject"}):
+        with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/Users/example/myproject"}):
             encoded = get_encoded_project_path(transcript_path)
 
         # Now keeps the leading dash to match Claude Code's folder naming convention
-        assert encoded == "-Users-test-myproject"
+        assert encoded == "-Users-example-myproject"
 
     def test_fallback_unknown_project(self):
         """Test fallback to 'unknown-project' when all else fails."""

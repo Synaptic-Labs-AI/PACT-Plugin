@@ -1,17 +1,17 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 3.20.0
+> **Version**: 3.20.1
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
-> **Breaking change in v3.0:** PACT now uses [Agent Teams](https://code.claude.com/docs/en/agent-teams) instead of subagents. You must [enable Agent Teams](https://github.com/ProfSynapse/PACT-prompt#enabling-agent-teams) in your `settings.json`. See the [upgrade guide](https://github.com/ProfSynapse/PACT-prompt#upgrading-from-v2x-to-v30) for details.
+> **Breaking change in v3.0:** PACT now uses [Agent Teams](https://code.claude.com/docs/en/agent-teams) instead of subagents. You must [enable Agent Teams](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams) in your `settings.json`. See the [upgrade guide](https://github.com/Synaptic-Labs-AI/PACT-Plugin#upgrading-from-v2x-to-v30) for details.
 
 ## Install in 30 Seconds
 
 ```bash
-/plugin marketplace add ProfSynapse/PACT-prompt
-/plugin install PACT@pact-marketplace
-cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+/plugin marketplace add Synaptic-Labs-AI/PACT-Plugin
+/plugin install PACT@pact-plugin
+cp ~/.claude/plugins/cache/pact-plugin/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
 Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDirectories` and PACT allow rules in `~/.claude/settings.json` to prevent permission prompts during agent operations:
@@ -43,7 +43,7 @@ Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDire
 
 > **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
-Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/ProfSynapse/PACT-prompt#enabling-agent-teams).
+Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams).
 
 ## What You Get
 
@@ -70,7 +70,7 @@ Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Prof
 ## Full Documentation
 
 For installation options, detailed features, examples, and technical reference:
-**[github.com/ProfSynapse/PACT-prompt](https://github.com/ProfSynapse/PACT-prompt)**
+**[github.com/Synaptic-Labs-AI/PACT-Plugin](https://github.com/Synaptic-Labs-AI/PACT-Plugin)**
 
 ## Reference
 

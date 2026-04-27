@@ -104,7 +104,7 @@ def init(input_data: dict) -> None:
     session-scoped context file path:
         ~/.claude/pact-sessions/{project-slug}/{session-id}/pact-session-context.json
 
-    Where project-slug is Path(project_dir).name (e.g., "PACT-prompt").
+    Where project-slug is Path(project_dir).name (e.g., "PACT-Plugin").
 
     If session_id or project_dir is unavailable, leaves _context_path as None.
     Readers will return _EMPTY_CONTEXT without attempting any file I/O.

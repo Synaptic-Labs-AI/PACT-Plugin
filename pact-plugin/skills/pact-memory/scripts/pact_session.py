@@ -28,7 +28,7 @@ def _context_file_path(session_id: str, project_dir: str) -> Path | None:
 
     Returns the session-scoped path when both identifiers are provided:
         ~/.claude/pact-sessions/{project-slug}/{session-id}/pact-session-context.json
-    where project-slug is Path(project_dir).name (e.g., "PACT-prompt").
+    where project-slug is Path(project_dir).name (e.g., "PACT-Plugin").
 
     Returns None when either identifier is missing — callers should treat
     this as "no context file available" and return a safe default.

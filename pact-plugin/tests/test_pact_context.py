@@ -154,14 +154,14 @@ class TestGetPactContext:
         pact_context(
             team_name="pact-abc12345",
             session_id="abc12345-0000-1111-2222-333344445555",
-            project_dir="/Users/test/project",
+            project_dir="/Users/example/project",
         )
 
         result = get_pact_context()
 
         assert result["team_name"] == "pact-abc12345"
         assert result["session_id"] == "abc12345-0000-1111-2222-333344445555"
-        assert result["project_dir"] == "/Users/test/project"
+        assert result["project_dir"] == "/Users/example/project"
         assert result["started_at"] == "2026-01-01T00:00:00Z"
 
     def test_returns_empty_strings_when_file_missing(self, monkeypatch, tmp_path):
@@ -283,9 +283,9 @@ class TestGetProjectDir:
         """Should return project_dir from context file."""
         from shared.pact_context import get_project_dir
 
-        pact_context(project_dir="/Users/test/my-project")
+        pact_context(project_dir="/Users/example/my-project")
 
-        assert get_project_dir() == "/Users/test/my-project"
+        assert get_project_dir() == "/Users/example/my-project"
 
 
 class TestGetPluginRoot:
@@ -317,7 +317,7 @@ class TestGetSessionDir:
 
         pact_context(
             session_id="abc-123-def",
-            project_dir="/Users/test/my-project",
+            project_dir="/Users/example/my-project",
         )
 
         result = get_session_dir()
@@ -328,7 +328,7 @@ class TestGetSessionDir:
         """Should return '' when session_id is unavailable."""
         from shared.pact_context import get_session_dir
 
-        pact_context(session_id="", project_dir="/Users/test/my-project")
+        pact_context(session_id="", project_dir="/Users/example/my-project")
 
         assert get_session_dir() == ""
 
@@ -549,14 +549,14 @@ class TestWriteContext:
         ctx_module.write_context(
             team_name="pact-abc12345",
             session_id="abc12345-0000-1111-2222-333344445555",
-            project_dir="/Users/test/project",
+            project_dir="/Users/example/project",
         )
 
         assert ctx_file.exists()
         data = json.loads(ctx_file.read_text(encoding="utf-8"))
         assert data["team_name"] == "pact-abc12345"
         assert data["session_id"] == "abc12345-0000-1111-2222-333344445555"
-        assert data["project_dir"] == "/Users/test/project"
+        assert data["project_dir"] == "/Users/example/project"
         assert "started_at" in data  # ISO timestamp, not empty
 
     def test_writes_plugin_root_when_provided(self, monkeypatch, tmp_path):
@@ -1010,14 +1010,14 @@ class TestWriteReadRoundTrip:
         ctx_module.write_context(
             team_name="pact-roundtrip",
             session_id="roundtrip-session-123",
-            project_dir="/Users/test/roundtrip",
+            project_dir="/Users/example/roundtrip",
         )
 
         result = ctx_module.get_pact_context()
 
         assert result["team_name"] == "pact-roundtrip"
         assert result["session_id"] == "roundtrip-session-123"
-        assert result["project_dir"] == "/Users/test/roundtrip"
+        assert result["project_dir"] == "/Users/example/roundtrip"
         assert result["started_at"] != ""
 
     def test_write_then_convenience_accessors(self, monkeypatch, tmp_path):
@@ -1053,7 +1053,7 @@ class TestCategoryC_MemoryScriptFallback:
         from scripts.pact_session import get_session_id_from_context_file
 
         session_id = "init-session-xyz"
-        project_dir = "/Users/test/my-project"
+        project_dir = "/Users/example/my-project"
         slug = Path(project_dir).name
         ctx_dir = tmp_path / ".claude" / "pact-sessions" / slug / session_id
         ctx_dir.mkdir(parents=True)
@@ -1079,7 +1079,7 @@ class TestCategoryC_MemoryScriptFallback:
 
         result = get_session_id_from_context_file(
             session_id="nonexistent-session",
-            project_dir="/Users/test/project",
+            project_dir="/Users/example/project",
         )
 
         assert result == ""
@@ -1097,7 +1097,7 @@ class TestCategoryC_MemoryScriptFallback:
         from scripts.pact_session import get_session_id_from_context_file
 
         session_id = "corrupt-session"
-        project_dir = "/Users/test/project"
+        project_dir = "/Users/example/project"
         slug = Path(project_dir).name
         ctx_dir = tmp_path / ".claude" / "pact-sessions" / slug / session_id
         ctx_dir.mkdir(parents=True)
@@ -1163,7 +1163,7 @@ class TestPathSync:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "abc-12345"
-        project_dir = "/Users/test/PACT-prompt"
+        project_dir = "/Users/example/PACT-Plugin"
         slug = Path(project_dir).name
 
         expected = (
@@ -1344,7 +1344,7 @@ class TestInitOrdering:
         monkeypatch.setattr(ctx_module, "_context_path", None)
         monkeypatch.setattr(ctx_module, "_cache", None)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/test/my-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/my-project")
 
         # Write context file at the session-scoped path
         session_id = "sess-abc12345"
@@ -1355,7 +1355,7 @@ class TestInitOrdering:
         ctx_file.write_text(json.dumps({
             "team_name": "pact-abc12345",
             "session_id": session_id,
-            "project_dir": "/Users/test/my-project",
+            "project_dir": "/Users/example/my-project",
             "started_at": "2026-01-01T00:00:00Z",
         }), encoding="utf-8")
 
@@ -1386,7 +1386,7 @@ class TestSessionScopedPathE2E:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "e2e-session-42"
-        project_dir = "/Users/test/PACT-prompt"
+        project_dir = "/Users/example/PACT-Plugin"
 
         # write_context with _context_path=None computes session-scoped path
         ctx_module.write_context(
@@ -1396,7 +1396,7 @@ class TestSessionScopedPathE2E:
         )
 
         # Verify file exists at expected session-scoped path
-        slug = "PACT-prompt"  # Path(project_dir).name
+        slug = "PACT-Plugin"  # Path(project_dir).name
         expected_path = (
             tmp_path / ".claude" / "pact-sessions"
             / slug / session_id / "pact-session-context.json"
@@ -1450,12 +1450,12 @@ class TestPactSessionPath:
 
         result = _context_file_path(
             session_id="abc-session-123",
-            project_dir="/Users/test/PACT-prompt",
+            project_dir="/Users/example/PACT-Plugin",
         )
 
         expected = (
             tmp_path / ".claude" / "pact-sessions"
-            / "PACT-prompt" / "abc-session-123" / "pact-session-context.json"
+            / "PACT-Plugin" / "abc-session-123" / "pact-session-context.json"
         )
         assert result == expected
 

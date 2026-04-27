@@ -141,7 +141,7 @@ def _get_project_name() -> str:
     """
     Get the project name from CLAUDE_PROJECT_DIR environment variable.
 
-    Returns the basename of the project directory (e.g. 'PACT-prompt'),
+    Returns the basename of the project directory (e.g. 'PACT-Plugin'),
     falling back to the basename of the current working directory when
     CLAUDE_PROJECT_DIR is not available (e.g. in MCP server processes),
     and finally to 'unknown' if neither yields a useful name.

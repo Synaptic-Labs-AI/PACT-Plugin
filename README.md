@@ -30,13 +30,13 @@ PACT turns one AI into a coordinated dev team. Instead of a single Claude guessi
 
 **1. Install the plugin**
 ```
-/plugin marketplace add Synaptic-Labs-AI/PACT-prompt
-/plugin install PACT@pact-marketplace
+/plugin marketplace add Synaptic-Labs-AI/PACT-Plugin
+/plugin install PACT@pact-plugin
 ```
 
 **2. Set up the orchestrator** ([detailed options below](#installation))
 ```bash
-cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+cp ~/.claude/plugins/cache/pact-plugin/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
 **3. Allow team file access** (prevents permission prompts during agent operations)
@@ -293,7 +293,7 @@ pip install sqlite-vec
 **Quick version** — give Claude this prompt:
 
 ```
-Read the PACT setup instructions at https://github.com/Synaptic-Labs-AI/PACT-prompt/blob/main/README.md
+Read the PACT setup instructions at https://github.com/Synaptic-Labs-AI/PACT-Plugin/blob/main/README.md
 and help me install the PACT plugin with auto-updates enabled.
 ```
 
@@ -302,9 +302,9 @@ and help me install the PACT plugin with auto-updates enabled.
 ```
 Help me install the PACT plugin for Claude Code:
 
-1. Add the marketplace: /plugin marketplace add Synaptic-Labs-AI/PACT-prompt
-2. Install the plugin: /plugin install PACT@pact-marketplace
-3. Enable auto-updates via /plugin → Marketplaces → pact-marketplace → Enable auto-update
+1. Add the marketplace: /plugin marketplace add Synaptic-Labs-AI/PACT-Plugin
+2. Install the plugin: /plugin install PACT@pact-plugin
+3. Enable auto-updates via /plugin → Marketplaces → pact-plugin → Enable auto-update
 4. Set up the orchestrator by appending PACT's CLAUDE.md to my existing ~/.claude/CLAUDE.md
    (or create it if I don't have one)
 5. Configure my settings.json per the "Enabling Agent Teams" section of this README
@@ -316,18 +316,18 @@ Help me install the PACT plugin for Claude Code:
 
 **Step 1: Add the marketplace**
 ```bash
-/plugin marketplace add Synaptic-Labs-AI/PACT-prompt
+/plugin marketplace add Synaptic-Labs-AI/PACT-Plugin
 ```
 
 **Step 2: Install the plugin**
 ```bash
-/plugin install PACT@pact-marketplace
+/plugin install PACT@pact-plugin
 ```
 
 **Step 3: Enable auto-updates**
 - Run `/plugin`
 - Select **Marketplaces**
-- Select **pact-marketplace**
+- Select **pact-plugin**
 - Enable **Auto-update**
 
 **Step 4: Set up the Orchestrator**
@@ -336,10 +336,10 @@ The PACT Orchestrator needs to be in your global `CLAUDE.md`:
 
 ```bash
 # If you DON'T have an existing ~/.claude/CLAUDE.md:
-cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+cp ~/.claude/plugins/cache/pact-plugin/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 
 # If you DO have an existing ~/.claude/CLAUDE.md, append PACT to it:
-cat ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md >> ~/.claude/CLAUDE.md
+cat ~/.claude/plugins/cache/pact-plugin/PACT/*/CLAUDE.md >> ~/.claude/CLAUDE.md
 ```
 
 **Step 5: Allow team file access**
@@ -359,8 +359,8 @@ claude
 If you want to contribute or customize PACT:
 
 ```bash
-git clone https://github.com/Synaptic-Labs-AI/PACT-prompt.git
-cd PACT-prompt
+git clone https://github.com/Synaptic-Labs-AI/PACT-Plugin.git
+cd PACT-Plugin
 claude
 ```
 
@@ -469,9 +469,9 @@ When installed as a plugin, PACT lives in your plugin cache:
 ├── CLAUDE.md                   # Orchestrator (copy from plugin)
 ├── plugins/
 │   └── cache/
-│       └── pact-marketplace/
+│       └── pact-plugin/
 │           └── PACT/
-│               └── 3.20.0/    # Plugin version
+│               └── 3.20.1/    # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
@@ -502,7 +502,7 @@ your-project/
 If you cloned this repo for development/contribution:
 
 ```
-PACT-prompt/
+PACT-Plugin/
 ├── .claude-plugin/
 │   └── marketplace.json        # Self-hosted marketplace definition
 ├── pact-plugin/                # Plugin source (canonical)
@@ -570,7 +570,7 @@ PACT v3.0 is a **breaking change**. The agent execution model migrated from suba
    # Back up your existing CLAUDE.md first
    cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.bak
    # Then re-copy from the updated plugin
-   cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+   cp ~/.claude/plugins/cache/pact-plugin/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
    ```
    If you have custom content in `~/.claude/CLAUDE.md`, manually merge the updated PACT section (between `<!-- PACT_START -->` and `<!-- PACT_END -->` markers) instead of overwriting.
 3. **Restart Claude Code**
@@ -596,5 +596,5 @@ MIT License - See [LICENSE](LICENSE) for details.
 ## Links
 
 - [Claude Code Documentation](https://code.claude.com/docs)
-- [Report Issues](https://github.com/ProfSynapse/PACT-prompt/issues)
+- [Report Issues](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues)
 - [VSM Background](https://en.wikipedia.org/wiki/Viable_system_model)
