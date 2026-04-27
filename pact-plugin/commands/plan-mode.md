@@ -187,9 +187,38 @@ If a specialist fails entirely (timeout, error):
 3. Flag prominently in "Open Questions" that this domain was not consulted
 4. Recommend the user consider re-running plan-mode or consulting that specialist manually
 
-**Dispatch each consultant**:
+**Two-Task Dispatch Shape (TEACHBACK + WORK)**
+
+Each consultant dispatch creates **two tasks**, not one:
+
+- **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for plan consultation on {feature}"`, owner = consultant. Description: lightweight understanding-confirm of the consultation scope.
+- **Task B** — primary consultation. `subject = "{specialist}: plan consultation for {feature}"`, owner = consultant, `blockedBy = [<Task A id>]`.
+
+Both are created BEFORE the `Task(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
+
+```
+A_id = TaskCreate(
+    subject="{specialist}: TEACHBACK for plan consultation on {feature}",
+    description="DOGFOOD TEACHBACK GATE.\n\n"
+                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
+                "DO NOT mark this task completed — team-lead-only completion.\n\n"
+                "Mission for Task B: see Task #{B_id}."
+)
+TaskUpdate(A_id, owner="{specialist-name}")
+B_id = TaskCreate(subject="{specialist}: plan consultation for {feature}", description="<consultation mission>")
+TaskUpdate(B_id, owner="{specialist-name}", addBlockedBy=[A_id])
+TaskUpdate(A_id, addBlocks=[B_id])
+```
+
+The teachback gate is lightweight ("understanding-confirm" with no implementation gate consequence) — plan-mode dispatches are read-mostly. The `Task()` `prompt` does NOT change shape.
+
+---
+
+**Dispatch each consultant** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per consultant:
+
 1. `TaskCreate(subject="{specialist}: plan consultation for {feature}", description="PLANNING CONSULTATION ONLY — No implementation.\n\nTask: {task description}\n\n[full template content from above]")`
-   - Add to description: "Send a teachback to lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
+   - Add to description: "Send a teachback to team-lead restating your understanding of the consultation task before providing your analysis. If upstream context is referenced, read it via `TaskGet` first."
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. Spawn the consultant with the canonical dispatch form:
 
@@ -531,7 +560,7 @@ The orchestrator should reference this plan during execution.
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
 On signal detected, handle via the Signal Task Handling procedure:

@@ -4,7 +4,7 @@ bootstrap-first instructions until bootstrap-complete marker exists.
 
 Tests cover:
 1. Marker exists → suppressOutput (fast path, zero tokens)
-2. No marker + PACT lead session → inject additionalContext with bootstrap instruction
+2. No marker + PACT team-lead session → inject additionalContext with bootstrap instruction
 3. Non-PACT session (no session dir) → suppressOutput (no-op passthrough)
 4. Teammate (agent_name non-empty) → suppressOutput (no-op passthrough)
 5. Malformed stdin JSON → fail-open (suppressOutput, exit 0)
@@ -117,7 +117,7 @@ class TestCheckBootstrapNeeded:
         assert result is None
 
     def test_returns_instruction_when_no_marker(self, monkeypatch, tmp_path):
-        """No marker + lead session → bootstrap instruction string with session dir."""
+        """No marker + team-lead session → bootstrap instruction string with session dir."""
         from bootstrap_prompt_gate import _check_bootstrap_needed
 
         session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)

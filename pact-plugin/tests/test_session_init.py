@@ -281,7 +281,7 @@ class TestTeamResumeDetection:
         # The team instruction uses insert(0, ...) so it should be first
         # additionalContext is " | ".join(context_parts), so team instruction
         # should be at the start. Post #366 Phase 1 the prelude leads with the
-        # PACT ROLE marker to anchor role detection for the lead session.
+        # PACT ROLE marker to anchor role detection for the team-lead session.
         # Post #444 the directive is the unconditional 4-sentence form.
         assert additional.startswith("YOUR PACT ROLE: orchestrator")
         assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
@@ -1766,7 +1766,7 @@ class TestFailureLogIntegration:
     create an unreapable `unknown-{hex}/` directory. That design choice
     costs visibility into hook failures (stderr is not user-visible, and
     teammate sessions never surface their first-message context to the
-    lead). The global ring buffer at ~/.claude/pact-sessions/_session_init_failures.log
+    team-lead). The global ring buffer at ~/.claude/pact-sessions/_session_init_failures.log
     is the post-hoc record that closes that gap.
 
     The integration contract verified here:
@@ -2915,7 +2915,7 @@ class TestPluginRootEnvWiring:
 #
 # These classes pin the post-refactor session_init contract:
 #   1. _team_create / _team_reuse strings now lead with `YOUR PACT ROLE: orchestrator`
-#      and instruct the lead to invoke `Skill("PACT:bootstrap")` as its FIRST
+#      and instruct the team-lead to invoke `Skill("PACT:bootstrap")` as its FIRST
 #      action.
 #   2. session_init.main() calls remove_stale_kernel_block() unconditionally
 #      on every SessionStart (not gated by is_context_reset).
@@ -2997,7 +2997,7 @@ class TestTeamCreateStringFreshSession:
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
 
     def test_blocks_premature_action(self, monkeypatch, tmp_path):
-        """The fresh prelude must instruct the lead not to act before bootstrap."""
+        """The fresh prelude must instruct the team-lead not to act before bootstrap."""
         additional, _, _ = _run_session_init_for_path(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
@@ -3212,10 +3212,10 @@ class TestHappyPathOutputInvariant:
 # for the PACT ROLE marker + Skill("PACT:bootstrap") YOUR FIRST ACTION directive.
 #
 # If session_init.main() throws BEFORE it has built the team_create/team_reuse
-# block, the lead would previously get only {"systemMessage": "..."} back and
+# block, the team-lead would previously get only {"systemMessage": "..."} back and
 # the governance delivery chain would be broken for that one session. The F2
 # safety net in the outer except block rebuilds a minimal PACT ROLE block so
-# the lead still knows how to bootstrap even on the failure path.
+# the team-lead still knows how to bootstrap even on the failure path.
 # ---------------------------------------------------------------------------
 
 
@@ -3247,7 +3247,7 @@ class TestBuildSafetyNetContext:
         assert 'You must invoke Skill("PACT:bootstrap") on every session start.' in result
 
     def test_none_team_mentions_not_generated(self):
-        """With team_name=None the message should tell the lead the team is not yet created."""
+        """With team_name=None the message should tell the team-lead the team is not yet created."""
         from session_init import _build_safety_net_context
 
         result = _build_safety_net_context(None)
@@ -3264,7 +3264,7 @@ class TestBuildSafetyNetContext:
         assert result.startswith("YOUR PACT ROLE: orchestrator.")
 
     def test_with_team_contains_team_name(self):
-        """With a team_name the string must embed the team name so the lead can reuse it."""
+        """With a team_name the string must embed the team name so the team-lead can reuse it."""
         from session_init import _build_safety_net_context
 
         result = _build_safety_net_context("pact-abc123")
@@ -3312,7 +3312,7 @@ class TestReadOnlyHomeScenario:
     and writes to ~/.claude/CLAUDE.md. If the .claude parent directory is
     read-only, the write fails — but the hook must still deliver the
     governance chain: exit 0, valid JSON on stdout, and additionalContext
-    starting with "YOUR PACT ROLE: orchestrator." so the lead can load bootstrap.
+    starting with "YOUR PACT ROLE: orchestrator." so the team-lead can load bootstrap.
 
     Unlike the unit-level OSError mocks, this test uses a real chmod on a
     real temp directory and exercises the full migration code path end to
@@ -3383,7 +3383,7 @@ class TestReadOnlyHomeScenario:
 
             assert exc_info.value.code == 0, (
                 "session_init must exit 0 even when the home .claude "
-                "directory is read-only — the hook fails open so the lead "
+                "directory is read-only — the hook fails open so the team-lead "
                 "still receives the governance delivery chain."
             )
 
@@ -3394,7 +3394,7 @@ class TestReadOnlyHomeScenario:
             assert additional.startswith("YOUR PACT ROLE: orchestrator."), (
                 "Read-only home scenario regressed: additionalContext must "
                 "still start with the PACT ROLE marker so the routing block "
-                "consumer identifies the lead's role."
+                "consumer identifies the team-lead's role."
             )
             assert 'Invoke Skill("PACT:bootstrap") immediately' in additional, (
                 "#444 unconditional directive must survive the readonly scenario."
@@ -3412,7 +3412,7 @@ class TestMainExceptionSafetyNet:
       - hookSpecificOutput.additionalContext starting with "YOUR PACT ROLE: orchestrator."
       - systemMessage reporting the original exception
 
-    The key invariant: even on the failure path, the lead still receives the
+    The key invariant: even on the failure path, the team-lead still receives the
     governance delivery chain (PACT ROLE marker + Skill bootstrap directive).
     """
 
@@ -3466,7 +3466,7 @@ class TestMainExceptionSafetyNet:
     ):
         """When an exception fires AFTER generate_team_name(), the except block
         must see the captured team_name and emit it in the safety net so the
-        lead can reuse it instead of creating a new one."""
+        team-lead can reuse it instead of creating a new one."""
         from session_init import main
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
@@ -3506,7 +3506,7 @@ class TestMainExceptionSafetyNet:
         assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
 
         # The team name captured before the exception must be in the safety net
-        # so the lead can reuse it rather than creating a second team.
+        # so the team-lead can reuse it rather than creating a second team.
         assert "pact-aabb1122" in additional
         assert "partially failed" in additional
         assert "NOT GENERATED" not in additional, (

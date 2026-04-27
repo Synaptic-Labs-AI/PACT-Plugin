@@ -406,8 +406,8 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 ```
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via `TaskGet(#5)`
-3. Agent sends teachback to lead via `SendMessage`:
-   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
+3. Agent sends teachback to team-lead via `SendMessage`:
+   "[{sender}→team-lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
 5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
 ```
@@ -419,7 +419,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 #### Teachback Format
 
 ```
-[{sender}→lead] Teachback:
+[{sender}→team-lead] Teachback:
 - Building: {what I understand I'm building}
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
@@ -444,7 +444,7 @@ One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance ag
 
 ### Agreement Verification (Orchestrator-Side)
 
-Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent).
+Teachback verifies understanding **downstream** (next agent → team-lead). Agreement verification verifies understanding **upstream** (team-lead → previous agent).
 
 #### When to Verify
 
@@ -750,7 +750,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
+- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT
@@ -856,7 +856,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 > **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
 > predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
 
-At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
 
 **Schema**:
 
@@ -881,7 +881,7 @@ CalibrationRecord:
 **Post-cycle comparison**: During HANDOFF processing, the secretary:
 1. Reads feature task metadata for initial_variety_score
 2. Scans TaskList for blocker count and phase rerun count
-3. Asks the lead for a brief difficulty assessment (higher, lower, or about the same)
+3. Asks the team-lead for a brief difficulty assessment (higher, lower, or about the same)
 4. Computes the full CalibrationRecord and saves to pact-memory
 5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
 
@@ -897,6 +897,19 @@ CalibrationRecord:
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
+
+### Lead-vs-Teammate Completion Responsibilities (per workflow)
+
+| Workflow | Teammate completion authority | Lead completion authority |
+|---|---|---|
+| `/PACT:orchestrate` | None (write HANDOFF, idle on `awaiting_lead_completion`) | All teammate-owned phase tasks; the feature task |
+| `/PACT:comPACT` | None for normal specialists; auditor self-completes signal-tasks | All teammate-owned tasks; the parent comPACT task |
+| `/PACT:rePACT` | None (write HANDOFF, idle) | All sub-scope tasks; the parent rePACT task |
+| `/PACT:peer-review` | None (reviewer writes review HANDOFF, idles) | All reviewer tasks; the peer-review parent task |
+| `/PACT:plan-mode` | None (consultant writes consultation HANDOFF, idles) | All consultant tasks; the plan-mode parent task |
+| `/PACT:imPACT` | None (triage agent writes triage HANDOFF, idles) | All triage tasks; the imPACT parent task |
+
+Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) holds the slim team-lead-side summary.
 
 ---
 
@@ -1102,17 +1115,31 @@ Feature Task (created by orchestrator)
 |-------|------------|----------|-----------|
 | Feature | Orchestrator | Orchestrator | Spans entire workflow |
 | Phase | Orchestrator | Orchestrator | Active during phase |
-| Agent | Orchestrator | Specialist (self-managed) | Specialist claims via `TaskUpdate(status="in_progress")`, completes via `TaskUpdate(status="completed")` |
+| Agent | Orchestrator | Specialist (claim-only); Orchestrator (completion authority) | Specialist claims via `TaskUpdate(status="in_progress")`; orchestrator completes via `TaskUpdate(status="completed")` paired with a wake-signal SendMessage |
 
-Under Agent Teams, specialists self-manage their agent task lifecycle. The orchestrator creates tasks via `TaskCreate` and assigns ownership, but the specialist teammate claims the task (sets `in_progress`) and marks it `completed` upon finishing. This differs from the background task model where the orchestrator managed all task state transitions.
+Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority).
 
 ### Task States
 
 Tasks progress through: `pending` → `in_progress` → `completed`
 
 - **pending**: Created but not started
-- **in_progress**: Active work underway
-- **completed**: Work finished (success or documented failure)
+- **in_progress**: Active work underway (also covers "done-awaiting-review" — teammate has stored HANDOFF and idles on `awaiting_lead_completion`)
+- **completed**: Work finished (success or documented failure); transition is **team-lead-only** on teammate-owned tasks
+
+### Status-by-Actor
+
+| Transition | Actor | Conditions |
+|---|---|---|
+| `pending → in_progress` (claim) | Teammate | Owns the task; `blockedBy` is empty |
+| `in_progress → in_progress` (metadata work) | Teammate | Writes `metadata.handoff` / `metadata.teachback_submit` |
+| `in_progress → in_progress` (rejection metadata) | Lead | Writes `metadata.teachback_rejection` / `metadata.handoff_rejection` + sends wake-signal SendMessage |
+| `in_progress → completed` | **LEAD ONLY** on teammate-owned tasks | Pairs with wake-signal SendMessage; carve-outs: signal-tasks, secretary memory-save, imPACT force-term |
+| `pending → completed` (skip) | Lead | Phase-skip with `metadata.skipped = true` |
+
+### Task A + Task B Dispatch Shape
+
+Every specialist dispatch creates a Task A (teachback) + Task B (primary work) pair. Task B has `blockedBy=[A]`. Lead-completion of Task A auto-unblocks Task B in the task graph; the team-lead pairs the status flip with a wake-signal SendMessage so the idle teammate (on `intentional_wait{reason=awaiting_lead_completion}`) wakes to claim B. The platform does not push a wake on blocker resolution — `blockedBy` is computed at TaskList query time, so the wake-signal SendMessage is required.
 
 ### Blocking Relationships
 
@@ -1641,10 +1668,10 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 | **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
 | **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
 | **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
-| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
+| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to team-lead |
 | **Output: commits** | Teammate commits directly to the feature branch |
 | **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
-| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
+| **Delivery mechanism** | Asynchronous — teammates operate independently; team-lead receives messages and task updates automatically |
 
 **Key Agent Teams tools**:
 
@@ -1652,14 +1679,14 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 |------|---------|--------------|
 | `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
 | `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
-| `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
+| `SendMessage` (type: `"message"`) | Direct message from teammate to team-lead | Handoff delivery, blocker reporting |
 | `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
 | `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
 | `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
 
 **Architectural notes**:
 
-- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
+- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the team-lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
 - No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
 - Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
 
@@ -1886,7 +1913,7 @@ The auditor uses signal-based completion rather than standard HANDOFF:
 1. Task is created with `metadata: {"completion_type": "signal"}`
 2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
 3. Auditor marks task completed
-4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the lead verifies presence directly via `TaskGet`).
+4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the team-lead verifies presence directly via `TaskGet`).
 
 **audit_summary format**:
 ```json

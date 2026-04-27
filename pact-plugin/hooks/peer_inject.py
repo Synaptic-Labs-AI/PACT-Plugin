@@ -34,6 +34,18 @@ _TEACHBACK_REMINDER = (
 )
 
 
+_COMPLETION_AUTHORITY_NOTE = (
+    "\n\nCOMPLETION AUTHORITY: You do NOT mark your own tasks `completed`. "
+    "When your work is done, write your HANDOFF (or teachback metadata) to "
+    "the task and remain `in_progress`. The team-lead reads your output, judges "
+    "acceptance, and transitions status to `completed` only on accept. "
+    "Your dispatch may be a Task A (teachback) + Task B (work) pair: claim A, "
+    "submit teachback, idle on `intentional_wait{reason=awaiting_lead_completion}`. "
+    "Do NOT begin Task B until A.status == 'completed' (team-lead's wake-signal "
+    "SendMessage confirms; you cannot self-wake to poll TaskList while idle)."
+)
+
+
 _BOOTSTRAP_PRELUDE_TEMPLATE = (
     "YOUR PACT ROLE: teammate ({agent_name}).\n\n"
     "YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). "
@@ -96,7 +108,7 @@ def get_peer_context(
     Prepends a bootstrap prelude (PACT ROLE marker + YOUR FIRST ACTION skill
     invocation instruction) and appends a teachback timing reminder
     after the peer list. The PACT ROLE marker is the stable substring
-    used by lead routing logic; empty agent_name falls back to "unknown".
+    used by team-lead routing logic; empty agent_name falls back to "unknown".
 
     Args:
         agent_type: The spawning agent's type (e.g., "pact-backend-coder")
@@ -155,17 +167,19 @@ def get_peer_context(
         )
 
     prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=safe_name)
-    # Surface plugin manifest diagnostic (#500). Banner is a single line
-    # with no leading/trailing newlines; add an explicit "\n\n" separator
-    # between peer_context and the banner. _TEACHBACK_REMINDER already
-    # begins with "\n\n", which preserves the existing visual spacing
-    # between the banner and the teachback reminder.
+    # Output ordering: prelude → peer_context → "\n\n" → plugin banner →
+    # _TEACHBACK_REMINDER → _COMPLETION_AUTHORITY_NOTE. The plugin banner
+    # is a single line with no leading/trailing newlines, so an explicit
+    # "\n\n" separator goes between peer_context and the banner.
+    # _TEACHBACK_REMINDER and _COMPLETION_AUTHORITY_NOTE each begin with
+    # "\n\n", preserving visual spacing through the trailing reminders.
     return (
         prelude
         + peer_context
         + "\n\n"
         + format_plugin_banner()
         + _TEACHBACK_REMINDER
+        + _COMPLETION_AUTHORITY_NOTE
     )
 
 

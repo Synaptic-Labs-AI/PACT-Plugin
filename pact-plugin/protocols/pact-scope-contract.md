@@ -127,10 +127,10 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 | **Input: feature_context** | Inherited via CLAUDE.md (auto-loaded by teammates) plus the spawn prompt |
 | **Input: worktree_path** | Worktree working directory (teammate operates in the assigned worktree) |
 | **Input: nesting_depth** | Communicated in the spawn prompt; no nested teams allowed (enforced by Agent Teams) |
-| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
+| **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to team-lead |
 | **Output: commits** | Teammate commits directly to the feature branch |
 | **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
-| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
+| **Delivery mechanism** | Asynchronous — teammates operate independently; team-lead receives messages and task updates automatically |
 
 **Key Agent Teams tools**:
 
@@ -138,14 +138,14 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 |------|---------|--------------|
 | `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
 | `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
-| `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
+| `SendMessage` (type: `"message"`) | Direct message from teammate to team-lead | Handoff delivery, blocker reporting |
 | `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
 | `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
 | `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |
 
 **Architectural notes**:
 
-- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
+- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the team-lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
 - No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
 - Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
 

@@ -41,11 +41,29 @@ Read your processed task list from agent memory (`~/.claude/agent-memory/pact-se
 
 ### Step 3: Read All HANDOFFs
 
-For each discovered task, read the HANDOFF using this two-tier fallback:
+For each discovered task, read the HANDOFF using this revision-aware fallback:
 
-1. **Session journal** (preferred, GC-proof): If the task was discovered via `agent_handoff` journal events, the `handoff` field contains the full HANDOFF content inline — use it directly. This is the most reliable source.
-2. **`TaskGet` fallback**: If the journal event lacks inline content, fall back to `TaskGet(taskId).metadata.handoff`. This may fail for garbage-collected tasks.
-3. **Report gap**: If both sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the lead has context.
+1. **Revision-aware metadata read**: Read the task's `metadata` (raw JSON; `TaskGet` is metadata-blind for `handoff` content). If `metadata.revision_number` is set and `> 1`, prefer `metadata.handoff` over the journal event. The journal `agent_handoff` event captured the FIRST (rejected) submission only — `agent_handoff_emitter.py` writes one journal event per task lifetime via an O_EXCL marker. On revision, the team-lead-completion of the revised task does NOT emit a second journal event, so the revised content lives in `metadata.handoff` only.
+2. **Session journal** (preferred for revision_number == 1 or unset, GC-proof): If the task was discovered via `agent_handoff` journal events and `revision_number` is unset or 1, the journal event's `handoff` field contains the full HANDOFF content inline — use it directly. This is the most reliable source for first-pass acceptance flows.
+3. **`TaskGet` fallback**: If both above fail (no journal event AND no `metadata.handoff`), fall back to `TaskGet(taskId).metadata.handoff`. May fail for garbage-collected tasks.
+4. **Report gap**: If all sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the team-lead has context.
+
+Pseudocode for the revision-aware branch:
+
+```python
+for task_id in unprocessed:
+    journal_event = next((e for e in journal_events if e.task_id == task_id), None)
+    task_meta = read_task_metadata(task_id) or {}  # raw JSON read; TaskGet is metadata-blind
+    revision_n = task_meta.get("revision_number", 1)
+    if revision_n > 1:
+        # Revised HANDOFF; journal event captured only the first (rejected) submission.
+        handoff = task_meta.get("handoff")
+    elif journal_event:
+        handoff = journal_event.handoff
+    else:
+        handoff = task_meta.get("handoff")
+    # ...process handoff...
+```
 
 Read all HANDOFFs before proceeding to extraction.
 
@@ -110,11 +128,11 @@ Last processed: {timestamp}
 
 ### Step 9: Report Summary
 
-Report to the lead:
+Report to the team-lead:
 
 ```
 SendMessage(to="team-lead",
-  message="[secretary→lead] HANDOFF review complete. Saved N memories from M HANDOFFs.
+  message="[secretary→team-lead] HANDOFF review complete. Saved N memories from M HANDOFFs.
 - {memory summary 1}
 - {memory summary 2}
 Gaps: {any HANDOFFs that were thin or missing}",
@@ -124,18 +142,18 @@ Gaps: {any HANDOFFs that were thin or missing}",
 ### Step 10: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
-- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the lead for the variety score instead.
+- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the team-lead for the variety score instead.
 - Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject). Note: `TaskList` may be incomplete in long sessions due to garbage collection — report what's available.
 - Scan `TaskList` for phase rerun count (retry/redo phase tasks)
 - Note domain from feature task description
 - Infer specialist fit from HANDOFF content (scope mismatch signals, blocker patterns)
-- Send a calibration check to the lead:
+- Send a calibration check to the team-lead:
   ```
   SendMessage(to="team-lead",
-    message="[secretary→lead] Calibration: variety was scored {X}. Blockers: {N}, reruns: {N}. Was actual difficulty higher, lower, or about the same? Any dimensions that surprised you?",
+    message="[secretary→team-lead] Calibration: variety was scored {X}. Blockers: {N}, reruns: {N}. Was actual difficulty higher, lower, or about the same? Any dimensions that surprised you?",
     summary="Calibration check: variety {X}")
   ```
-- On lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
+- On team-lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
 
 ---
 
@@ -151,7 +169,7 @@ Triggered after remediation completes — processes only the delta since the las
 6. **Update processed task tracking** — append new task IDs to the processed set (do NOT overwrite — preserves the full session history)
 7. **Do NOT delete the session journal** — it may still be accumulating entries from ongoing work
 8. **Update existing memories** if remediation superseded prior decisions (use `update` CLI command, not `save`). Remember: default `update` is additive merge — pass `--replace` only when the prior list items need to be discarded, not amended.
-9. **Report delta summary** to lead — only report what changed in this incremental pass
+9. **Report delta summary** to team-lead — only report what changed in this incremental pass
 
 ---
 
@@ -182,7 +200,7 @@ Save orchestration retrospective as calibration data (see Standard Harvest Step 
 
 ### Step 6: Report Summary
 
-Report consolidation results to the lead, including:
+Report consolidation results to the team-lead, including:
 - Memories consolidated (merged count)
 - Memories pruned (deleted/superseded count)
 - Calibration data saved
@@ -235,7 +253,7 @@ HANDOFFs are agent-written summaries — they may omit implicit learnings (faile
 
 ### Investigation Techniques
 
-**Direct teammate communication**: Message implementing agents **directly** — not through the lead. The lead does not need to be in the loop for these exchanges.
+**Direct teammate communication**: Message implementing agents **directly** — not through the team-lead. The team-lead does not need to be in the loop for these exchanges.
 
 ```
 SendMessage(to="{agent-name}",
@@ -261,7 +279,7 @@ SendMessage(to="{agent-name}",
 
 ## Ad-Hoc Save Requests
 
-For direct save requests from the lead outside of workflow HANDOFF review (ad-hoc saves), apply the same institutional knowledge criteria and save-vs-update dedup — save decisions, lessons, and cross-cutting concerns to pact-memory.
+For direct save requests from the team-lead outside of workflow HANDOFF review (ad-hoc saves), apply the same institutional knowledge criteria and save-vs-update dedup — save decisions, lessons, and cross-cutting concerns to pact-memory.
 
 ---
 
@@ -270,7 +288,7 @@ For direct save requests from the lead outside of workflow HANDOFF review (ad-ho
 This is the Layer 4 fallback for completed handoffs left behind by sessions that ended without wrap-up or where Layer 2 triggers were missed.
 
 1. Look for `session-journal.jsonl` in `~/.claude/pact-sessions/*/*/` directories. **Exclude the current session's directory** (available from the session context file at `~/.claude/pact-sessions/{slug}/{session_id}/pact-session-context.json`, or the session dir provided in your dispatch prompt) — that session's data is active, not orphaned.
-2. If found: report to lead "Found N orphaned HANDOFFs from prior session {session_dir}"
+2. If found: report to team-lead "Found N orphaned HANDOFFs from prior session {session_dir}"
 3. Attempt to process them — prefer `agent_handoff` events from the session journal (full HANDOFF inline, read via `read_events_from(session_dir, 'agent_handoff')`); fall back to `TaskGet` (may fail for garbage-collected tasks)
 4. Delete processed files after recovery (use `python3 -c "from pathlib import Path; Path(...).unlink(missing_ok=True)"` — not shell `rm`, to avoid sensitive-file permission prompts)
 5. Report summary of recovered knowledge (or gaps where all sources failed)

@@ -2,28 +2,31 @@
 Location: pact-plugin/hooks/shared/intentional_wait.py
 Summary: `intentional_wait` metadata schema — the teammate-facing contract
          for signalling a legitimate wait on an in_progress task (teachback
-         approval, inter-commit hold, peer reply, etc.).
-Used by: teammate-authored metadata on Task records. No in-plugin consumers
-         post-#538; the schema primitives are retained as the teammate-facing
-         metadata contract documented in skills/pact-agent-teams/SKILL.md.
+         approval, inter-commit hold, peer reply, etc.). Also the canonical
+         self-complete-exemption predicate for team-lead-side TaskGet inspection
+         and audit tooling.
+Used by: teammate-authored metadata on Task records, team-lead inspection, and
+         audit tooling. The exemption predicate (is_self_complete_exempt)
+         is NOT a hook — it is a pure function consumed by team-lead instructions
+         and future audit consumers. See skills/pact-agent-teams/SKILL.md
+         and skills/orchestration/SKILL.md for the contract.
 
 Contract: pure functions; never raise. Malformed flags fail loud — e.g.
 `wait_stale` returns True on any parse error so a broken flag cannot
-silently be interpreted as a fresh wait.
+silently be interpreted as a fresh wait. is_self_complete_exempt defaults
+to False on malformed input (conservative: never silently exempt).
 
 Public surface:
 - KNOWN_REASONS / KNOWN_RESOLVERS — vocabulary hints (free-form strings
   still accepted by validate_wait).
 - DEFAULT_THRESHOLD_MINUTES — staleness horizon (30 min).
+- SELF_COMPLETE_EXEMPT_AGENTS — agent names whose tasks may self-complete
+  (memory-save, etc.). Companion predicate: is_self_complete_exempt.
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
-
-Removed in #538 C3 (with detect_stall in teammate_idle.py):
-- is_signal_task(task) — agent_handoff_emitter uses the inline literal
-  `metadata.type in ("blocker", "algedonic")` (matches task_utils.py:184
-  and session_resume.py:525 convention).
-- should_silence_stall_nag(task) — stall-nag removed entirely.
+- is_self_complete_exempt(task) — True iff the task is exempt from the
+  team-lead-only-completion rule (by agent type or signal-task pattern).
 """
 
 from datetime import datetime, timezone
@@ -41,11 +44,34 @@ KNOWN_REASONS = frozenset({
     "awaiting_peer_response",
     "awaiting_user_decision",
     "awaiting_blocker_resolution",
+    "awaiting_lead_completion",
 })
 
 KNOWN_RESOLVERS = frozenset({"lead", "peer", "user", "external"})
 
 DEFAULT_THRESHOLD_MINUTES = 30
+
+
+# Agents whose tasks may be self-completed because the team-lead has no
+# acceptance criteria to judge. Exemption is narrow by design: each
+# entry must have a documented rationale.
+#
+# `pact-secretary` (memory-save tasks): purely internal bookkeeping.
+#   The secretary writes a HANDOFF describing what was saved; the team-lead
+#   has no acceptance criteria — judging memory-save quality is the
+#   secretary's domain. Lead-as-gate would add 12-18 transitions per
+#   session with zero quality signal.
+#
+# Auditor signal-tasks are NOT in this set — they self-complete via
+# `metadata.completion_type == "signal"` + `metadata.type in {"blocker",
+# "algedonic"}` (the inline-literal pattern at task_utils.py:184 /
+# session_resume.py:525). Two distinct exemption surfaces:
+# - SELF_COMPLETE_EXEMPT_AGENTS: by agent type, declared at dispatch.
+# - signal-task pattern: by task metadata, applies to any agent.
+SELF_COMPLETE_EXEMPT_AGENTS: frozenset = frozenset({
+    "pact-secretary",
+    "secretary",
+})
 
 
 def canonical_since() -> str:
@@ -129,3 +155,53 @@ def wait_stale(
     now = _now or datetime.now(timezone.utc)
     age_minutes = (now - since).total_seconds() / 60
     return age_minutes >= threshold_minutes
+
+
+def is_self_complete_exempt(task: Any) -> bool:
+    """
+    Return True iff this task is exempt from the team-lead-only-completion rule.
+
+    Two exemption surfaces (OR-combined):
+    1. By owner: task.owner in SELF_COMPLETE_EXEMPT_AGENTS. Lead-declared
+       at dispatch time via the agent's owner field.
+    2. By signal-task metadata: task.metadata.completion_type == "signal" AND
+       task.metadata.type in {"blocker", "algedonic"}. Mirrors the inline
+       literal at agent_handoff_emitter.py / task_utils.py:184 /
+       session_resume.py:525.
+
+    Pure function; never raises on plain dicts (PACT task representation
+    via json.loads); defaults to False on missing or malformed fields
+    (conservative — never silently exempt).
+
+    NOT a hook predicate. There is no hook reading this — the function is
+    the canonical predicate for team-lead-side TaskGet inspection, audit tooling,
+    and future consumers. Hooks must use the inline-literal mirror to avoid
+    reintroducing livelock-capable hook surface.
+
+    TRUST BOUNDARY: `owner` is teammate-writable via TaskUpdate(owner=...).
+    The carve-out is bounded by SELF_COMPLETE_EXEMPT_AGENTS being a curated
+    short list (currently `secretary` / `pact-secretary` only); a non-exempt
+    teammate cannot self-promote without writing one of those curated names.
+    No in-plugin consumer reads this predicate at runtime — instructions and
+    audit tooling are the defense. Future extensions adding new agents to
+    SELF_COMPLETE_EXEMPT_AGENTS must re-evaluate this boundary.
+    """
+    if not isinstance(task, dict):
+        return False
+
+    metadata = task.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return False
+
+    # Surface 1: owner in curated exempt set.
+    owner = task.get("owner")
+    if isinstance(owner, str) and owner in SELF_COMPLETE_EXEMPT_AGENTS:
+        return True
+
+    # Surface 2: signal-task pattern (inline-literal mirror).
+    if metadata.get("completion_type") == "signal":
+        signal_type = metadata.get("type")
+        if signal_type in ("blocker", "algedonic"):
+            return True
+
+    return False

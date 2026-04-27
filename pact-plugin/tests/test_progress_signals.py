@@ -27,7 +27,7 @@ class TestProgressSignals:
         assert "### Progress Signals" in skill_content
 
     def test_format_specification_present(self, skill_content):
-        assert "[sender→lead] Progress:" in skill_content
+        assert "[sender→team-lead] Progress:" in skill_content
 
     def test_natural_breakpoints_defined(self, skill_content):
         assert "Natural breakpoints" in skill_content

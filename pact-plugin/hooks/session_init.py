@@ -489,7 +489,7 @@ def _build_safety_net_context(team_name: str | None) -> str:
     The returned string MUST start with "YOUR PACT ROLE: orchestrator." at byte 0
     (line-anchored) so the routing-block consumer check recognizes it, and
     must include the `Skill("PACT:bootstrap")` YOUR FIRST ACTION instruction so
-    the lead still loads its operating instructions, governance policy, and
+    the team-lead still loads its operating instructions, governance policy, and
     workflow protocols even when main() failed before building the normal
     team-reuse/team-create string.
 
@@ -702,7 +702,7 @@ def main():
 
         # 4c. Surface plugin manifest diagnostic (#500). Tier-0 additionalContext —
         # total-function banner; always emits, even on read/parse failure.
-        # Lets both lead and teammate context readers cross-reference
+        # Lets both team-lead and teammate context readers cross-reference
         # worktree edits against the resolved installed-cache root at a
         # glance. Helper is total: no conditional append, no try/except
         # wrapper at the call site.
@@ -764,9 +764,9 @@ def main():
             # Issue #399: record this failure in the global ring buffer log
             # BEFORE emitting the stderr warning. The ring buffer is the
             # only observability surface that survives across sessions and
-            # aggregates across both lead and teammate sessions — stderr
+            # aggregates across both team-lead and teammate sessions — stderr
             # output from hooks is not visible to users, and the single-
-            # instance safety net only reaches the lead's first-message
+            # instance safety net only reaches the team-lead's first-message
             # context. Defense in depth: append_failure fails-open
             # internally, but we also wrap the call in its own try/except
             # so a future refactor weakening that contract cannot crash
@@ -1087,7 +1087,7 @@ def main():
 
     except Exception as e:
         # Safety net: even when main() throws before building the normal
-        # output, the lead still needs the governance delivery chain.
+        # output, the team-lead still needs the governance delivery chain.
         # Emit a minimal PACT ROLE marker + bootstrap skill directive in
         # additionalContext, alongside the error in systemMessage. Claude
         # Code's hook-output schema supports both fields in the same JSON.

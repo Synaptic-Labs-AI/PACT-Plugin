@@ -653,7 +653,7 @@ class TestR1bRuntimeFailOpen:
         # The critical structural invariant: no systemMessage on stdout.
         # Claude Code treats stdout-JSON as a hook signal; if python's
         # own error output leaked there, every missing-hook path would
-        # surface in the lead's prompt.
+        # surface in the team-lead's prompt.
         assert "systemMessage" not in result.stdout, (
             f"python3 emitted systemMessage to stdout on missing file — "
             f"this would incorrectly surface as a Claude Code hook signal. "

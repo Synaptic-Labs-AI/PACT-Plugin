@@ -10,7 +10,7 @@ Used by: hooks.json TeammateIdle hook
 # livelock-safe: threshold-escalation, not a nag. Message emissions
 # transition only at the IDLE_SUGGEST_THRESHOLD and IDLE_FORCE_THRESHOLD
 # boundaries — not every idle tick. Above IDLE_FORCE_THRESHOLD a
-# shutdown_request is re-emitted per tick until the lead processes it and
+# shutdown_request is re-emitted per tick until the team-lead processes it and
 # the platform terminates the agent (safety is protocol-level, not a
 # structural cap). Exits deterministically on every code path. Does NOT
 # consume intentional_wait.

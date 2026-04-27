@@ -83,7 +83,7 @@ Apply the S5 Decision Framing Protocol (see [pact-s5-policy.md](pact-s5-policy.m
 
 ### Latency Caveat
 
-See [Communication Charter Part I — Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat) for the delivery-model implications (idle-boundary HALT latency; immediate in-flight halt needs user interrupt; lead's "surface immediately" = lead's next idle).
+See [Communication Charter Part I — Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat) for the delivery-model implications (idle-boundary HALT latency; immediate in-flight halt needs user interrupt; team-lead's "surface immediately" = team-lead's next idle).
 
 ### Task System Integration
 
@@ -93,15 +93,15 @@ With PACT Task integration, algedonic signals create **signal Tasks** that persi
 
 Under Agent Teams, teammates have access to Task tools (`TaskGet`, `TaskUpdate`, `TaskList`) and messaging (`SendMessage`). When an agent detects a viability threat:
 1. Stop work immediately
-2. Send the signal to the lead via `SendMessage` (using the Signal Format above):
+2. Send the signal to the team-lead via `SendMessage` (using the Signal Format above):
    ```
-   SendMessage(to="lead",
-     message="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+   SendMessage(to="team-lead",
+     message="[{sender}→team-lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial handoff with whatever work was completed
 
-The lead receives the `SendMessage` signal and handles algedonic Task creation and scope amplification.
+The team-lead receives the `SendMessage` signal and handles algedonic Task creation and scope amplification.
 
 **Orchestrator creates and manages the algedonic Task:**
 1. `TaskCreate(subject="[HALT|ALERT]: {category}", metadata={"type": "algedonic", "level": "...", "category": "..."})` — creates the signal Task
@@ -130,7 +130,7 @@ Agent detects trigger condition
     ↓
 Agent stops work immediately
     ↓
-Agent sends algedonic signal via `SendMessage` to lead + provides partial handoff
+Agent sends algedonic signal via `SendMessage` to team-lead + provides partial handoff
     ↓
 Orchestrator creates algedonic Task + blocks agent's task (addBlockedBy)
     ↓
@@ -152,14 +152,14 @@ Work resumes (or stops) based on user decision
 On receiving an algedonic signal:
 
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
-2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see lead-side fan-out idiom in [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)). Then await user acknowledgment.
+2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see team-lead-side fan-out idiom in [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)). Then await user acknowledgment.
 3. For **ALERT**: Pause current work, present options to user
 4. **Log** the signal in session record
 
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Stop in-progress teammates by name** — for each teammate with `status="in_progress"`, send the HALT individually (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)). Each message lands at that teammate's next idle boundary; for immediate halt of in-flight work, user-side manual interrupt is required (see [Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat)).
+1. **Stop in-progress teammates by name** — for each teammate with `status="in_progress"`, send the HALT individually (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)). Each message lands at that teammate's next idle boundary; for immediate halt of in-flight work, user-side manual interrupt is required (see [Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat)).
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress

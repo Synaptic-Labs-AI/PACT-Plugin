@@ -59,6 +59,56 @@ Task(
 
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
+### Two-Task Dispatch Shape (TEACHBACK + WORK)
+
+Every specialist dispatch creates **two tasks**, not one:
+
+- **Task A** — TEACHBACK gate. `subject = "{role}: TEACHBACK for {feature}"`, owner = teammate. Description: teachback expectations + dispatch context.
+- **Task B** — primary work. `subject = "{role}: {mission}"`, owner = teammate, `blockedBy = [<Task A id>]`.
+
+Both are created BEFORE the `Task(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)), and the teammate wakes to claim B.
+
+**Dispatch sequence (replaces single-task dispatch)**:
+
+```
+# 1. Create Task A (teachback gate)
+A_id = TaskCreate(
+    subject="{role}: TEACHBACK for {feature}",
+    description="DOGFOOD TEACHBACK GATE for {feature}.\n\n"
+                "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
+                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
+                "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
+                "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable. "
+                "If teachback is rejected, team-lead writes metadata.teachback_rejection and sends a "
+                "wake-SendMessage with corrections; revise on this same task.\n\n"
+                "Mission for Task B: see Task #{B_id}."
+)
+TaskUpdate(A_id, owner="{teammate-name}")
+
+# 2. Create Task B (primary work)
+B_id = TaskCreate(
+    subject="{role}: {primary mission}",
+    description="{full mission per Recommended Agent Prompting Structure}\n\n"
+                "Per dogfood directive: DO NOT mark this task completed yourself. "
+                "After staging artifacts, write metadata.handoff, send notify SendMessage to team-lead, "
+                "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "
+                "completed after HANDOFF validation. If team-lead rejects, team-lead writes metadata.handoff_rejection; "
+                "revise on this same task.\n\nUpstream: TEACHBACK Task #{A_id}."
+)
+TaskUpdate(B_id, owner="{teammate-name}", addBlockedBy=[A_id])
+TaskUpdate(A_id, addBlocks=[B_id])
+
+# 3. Spawn the teammate via the canonical Task() form above.
+```
+
+The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Task()` call. The teammate discovers Task A + Task B via `TaskList` and follows pact-agent-teams §On Start.
+
+**Carve-outs** — single-task dispatch still applies for:
+
+- **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B. The auditor IS observing; their task IS the signal.
+- **Secretary memory-save tasks**: secretary self-completes; the standard On Completion flow applies via the `SELF_COMPLETE_EXEMPT_AGENTS` set in `shared/intentional_wait.py`.
+- **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
+
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "{reason}"})`
 Valid reasons: `"plan_section_complete"`, `"structured_gate_passed"`, `"decomposition_active"`.
@@ -396,7 +446,8 @@ When a phase is skipped but a coder encounters a decision that would have been h
 - "Preparation Phase"
 - "Open Questions > Require Further Research"
 
-**Dispatch `pact-preparer`**:
+**Dispatch `pact-preparer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"preparer: TEACHBACK for {feature}"`. Task B is the research mission below:
+
 1. `TaskCreate(subject="preparer: research {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, plan sections (if any), and "Reference the approved plan at `docs/plans/{slug}-plan.md` for full context."
 2. `TaskUpdate(taskId, owner="preparer")`
@@ -484,7 +535,8 @@ When detection fires (score >= threshold), follow the evaluation response protoc
 - "Key Decisions"
 - "Interface Contracts"
 
-**Dispatch `pact-architect`**:
+**Dispatch `pact-architect`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"architect: TEACHBACK for {feature}"`. Task B is the design mission below:
+
 1. `TaskCreate(subject="architect: design {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, where to find PREPARE outputs (e.g., "Read `docs/preparation/{feature}.md`"), plan sections (if any), and plan reference.
    - Include upstream task reference: "Preparer task: #{taskId} — read via `TaskGet` for research decisions and context."
@@ -603,7 +655,7 @@ JSON
 
 **Progress monitoring**: For tasks where mid-flight visibility matters (variety 7+, parallel execution, novel domains), include in the agent prompt: "Send progress signals per the agent-teams skill Progress Signals section."
 
-**Dispatch coder(s)**:
+**Dispatch coder(s)** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above for each coder. Task A subject: `"{coder-type}: TEACHBACK for {scope}"`. Task B is the implementation mission below:
 
 For each coder needed:
 1. `TaskCreate(subject="{coder-type}: implement {scope}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
@@ -669,7 +721,7 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the lead works through the commit sequence; CLEAR on the lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
+- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the team-lead works through the commit sequence; CLEAR on the team-lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal event**: After each commit, write a `commit` event:
   ```bash
   set -e
@@ -735,7 +787,8 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
 - "Test Scenarios"
 - "Coverage Targets"
 
-**Dispatch `pact-test-engineer`**:
+**Dispatch `pact-test-engineer`** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above. Task A subject: `"test-engineer: TEACHBACK for {feature}"`. Task B is the testing mission below:
+
 1. `TaskCreate(subject="test-engineer: test {feature}", description="CONTEXT: ...\nMISSION: ...\nINSTRUCTIONS: ...\nGUIDELINES: ...")`
    - Include task description, coder task references (e.g., "Coder tasks: #{id1}, #{id2} — read via `TaskGet` for implementation decisions and flagged uncertainties"), plan sections (if any), plan reference.
    - Include: "You own ALL substantive testing: unit tests, integration, E2E, edge cases."
@@ -781,7 +834,7 @@ For stall detection indicators, recovery protocol, prevention, and non-happy-pat
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
@@ -798,7 +851,7 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
-**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
+**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
 
 ### Blocker Recovery: Resume vs. Fresh Spawn
 

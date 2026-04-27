@@ -263,11 +263,11 @@ class TestDeadReferencesToMovedOrchestratorCore:
 
 
 class TestLeadSideHaltFanOutSlugStability:
-    """L10: Stability of the `lead-side-halt-fan-out` slug.
+    """L10: Stability of the `team-lead-side-halt-fan-out` slug.
 
     The canonical `#### Lead-Side HALT Fan-Out` heading lives in
     skills/orchestration/SKILL.md and is referenced from 4 distinct
-    consumer files via the GitHub-rendered slug `lead-side-halt-fan-out`
+    consumer files via the GitHub-rendered slug `team-lead-side-halt-fan-out`
     (algedonic.md hosts 2 link occurrences, the other three each host 1,
     for 5 link occurrences across 4 files). Renaming the heading
     silently breaks every cross-reference (link still resolves to the
@@ -283,7 +283,7 @@ class TestLeadSideHaltFanOutSlugStability:
     """
 
     CANONICAL_HEADING = "#### Lead-Side HALT Fan-Out"
-    SLUG = "lead-side-halt-fan-out"
+    SLUG = "team-lead-side-halt-fan-out"
 
     CROSS_REF_FILES = [
         ("protocols/algedonic.md", ALGEDONIC_PATH),
@@ -304,9 +304,9 @@ class TestLeadSideHaltFanOutSlugStability:
 
     def test_canonical_heading_renders_to_expected_slug(self):
         """GitHub auto-slugs `#### Lead-Side HALT Fan-Out` to
-        `lead-side-halt-fan-out` (lowercased, spaces → hyphens, special
+        `team-lead-side-halt-fan-out` (lowercased, spaces → hyphens, special
         chars stripped). Verify the canonical site itself contains the
-        slug as a self-anchor in its consumer body — `[…](#lead-side-halt-fan-out)` —
+        slug as a self-anchor in its consumer body — `[…](#team-lead-side-halt-fan-out)` —
         which transitively confirms the lower-casing/hyphenation rule
         the consumers rely on.
         """

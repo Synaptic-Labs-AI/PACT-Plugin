@@ -413,26 +413,24 @@ class TestTeachbackMicroSkillExtraction:
     AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
     # Micro-skill size budget: teachback protocol should be compact.
-    # Measured in characters (not bytes). Bumped from 1500 to 2500 post-#366
-    # because the skill was rewritten in command-style form (it now contains
-    # the full SendMessage template, ordering rule, post-send behavior, and
-    # consultant-question exception). The previous stub form was too terse to
-    # function as the standalone teachback gate it now serves.
-    MAX_SKILL_CHARS = 2500
+    # Measured in characters (not bytes). Budget tracks legitimate growth
+    # of the protocol surface. Current value (4000) accommodates the
+    # 4-field structured payload (understanding / most_likely_wrong /
+    # least_confident_item / first_action), the Task A / Task B dispatch
+    # framing, and the idle-on-awaiting_lead_completion contract that
+    # replaced the prior SendMessage-prose teachback delivery.
+    MAX_SKILL_CHARS = 4000
 
     # Key protocol elements that must be in the extracted skill.
-    # Cycle 2 minor item 4: added literal ordering rule and TaskUpdate
-    # follow-up to close spec Section 6.14 coverage gap. The previous
-    # presence-only checks would have passed even if the skill dropped
-    # the ordering rule entirely.
+    # Presence-only checks are deliberately strict — any drop indicates
+    # the skill has shed a load-bearing piece of the protocol.
     REQUIRED_PROTOCOL_ELEMENTS = [
-        "SendMessage",           # Communication tool reference
-        "teachback_sent",        # Metadata flag
-        "gate",                  # Gate semantics (teachback is a gate)
-        "Teachback:",            # Format template marker
-        # Cycle 2 item 4 additions:
-        "before any Edit/Write/Bash",  # Ordering rule literal
-        'TaskUpdate(taskId, metadata={"teachback_sent": true})',  # Follow-up literal
+        "SendMessage",                  # Communication tool reference (notify path)
+        "teachback_submit",             # Metadata field name (team-lead-readable payload)
+        "gate",                         # Gate semantics (teachback is a gate)
+        "Teachback submitted",          # Notify-message marker
+        "before any Edit/Write/Bash",   # Ordering rule literal
+        'TaskUpdate(taskId, metadata={"teachback_submit":',  # Storage literal
     ]
 
     # Lines that indicate full protocol content (not a stub).
@@ -1323,7 +1321,7 @@ class TestDispatchTemplatePrelude:
     skills/orchestration/SKILL.md must embed the teammate bootstrap prelude
     inside the `prompt=` parameter.
 
-    This is load-bearing because the dispatch template is what the lead
+    This is load-bearing because the dispatch template is what the team-lead
     reads when spawning a specialist — if the template is missing the
     `YOUR PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
     call, spawned teammates will not self-bootstrap and will lack the
@@ -1357,7 +1355,7 @@ class TestDispatchTemplatePrelude:
         """Spec Section 6.6 / Section 8: the dispatch template must
         contain the literal placeholder form `YOUR PACT ROLE: teammate ({name})`
         — not just the prefix. The `{name}` placeholder is load-bearing
-        because at dispatch time the lead substitutes the teammate's
+        because at dispatch time the team-lead substitutes the teammate's
         actual name, which is what the routing block searches for and
         what appears in the spawned teammate's context.
         """
@@ -1370,7 +1368,7 @@ class TestDispatchTemplatePrelude:
         assert "YOUR PACT ROLE: teammate ({name})" in region, (
             "Agent Teams Dispatch template in skills/orchestration/SKILL.md "
             "must contain literal `YOUR PACT ROLE: teammate ({name})` (with "
-            "the exact placeholder form) so the lead substitutes the "
+            "the exact placeholder form) so the team-lead substitutes the "
             "teammate's name at dispatch time. Spec Section 6.6."
         )
 

@@ -6,7 +6,7 @@ Used by: pytest CI / local test runs.
 The PR #390 / v3.17.0 release eliminated ~17KB of orchestrator content from
 the per-teammate spawn path by moving it out of ~/.claude/CLAUDE.md (always
 loaded) and into pact-plugin/commands/bootstrap.md (lazy-loaded via
-Skill("PACT:bootstrap") only when the lead needs it). This test pins that
+Skill("PACT:bootstrap") only when the team-lead needs it). This test pins that
 reduction as a byte-level regression gate: any change that re-introduces
 CLAUDE.md-scale content into the spawn path will blow past the threshold.
 
@@ -134,7 +134,7 @@ class TestSpawnOverheadRegression:
         SessionStart / SubagentStart and whose output lands in
         additionalContext. Neither should Read or embed bootstrap.md
         content — bootstrap.md must only be reachable via the
-        Skill("PACT:bootstrap") invocation instruction the lead is
+        Skill("PACT:bootstrap") invocation instruction the team-lead is
         told to issue.
         """
         session_init_src = (
@@ -147,12 +147,12 @@ class TestSpawnOverheadRegression:
         assert "bootstrap.md" not in session_init_src, (
             "session_init.py references bootstrap.md directly — this is a "
             "spawn-path regression. bootstrap.md must only be loaded lazily "
-            "via the Skill(\"PACT:bootstrap\") invocation by the lead."
+            "via the Skill(\"PACT:bootstrap\") invocation by the team-lead."
         )
         assert "bootstrap.md" not in peer_inject_src, (
             "peer_inject.py references bootstrap.md directly — this is a "
             "spawn-path regression. bootstrap.md must only be loaded lazily "
-            "via the Skill(\"PACT:bootstrap\") invocation by the lead."
+            "via the Skill(\"PACT:bootstrap\") invocation by the team-lead."
         )
 
     def test_home_claude_md_template_has_no_pact_content_after_migration(

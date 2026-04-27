@@ -5,7 +5,7 @@ CLAUDE.md Pinned Context edits under stale-pins-pending state.
 Risk tier: CRITICAL (auth-adjacent — gate blocks user tool calls). All
 I/O failure paths MUST fail-open (SACROSANCT: gate bugs never block).
 
-Matrix: marker absence/present × CLAUDE.md path match/miss × teammate/lead
+Matrix: marker absence/present × CLAUDE.md path match/miss × teammate/team-lead
         × Edit/Write → 16 cells minimum, plus fail-open assertions.
 """
 
@@ -82,10 +82,10 @@ def _call_gate(input_data):
 
 
 # Matrix coverage note: the full matrix is (marker absent/present) × (path match/miss) ×
-# (teammate/lead) × (Edit/Write) = 16 cells. Three cells are NOT exercised explicitly
+# (teammate/team-lead) × (Edit/Write) = 16 cells. Three cells are NOT exercised explicitly
 # because they reduce to tested paths: (marker-absent × teammate × {Edit,Write,path-miss})
 # all short-circuit at the same marker-check before any teammate/path logic runs —
-# TestPinStalenessGate_MarkerAbsent already covers that short-circuit for lead callers,
+# TestPinStalenessGate_MarkerAbsent already covers that short-circuit for team-lead callers,
 # and the marker-absent return is agent-name-independent by construction.
 
 

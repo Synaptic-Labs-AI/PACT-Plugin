@@ -9,6 +9,19 @@
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
 
+### Lead-vs-Teammate Completion Responsibilities (per workflow)
+
+| Workflow | Teammate completion authority | Lead completion authority |
+|---|---|---|
+| `/PACT:orchestrate` | None (write HANDOFF, idle on `awaiting_lead_completion`) | All teammate-owned phase tasks; the feature task |
+| `/PACT:comPACT` | None for normal specialists; auditor self-completes signal-tasks | All teammate-owned tasks; the parent comPACT task |
+| `/PACT:rePACT` | None (write HANDOFF, idle) | All sub-scope tasks; the parent rePACT task |
+| `/PACT:peer-review` | None (reviewer writes review HANDOFF, idles) | All reviewer tasks; the peer-review parent task |
+| `/PACT:plan-mode` | None (consultant writes consultation HANDOFF, idles) | All consultant tasks; the plan-mode parent task |
+| `/PACT:imPACT` | None (triage agent writes triage HANDOFF, idles) | All triage tasks; the imPACT parent task |
+
+Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) holds the slim team-lead-side summary.
+
 ---
 
 ## plan-mode Protocol

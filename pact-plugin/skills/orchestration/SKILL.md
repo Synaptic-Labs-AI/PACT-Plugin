@@ -111,7 +111,7 @@ Workflow commands handle recovery automatically. Your context window doesn't sur
 - **Challenge, don't comply**: When you believe a different approach is better, say so with evidence. Propose the alternative and ask the user if they agree. Do not default to compliance — default to the strongest recommendation you can make.
 - **Adopt specialist pushback**: When a specialist argues for a different approach, engage with the argument. If their case is stronger, adopt it. You have authority to change course based on specialist input without escalating to the user.
 - **No empty affirmations**: Never open with "Great idea" or restate what the user just said. Start with substance. Follow the Communication Charter. Full protocol: `pact-communication-charter.md` (loaded at bootstrap).
-- **Verify before dispatching a course-correction**: before you SendMessage a teammate to change direction, check the filesystem, task metadata, or journal against your mental model — a stale model produces stale instructions. See [Communication Charter Part I — Lead-Side Discipline — Verify Before Dispatching](../../protocols/pact-communication-charter.md#lead-side-discipline--verify-before-dispatching) for the full rule.
+- **Verify before dispatching a course-correction**: before you SendMessage a teammate to change direction, check the filesystem, task metadata, or journal against your mental model — a stale model produces stale instructions. See [Communication Charter Part I — Lead-Side Discipline — Verify Before Dispatching](../../protocols/pact-communication-charter.md#team-lead-side-discipline--verify-before-dispatching) for the full rule.
 
 ### Git Branching
 - Create a feature branch before any new workstream begins
@@ -162,7 +162,7 @@ The secretary answers queries about prior project knowledge from pact-memory —
 
 ```
 SendMessage(to="secretary",
-  message="[lead→secretary] Query: {specific question}",
+  message="[team-lead→secretary] Query: {specific question}",
   summary="Query: {topic}")
 ```
 
@@ -179,7 +179,7 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 
 These triggers are idempotent — safe to fire even if HANDOFFs were already processed.
 
-NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
+NOTE: For ad-hoc work outside defined PACT workflows → `SendMessage(to="secretary", message="[team-lead→secretary] Save: {what and why}", summary="Save request: {topic}")`
 
 ### S3/S4 Operational Modes
 
@@ -329,7 +329,7 @@ Explicit user override ("you code this, don't delegate") should be honored; casu
 | Agent reports blocker | `TaskCreate(subject: "BLOCKER: ...", metadata={"type": "blocker"})` then `TaskUpdate(agent_taskId, addBlockedBy: [blocker_taskId])`. **`metadata.type` is required** — `agent_handoff_emitter.py` inline-checks `metadata.type in ("blocker", "algedonic")` and SUPPRESSES journal emission for signal tasks; `shared/task_utils.py` and `shared/session_resume.py` use the same literal to CATEGORIZE signal tasks for recovery display (they do not suppress anything). The three sites share the literal as a convention, not a common suppression mechanism. The subject prefix has no special meaning. |
 | Agent reports algedonic signal | `TaskCreate(subject: "[HALT\|ALERT]: ...", metadata={"type": "algedonic", "level": "halt"\|"alert", "category": "..."})` then amplify scope via `addBlockedBy` on phase/feature task. **`metadata.type` is required** — same three-site behavior as the blocker row (emitter suppresses; task_utils + session_resume categorize). |
 
-**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals, progress signals). You create tasks and monitor via `TaskList` and incoming `SendMessage` signals. Agents can send brief mid-task status updates (`[sender→lead] Progress: {done}/{remaining}, {status}`) when requested.
+**Key principle**: Under Agent Teams, teammates self-manage their task status (claim via `TaskUpdate(status="in_progress")`, complete via `TaskUpdate(status="completed")`) and communicate via `SendMessage` (HANDOFFs, blockers, algedonic signals, progress signals). You create tasks and monitor via `TaskList` and incoming `SendMessage` signals. Agents can send brief mid-task status updates (`[sender→team-lead] Progress: {done}/{remaining}, {status}`) when requested.
 
 ##### Signal Task Handling
 When an agent reports a blocker or algedonic signal via `SendMessage`:
@@ -430,23 +430,23 @@ Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
 - comPACT specialists shut down when user chooses "Pause work for now"
 
-**Inter-teammate messages always go individually by name.** `SendMessage` requires a specific `to=` recipient — there is no broadcast addressing mode. To reach multiple teammates (HALT, shutdown, plan approval, structured protocol messages, plain-text announcements), iterate over the relevant teammates and send one `SendMessage` per recipient. Use the [Lead-Side HALT Fan-Out](#lead-side-halt-fan-out) idiom as the canonical pattern.
+**Inter-teammate messages always go individually by name.** `SendMessage` requires a specific `to=` recipient — there is no broadcast addressing mode. To reach multiple teammates (HALT, shutdown, plan approval, structured protocol messages, plain-text announcements), iterate over the relevant teammates and send one `SendMessage` per recipient. Use the [Lead-Side HALT Fan-Out](#team-lead-side-halt-fan-out) idiom as the canonical pattern.
 
 #### Lead-Side HALT Fan-Out
 
-To stop all in-progress teammates (HALT, shutdown, or any other lead-to-many signal), iterate `TaskList` for tasks with `status="in_progress"` and send the signal individually to each owner:
+To stop all in-progress teammates (HALT, shutdown, or any other team-lead-to-many signal), iterate `TaskList` for tasks with `status="in_progress"` and send the signal individually to each owner:
 
     in_progress = [t for t in TaskList() if t["status"] == "in_progress" and t["owner"]]
     for task in in_progress:
         SendMessage(
             to=task["owner"],
-            message=f"[lead→{task['owner']}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+            message=f"[team-lead→{task['owner']}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
             summary=f"HALT: {category}",
         )
 
 Each message lands at the teammate's next idle boundary (see [Algedonic-Signal Latency Caveat](../../protocols/pact-communication-charter.md#algedonic-signal-latency-caveat)). For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
 
-Use the same iterate-by-name pattern for any other lead-to-many signal (graceful shutdown via `shutdown_request`, `plan_approval_request`, plain-text announcements). There is no broadcast addressing mode.
+Use the same iterate-by-name pattern for any other team-lead-to-many signal (graceful shutdown via `shutdown_request`, `plan_approval_request`, plain-text announcements). There is no broadcast addressing mode.
 
 ### Intentional Waiting (orchestrator responsibilities)
 
@@ -472,8 +472,33 @@ inspection and session review. Your responsibilities:
   inspection purposes; no hook fires on expiry. If a flagged wait has been
   pending past 30 min, the teammate should re-SET with a fresh `since` — or
   the wait has hung and you should investigate and drive resolution.
-- **Don't SET the `intentional_wait` task metadata on your own lead task.**
-  TeammateIdle hooks filter by task owner; they don't inspect lead state.
+- **Don't SET the `intentional_wait` task metadata on your own team-lead task.**
+  TeammateIdle hooks filter by task owner; they don't inspect team-lead state.
+- **`awaiting_lead_completion` is the most common wait you'll see** — set by every teammate after they store HANDOFF or teachback metadata. Resolution = your two-call acceptance pair (or rejection dual-channel pair). See [Completion Authority](#completion-authority) below.
+
+### Completion Authority
+
+You — the team-lead — are the **only** actor who marks teammate-owned tasks `completed`. `blockedBy` is pull-only at the platform level — idle teammates cannot self-wake to re-poll, so the wake-signal SendMessage paired with each metadata/status write is load-bearing.
+
+**Acceptance — two-call atomic pair (BOTH required)**
+1. `TaskUpdate(taskId, status="completed")`
+2. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Task #<id> accepted...", summary="Task accepted")`
+
+Both calls are required. Skipping the SendMessage leaves the teammate idle on `awaiting_lead_completion`; `blockedBy` resolution is invisible without the wake.
+
+**Rejection — two-call atomic pair (BOTH required)**
+1. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` OR `metadata={"handoff_rejection": {...}}` — payload `{reason, corrections, since, revision_number}`
+2. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Rejected on Task #<id>. See metadata...; revise.")`
+
+Both calls are required. Skipping the SendMessage leaves the teammate idle on stale `awaiting_lead_completion`, never seeing the corrections — symmetric failure to skipping wake on acceptance. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
+
+Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}`); secretary memory-save (owner in `SELF_COMPLETE_EXEMPT_AGENTS`). Canonical predicate: `is_self_complete_exempt(task)` in `shared/intentional_wait.py` — covers ONLY these two surfaces. Separate path: imPACT force-termination (`metadata.terminated == true`) is team-lead-driven (you write `status=completed` directly via `TaskStop` + `TaskUpdate`); the `terminated` marker is recognized by audit/inspection, NOT by the predicate.
+
+**TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty. See [pact-completion-authority.md](../../protocols/pact-completion-authority.md) for full recipes (teachback review flow, rejection corrections schema, carve-out rationale).
+
+### Teachback Review
+
+Each specialist dispatch creates a Task A (teachback) + Task B (primary work) pair with `blockedBy=[A]`. Teammate claims A, writes `metadata.teachback_submit` (4 fields per [pact-teachback](../pact-teachback/SKILL.md)), idles on `awaiting_lead_completion`. Read the payload via raw JSON (TaskGet is metadata-blind), apply [Validating Incoming Teachbacks](#validating-incoming-teachbacks) below, then accept via the Acceptance two-call atomic pair above; acceptance auto-unblocks Task B. Do NOT mark Task B `completed` or `pending` yourself — the teammate claims on wake. See [pact-completion-authority.md §Teachback Review](../../protocols/pact-completion-authority.md#teachback-review) for the full review flow.
 
 ### Recommended Agent Prompting Structure
 
@@ -491,7 +516,7 @@ Use this structure in the `prompt` field to ensure agents have adequate context:
 1. [Step 1]
 2. [Step 2 - explicit skill usage if needed, e.g., "Use pact-security-patterns"]
 3. [Step 3]
-4. **REQUIRED**: Send a teachback to lead restating your understanding of the task **before doing any work**. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
+4. **REQUIRED**: Send a teachback to team-lead restating your understanding of the task **before doing any work**. If upstream task references are provided, read them via `TaskGet` first. (See agent-teams skill for format)
 
 **GUIDELINES**
 A list of things that include the following:
@@ -503,30 +528,11 @@ A list of things that include the following:
 
 #### Validating Incoming Teachbacks
 
-When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase.
+When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
 #### Expected Agent HANDOFF Format
 
-Every agent delivers a structured HANDOFF stored in task metadata. Read via `TaskGet(taskId).metadata.handoff` when needed:
-
-```
-HANDOFF:
-1. Produced: Files created/modified
-2. Key decisions: Decisions with rationale, assumptions that could be wrong
-3. Reasoning chain (optional): How key decisions connect — "X because Y, which required Z"
-4. Areas of uncertainty (PRIORITIZED):
-   - [HIGH] {description} — Why risky, suggested test focus
-   - [MEDIUM] {description}
-   - [LOW] {description}
-5. Integration points: Other components touched
-6. Open questions: Unresolved items
-```
-
-Items 1-2 and 4-6 are required. Item 3 (reasoning chain) is recommended — include it unless the task is trivial. Use this to update Task metadata and inform subsequent phases.
-
-If the `validate_handoff` hook warns about a missing HANDOFF, extract available context from the agent's response and update the Task accordingly.
-
-On HANDOFF receipt, verify task completion via `TaskList` before dispatching downstream phases — mechanical gates catch missed completions later, but `TaskList` is the gate-truth at receipt time. If the task is not marked completed, ask the agent to update task status via `SendMessage` before dispatching downstream phases.
+Every agent delivers a structured HANDOFF (6 fields: `produced`, `decisions`, `reasoning_chain`, `uncertainty`, `integration`, `open_questions`) stored in `metadata.handoff`. See [pact-agent-teams §HANDOFF Format](../pact-agent-teams/SKILL.md#handoff-format) for the full schema. If `validate_handoff` warns about a missing HANDOFF, extract available context from the agent's response and update the task. On receipt, inspect `metadata.handoff` (raw JSON read; `TaskGet` is metadata-blind) and follow the [Completion Authority](#completion-authority) two-call atomic pair. Do NOT dispatch downstream phases against a teammate-owned task you have not yet marked completed — the teammate is idle awaiting your acceptance, and dependents have not unblocked.
 
 ### How to Delegate
 

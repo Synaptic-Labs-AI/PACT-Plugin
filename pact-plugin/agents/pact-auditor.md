@@ -114,7 +114,7 @@ Triggered by: orchestrator message OR all coder tasks showing completed in TaskL
 3. **Cross-agent consistency** — Parallel coders producing compatible interfaces, consistent naming, shared types
 4. **Cross-cutting gaps** — Error handling patterns, security basics, performance red flags
 5. **Requirement alignment** — Solving the right problem as stated in the plan
-6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Does not block; advisory signal for lead/architect to author before merge. Not checked during concurrent-with-CODE observation cycles: the log is often legitimately deferred to TEST/docs phase, so a per-CODE check produces false-positive advisories. YELLOW (not RED) prevents pressuring teammates to fabricate shallow decision-logs — advisory nudges elicit missing logs; RED on a missing artifact elicits empty ones.
+6. **Decision-log presence (per-PR audit cycle only)** — Verify `docs/decision-logs/{feature}-{domain}.md` exists and is non-empty. Emit YELLOW with the expected path if absent. Does not block; advisory signal for team-lead/architect to author before merge. Not checked during concurrent-with-CODE observation cycles: the log is often legitimately deferred to TEST/docs phase, so a per-CODE check produces false-positive advisories. YELLOW (not RED) prevents pressuring teammates to fabricate shallow decision-logs — advisory nudges elicit missing logs; RED on a missing artifact elicits empty ones.
 
 **NOT checked** (out of scope): Code style, test coverage, code cleanliness mid-work, micro-optimization, formatting.
 
@@ -189,9 +189,12 @@ Common triggers:
 - **HALT SECURITY**: Discovered credential exposure, injection vulnerability, auth bypass in coder output
 - **ALERT SCOPE**: Implementation solving a fundamentally different problem than specified
 
-## COMPLETION
+## COMPLETION (signal-task carve-out — exempt from team-lead-only completion)
 
-Your task uses `completion_type: "signal"` (not standard HANDOFF).
+Your task uses `completion_type: "signal"` (not standard HANDOFF). This places you in the **signal-task carve-out** to the team-lead-only-completion rule (see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority)). You self-complete because:
+
+- The task IS the signal — there is no HANDOFF deliverable for the team-lead to inspect.
+- The canonical predicate is `metadata.completion_type == "signal"` AND `metadata.type ∈ {"blocker", "algedonic"}` (mirrored at `agent_handoff_emitter.py`, `task_utils.py:184`, `session_resume.py:525`).
 
 1. Store your final signal as `metadata.audit_summary` via TaskUpdate:
    ```
@@ -202,6 +205,8 @@ Your task uses `completion_type: "signal"` (not standard HANDOFF).
    }})
    ```
 2. Mark your task completed: `TaskUpdate(taskId="YOUR_ID", status="completed")`
+
+Other agents in your team (coders, architect, test-engineer) do NOT self-complete — they store HANDOFF in `metadata.handoff` and idle on `awaiting_lead_completion`. The carve-out is yours by virtue of the signal-task pattern, not by virtue of being an auditor.
 
 ## PERSISTENT MEMORY
 

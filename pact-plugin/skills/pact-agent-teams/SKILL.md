@@ -18,15 +18,15 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES). If upstream tasks are referenced, read them via `TaskGet`.
-4. **GATE — Send teachback**: Send a teachback to lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
+4. **GATE — Send teachback**: Send a teachback to team-lead restating your understanding of the task. Nothing proceeds until this is sent. (See [Teachback](#teachback-conversation-verification) below)
    - **DO NOT** call `Edit`, `Write`, or `Bash` before sending your teachback
    - After sending, record it: `TaskUpdate(taskId, metadata={"teachback_sent": true})`
-   - Non-blocking: proceed immediately after sending — do not wait for the lead's reply
+   - Non-blocking: proceed immediately after sending — do not wait for the team-lead's reply
 5. Begin work — check your agent memory (`~/.claude/agent-memory/<your-name>/`) for relevant patterns and knowledge as part of your working process
 
 > **Worktree Scope**: If you are working in a worktree, files that are gitignored (e.g., `CLAUDE.md`) do not exist there. Do not edit or create `CLAUDE.md` — the orchestrator manages it separately. If you need to reference `CLAUDE.md` content, it is auto-loaded into your context. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead of editing it directly.
 
-> **Note**: The lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the lead can resume your process with preserved context instead of spawning fresh.
+> **Note**: The team-lead stores your `agent_id` in task metadata after dispatch. This enables `resume` if you hit a blocker — the team-lead can resume your process with preserved context instead of spawning fresh.
 
 > **Custom start flows**: If your agent definition specifies a custom On Start sequence (e.g., the secretary's session briefing), you must explicitly re-enter this standard lifecycle after your custom flow completes — call `TaskList`, claim assigned tasks, and follow the teachback protocol from the teachback step onward.
 
@@ -34,7 +34,7 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 
 Your task description may reference upstream task IDs (e.g., "Architect task: #5").
 Use `TaskGet(taskId)` to read their metadata for design decisions, HANDOFF data, and
-integration points — rather than relying on the lead to relay this information.
+integration points — rather than relying on the team-lead to relay this information.
 
 Common chain-reads:
 - **Coders** → read architect's task for design decisions and interface contracts
@@ -70,9 +70,9 @@ Report progress naturally in your responses. For significant milestones, update 
 
 ### Progress Signals
 
-When the lead requests progress monitoring in your dispatch, send brief progress updates at natural breakpoints during your work.
+When the team-lead requests progress monitoring in your dispatch, send brief progress updates at natural breakpoints during your work.
 
-**Format**: `[sender→lead] Progress: {what's done}/{what's remaining}, {current status}`
+**Format**: `[sender→team-lead] Progress: {what's done}/{what's remaining}, {current status}`
 
 **Natural breakpoints**:
 - After modifying a file
@@ -108,7 +108,7 @@ For consequence-level disagreements:
 
 ## On Completion — HANDOFF (Required)
 
-When your work is done:
+When your work is done, you store the HANDOFF and remain `in_progress`. **You do NOT mark your own tasks `completed`** — the team-lead is the authoritative completion signal.
 
 1. **Store HANDOFF in task metadata**:
    ```
@@ -122,15 +122,59 @@ When your work is done:
    }})
    ```
    If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
-2. **Complete task — BOTH actions required, in this order**:
-   a. `SendMessage(to="lead", message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
-   b. `TaskUpdate(taskId, status="completed")`
 
-   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the `TaskUpdate(status="completed")` call is required to fire the TaskCompleted event. The lead's `TaskGet` verification is the primary HANDOFF-presence check; a missing or empty `metadata.handoff` will be flagged and your completion rejected until you store the HANDOFF. The `agent_handoff_emitter.py` hook that journals the completion is a pure journal-writer — it does NOT block, so your metadata.handoff content is load-bearing for both the lead's gate and institutional memory.
+2. **Notify the team-lead**:
+   ```
+   SendMessage(to="team-lead",
+     message="[{sender}→team-lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
+     summary="Task complete: [brief]")
+   ```
 
-3. **Self-claim follow-up work**: Check `TaskList` for unassigned, unblocked tasks matching your domain
-4. If found: `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin
-5. If none: idle (you may be consulted or shut down)
+3. **SET `intentional_wait` and idle**:
+   ```
+   TaskUpdate(taskId, metadata={"intentional_wait": {
+       "reason": "awaiting_lead_completion",
+       "expected_resolver": "lead",
+       "since": "<canonical_since() output: tz-aware ISO-8601 UTC>"
+   }})
+   ```
+
+4. **Idle.** The team-lead reads `metadata.handoff`, judges acceptance, and either:
+   - **Accepts**: `TaskUpdate(taskId, status="completed")` plus a wake-signal SendMessage. On wake, CLEAR `intentional_wait` and check `TaskList` for follow-up work.
+   - **Rejects**: writes `metadata.handoff_rejection = {reason, corrections, since, revision_number}` plus a wake-signal SendMessage. Follow §On Rejection below.
+
+> ⚠️ Do NOT call `TaskUpdate(taskId, status="completed")` on your own task. The team-lead-as-completion-gate is the discipline; teammate self-completion bypasses HANDOFF inspection. Two narrow exemptions (signal-tasks; secretary memory-save) are documented at the relevant agent bodies — those carve-outs apply only to those agents, not to you unless your agent body says so.
+
+> **Why idle, not poll?** You cannot self-wake while idle. The team-lead's wake-signal SendMessage brings you back to read the acceptance/rejection. Trust the wake; do not poll TaskList speculatively.
+
+After wake on acceptance, check `TaskList` for unassigned, unblocked tasks matching your domain (Task B from your dispatch pair, or other follow-up work). If found, claim via `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin. If none, idle (you may be consulted or shut down).
+
+## On Rejection (Wake-Signal Receipt)
+
+If the team-lead rejects your teachback or HANDOFF, you wake on the inbound SendMessage. Your task remains `in_progress`; the team-lead has written rejection details to metadata.
+
+**On wake**:
+
+1. **CLEAR your existing `intentional_wait`**:
+   ```
+   TaskUpdate(taskId, metadata={"intentional_wait": None})
+   ```
+
+2. **Read the rejection metadata**:
+   - For Task A (teachback): `TaskGet(taskId).metadata.teachback_rejection`
+   - For Task B (work): `TaskGet(taskId).metadata.handoff_rejection`
+
+   The shape is `{"reason": str, "corrections": [str, ...], "since": ISO8601, "revision_number": int}`.
+
+3. **Revise**. For teachback rejection: rewrite `metadata.teachback_submit` per the corrections. For HANDOFF rejection: revise the deliverable (re-edit files, re-run tests, etc.) and rewrite `metadata.handoff`.
+
+4. **Re-submit on the SAME task** (do NOT create a new task):
+   - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. The harvest path reads `metadata.handoff` directly when `revision_number > 1` to surface revised content; setting `revision_number=1` would route harvest to the rejected journal event and silently lose the revised content.
+   - SendMessage the team-lead: `"[{sender}→team-lead] Revised teachback/HANDOFF on Task #{id}. See metadata.{teachback_submit|handoff} (revision {N})."`
+   - Re-SET `intentional_wait{reason=awaiting_lead_completion, since=<fresh canonical_since() output>}`.
+   - Idle.
+
+> **Revision visibility**: on revision (`revision_number > 1`), the journal `agent_handoff` event from your *first* completion is preserved (one event per task lifetime). The secretary's harvest path reads `metadata.handoff` directly when `revision_number > 1`, so your revised content reaches institutional memory. The metadata write is sufficient.
 
 ### HANDOFF Format
 
@@ -160,17 +204,17 @@ in your task description.
 
 **Message a peer when:**
 - Your work produces something an active peer needs (API schema, interface contract, shared config)
-- You have a question another specialist can answer better than the lead
+- You have a question another specialist can answer better than the team-lead
 - You discover something affecting a peer's scope (breaking change, shared dependency)
 
-**Message the lead when:**
+**Message the team-lead when:**
 - Blockers, algedonic signals, completion summaries (always)
 - Questions about scope, priorities, or requirements
 - Anything requiring a decision above your authority
 
 Keep messages actionable — state what you did/found, what they need to know, and
 any action needed from them.
-Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the lead.
+Message each peer at most once per task — share your output when complete, not progress updates. If you need ongoing coordination, route through the team-lead.
 
 ## Idle Discipline
 
@@ -179,9 +223,10 @@ When you wake with no new work, return to idle silently — no "standing by" or
 output (even zero-content) blocks the next inbox delivery.
 
 - **No new `SendMessage` and no new dispatch instructions?** Do not emit.
-- **Idle-waiting for a protocol-defined resolution** (teachback, lead commit,
+- **Idle-waiting for a protocol-defined resolution** (teachback, team-lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
+- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata. Do NOT poll TaskList while idle — you cannot self-wake to do so. The team-lead's wake-signal SendMessage is the resolver.
 - **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.
@@ -200,7 +245,7 @@ resolution), signal it via the `intentional_wait` task metadata BEFORE going idl
 There are no in-plugin consumers of this flag; the schema primitives
 (`KNOWN_REASONS`, `KNOWN_RESOLVERS`, `wait_stale`) in `shared.intentional_wait`
 are retained as the teammate-facing metadata contract for protocol-defined
-waits. Using the flag documents the wait intent for the lead's TaskGet
+waits. Using the flag documents the wait intent for the team-lead's TaskGet
 inspection and for post-hoc session review.
 
 ### SET — before going idle
@@ -216,7 +261,7 @@ TaskUpdate(taskId=taskId, metadata={
 })
 ```
 
-`since` must be tz-aware ISO-8601. A naive timestamp fails `validate_wait` and will be surfaced as malformed to any reader of the flag (lead TaskGet, audit, future consumers). Fail-loud.
+`since` must be tz-aware ISO-8601. A naive timestamp fails `validate_wait` and will be surfaced as malformed to any reader of the flag (team-lead TaskGet, audit, future consumers). Fail-loud.
 
 ### CLEAR — when the wait resolves
 
@@ -239,7 +284,7 @@ Unknown keys are preserved (forward-compat).
 ### Staleness safeguard
 
 The `wait_stale` primitive in `shared.intentional_wait` considers the flag stale after 30
-minutes from `since`. No hook currently enforces this — it's advisory metadata the lead may
+minutes from `since`. No hook currently enforces this — it's advisory metadata the team-lead may
 inspect via TaskGet. If your wait genuinely takes longer, re-SET with a fresh `since` so
 later inspection reflects the real duration.
 
@@ -247,7 +292,7 @@ later inspection reflects the real duration.
 
 - **Consultant mode** (no owned `in_progress` task): the flag has no current consumer for consultants anyway.
 - **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it for brief waits.
-- **Completion gating**: the flag does NOT suppress the lead's HANDOFF-presence check. An empty or missing `metadata.handoff` will be flagged by the lead's TaskGet verification — store your HANDOFF before marking the task completed, regardless of intentional_wait state.
+- **Completion gating**: the flag does NOT suppress the team-lead's HANDOFF-presence check. An empty or missing `metadata.handoff` will be flagged by the team-lead's TaskGet verification — store your HANDOFF before marking the task completed, regardless of intentional_wait state.
 
 ## Consultant Mode
 
@@ -262,14 +307,14 @@ When your active task is done and no follow-up tasks are available:
 If you cannot proceed:
 
 1. **Stop work immediately**
-2. **`SendMessage`** the blocker to the lead:
+2. **`SendMessage`** the blocker to the team-lead:
    ```
-   SendMessage(to="lead",
-     message="[{sender}→lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
+   SendMessage(to="team-lead",
+     message="[{sender}→team-lead] BLOCKER: {description of what is blocking you}\n\nPartial HANDOFF:\n...",
      summary="BLOCKER: [brief description]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
-4. Wait for lead's response or new instructions
+4. Wait for team-lead's response or new instructions
 
 Do not attempt to work around the blocker.
 
@@ -278,10 +323,10 @@ Do not attempt to work around the blocker.
 When you detect a viability threat (security, data integrity, ethics):
 
 1. **Stop work immediately**
-2. **`SendMessage`** the signal to the lead:
+2. **`SendMessage`** the signal to the team-lead:
    ```
-   SendMessage(to="lead",
-     message="[{sender}→lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
+   SendMessage(to="team-lead",
+     message="[{sender}→team-lead] ⚠️ ALGEDONIC [HALT|ALERT]: {Category}\n\nIssue: ...\nEvidence: ...\nImpact: ...\nRecommended Action: ...\n\nPartial HANDOFF:\n...",
      summary="ALGEDONIC [HALT|ALERT]: [category]")
    ```
 3. Provide a partial HANDOFF with whatever work you completed
@@ -291,8 +336,8 @@ These bypass normal triage. See the [algedonic protocol](../../protocols/algedon
 ## Variety Signals
 
 If task complexity differs significantly from what was delegated:
-- "Simpler than expected" — Note in handoff; lead may simplify remaining work
-- "More complex than expected" — Escalate if scope change >20%, or note for lead
+- "Simpler than expected" — Note in handoff; team-lead may simplify remaining work
+- "More complex than expected" — Escalate if scope change >20%, or note for team-lead
 
 ## Bash Commands in ~/.claude/ Paths
 
@@ -336,8 +381,6 @@ When you receive a `shutdown_request`:
 
 ## Completion Integrity (SACROSANCT)
 
-Only report work as completed if you actually performed the changes. Never fabricate
-a completion HANDOFF. If files don't exist, can't be edited, or tools fail, report
-a BLOCKER via `SendMessage` -- never invent results.
+Only report work as ready for team-lead-review if you actually performed the changes. Never fabricate a completion HANDOFF; the team-lead inspects `metadata.handoff` before transitioning status to `completed`. If files don't exist, can't be edited, or tools fail, report a BLOCKER via `SendMessage` — never invent results.
 
-**Do not create git commits.** All staging and committing is the lead's responsibility. Your job ends at the HANDOFF.
+**Do not create git commits.** All staging and committing is the team-lead's responsibility. Your job ends at the HANDOFF.

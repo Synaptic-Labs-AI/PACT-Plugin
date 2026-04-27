@@ -165,7 +165,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     pact_context.init(input_data)
 
     # Teammate bypass — teammates don't edit project CLAUDE.md
-    # (worktree scope rule), so this gate is lead-only.
+    # (worktree scope rule), so this gate is team-lead-only.
     agent_name = pact_context.resolve_agent_name(input_data)
     if agent_name:
         return None

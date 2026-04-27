@@ -577,7 +577,7 @@ class TestMainEdgeCases:
 
     def test_shutdown_message_includes_action_required(self, capsys, tmp_path):
         """At force threshold, output must include ACTION REQUIRED +
-        shutdown_request wording for the lead to act on."""
+        shutdown_request wording for the team-lead to act on."""
         import io
         from teammate_idle import main, write_idle_counts
 

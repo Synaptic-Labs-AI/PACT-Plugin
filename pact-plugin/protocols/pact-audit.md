@@ -130,7 +130,7 @@ The auditor uses signal-based completion rather than standard HANDOFF:
 1. Task is created with `metadata: {"completion_type": "signal"}`
 2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
 3. Auditor marks task completed
-4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the lead verifies presence directly via `TaskGet`).
+4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the team-lead verifies presence directly via `TaskGet`).
 
 **audit_summary format**:
 ```json
