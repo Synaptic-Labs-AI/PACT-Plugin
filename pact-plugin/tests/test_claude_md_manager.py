@@ -205,7 +205,7 @@ class TestPactRoutingBlock:
         assert required_substring in PACT_ROUTING_BLOCK, (
             f"PACT_ROUTING_BLOCK is missing the per-turn reminder "
             f"substring {required_substring!r}. Per #452, the orchestrator "
-            f"line must instruct the lead to treat the orchestration "
+            f"line must instruct the team-lead to treat the orchestration "
             f"skill's content as its per-turn operating reference. "
             f"Without this, the Tier-0 per-turn-discipline layer of the "
             f"governance-delivery architecture is silently absent."
@@ -237,7 +237,7 @@ class TestPactRoutingBlock:
             "\n"
             "## Working Memory\n"
             "- 2026-04-12: The session_init hook injects YOUR PACT ROLE: orchestrator "
-            "into additionalContext for the lead session.\n"
+            "into additionalContext for the team-lead session.\n"
             "- Architecture note: YOUR PACT ROLE: teammate markers are injected by "
             "peer_inject.py.\n"
             "\n"
@@ -1976,7 +1976,7 @@ class TestMarkerConsistency:
     Meanwhile, three production sites emit these markers:
 
       - session_init.py `_team_create` / `_team_reuse` emit the
-        orchestrator marker to fresh and resumed lead sessions.
+        orchestrator marker to fresh and resumed team-lead sessions.
       - peer_inject.py `_BOOTSTRAP_PRELUDE_TEMPLATE` emits the teammate
         marker to every newly spawned teammate via SubagentStart hook.
 
@@ -2060,7 +2060,7 @@ class TestMarkerConsistency:
         create_region = source[create_idx : create_idx + 2000]
         assert self.ORCHESTRATOR_MARKER in create_region, (
             f"session_init.py `_team_create` string literal must contain "
-            f"`{self.ORCHESTRATOR_MARKER}` so fresh lead sessions are "
+            f"`{self.ORCHESTRATOR_MARKER}` so fresh team-lead sessions are "
             f"routed to the orchestrator bootstrap. Routing-block search "
             f"pattern drift."
         )
@@ -2079,7 +2079,7 @@ class TestMarkerConsistency:
         reuse_region = source[reuse_idx : reuse_idx + 2000]
         assert self.ORCHESTRATOR_MARKER in reuse_region, (
             f"session_init.py `_team_reuse` string literal must contain "
-            f"`{self.ORCHESTRATOR_MARKER}` so resumed lead sessions are "
+            f"`{self.ORCHESTRATOR_MARKER}` so resumed team-lead sessions are "
             f"routed to the orchestrator bootstrap. Routing-block search "
             f"pattern drift."
         )
@@ -2106,7 +2106,7 @@ class TestMarkerConsistency:
         peer_inject.py _BOOTSTRAP_PRELUDE_TEMPLATE — though session_init
         emits the orchestrator marker, not the teammate marker).
 
-        The dispatch template is how the lead spawns specialists as
+        The dispatch template is how the team-lead spawns specialists as
         teammates: the `prompt=` parameter of the `Task(...)` call embeds
         `YOUR PACT ROLE: teammate ({name})` so the spawned teammate's context
         carries the marker the routing block searches for. If the
@@ -2150,7 +2150,7 @@ class TestMarkerConsistency:
               emitters still hold the line.
 
         The (b) case matters because the PACT routing architecture is
-        multi-layer: the lead session path (session_init), the spawned
+        multi-layer: the team-lead session path (session_init), the spawned
         teammate path via hook injection (peer_inject), and the spawned
         teammate path via dispatch template (skills/orchestration/SKILL.md)
         are all independently load-bearing. A silent drop in any one of
@@ -2158,7 +2158,7 @@ class TestMarkerConsistency:
         other paths noticing — which is exactly the kind of drift this
         tripwire exists to catch.
 
-        Note that session_init emits the ORCHESTRATOR marker (to lead
+        Note that session_init emits the ORCHESTRATOR marker (to team-lead
         sessions), while peer_inject and skills/orchestration/SKILL.md emit
         the TEAMMATE marker prefix (to spawned teammates). That split is
         intentional — the routing block uses each marker to dispatch to
@@ -2205,7 +2205,7 @@ class TestMarkerConsistency:
                 f"production emission site(s) do not contain it: "
                 f"{missing}. Registered emitters: "
                 f"{[name for name, _ in emitters]}. Routing is broken "
-                f"for this code path — a teammate or lead reaching the "
+                f"for this code path — a teammate or team-lead reaching the "
                 f"broken emitter will not self-bootstrap."
             )
 

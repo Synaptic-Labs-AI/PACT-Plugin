@@ -43,10 +43,10 @@ Read your processed task list from agent memory (`~/.claude/agent-memory/pact-se
 
 For each discovered task, read the HANDOFF using this revision-aware fallback:
 
-1. **Revision-aware metadata read**: Read the task's `metadata` (raw JSON; `TaskGet` is metadata-blind for `handoff` content). If `metadata.revision_number` is set and `> 1`, prefer `metadata.handoff` over the journal event. The journal `agent_handoff` event captured the FIRST (rejected) submission only — `agent_handoff_emitter.py` writes one journal event per task lifetime via an O_EXCL marker. On revision, the lead-completion of the revised task does NOT emit a second journal event, so the revised content lives in `metadata.handoff` only.
+1. **Revision-aware metadata read**: Read the task's `metadata` (raw JSON; `TaskGet` is metadata-blind for `handoff` content). If `metadata.revision_number` is set and `> 1`, prefer `metadata.handoff` over the journal event. The journal `agent_handoff` event captured the FIRST (rejected) submission only — `agent_handoff_emitter.py` writes one journal event per task lifetime via an O_EXCL marker. On revision, the team-lead-completion of the revised task does NOT emit a second journal event, so the revised content lives in `metadata.handoff` only.
 2. **Session journal** (preferred for revision_number == 1 or unset, GC-proof): If the task was discovered via `agent_handoff` journal events and `revision_number` is unset or 1, the journal event's `handoff` field contains the full HANDOFF content inline — use it directly. This is the most reliable source for first-pass acceptance flows.
 3. **`TaskGet` fallback**: If both above fail (no journal event AND no `metadata.handoff`), fall back to `TaskGet(taskId).metadata.handoff`. May fail for garbage-collected tasks.
-4. **Report gap**: If all sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the lead has context.
+4. **Report gap**: If all sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the team-lead has context.
 
 Pseudocode for the revision-aware branch:
 
@@ -128,11 +128,11 @@ Last processed: {timestamp}
 
 ### Step 9: Report Summary
 
-Report to the lead:
+Report to the team-lead:
 
 ```
 SendMessage(to="team-lead",
-  message="[secretary→lead] HANDOFF review complete. Saved N memories from M HANDOFFs.
+  message="[secretary→team-lead] HANDOFF review complete. Saved N memories from M HANDOFFs.
 - {memory summary 1}
 - {memory summary 2}
 Gaps: {any HANDOFFs that were thin or missing}",
@@ -142,18 +142,18 @@ Gaps: {any HANDOFFs that were thin or missing}",
 ### Step 10: Gather Calibration Data
 
 After processing HANDOFFs, gather calibration metrics for the orchestrator's variety scoring feedback loop:
-- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the lead for the variety score instead.
+- Read the feature task metadata for `initial_variety_score` (stored during variety assessment). If `TaskGet` fails (garbage-collected), ask the team-lead for the variety score instead.
 - Scan `TaskList` for blocker count (tasks with "BLOCKER:" in subject). Note: `TaskList` may be incomplete in long sessions due to garbage collection — report what's available.
 - Scan `TaskList` for phase rerun count (retry/redo phase tasks)
 - Note domain from feature task description
 - Infer specialist fit from HANDOFF content (scope mismatch signals, blocker patterns)
-- Send a calibration check to the lead:
+- Send a calibration check to the team-lead:
   ```
   SendMessage(to="team-lead",
-    message="[secretary→lead] Calibration: variety was scored {X}. Blockers: {N}, reruns: {N}. Was actual difficulty higher, lower, or about the same? Any dimensions that surprised you?",
+    message="[secretary→team-lead] Calibration: variety was scored {X}. Blockers: {N}, reruns: {N}. Was actual difficulty higher, lower, or about the same? Any dimensions that surprised you?",
     summary="Calibration check: variety {X}")
   ```
-- On lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
+- On team-lead's response, compute the full CalibrationRecord and save to pact-memory with entities `['orchestration_calibration', '{domain}']`
 
 ---
 
@@ -200,7 +200,7 @@ Save orchestration retrospective as calibration data (see Standard Harvest Step 
 
 ### Step 6: Report Summary
 
-Report consolidation results to the lead, including:
+Report consolidation results to the team-lead, including:
 - Memories consolidated (merged count)
 - Memories pruned (deleted/superseded count)
 - Calibration data saved
@@ -253,7 +253,7 @@ HANDOFFs are agent-written summaries — they may omit implicit learnings (faile
 
 ### Investigation Techniques
 
-**Direct teammate communication**: Message implementing agents **directly** — not through the lead. The lead does not need to be in the loop for these exchanges.
+**Direct teammate communication**: Message implementing agents **directly** — not through the team-lead. The team-lead does not need to be in the loop for these exchanges.
 
 ```
 SendMessage(to="{agent-name}",
@@ -279,7 +279,7 @@ SendMessage(to="{agent-name}",
 
 ## Ad-Hoc Save Requests
 
-For direct save requests from the lead outside of workflow HANDOFF review (ad-hoc saves), apply the same institutional knowledge criteria and save-vs-update dedup — save decisions, lessons, and cross-cutting concerns to pact-memory.
+For direct save requests from the team-lead outside of workflow HANDOFF review (ad-hoc saves), apply the same institutional knowledge criteria and save-vs-update dedup — save decisions, lessons, and cross-cutting concerns to pact-memory.
 
 ---
 

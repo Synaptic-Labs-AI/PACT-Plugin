@@ -1268,7 +1268,7 @@ class TestAllMatchEdgeCases:
         only the new task (without teachback) visible to the scanner.
 
         This is the benign race condition from the prep doc. The hook reads a
-        point-in-time snapshot, so if the lead marks the old task completed
+        point-in-time snapshot, so if the team-lead marks the old task completed
         before the scan reaches it, only the new task is visible.
         """
         from teachback_check import check_teachback_sent
@@ -1328,7 +1328,7 @@ class TestAllMatchEdgeCases:
         assert task_id == "25"
 
     def test_self_claim_followup_both_in_progress(self, tmp_path):
-        """Self-claim follow-up: agent claims task B before lead marks task A
+        """Self-claim follow-up: agent claims task B before team-lead marks task A
         completed. Both are in_progress. Task A has teachback; task B does not.
 
         Per prep doc scenario 1, there's a timing window where both tasks

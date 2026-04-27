@@ -205,7 +205,7 @@ class TestTwoTaskDispatchShapeInConsumerCommands:
     in skills/orchestration/SKILL.md but consumer commands inline it because
     LLM readers under token pressure don't follow cross-references reliably
     (same rationale as the canonical PACT ROLE marker test above). If a
-    consumer command silently drops the inline anchor, lead-side dispatch
+    consumer command silently drops the inline anchor, team-lead-side dispatch
     for that workflow degrades to single-task form and the teachback gate
     becomes optional rather than mandatory.
 

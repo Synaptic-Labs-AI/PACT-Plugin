@@ -76,10 +76,10 @@ A_id = TaskCreate(
     subject="{role}: TEACHBACK for {feature}",
     description="DOGFOOD TEACHBACK GATE for {feature}.\n\n"
                 "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
-                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead}. Idle. "
-                "DO NOT mark this task completed — lead-only completion. Lead will mark completed "
+                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
+                "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable. "
-                "If teachback is rejected, lead writes metadata.teachback_rejection and sends a "
+                "If teachback is rejected, team-lead writes metadata.teachback_rejection and sends a "
                 "wake-SendMessage with corrections; revise on this same task.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
@@ -92,7 +92,7 @@ B_id = TaskCreate(
                 "Per dogfood directive: DO NOT mark this task completed yourself. "
                 "After staging artifacts, write metadata.handoff, send notify SendMessage to lead, "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "
-                "completed after HANDOFF validation. If lead rejects, lead writes metadata.handoff_rejection; "
+                "completed after HANDOFF validation. If team-lead rejects, team-lead writes metadata.handoff_rejection; "
                 "revise on this same task.\n\nUpstream: TEACHBACK Task #{A_id}."
 )
 TaskUpdate(B_id, owner="{teammate-name}", addBlockedBy=[A_id])
@@ -107,7 +107,7 @@ The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded
 
 - **Auditor signal-tasks** (`metadata.completion_type="signal"`): no teachback, no Task B. The auditor IS observing; their task IS the signal.
 - **Secretary memory-save tasks**: secretary self-completes; the standard On Completion flow applies via the `SELF_COMPLETE_EXEMPT_AGENTS` set in `shared/intentional_wait.py`.
-- **imPACT force-termination**: `TaskStop` + lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
+- **imPACT force-termination**: `TaskStop` + team-lead-set `metadata.terminated=true` is its own out-of-band path. See [imPACT.md](imPACT.md).
 
 **Skipped phases**: Mark directly `completed` (no `in_progress` — no work occurs):
 `TaskUpdate(phaseTaskId, status="completed", metadata={"skipped": true, "skip_reason": "{reason}"})`
@@ -721,7 +721,7 @@ The auditor stores its final signal as `metadata.audit_summary` via `TaskUpdate`
 - [ ] All tests passing (full test suite; fix any tests your changes break)
 - [ ] Specialist handoff(s) received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the lead works through the commit sequence; CLEAR on the lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
+- [ ] **Create atomic commit(s)** of CODE phase work (preserves work before strategic re-assessment). Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the team-lead works through the commit sequence; CLEAR on the team-lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal event**: After each commit, write a `commit` event:
   ```bash
   set -e
@@ -834,7 +834,7 @@ For stall detection indicators, recovery protocol, prevention, and non-happy-pat
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each agent dispatch, when agent reports completion, on any unexpected stoppage
 
@@ -851,7 +851,7 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
-**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
+**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
 
 ### Blocker Recovery: Resume vs. Fresh Spawn
 

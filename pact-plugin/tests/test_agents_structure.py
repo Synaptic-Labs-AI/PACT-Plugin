@@ -426,7 +426,7 @@ class TestTeachbackMicroSkillExtraction:
     # the skill has shed a load-bearing piece of the protocol.
     REQUIRED_PROTOCOL_ELEMENTS = [
         "SendMessage",                  # Communication tool reference (notify path)
-        "teachback_submit",             # Metadata field name (lead-readable payload)
+        "teachback_submit",             # Metadata field name (team-lead-readable payload)
         "gate",                         # Gate semantics (teachback is a gate)
         "Teachback submitted",          # Notify-message marker
         "before any Edit/Write/Bash",   # Ordering rule literal
@@ -1321,7 +1321,7 @@ class TestDispatchTemplatePrelude:
     skills/orchestration/SKILL.md must embed the teammate bootstrap prelude
     inside the `prompt=` parameter.
 
-    This is load-bearing because the dispatch template is what the lead
+    This is load-bearing because the dispatch template is what the team-lead
     reads when spawning a specialist — if the template is missing the
     `YOUR PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
     call, spawned teammates will not self-bootstrap and will lack the
@@ -1355,7 +1355,7 @@ class TestDispatchTemplatePrelude:
         """Spec Section 6.6 / Section 8: the dispatch template must
         contain the literal placeholder form `YOUR PACT ROLE: teammate ({name})`
         — not just the prefix. The `{name}` placeholder is load-bearing
-        because at dispatch time the lead substitutes the teammate's
+        because at dispatch time the team-lead substitutes the teammate's
         actual name, which is what the routing block searches for and
         what appears in the spawned teammate's context.
         """
@@ -1368,7 +1368,7 @@ class TestDispatchTemplatePrelude:
         assert "YOUR PACT ROLE: teammate ({name})" in region, (
             "Agent Teams Dispatch template in skills/orchestration/SKILL.md "
             "must contain literal `YOUR PACT ROLE: teammate ({name})` (with "
-            "the exact placeholder form) so the lead substitutes the "
+            "the exact placeholder form) so the team-lead substitutes the "
             "teammate's name at dispatch time. Spec Section 6.6."
         )
 

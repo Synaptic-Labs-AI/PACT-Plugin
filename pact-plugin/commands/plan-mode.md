@@ -202,7 +202,7 @@ A_id = TaskCreate(
     description="DOGFOOD TEACHBACK GATE.\n\n"
                 "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
-                "DO NOT mark this task completed — lead-only completion.\n\n"
+                "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{specialist-name}")
@@ -560,7 +560,7 @@ The orchestrator should reference this plan during execution.
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
 On signal detected, handle via the Signal Task Handling procedure:

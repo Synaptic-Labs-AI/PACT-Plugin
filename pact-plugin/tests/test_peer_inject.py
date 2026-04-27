@@ -1194,7 +1194,7 @@ class TestCompletionAuthorityLiteralPhraseRegressionGuard:
     def test_directive_names_lead_as_completion_authority(self):
         from peer_inject import _COMPLETION_AUTHORITY_NOTE
 
-        # The directive must name the lead explicitly as the actor that
+        # The directive must name the team-lead explicitly as the actor that
         # transitions status — not vague "the team" or "someone".
         assert "lead" in _COMPLETION_AUTHORITY_NOTE.lower()
         assert "transitions status" in _COMPLETION_AUTHORITY_NOTE.lower() \

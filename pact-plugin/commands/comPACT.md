@@ -178,8 +178,8 @@ A_id = TaskCreate(
     subject="{specialist}: TEACHBACK for {sub-task}",
     description="DOGFOOD TEACHBACK GATE for {sub-task}.\n\n"
                 "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
-                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead}. Idle. "
-                "DO NOT mark this task completed — lead-only completion. Lead will mark completed "
+                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=team-lead}. Idle. "
+                "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-SendMessage confirming Task B is claimable.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
@@ -209,7 +209,7 @@ The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded
 When the task contains multiple independent items, invoke multiple specialists together with boundary context. Apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above per specialist:
 
 For each specialist needed:
-1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [this agent's specific sub-task]")`
+1. `TaskCreate(subject="{specialist}: {sub-task}", description="comPACT mode (concurrent): You are one of [N] specialists working concurrently.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\n\nYOUR SCOPE: [specific sub-task]\nOTHER AGENTS' SCOPE: [what others handle]\n\nWork directly from this task description.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nStay within your assigned scope.\n\nTesting: New unit tests for logic changes. Fix broken existing tests. Run test suite before handoff.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [this agent's specific sub-task]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning each specialist:
    ```bash
@@ -249,7 +249,7 @@ Use a single specialist agent only when:
 
 **Dispatch the specialist** — apply the [Two-Task Dispatch Shape](#two-task-dispatch-shape-teachback--work) above:
 
-1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the lead.\n\nTask: [user's task description]")`
+1. `TaskCreate(subject="{specialist}: {task}", description="comPACT mode: Work directly from this task description.\nYou are working in a git worktree at [worktree_path].\nNote: `CLAUDE.md` is gitignored and does not exist in worktrees. Do NOT edit or create `CLAUDE.md` — the orchestrator manages it separately. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead.\nIf upstream task IDs are provided, read via `TaskGet` for prior decisions.\nCheck docs/plans/, docs/preparation/, docs/architecture/ briefly if they exist.\nDo not create new documentation artifacts in docs/.\nFocus on the task at hand.\n\nTesting: New unit tests for logic changes (optional for trivial changes). Fix broken existing tests. Run test suite before handoff.\n\n> Smoke vs comprehensive tests: These are verification tests. Comprehensive coverage is TEST phase work.\n\nIf you hit a blocker, STOP and `SendMessage` it to the team-lead.\n\nTask: [user's task description]")`
 2. `TaskUpdate(taskId, owner="{specialist-name}")`
 3. **Journal event**: Write `agent_dispatch` before spawning:
    ```bash
@@ -278,7 +278,7 @@ Task(
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 
 On signal detected, handle via the Signal Task Handling procedure:
@@ -322,7 +322,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
 - [ ] Agent tasks marked `completed` (agents self-manage their task status via `TaskUpdate`)
 - [ ] **Agreement verification**: `SendMessage` to specialist to confirm shared understanding of deliverables before committing. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 - [ ] **Run tests** — verify work passes. If tests fail → return to specialist for fixes (create new agent task, repeat).
-- [ ] **Create atomic commit(s)** — stage and commit before proceeding. Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the lead works through the commit sequence; CLEAR on the lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
+- [ ] **Create atomic commit(s)** — stage and commit before proceeding. Lead owns commits; specialists stage + SendMessage "stage-ready" and wait. A staging specialist should SET the `intentional_wait` task metadata (reason `awaiting_lead_commit`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag while the team-lead works through the commit sequence; CLEAR on the team-lead's commit confirmation. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 - [ ] **Journal events**: After each commit, write a `commit` event:
   ```bash
   set -e

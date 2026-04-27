@@ -407,7 +407,7 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via `TaskGet(#5)`
 3. Agent sends teachback to lead via `SendMessage`:
-   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
+   "[{sender}→team-lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
 5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
 ```
@@ -419,7 +419,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 #### Teachback Format
 
 ```
-[{sender}→lead] Teachback:
+[{sender}→team-lead] Teachback:
 - Building: {what I understand I'm building}
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
@@ -444,7 +444,7 @@ One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance ag
 
 ### Agreement Verification (Orchestrator-Side)
 
-Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent).
+Teachback verifies understanding **downstream** (next agent → team-lead). Agreement verification verifies understanding **upstream** (team-lead → previous agent).
 
 #### When to Verify
 
@@ -750,7 +750,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
+- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT
@@ -856,7 +856,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 > **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
 > predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
 
-At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
 
 **Schema**:
 
@@ -881,7 +881,7 @@ CalibrationRecord:
 **Post-cycle comparison**: During HANDOFF processing, the secretary:
 1. Reads feature task metadata for initial_variety_score
 2. Scans TaskList for blocker count and phase rerun count
-3. Asks the lead for a brief difficulty assessment (higher, lower, or about the same)
+3. Asks the team-lead for a brief difficulty assessment (higher, lower, or about the same)
 4. Computes the full CalibrationRecord and saves to pact-memory
 5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
 
@@ -909,7 +909,7 @@ CalibrationRecord:
 | `/PACT:plan-mode` | None (consultant writes consultation HANDOFF, idles) | All consultant tasks; the plan-mode parent task |
 | `/PACT:imPACT` | None (triage agent writes triage HANDOFF, idles) | All triage tasks; the imPACT parent task |
 
-Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) holds the slim lead-side summary.
+Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) holds the slim team-lead-side summary.
 
 ---
 
@@ -1125,7 +1125,7 @@ Tasks progress through: `pending` → `in_progress` → `completed`
 
 - **pending**: Created but not started
 - **in_progress**: Active work underway (also covers "done-awaiting-review" — teammate has stored HANDOFF and idles on `awaiting_lead_completion`)
-- **completed**: Work finished (success or documented failure); transition is **lead-only** on teammate-owned tasks
+- **completed**: Work finished (success or documented failure); transition is **team-lead-only** on teammate-owned tasks
 
 ### Status-by-Actor
 
@@ -1139,7 +1139,7 @@ Tasks progress through: `pending` → `in_progress` → `completed`
 
 ### Task A + Task B Dispatch Shape
 
-Every specialist dispatch creates a Task A (teachback) + Task B (primary work) pair. Task B has `blockedBy=[A]`. Lead-completion of Task A auto-unblocks Task B in the task graph; the lead pairs the status flip with a wake-signal SendMessage so the idle teammate (on `intentional_wait{reason=awaiting_lead_completion}`) wakes to claim B. The platform does not push a wake on blocker resolution — `blockedBy` is computed at TaskList query time, so the wake-signal SendMessage is required.
+Every specialist dispatch creates a Task A (teachback) + Task B (primary work) pair. Task B has `blockedBy=[A]`. Lead-completion of Task A auto-unblocks Task B in the task graph; the team-lead pairs the status flip with a wake-signal SendMessage so the idle teammate (on `intentional_wait{reason=awaiting_lead_completion}`) wakes to claim B. The platform does not push a wake on blocker resolution — `blockedBy` is computed at TaskList query time, so the wake-signal SendMessage is required.
 
 ### Blocking Relationships
 
@@ -1671,7 +1671,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 | **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
 | **Output: commits** | Teammate commits directly to the feature branch |
 | **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
-| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
+| **Delivery mechanism** | Asynchronous — teammates operate independently; team-lead receives messages and task updates automatically |
 
 **Key Agent Teams tools**:
 
@@ -1686,7 +1686,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 **Architectural notes**:
 
-- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
+- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the team-lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
 - No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
 - Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
 
@@ -1913,7 +1913,7 @@ The auditor uses signal-based completion rather than standard HANDOFF:
 1. Task is created with `metadata: {"completion_type": "signal"}`
 2. Auditor stores final signal as `metadata.audit_summary` via `TaskUpdate`
 3. Auditor marks task completed
-4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the lead verifies presence directly via `TaskGet`).
+4. Completion gate accepts `audit_summary` as the completion artifact (the `audit_summary` field in task metadata; no hook validates it; the team-lead verifies presence directly via `TaskGet`).
 
 **audit_summary format**:
 ```json

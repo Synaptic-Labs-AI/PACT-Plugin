@@ -8,7 +8,7 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists → suppressOutput (zero tokens, sub-ms)
-  - No marker + PACT lead session → inject additionalContext instructing bootstrap
+  - No marker + PACT team-lead session → inject additionalContext instructing bootstrap
   - Non-PACT session (no context file) → no-op passthrough
   - Teammate (resolve_agent_name non-empty) → no-op passthrough
 
@@ -63,7 +63,7 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         # Bootstrap already done → suppress (zero tokens)
         return None
 
-    # Teammate detection: teammates don't need the lead's bootstrap gate
+    # Teammate detection: teammates don't need the team-lead's bootstrap gate
     agent_name = pact_context.resolve_agent_name(input_data)
     if agent_name:
         return None

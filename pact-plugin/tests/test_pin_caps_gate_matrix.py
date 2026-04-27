@@ -13,7 +13,7 @@ Matrix axes:
   baseline:  fresh (existing CLAUDE.md with N < cap pins)
              missing (no CLAUDE.md on disk)
              corrupt (CLAUDE.md exists but no Pinned Context section)
-  bypass:    lead (agent_name empty)
+  bypass:    team-lead (agent_name empty)
              teammate (agent_name non-empty)
 
 Full 2 * 6 * 3 * 2 = 72 logical cells. Not every combination produces a

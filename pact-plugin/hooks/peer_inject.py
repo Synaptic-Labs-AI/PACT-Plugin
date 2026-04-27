@@ -37,11 +37,11 @@ _TEACHBACK_REMINDER = (
 _COMPLETION_AUTHORITY_NOTE = (
     "\n\nCOMPLETION AUTHORITY: You do NOT mark your own tasks `completed`. "
     "When your work is done, write your HANDOFF (or teachback metadata) to "
-    "the task and remain `in_progress`. The lead reads your output, judges "
+    "the task and remain `in_progress`. The team-lead reads your output, judges "
     "acceptance, and transitions status to `completed` only on accept. "
     "Your dispatch may be a Task A (teachback) + Task B (work) pair: claim A, "
     "submit teachback, idle on `intentional_wait{reason=awaiting_lead_completion}`. "
-    "Do NOT begin Task B until A.status == 'completed' (lead's wake-signal "
+    "Do NOT begin Task B until A.status == 'completed' (team-lead's wake-signal "
     "SendMessage confirms; you cannot self-wake to poll TaskList while idle)."
 )
 
@@ -108,7 +108,7 @@ def get_peer_context(
     Prepends a bootstrap prelude (PACT ROLE marker + YOUR FIRST ACTION skill
     invocation instruction) and appends a teachback timing reminder
     after the peer list. The PACT ROLE marker is the stable substring
-    used by lead routing logic; empty agent_name falls back to "unknown".
+    used by team-lead routing logic; empty agent_name falls back to "unknown".
 
     Args:
         agent_type: The spawning agent's type (e.g., "pact-backend-coder")

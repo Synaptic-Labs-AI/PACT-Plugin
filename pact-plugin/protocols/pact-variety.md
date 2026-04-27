@@ -91,7 +91,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 > **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
 > predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
 
-At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
 
 **Schema**:
 
@@ -116,7 +116,7 @@ CalibrationRecord:
 **Post-cycle comparison**: During HANDOFF processing, the secretary:
 1. Reads feature task metadata for initial_variety_score
 2. Scans TaskList for blocker count and phase rerun count
-3. Asks the lead for a brief difficulty assessment (higher, lower, or about the same)
+3. Asks the team-lead for a brief difficulty assessment (higher, lower, or about the same)
 4. Computes the full CalibrationRecord and saves to pact-memory
 5. If drift exceeds 2 in any dimension, notes as significant for future Learning II queries
 

@@ -249,7 +249,7 @@ class TestCheckAddAllowed_EmbeddedHeading:
     level-3 heading (`### `) are rejected because parse_pins on reload
     would count them as additional pins, defeating the count cap.
 
-    Conservative by design (per lead direction 2026-04-21): rejects ANY
+    Conservative by design (per team-lead direction 2026-04-21): rejects ANY
     embedded pin structure detected by parse_pins, whether accompanied
     by a date-comment or not. Legitimate pin bodies can use `#### ` or
     bold/italic for in-body structure.

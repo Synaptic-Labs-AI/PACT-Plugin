@@ -10,7 +10,7 @@ You hit a blocker: $ARGUMENTS
 
 imPACT operates on blocker Tasks reported by agents.
 
-These are orchestrator-side operations (agents report blockers via `SendMessage` to the lead; the orchestrator manages Tasks):
+These are orchestrator-side operations (agents report blockers via `SendMessage` to the team-lead; the orchestrator manages Tasks):
 
 ```
 1. `TaskGet(blocker_id)` — understand the blocker context
@@ -22,7 +22,7 @@ These are orchestrator-side operations (agents report blockers via `SendMessage`
 5. Blocked agent task is now unblocked
 ```
 
-**Note**: Agents report blockers via `SendMessage` to the lead ("BLOCKER: {description}"). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the agent's task. When the blocker is resolved (marked completed), the agent's task becomes unblocked.
+**Note**: Agents report blockers via `SendMessage` to the team-lead ("BLOCKER: {description}"). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the agent's task. When the blocker is resolved (marked completed), the agent's task becomes unblocked.
 
 ---
 
@@ -129,9 +129,9 @@ If the blocker reveals that a sub-task is more complex than expected and needs i
 
 **When to terminate**: Last resort — agent resumed once and stalled again, looping on same error 3+ times, context exhausted, or TeammateIdle stall unresolved by resume. `TaskStop` is a force-stop (immediate, non-cooperative); use `SendMessage(to="{agent-name}", message={"type": "shutdown_request"})` for cooperative shutdown. After termination, spawn a fresh agent with partial handoff from the terminated agent's task metadata.
 
-> **Force-termination is a carve-out** to the lead-only-completion rule. The `metadata.terminated == true` marker on the lead-driven `TaskUpdate(status="completed")` distinguishes this path from the standard cooperative acceptance flow. The terminated teammate is not idling on `awaiting_lead_completion`; the lead is force-completing an unrecoverable agent's task out-of-band. See [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) for the carve-out table.
+> **Force-termination is a carve-out** to the team-lead-only-completion rule. The `metadata.terminated == true` marker on the team-lead-driven `TaskUpdate(status="completed")` distinguishes this path from the standard cooperative acceptance flow. The terminated teammate is not idling on `awaiting_lead_completion`; the team-lead is force-completing an unrecoverable agent's task out-of-band. See [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) for the carve-out table.
 
-**Re-dispatch after imPACT-driven redo**: When imPACT decides to redo a phase, the new dispatch follows the standard [Two-Task Dispatch Shape](orchestrate.md#two-task-dispatch-shape-teachback--work) — Task A teachback + Task B work, blockedBy edge. The original (failed) phase task is marked `completed` with `metadata={"redo_reason": "..."}` (lead-driven; this is a lead-completion, not teammate-completion).
+**Re-dispatch after imPACT-driven redo**: When imPACT decides to redo a phase, the new dispatch follows the standard [Two-Task Dispatch Shape](orchestrate.md#two-task-dispatch-shape-teachback--work) — Task A teachback + Task B work, blockedBy edge. The original (failed) phase task is marked `completed` with `metadata={"redo_reason": "..."}` (team-lead-driven; this is a team-lead-completion, not teammate-completion).
 
 ### Conversation Failure Taxonomy
 

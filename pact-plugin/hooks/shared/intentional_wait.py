@@ -3,11 +3,11 @@ Location: pact-plugin/hooks/shared/intentional_wait.py
 Summary: `intentional_wait` metadata schema — the teammate-facing contract
          for signalling a legitimate wait on an in_progress task (teachback
          approval, inter-commit hold, peer reply, etc.). Also the canonical
-         self-complete-exemption predicate for lead-side TaskGet inspection
+         self-complete-exemption predicate for team-lead-side TaskGet inspection
          and audit tooling.
-Used by: teammate-authored metadata on Task records, lead inspection, and
+Used by: teammate-authored metadata on Task records, team-lead inspection, and
          audit tooling. The exemption predicate (is_self_complete_exempt)
-         is NOT a hook — it is a pure function consumed by lead instructions
+         is NOT a hook — it is a pure function consumed by team-lead instructions
          and future audit consumers. See skills/pact-agent-teams/SKILL.md
          and skills/orchestration/SKILL.md for the contract.
 
@@ -26,7 +26,7 @@ Public surface:
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
 - is_self_complete_exempt(task) — True iff the task is exempt from the
-  lead-only-completion rule (by agent type or signal-task pattern).
+  team-lead-only-completion rule (by agent type or signal-task pattern).
 """
 
 from datetime import datetime, timezone
@@ -52,12 +52,12 @@ KNOWN_RESOLVERS = frozenset({"lead", "peer", "user", "external"})
 DEFAULT_THRESHOLD_MINUTES = 30
 
 
-# Agents whose tasks may be self-completed because the lead has no
+# Agents whose tasks may be self-completed because the team-lead has no
 # acceptance criteria to judge. Exemption is narrow by design: each
 # entry must have a documented rationale.
 #
 # `pact-secretary` (memory-save tasks): purely internal bookkeeping.
-#   The secretary writes a HANDOFF describing what was saved; the lead
+#   The secretary writes a HANDOFF describing what was saved; the team-lead
 #   has no acceptance criteria — judging memory-save quality is the
 #   secretary's domain. Lead-as-gate would add 12-18 transitions per
 #   session with zero quality signal.
@@ -159,7 +159,7 @@ def wait_stale(
 
 def is_self_complete_exempt(task: Any) -> bool:
     """
-    Return True iff this task is exempt from the lead-only-completion rule.
+    Return True iff this task is exempt from the team-lead-only-completion rule.
 
     Two exemption surfaces (OR-combined):
     1. By owner: task.owner in SELF_COMPLETE_EXEMPT_AGENTS. Lead-declared
@@ -174,7 +174,7 @@ def is_self_complete_exempt(task: Any) -> bool:
     (conservative — never silently exempt).
 
     NOT a hook predicate. There is no hook reading this — the function is
-    the canonical predicate for lead-side TaskGet inspection, audit tooling,
+    the canonical predicate for team-lead-side TaskGet inspection, audit tooling,
     and future consumers. Hooks must use the inline-literal mirror to avoid
     reintroducing livelock-capable hook surface.
 

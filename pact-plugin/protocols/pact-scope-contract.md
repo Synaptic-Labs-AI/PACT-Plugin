@@ -130,7 +130,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 | **Output: handoff** | `SendMessage` (type: `"message"`) from teammate to lead |
 | **Output: commits** | Teammate commits directly to the feature branch |
 | **Output: status** | `TaskUpdate` via shared task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) |
-| **Delivery mechanism** | Asynchronous — teammates operate independently; lead receives messages and task updates automatically |
+| **Delivery mechanism** | Asynchronous — teammates operate independently; team-lead receives messages and task updates automatically |
 
 **Key Agent Teams tools**:
 
@@ -145,7 +145,7 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 
 **Architectural notes**:
 
-- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
+- Teammates load CLAUDE.md, MCP servers, and skills automatically but do **not** inherit the team-lead's conversation history — they receive only the spawn prompt (scope contract + feature context).
 - No nested teams are allowed. This parallels PACT's 1-level nesting limit but is enforced architecturally by Agent Teams rather than by convention.
 - Agent Teams supports peer-to-peer messaging between teammates (`SendMessage` type: `"message"` with `recipient`), which goes beyond PACT's current hub-and-spoke model. Scoped orchestration would use this for sibling scope coordination during the CONSOLIDATE phase.
 

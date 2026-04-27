@@ -30,7 +30,7 @@ When a downstream agent receives an upstream handoff (via `TaskGet`), their firs
 1. Agent dispatched with upstream task reference (e.g., "Architect task: #5")
 2. Agent reads upstream handoff via `TaskGet(#5)`
 3. Agent sends teachback to lead via `SendMessage`:
-   "[{sender}→lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
+   "[{sender}→team-lead] Teachback: My understanding is... [key decisions restated]. Proceeding unless corrected."
 4. Agent proceeds with work (non-blocking)
 5. If orchestrator spots misunderstanding, they must `SendMessage` to agent to correct it
 ```
@@ -42,7 +42,7 @@ Blocking teachback (wait for confirmation before working) would serialize everyt
 #### Teachback Format
 
 ```
-[{sender}→lead] Teachback:
+[{sender}→team-lead] Teachback:
 - Building: {what I understand I'm building}
 - Key constraints: {constraints I'm working within}
 - Interfaces: {interfaces I'll produce or consume}
@@ -67,7 +67,7 @@ One extra `SendMessage` per agent dispatch (~100-200 tokens). Cheap insurance ag
 
 ### Agreement Verification (Orchestrator-Side)
 
-Teachback verifies understanding **downstream** (next agent → lead). Agreement verification verifies understanding **upstream** (lead → previous agent).
+Teachback verifies understanding **downstream** (next agent → team-lead). Agreement verification verifies understanding **upstream** (team-lead → previous agent).
 
 #### When to Verify
 

@@ -117,7 +117,7 @@ class TestHappyPath:
         _run_main(
             stdin_payload={
                 "task_id": "6",
-                "task_subject": "handed off from lead",
+                "task_subject": "handed off from team-lead",
                 "teammate_name": "platform-placeholder",
                 "team_name": "pact-test",
             },

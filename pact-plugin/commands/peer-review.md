@@ -113,7 +113,7 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 
 > **Worktree scope reminder**: When reusing a reviewer as a fixer or spawning a new fixer, include the worktree path and `CLAUDE.md` scope note in the fix task: "`CLAUDE.md` is gitignored and does not exist in worktrees — do not edit it. If your task mentions updating `CLAUDE.md`, flag it in your handoff instead."
 
-> **Remediation stage-ready wait**: Reviewers acting as fixers stage remediation changes and notify the lead, then wait for the lead to commit the fix. Instruct the reviewer to SET the `intentional_wait` task metadata (reason `awaiting_amendment_review`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag through the fix→commit→re-review cycle; CLEAR when the lead acknowledges the commit. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
+> **Remediation stage-ready wait**: Reviewers acting as fixers stage remediation changes and notify the team-lead, then wait for the team-lead to commit the fix. Instruct the reviewer to SET the `intentional_wait` task metadata (reason `awaiting_amendment_review`, resolver `lead`) before the stage-ready notify so TeammateIdle hooks do not nag through the fix→commit→re-review cycle; CLEAR when the team-lead acknowledges the commit. See the "Intentional Waiting" section in `pact-agent-teams/SKILL.md` for the SET/CLEAR contract.
 
 ---
 
@@ -157,7 +157,7 @@ A_id = TaskCreate(
     description="DOGFOOD TEACHBACK GATE.\n\n"
                 "Submit teachback by writing metadata.teachback_submit (per pact-teachback skill). "
                 "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
-                "DO NOT mark this task completed — lead-only completion.\n\n"
+                "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "Mission for Task B: see Task #{B_id}."
 )
 TaskUpdate(A_id, owner="{reviewer-name}")
@@ -216,7 +216,7 @@ This is the **primary memory trigger** — fires unconditionally at reviewer dis
 Each reviewer should state their understanding of the PR's intent before diving into review. This catches cases where a reviewer misunderstands the purpose and produces irrelevant findings.
 
 **Mechanism**: Include in each reviewer's task description:
-> "Before reviewing, send a teachback message to the lead stating your understanding of what this PR is trying to accomplish and what you'll focus on in your domain. Format: `[{sender}→lead] Teachback: I understand this PR is [intent]. Reviewing with focus on [domain focus]. Proceeding unless corrected.` Non-blocking — proceed with review after sending."
+> "Before reviewing, send a teachback message to the team-lead stating your understanding of what this PR is trying to accomplish and what you'll focus on in your domain. Format: `[{sender}→team-lead] Teachback: I understand this PR is [intent]. Reviewing with focus on [domain focus]. Proceeding unless corrected.` Non-blocking — proceed with review after sending."
 
 This uses the same teachback mechanism as agent handoffs. Background: [pact-ct-teachback.md](../protocols/pact-ct-teachback.md).
 
@@ -367,7 +367,7 @@ JSON
 ## Signal Monitoring
 
 Monitor for blocker/algedonic signals via:
-- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the lead
+- **`SendMessage`**: Teammates send blockers and algedonic signals directly to the team-lead
 - **`TaskList`**: Check for tasks with blocker metadata or stalled status
 - After each reviewer dispatch, after each remediation dispatch, on any unexpected stoppage
 

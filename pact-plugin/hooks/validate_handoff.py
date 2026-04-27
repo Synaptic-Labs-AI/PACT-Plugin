@@ -10,7 +10,7 @@ Validates that PACT agents complete with proper handoff information
 
 Note: Task protocol compliance (status, metadata) is NOT validated here.
 Task state may still be in flux at SubagentStop time (agents self-manage
-status under Agent Teams, and the lead may process output after this hook
+status under Agent Teams, and the team-lead may process output after this hook
 fires), so Task state cannot be reliably checked here.
 
 Input: JSON from stdin with `last_assistant_message` (preferred, SDK v2.1.47+),

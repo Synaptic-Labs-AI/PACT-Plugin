@@ -18,39 +18,39 @@ The rules below govern how messages delivered via this tool actually behave.
 - Agents read queued messages in FIFO order on reaching idle.
 - No cancellation primitive exists — a follow-up message cannot supersede a queued earlier one.
 - The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
-- `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out) for the canonical pattern).
+- `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) for the canonical pattern).
 
 ### Lead-Side Discipline — Verify Before Dispatching
 
 #### Verify State Before Correction
 
-Before sending a course-correction, check actual state (`git status`, `TaskList`, read files). The lead's mental model of teammate state diverges every time the teammate takes a tool action.
+Before sending a course-correction, check actual state (`git status`, `TaskList`, read files). The team-lead's mental model of teammate state diverges every time the teammate takes a tool action.
 
-*Failure shape: lead corrects against a `git status` snapshot from three tool calls ago; the teammate has committed and moved on since. The correction targets a no-longer-existing diff, and the teammate must surface the mismatch instead of acting on it.*
+*Failure shape: team-lead corrects against a `git status` snapshot from three tool calls ago; the teammate has committed and moved on since. The correction targets a no-longer-existing diff, and the teammate must surface the mismatch instead of acting on it.*
 
 #### Hold Fire During Mid-Turn
 
 Do not rapid-fire corrections while a teammate is mid-turn. Each queues and executes in order at their idle boundary, by which point the earlier message's premise may be stale.
 
-*Failure shape: lead fires correction B before correction A has cleared; A and B both queue. Distinct from the No-Supersede rule (which governs what happens once corrections collide); this is the upstream discipline of not firing them in the first place.*
+*Failure shape: team-lead fires correction B before correction A has cleared; A and B both queue. Distinct from the No-Supersede rule (which governs what happens once corrections collide); this is the upstream discipline of not firing them in the first place.*
 
 #### No Supersede Primitive
 
 Supersede-the-last-message does not exist. If message A is wrong and you send B, both will execute at the recipient's idle in FIFO order.
 
-*Failure shape: lead sends dispatch A based on a stale mental model; sends correction B before the teammate idles. The teammate processes A first, takes an action B's correction would have prevented, then reads B against the post-A state where the correction no longer fits.*
+*Failure shape: team-lead sends dispatch A based on a stale mental model; sends correction B before the teammate idles. The teammate processes A first, takes an action B's correction would have prevented, then reads B against the post-A state where the correction no longer fits.*
 
 #### Escalation for In-Flight Halt
 
 For in-flight damage that is unacceptable, escalate to the user for manual interrupt — do not attempt to fake sync interrupt via rapid-fire SendMessage.
 
-*Failure shape: lead detects a teammate executing destructive work mid-turn; queues rapid-fire HALT messages instead of asking the user to press Escape. Each HALT lands at the teammate's next idle; the destructive tool call completes before any HALT is read.*
+*Failure shape: team-lead detects a teammate executing destructive work mid-turn; queues rapid-fire HALT messages instead of asking the user to press Escape. Each HALT lands at the teammate's next idle; the destructive tool call completes before any HALT is read.*
 
 #### Dispatch Commit Point
 
 Treat task creation + `TaskUpdate(owner)` as the dispatch commit point; SendMessage is supplemental context.
 
-*Failure shape: lead sends a SendMessage with task instructions but skips the TaskUpdate(owner) step. The teammate's TaskList shows no assigned task; the SendMessage lands as orphan context with no work-tracking anchor, no teachback gate, and no completion handle.*
+*Failure shape: team-lead sends a SendMessage with task instructions but skips the TaskUpdate(owner) step. The teammate's TaskList shows no assigned task; the SendMessage lands as orphan context with no work-tracking anchor, no teachback gate, and no completion handle.*
 
 #### Wait for In-Flight Context
 
@@ -70,16 +70,16 @@ Before every SendMessage, run through:
 
 #### Forwarding-Chain Hygiene
 
-If teammate A produces info teammate B needs, prefer direct A→B SendMessage with a brief CC-summary to the lead, rather than A→lead→B routing. Halves idle-boundary latency. Reserve lead-routing for cases where the lead specifically owns the routing decision (priority arbitration, scope reassignment).
+If teammate A produces info teammate B needs, prefer direct A→B SendMessage with a brief CC-summary to the team-lead, rather than A→lead→B routing. Halves idle-boundary latency. Reserve team-lead-routing for cases where the team-lead specifically owns the routing decision (priority arbitration, scope reassignment).
 
-- **DON'T** relay design notes, query results, or HANDOFF excerpts from one teammate to another — that's a routing hop with no lead-owned decision in it. Send direct.
-- **DO** ask the lead to choose which of two teammates should take a task, or to arbitrate a scope conflict — those are decisions the lead owns.
+- **DON'T** relay design notes, query results, or HANDOFF excerpts from one teammate to another — that's a routing hop with no team-lead-owned decision in it. Send direct.
+- **DO** ask the team-lead to choose which of two teammates should take a task, or to arbitrate a scope conflict — those are decisions the team-lead owns.
 
 ### Teammate-Side Discipline — Verify Before Acting + Assume Eventually-Seen
 
 #### Wait for In-Flight Context
 
-Before composing any outbound SendMessage (peer-to-peer or to lead), wait for your own pending inputs. If you have an unread Read/Bash result, an outstanding peer query, or a dispatch you yourself issued that has not yet completed, hold the outbound until inputs land. Same **premature-dispatch** failure shape as lead-side — see [the lead-side rule](#wait-for-in-flight-context).
+Before composing any outbound SendMessage (peer-to-peer or to lead), wait for your own pending inputs. If you have an unread Read/Bash result, an outstanding peer query, or a dispatch you yourself issued that has not yet completed, hold the outbound until inputs land. Same **premature-dispatch** failure shape as team-lead-side — see [the team-lead-side rule](#wait-for-in-flight-context).
 
 *Failure shape: backend-coder mid-task with a pending Bash result; a peer pings; backend-coder drafts a peer-to-peer reply now and an addendum after the Bash returns. Two messages queue at the peer's idle; the first is composed against framing the Bash result would have shaped.*
 
@@ -91,7 +91,7 @@ On receiving a state-dependent message, check actual state before executing. If 
 
 #### Additive vs Corrective
 
-When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a lead-side rapid-fire-correction violation; surface it to the lead rather than silently picking one. Ambiguous middle: "investigate auth flow" followed by "start with the session-token path" — narrower-additive (a starting point) or different-assumption-contradictory (auth flow ≠ session-token path)? Default to surfacing.
+When a follow-up message updates earlier context, mentally diff and incorporate. Do NOT assume the earlier message is superseded — additive updates extend rather than replace prior framing. If the new message contradicts the prior, it's a team-lead-side rapid-fire-correction violation; surface it to the team-lead rather than silently picking one. Ambiguous middle: "investigate auth flow" followed by "start with the session-token path" — narrower-additive (a starting point) or different-assumption-contradictory (auth flow ≠ session-token path)? Default to surfacing.
 
 #### Eventually-Seen, Not Read
 
@@ -106,13 +106,13 @@ Before resending an apparently-unacknowledged message, verify the addressee has 
 *Failure shape: peer is busy mid-task; their idle hasn't fired since the original send. The resend queues a second identical message that lands at their first idle alongside the original — peer reads two copies in FIFO order.*
 
 - Peer-to-peer: do not assume a peer saw your message before their next tool call. Peer's in-flight action runs to completion before they read inbound.
-- Prefer peer-to-peer for context forwarding — see [the lead-side Forwarding-Chain Hygiene rule](#forwarding-chain-hygiene). If your work produces info another teammate would benefit from, send directly to them with a brief CC-summary to the lead.
-- Apply the **Pre-Send Self-Check** above before any outbound SendMessage — the questions are universal to any sender, not lead-only.
+- Prefer peer-to-peer for context forwarding — see [the team-lead-side Forwarding-Chain Hygiene rule](#forwarding-chain-hygiene). If your work produces info another teammate would benefit from, send directly to them with a brief CC-summary to the team-lead.
+- Apply the **Pre-Send Self-Check** above before any outbound SendMessage — the questions are universal to any sender, not team-lead-only.
 
 ### Algedonic-Signal Latency Caveat
 - HALT signals via SendMessage have idle-boundary latency like any other message.
 - For immediate halt of in-flight teammate work, user-side manual interrupt is required.
-- The lead's responsibility to "surface immediately" means at the lead's next idle, not at arbitrary real-time.
+- The team-lead's responsibility to "surface immediately" means at the team-lead's next idle, not at arbitrary real-time.
 
 ## Part II — Written Output
 

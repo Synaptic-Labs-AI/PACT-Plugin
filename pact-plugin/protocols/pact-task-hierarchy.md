@@ -29,7 +29,7 @@ Tasks progress through: `pending` → `in_progress` → `completed`
 
 - **pending**: Created but not started
 - **in_progress**: Active work underway (also covers "done-awaiting-review" — teammate has stored HANDOFF and idles on `awaiting_lead_completion`)
-- **completed**: Work finished (success or documented failure); transition is **lead-only** on teammate-owned tasks
+- **completed**: Work finished (success or documented failure); transition is **team-lead-only** on teammate-owned tasks
 
 ### Status-by-Actor
 
@@ -43,7 +43,7 @@ Tasks progress through: `pending` → `in_progress` → `completed`
 
 ### Task A + Task B Dispatch Shape
 
-Every specialist dispatch creates a Task A (teachback) + Task B (primary work) pair. Task B has `blockedBy=[A]`. Lead-completion of Task A auto-unblocks Task B in the task graph; the lead pairs the status flip with a wake-signal SendMessage so the idle teammate (on `intentional_wait{reason=awaiting_lead_completion}`) wakes to claim B. The platform does not push a wake on blocker resolution — `blockedBy` is computed at TaskList query time, so the wake-signal SendMessage is required.
+Every specialist dispatch creates a Task A (teachback) + Task B (primary work) pair. Task B has `blockedBy=[A]`. Lead-completion of Task A auto-unblocks Task B in the task graph; the team-lead pairs the status flip with a wake-signal SendMessage so the idle teammate (on `intentional_wait{reason=awaiting_lead_completion}`) wakes to claim B. The platform does not push a wake on blocker resolution — `blockedBy` is computed at TaskList query time, so the wake-signal SendMessage is required.
 
 ### Blocking Relationships
 

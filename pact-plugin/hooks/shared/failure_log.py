@@ -4,7 +4,7 @@ Summary: Bounded ring buffer log for session_init failures that cannot use
          the normal per-session journal path.
 Used by: session_init.py (R3 malformed-stdin gate) to record failures that
          leave no per-session directory, giving post-hoc observability across
-         ALL affected sessions (lead and teammates) without risking an
+         ALL affected sessions (team-lead and teammates) without risking an
          unreapable `unknown-{hex}/` directory leak.
 
 The normal session_journal.py writes into a per-session directory keyed by

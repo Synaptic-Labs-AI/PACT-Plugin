@@ -226,7 +226,7 @@ def _check_tool_allowed(input_data: dict) -> Optional[str]:
     pact_context.init(input_data)
 
     # Teammate bypass — mirror pin_staleness_gate. Teammates do not edit
-    # the project CLAUDE.md; only the lead (empty agent_name) is gated.
+    # the project CLAUDE.md; only the team-lead (empty agent_name) is gated.
     agent_name = pact_context.resolve_agent_name(input_data)
     if agent_name:
         return None
