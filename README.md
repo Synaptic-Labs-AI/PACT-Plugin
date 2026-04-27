@@ -30,7 +30,7 @@ PACT turns one AI into a coordinated dev team. Instead of a single Claude guessi
 
 **1. Install the plugin**
 ```
-/plugin marketplace add ProfSynapse/PACT-prompt
+/plugin marketplace add Synaptic-Labs-AI/PACT-prompt
 /plugin install PACT@pact-marketplace
 ```
 
