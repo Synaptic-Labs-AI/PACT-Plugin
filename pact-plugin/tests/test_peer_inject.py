@@ -29,7 +29,11 @@ class TestPeerInject:
     """Tests for peer_inject.get_peer_context()."""
 
     def test_injects_peer_names(self, tmp_path):
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -51,10 +55,14 @@ class TestPeerInject:
         assert "frontend-coder" in result
         assert "database-engineer" in result
         assert "backend-coder" not in result
-        assert result.endswith(_TEACHBACK_REMINDER)
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
 
     def test_excludes_spawning_agent(self, tmp_path):
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -74,7 +82,7 @@ class TestPeerInject:
 
         assert "backend-coder" in result
         assert "architect" not in result
-        assert result.endswith(_TEACHBACK_REMINDER)
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
 
     def test_returns_none_when_no_team_config(self, tmp_path):
         from peer_inject import get_peer_context
@@ -88,7 +96,11 @@ class TestPeerInject:
         assert result is None
 
     def test_alone_message_when_only_member(self, tmp_path):
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -106,7 +118,7 @@ class TestPeerInject:
         )
 
         assert "only active teammate" in result.lower()
-        assert result.endswith(_TEACHBACK_REMINDER)
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
 
     def test_noop_when_no_team_name(self, tmp_path):
         from peer_inject import get_peer_context
@@ -176,7 +188,11 @@ class TestTeachbackReminder:
     """Tests for _TEACHBACK_REMINDER injection into peer context."""
 
     def test_reminder_appended_when_peers_exist(self, tmp_path):
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -194,11 +210,15 @@ class TestTeachbackReminder:
             teams_dir=str(tmp_path / "teams")
         )
 
-        assert result.endswith(_TEACHBACK_REMINDER)
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
         assert "TEACHBACK TIMING" in result
 
     def test_reminder_appended_when_alone(self, tmp_path):
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -216,7 +236,7 @@ class TestTeachbackReminder:
         )
 
         assert "only active teammate" in result.lower()
-        assert result.endswith(_TEACHBACK_REMINDER)
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
 
     def test_reminder_contains_key_instructions(self):
         """The teachback reminder must mention the key instructions:
@@ -257,7 +277,11 @@ class TestTeachbackReminder:
         therefore targets the peer-list segment only — the slice between the
         prelude and the teachback reminder.
         """
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -277,12 +301,13 @@ class TestTeachbackReminder:
         )
 
         assert "coder-2" in result
-        assert result.endswith(_TEACHBACK_REMINDER)
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
 
         # Slice out the peer-list segment: drop the prelude (everything up to
         # and including the first blank-line gap before "Active teammates")
-        # and drop the teachback reminder.
-        before_reminder = result[: -len(_TEACHBACK_REMINDER)]
+        # and drop the trailing reminders.
+        suffix_len = len(_TEACHBACK_REMINDER) + len(_COMPLETION_AUTHORITY_NOTE)
+        before_reminder = result[:-suffix_len]
         peer_list_section = before_reminder.split("Active teammates on your team:", 1)[1]
         assert "coder-1" not in peer_list_section
 
@@ -501,7 +526,11 @@ class TestBootstrapPreludeAgentName:
 
     def test_prelude_precedes_peer_list(self, tmp_path):
         """Order is: prelude, then peer context, then teachback reminder."""
-        from peer_inject import get_peer_context, _TEACHBACK_REMINDER
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
 
         team_dir = tmp_path / "teams" / "pact-test"
         team_dir.mkdir(parents=True)
@@ -975,3 +1004,53 @@ class TestCounterTestByPeerInjectRevert:
         assert hasattr(peer_inject, "format_plugin_banner"), (
             "peer_inject must import format_plugin_banner at module scope"
         )
+
+
+class TestCompletionAuthorityNote:
+    """Tests for the completion-authority directive appended to peer context."""
+
+    def test_constant_exists_and_non_empty(self):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        assert isinstance(_COMPLETION_AUTHORITY_NOTE, str)
+        assert len(_COMPLETION_AUTHORITY_NOTE) > 0
+
+    def test_note_contains_load_bearing_phrases(self):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        assert "do NOT mark your own tasks" in _COMPLETION_AUTHORITY_NOTE
+        assert "awaiting_lead_completion" in _COMPLETION_AUTHORITY_NOTE
+        assert "Task A" in _COMPLETION_AUTHORITY_NOTE
+        assert "Task B" in _COMPLETION_AUTHORITY_NOTE
+        assert "lead" in _COMPLETION_AUTHORITY_NOTE.lower()
+
+    def test_note_appears_after_teachback_reminder(self, tmp_path):
+        """Ordering: prelude → peer_context → banner → teachback → completion-note."""
+        from peer_inject import (
+            get_peer_context,
+            _TEACHBACK_REMINDER,
+            _COMPLETION_AUTHORITY_NOTE,
+        )
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        config = {
+            "members": [
+                {"name": "architect", "agentType": "pact-architect"},
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+            ]
+        }
+        (team_dir / "config.json").write_text(json.dumps(config))
+
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(tmp_path / "teams"),
+        )
+
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Teachback reminder precedes completion-authority note.
+        assert result.index(_TEACHBACK_REMINDER) < result.index(_COMPLETION_AUTHORITY_NOTE)
+
