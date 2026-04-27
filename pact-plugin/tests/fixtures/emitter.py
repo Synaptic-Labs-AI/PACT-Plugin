@@ -28,6 +28,8 @@ VALID_HANDOFF = {
 
 def _run_main(stdin_payload, task_data, append_calls):
     """Invoke agent_handoff_emitter.main() with patched IO/deps."""
+    # Lazy import: sys.path is configured in conftest.py before this module loads.
+    # Do not hoist to module-level — sys.path coupling depends on conftest load order.
     from agent_handoff_emitter import main
 
     def _append_spy(event):
