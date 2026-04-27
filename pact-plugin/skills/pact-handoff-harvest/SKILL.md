@@ -41,11 +41,29 @@ Read your processed task list from agent memory (`~/.claude/agent-memory/pact-se
 
 ### Step 3: Read All HANDOFFs
 
-For each discovered task, read the HANDOFF using this two-tier fallback:
+For each discovered task, read the HANDOFF using this revision-aware fallback:
 
-1. **Session journal** (preferred, GC-proof): If the task was discovered via `agent_handoff` journal events, the `handoff` field contains the full HANDOFF content inline — use it directly. This is the most reliable source.
-2. **`TaskGet` fallback**: If the journal event lacks inline content, fall back to `TaskGet(taskId).metadata.handoff`. This may fail for garbage-collected tasks.
-3. **Report gap**: If both sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the lead has context.
+1. **Revision-aware metadata read**: Read the task's `metadata` (raw JSON; `TaskGet` is metadata-blind for `handoff` content). If `metadata.revision_number` is set and `> 1`, prefer `metadata.handoff` over the journal event. The journal `agent_handoff` event captured the FIRST (rejected) submission only — `agent_handoff_emitter.py` writes one journal event per task lifetime via an O_EXCL marker. On revision, the lead-completion of the revised task does NOT emit a second journal event, so the revised content lives in `metadata.handoff` only.
+2. **Session journal** (preferred for revision_number == 1 or unset, GC-proof): If the task was discovered via `agent_handoff` journal events and `revision_number` is unset or 1, the journal event's `handoff` field contains the full HANDOFF content inline — use it directly. This is the most reliable source for first-pass acceptance flows.
+3. **`TaskGet` fallback**: If both above fail (no journal event AND no `metadata.handoff`), fall back to `TaskGet(taskId).metadata.handoff`. May fail for garbage-collected tasks.
+4. **Report gap**: If all sources fail, report the gap to lead — note the task_id, agent name, and timestamp so the lead has context.
+
+Pseudocode for the revision-aware branch:
+
+```python
+for task_id in unprocessed:
+    journal_event = next((e for e in journal_events if e.task_id == task_id), None)
+    task_meta = read_task_metadata(task_id) or {}  # raw JSON read; TaskGet is metadata-blind
+    revision_n = task_meta.get("revision_number", 1)
+    if revision_n > 1:
+        # Revised HANDOFF; journal event captured only the first (rejected) submission.
+        handoff = task_meta.get("handoff")
+    elif journal_event:
+        handoff = journal_event.handoff
+    else:
+        handoff = task_meta.get("handoff")
+    # ...process handoff...
+```
 
 Read all HANDOFFs before proceeding to extraction.
 
