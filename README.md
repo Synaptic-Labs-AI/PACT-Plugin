@@ -30,7 +30,7 @@ PACT turns one AI into a coordinated dev team. Instead of a single Claude guessi
 
 **1. Install the plugin**
 ```
-/plugin marketplace add ProfSynapse/PACT-prompt
+/plugin marketplace add Synaptic-Labs-AI/PACT-prompt
 /plugin install PACT@pact-marketplace
 ```
 
@@ -293,7 +293,7 @@ pip install sqlite-vec
 **Quick version** — give Claude this prompt:
 
 ```
-Read the PACT setup instructions at https://github.com/ProfSynapse/PACT-prompt/blob/main/README.md
+Read the PACT setup instructions at https://github.com/Synaptic-Labs-AI/PACT-prompt/blob/main/README.md
 and help me install the PACT plugin with auto-updates enabled.
 ```
 
@@ -302,7 +302,7 @@ and help me install the PACT plugin with auto-updates enabled.
 ```
 Help me install the PACT plugin for Claude Code:
 
-1. Add the marketplace: /plugin marketplace add ProfSynapse/PACT-prompt
+1. Add the marketplace: /plugin marketplace add Synaptic-Labs-AI/PACT-prompt
 2. Install the plugin: /plugin install PACT@pact-marketplace
 3. Enable auto-updates via /plugin → Marketplaces → pact-marketplace → Enable auto-update
 4. Set up the orchestrator by appending PACT's CLAUDE.md to my existing ~/.claude/CLAUDE.md
@@ -316,7 +316,7 @@ Help me install the PACT plugin for Claude Code:
 
 **Step 1: Add the marketplace**
 ```bash
-/plugin marketplace add ProfSynapse/PACT-prompt
+/plugin marketplace add Synaptic-Labs-AI/PACT-prompt
 ```
 
 **Step 2: Install the plugin**
@@ -359,7 +359,7 @@ claude
 If you want to contribute or customize PACT:
 
 ```bash
-git clone https://github.com/ProfSynapse/PACT-prompt.git
+git clone https://github.com/Synaptic-Labs-AI/PACT-prompt.git
 cd PACT-prompt
 claude
 ```
