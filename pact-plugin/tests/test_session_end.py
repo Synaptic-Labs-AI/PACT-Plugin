@@ -32,7 +32,7 @@ class TestGetProjectSlug:
     def test_returns_basename_from_project_dir(self):
         from session_end import get_project_slug
 
-        with patch("session_end.get_project_dir", return_value="/Users/mj/Sites/my-project"):
+        with patch("session_end.get_project_dir", return_value="/Users/example/Sites/my-project"):
             assert get_project_slug() == "my-project"
 
     def test_returns_empty_when_no_project_dir(self):
@@ -60,7 +60,7 @@ class TestMainEntryPoint:
         defaults = {
             "pact_context_init": patch("session_end.pact_context.init"),
             "get_project_dir": patch("session_end.get_project_dir",
-                                     return_value="/Users/mj/Sites/my-project"),
+                                     return_value="/Users/example/Sites/my-project"),
             "get_session_dir": patch("session_end.get_session_dir", return_value=""),
             "get_session_id": patch("session_end.get_session_id", return_value=""),
             "get_team_name": patch("session_end.get_team_name", return_value="pact-abc12345"),

@@ -881,7 +881,7 @@ class TestUpdatePactRoutingSessionStartIsolation:
         "## Current Session\n"
         "- Resume: `claude --resume deadbeef-dead-beef-dead-beefdeadbeef`\n"
         "- Team: `pact-deadbeef`\n"
-        "- Session dir: `/Users/test/.claude/pact-sessions/proj/deadbeef`\n"
+        "- Session dir: `/Users/example/.claude/pact-sessions/proj/deadbeef`\n"
         "- Started: 2026-04-11 00:00:00 UTC\n"
         "<!-- SESSION_END -->\n"
     )

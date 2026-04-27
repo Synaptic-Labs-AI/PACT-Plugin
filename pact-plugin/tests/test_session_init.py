@@ -193,7 +193,7 @@ class TestTeamResumeDetection:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         if stdin_data is None:
@@ -239,7 +239,7 @@ class TestTeamResumeDetection:
 
     def test_oserror_falls_back_to_team_create(self, monkeypatch, tmp_path):
         """When filesystem check raises OSError, should fall back to TeamCreate."""
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
         # Make Path.home() raise OSError indirectly by patching Path.exists
         original_exists = Path.exists
@@ -308,7 +308,7 @@ class TestSourceAwareness:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         if team_exists:
@@ -551,7 +551,7 @@ class TestSourceAwareness:
         """Missing source field should default to startup behavior."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # stdin_data without "source" key
@@ -634,7 +634,7 @@ class TestMainPausedStateIntegration:
 
         paused_msg = "Paused work detected: PR #42 (feat/login) — awaiting merge."
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
         # Provide valid JSON on stdin with a session_id
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
@@ -664,7 +664,7 @@ class TestMainPausedStateIntegration:
         """None check_paused_state result should not appear in additionalContext."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
@@ -849,7 +849,7 @@ class TestCompactSummaryCleanup:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create compact-summary.txt
@@ -1135,7 +1135,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         """Tip should appear in systemMessage when teams dir not configured."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITHOUT ~/.claude/teams in additionalDirectories
@@ -1173,7 +1173,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         """No tip should appear when both required dirs are configured."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITH both dirs in additionalDirectories
@@ -1213,7 +1213,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         """Tip should NOT be checked on compact/clear sources (context resets)."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create settings.json WITHOUT ~/.claude/teams — tip would fire on startup
@@ -1354,7 +1354,7 @@ class TestWriteContextIntegration:
         """write_context should be called with team_name, session_id, project_dir."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -1380,7 +1380,7 @@ class TestWriteContextIntegration:
         mock_write_ctx.assert_called_once_with(
             "pact-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
-            "/Users/mj/Sites/test-project",
+            "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
         )
 
@@ -1401,7 +1401,7 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # No session_id in stdin
@@ -1466,7 +1466,7 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # No session_id in stdin
@@ -1530,7 +1530,7 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # No session_id in stdin
@@ -1579,7 +1579,7 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # No session_id in stdin
@@ -1651,7 +1651,7 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # No session_id in stdin
@@ -1689,7 +1689,7 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         real_session_id = "aabb1122-0000-0000-0000-000000000000"
@@ -1720,7 +1720,7 @@ class TestWriteContextIntegration:
         """write_context failure should not prevent session_init from completing."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -1788,7 +1788,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = "{ not valid json at all"
@@ -1837,7 +1837,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # valid JSON, no session_id
@@ -1876,7 +1876,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Integer, not a string — triggers the non_string_session_id branch.
@@ -1918,7 +1918,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({"session_id": "   "})  # whitespace only
@@ -1959,7 +1959,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({"session_id": "unknown-deadbeef"})
@@ -2001,7 +2001,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({})  # missing session_id → R3 gate fires
@@ -2078,7 +2078,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # The attack payload: embedded newline + a forged PACT ROLE marker.
@@ -2145,7 +2145,7 @@ class TestFailureLogIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # A valid UUID — would normally pass _is_unknown_or_missing_session.
@@ -2936,7 +2936,7 @@ def _run_session_init_for_path(
     and returns (additionalContext, kernel_call_count, routing_call_count)."""
     from session_init import main
 
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     if team_exists:
@@ -3424,7 +3424,7 @@ class TestMainExceptionSafetyNet:
         branch and the original error must still surface via systemMessage."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -3469,7 +3469,7 @@ class TestMainExceptionSafetyNet:
         team-lead can reuse it instead of creating a new one."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -3542,7 +3542,7 @@ class TestBootstrapMarkerCleanup:
         """
         from session_init import main
 
-        project_dir = "/Users/mj/Sites/test-project"
+        project_dir = "/Users/example/Sites/test-project"
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", project_dir)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -3606,7 +3606,7 @@ class TestBootstrapMarkerCleanup:
         """clear with no marker should not raise (unlink(missing_ok=True))."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
@@ -3643,7 +3643,7 @@ class TestBootstrapMarkerCleanup:
         """No session_id in input → marker cleanup is skipped (no crash)."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -3726,7 +3726,7 @@ class TestSessionStartSourceField:
         return the dict that was passed to append_event for session_start."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps(stdin_payload)
@@ -3861,7 +3861,7 @@ class TestSessionStartSourceField:
         assert event.get("session_id") == (
             "aabb1122-0000-0000-0000-000000000000"
         )
-        assert event.get("project_dir") == "/Users/mj/Sites/test-project"
+        assert event.get("project_dir") == "/Users/example/Sites/test-project"
         assert event.get("team") == "pact-aabb1122"
         # `worktree` is always written as "" at this point in the hook —
         # the worktree is not yet created. The empty string is the
@@ -3903,7 +3903,7 @@ def _run_session_init_compact(
     """
     from session_init import main
 
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     if team_exists:
@@ -4185,7 +4185,7 @@ class TestSessionInitCompactPhantomWorkflow:
         # _run_session_init_compact since it hard-codes source.
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
@@ -4248,7 +4248,7 @@ class TestSessionInitCompactPhantomWorkflow:
 
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
@@ -4303,7 +4303,7 @@ class TestSessionInitCompactBranchExceptions:
         from session_init import main
 
         pact_context(session_id="aabb1122-0000-0000-0000-000000000000")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
@@ -4349,7 +4349,7 @@ class TestSessionInitCompactBranchExceptions:
         test_main_with_invalid_json_input."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdout = io.StringIO()
@@ -4397,7 +4397,7 @@ class TestSessionInitCompactBranchExceptions:
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
         pact_context(session_id=session_id)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
@@ -4477,7 +4477,7 @@ class TestSessionInitCompactBranchExceptions:
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
         pact_context(session_id=session_id)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
@@ -4528,7 +4528,7 @@ class TestSessionInitDirectiveAcrossAllSources:
         """Minimal driver for a compact/clear run with team_exists=True."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"
@@ -4610,7 +4610,7 @@ class TestSessionInitDirectiveAcrossAllSources:
 
         session_id = "aabb1122-0000-0000-0000-000000000000"
         pact_context(session_id=session_id)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/mj/Sites/test-project")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         team_dir = tmp_path / ".claude" / "teams" / "pact-aabb1122"

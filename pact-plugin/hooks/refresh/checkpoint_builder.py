@@ -166,9 +166,9 @@ def get_encoded_project_path(transcript_path: str) -> str:
         transcript_path: Full path to the transcript file
 
     Returns:
-        Encoded project path segment (e.g., "-Users-mj-Sites-project")
+        Encoded project path segment (e.g., "-Users-example-Sites-project")
         Note: The leading dash is intentional - it matches Claude Code's folder
-        naming convention where /Users/mj/Sites/project becomes -Users-mj-Sites-project
+        naming convention where /Users/example/Sites/project becomes -Users-example-Sites-project
     """
     parts = transcript_path.split("/")
     try:
