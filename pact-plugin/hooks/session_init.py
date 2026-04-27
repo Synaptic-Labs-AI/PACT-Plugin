@@ -351,7 +351,7 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
 
     Reads the "## Current Session" block written by update_session_info()
     and extracts the session dir from lines like
-    "- Session dir: `~/.claude/pact-sessions/PACT-prompt/abc12345-...`".
+    "- Session dir: `~/.claude/pact-sessions/PACT-Plugin/abc12345-...`".
 
     Honors both supported project CLAUDE.md locations
     ($project_dir/.claude/CLAUDE.md preferred, $project_dir/CLAUDE.md legacy).
