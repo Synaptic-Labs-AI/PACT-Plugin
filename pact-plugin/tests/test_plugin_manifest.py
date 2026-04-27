@@ -803,7 +803,7 @@ class TestDogfoodPathWorktreeVsInstalledCache:
     """The #500 dogfood motivation: teammate edits worktree source at
     /Users/.../worktrees/feat-X/pact-plugin/hooks/, but the runtime
     resolves hooks against ${CLAUDE_PLUGIN_ROOT}, which is the installed
-    cache at ~/.claude/plugins/cache/pact-marketplace/PACT/3.x.y. The
+    cache at ~/.claude/plugins/cache/pact-plugin/PACT/3.x.y. The
     banner must surface the INSTALLED-CACHE version/root — not whatever
     is in the worktree source tree.
 

@@ -10,8 +10,8 @@ Turn a single Claude Code session into a managed team of specialist AI agents th
 
 ```bash
 /plugin marketplace add ProfSynapse/PACT-prompt
-/plugin install PACT@pact-marketplace
-cp ~/.claude/plugins/cache/pact-marketplace/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
+/plugin install PACT@pact-plugin
+cp ~/.claude/plugins/cache/pact-plugin/PACT/*/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
 Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDirectories` and PACT allow rules in `~/.claude/settings.json` to prevent permission prompts during agent operations:
