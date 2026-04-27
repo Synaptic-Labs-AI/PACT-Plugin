@@ -1,5 +1,5 @@
 {
-  "name": "PACT",
+  "name": "pact",
   "version": "3.20.0",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
