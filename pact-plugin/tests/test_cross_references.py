@@ -10,7 +10,7 @@ L6. Agent state model cross-reference in pact-agent-stall.md
 L7. Worktree CLAUDE.md scope warnings in dispatch templates and agent-teams skill
 L8. Custom start flows note in agent-teams SKILL.md cross-references pact-secretary.md
 L9. Dead-reference guard for #452 file relocation
-L10. Lead-Side HALT Fan-Out slug stability — canonical heading + 5 cross-refs
+L10. Lead-Side HALT Fan-Out slug stability — canonical heading + 4 consumer files
 """
 from pathlib import Path
 
@@ -266,14 +266,16 @@ class TestLeadSideHaltFanOutSlugStability:
     """L10: Stability of the `lead-side-halt-fan-out` slug.
 
     The canonical `#### Lead-Side HALT Fan-Out` heading lives in
-    skills/orchestration/SKILL.md and is referenced by 5 sites via the
-    GitHub-rendered slug `lead-side-halt-fan-out`. Renaming the heading
+    skills/orchestration/SKILL.md and is referenced from 4 distinct
+    consumer files via the GitHub-rendered slug `lead-side-halt-fan-out`
+    (algedonic.md hosts 2 link occurrences, the other three each host 1,
+    for 5 link occurrences across 4 files). Renaming the heading
     silently breaks every cross-reference (link still resolves to the
     file, just lands at the page top instead of the section). This test
     pins the slug by asserting:
 
     - the canonical heading text is present at the SSOT site, and
-    - each of the 5 consumer sites contains the exact slug fragment.
+    - each of the 4 consumer files contains the exact slug fragment.
 
     Counter-test-by-revert: rename the canonical heading (e.g., to
     "Lead-Side Halt Fanout") — the SSOT assertion fails. Drop the slug
@@ -296,8 +298,8 @@ class TestLeadSideHaltFanOutSlugStability:
             f"skills/orchestration/SKILL.md missing canonical heading "
             f"{self.CANONICAL_HEADING!r}. Renaming this heading breaks "
             "every cross-reference to the slug "
-            f"{self.SLUG!r}; restore the exact text or update all 5 "
-            "consumer sites in lockstep."
+            f"{self.SLUG!r}; restore the exact text or update all 4 "
+            "consumer files in lockstep."
         )
 
     def test_canonical_heading_renders_to_expected_slug(self):

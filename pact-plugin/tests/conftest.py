@@ -161,7 +161,7 @@ def make_send_message_call(
         recipient: Target teammate name (e.g., "lead", "backend-coder")
         content: Message content
         summary: Short summary for UI preview
-        msg_type: Message type ("message", "broadcast", "shutdown_request")
+        msg_type: Message type ("message", "shutdown_request")
         tool_use_id: Unique ID for the tool call
 
     Returns:

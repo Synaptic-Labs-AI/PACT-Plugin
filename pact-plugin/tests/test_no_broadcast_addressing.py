@@ -2,7 +2,8 @@
 Regression: no SendMessage broadcast addressing in plugin source.
 
 The Claude Code Agent Teams runtime does not support broadcast addressing.
-This test asserts no plugin-source file references the prior broadcast form.
+This test asserts no plugin-source file references the prior broadcast form
+in any of three shapes: `to="*"`, `to: "*"`, or JSON-key `"to": "*"`.
 See skills/orchestration/SKILL.md::Lead-Side HALT Fan-Out for the
 iterate-and-send replacement.
 
@@ -18,7 +19,14 @@ import pytest
 
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent  # pact-plugin/
-_BROADCAST_RE = re.compile(r"""\bto\s*[=:]\s*['"]\*['"]""")
+# Two addressing-mode shapes:
+#   - Bare-identifier kwarg form: `to="*"`, `to: "*"` (Python call, YAML)
+#   - JSON-key form: `"to": "*"` (JSON config / quoted-key dict)
+# The `\bto` and `"to"` branches are mutually exclusive at a given match
+# position but together cover the addressing surface end-to-end. Negative
+# controls in test_regex_catches_known_shapes pin the precision against
+# `"to_field"` and similar near-shapes.
+_BROADCAST_RE = re.compile(r"""(\bto|"to")\s*[=:]\s*['"]\*['"]""")
 _SCAN_SUFFIXES = (".md", ".py", ".json", ".sh", ".yaml", ".yml", ".toml")
 # Allowlist entries: (relative_path, line_substring). Empty line_substring
 # means "exempt every match in this path" (whole-file exemption). The test
@@ -77,7 +85,7 @@ def _scan_for_broadcast(root: Path):
 
 class TestNoBroadcastAddressing:
     """Asserts the plugin source contains no SendMessage broadcast form
-    (`to="*"` / `to: "*"`) outside the allowlist."""
+    (`to="*"`, `to: "*"`, or JSON-key `"to": "*"`) outside the allowlist."""
 
     def test_no_broadcast_in_plugin_source(self):
         hits = _scan_for_broadcast(_PLUGIN_ROOT)
@@ -130,15 +138,24 @@ class TestNoBroadcastAddressing:
 
     def test_regex_catches_known_shapes(self):
         positives = [
+            # Bare-identifier kwarg form (Python call / YAML)
             'to="*"',
             "to='*'",
             'to: "*"',
             "to: '*'",
+            # JSON-key form (quoted key, then `:` separator)
+            '"to":"*"',
+            '"to": "*"',
         ]
         negatives = [
             'to="lead"',
             'to: "secretary"',
             'to_star_field = "*"',
+            # Different JSON keys must NOT match — the `"to"` branch is
+            # exact-string, so trailing or leading underscores break it.
+            '"to_field":"*"',
+            '"foo_to":"*"',
+            '"target":"*"',
         ]
         for sample in positives:
             assert _BROADCAST_RE.search(sample), (
