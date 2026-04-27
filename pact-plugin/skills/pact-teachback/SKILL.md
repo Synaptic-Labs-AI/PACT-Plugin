@@ -1,67 +1,78 @@
 ---
 name: pact-teachback
-description: Command-style teachback protocol for PACT teammates. Invoking this skill directly instructs you to construct and send a teachback SendMessage in the canonical format before any implementation work.
+description: Command-style teachback protocol for PACT teammates. Invoking this skill directly instructs you to store your teachback in task metadata and idle on awaiting_lead_completion before any implementation work.
 ---
 
-# Teachback — Send Now
+# Teachback — Store Now
 
-Invoking this skill means you are about to send a teachback SendMessage to
-the lead. Do not proceed to implementation work until you have sent it.
+Invoking this skill means you are about to submit a teachback for your
+current task. Do not proceed to implementation work until you have stored
+it AND received the lead's acceptance.
 
 ## What a teachback is
 
 A teachback is a Pask Conversation Theory verification gate. Before you
 start implementing, you restate your understanding of the task so the
-orchestrator can catch misunderstandings early, before you burn context on
-a wrong implementation.
+lead can catch misunderstandings early, before you burn context on a
+wrong implementation.
 
-## Action: send this SendMessage now
+Under the Task A + Task B dispatch shape, your teachback is the deliverable
+of Task A. Task B (the primary work) is `blockedBy=[A]` and stays hidden
+in your TaskList until the lead accepts your teachback by transitioning
+Task A to `completed`.
 
-Construct the following SendMessage call with your understanding of the
-current task substituted into the placeholders. Send it now, before any
-Edit, Write, or Bash tool call:
+## Action: store teachback now
+
+**Step 1 — write the teachback to task metadata** (4 fields: the structured payload):
+
+```
+TaskUpdate(taskId, metadata={"teachback_submit": {
+    "understanding": "<what you understand you're building, key constraints, interfaces>",
+    "most_likely_wrong": "<the part of your understanding you are least confident about>",
+    "least_confident_item": "<one specific assumption you'd like the lead to confirm>",
+    "first_action": "<the first concrete step you will take after teachback approval>"
+}})
+```
+
+**Step 2 — notify the lead** (lightweight prose, NOT the full payload):
 
 ```
 SendMessage(
-  to="team-lead",
-  message=(
-    "[<your-agent-name>→lead] Teachback:\n"
-    "- Building: <what you understand you're building>\n"
-    "- Key constraints: <constraints you're working within>\n"
-    "- Interfaces: <interfaces you'll produce or consume>\n"
-    "- Approach: <your intended approach, briefly>\n"
-    "Proceeding unless corrected."
-  ),
-  summary="Teachback: <1-line summary>"
+    to="team-lead",
+    message=(
+        "[<your-agent-name>→lead] Teachback submitted on Task #<A_id>. "
+        "See metadata.teachback_submit. Idling on awaiting_lead_completion."
+    ),
+    summary="Teachback submitted: <topic>"
 )
 ```
 
-After sending, record the teachback as metadata on your task:
+**Step 3 — SET `intentional_wait` and idle**:
 
 ```
-TaskUpdate(taskId, metadata={"teachback_sent": true})
+TaskUpdate(taskId, metadata={"intentional_wait": {
+    "reason": "awaiting_lead_completion",
+    "expected_resolver": "lead",
+    "since": "<canonical_since() output: tz-aware ISO-8601 UTC>"
+}})
 ```
 
-If you will idle-wait for the lead's correction, SET the `intentional_wait`
-task metadata (reason `awaiting_teachback_approved`, resolver `lead`) before
-going idle and CLEAR it on resume. See "Intentional Waiting" in `pact-agent-teams`
-for the SET/CLEAR snippets and full contract.
+Do NOT begin Task B until Task A's status transitions to `completed`. The lead's wake-signal SendMessage confirms acceptance — you cannot self-wake to poll TaskList while idle.
+
+**On rejection** (lead writes `metadata.teachback_rejection`): see [pact-agent-teams §On Rejection](../pact-agent-teams/SKILL.md#on-rejection-wake-signal-receipt).
 
 ## Ordering rule
 
-You must send the teachback before any Edit/Write/Bash call used for
-implementation work. Reading files to understand the task (via Read, Glob,
-Grep) is permitted before teachback; those are understanding actions, not
-implementation actions.
+You must store your teachback (`metadata.teachback_submit` write) before any Edit/Write/Bash call used for implementation work. Reading files to understand the task (Read, Glob, Grep) is permitted before teachback; those are understanding actions, not implementation actions.
 
-## Post-send behavior
+Under the Task A + Task B dispatch shape, this ordering is structurally reinforced: Task B is hidden behind `blockedBy=[A]` until Task A's status transitions to `completed`. The `metadata.teachback_submit` write IS your teachback delivery; the lead's `TaskUpdate(A, status="completed")` paired with a wake-signal SendMessage IS approval.
 
-After sending the teachback, proceed with your work immediately. Do not
-wait for the lead to confirm — the protocol is non-blocking by design.
-If the lead sends a correction via SendMessage, adjust your approach
-as soon as you see it.
+## Post-store behavior
+
+Idle on `awaiting_lead_completion` until the lead's wake-signal arrives. Do NOT speculatively begin Task B; the lead's status flip is the gate.
+
+If you have other claimable, unblocked tasks unrelated to this dispatch (a separate Task A from a different mission), you may claim and work them. The wait is per-task, not per-agent.
 
 ## Exception
 
-Consultant questions (a peer asks you something) do not require a teachback.
-You only teachback on task dispatches.
+Consultant questions (a peer asks you something) do not require a teachback. You only teachback on task dispatches.
