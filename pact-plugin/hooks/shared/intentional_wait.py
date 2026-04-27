@@ -177,6 +177,10 @@ def is_self_complete_exempt(task: Any) -> bool:
     the canonical predicate for lead-side TaskGet inspection, audit tooling,
     and future consumers. Hooks must use the inline-literal mirror to avoid
     reintroducing livelock-capable hook surface.
+
+    TRUST BOUNDARY: dispatch_agent must originate from lead-side trusted
+    writes. The carve-out trusts the lead's intent at dispatch time;
+    no runtime verification of owner-matches-dispatch_agent.
     """
     if not isinstance(task, dict):
         return False
