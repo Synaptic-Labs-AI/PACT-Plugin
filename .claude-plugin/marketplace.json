@@ -14,7 +14,7 @@
       "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
       "version": "3.19.5",
       "author": {
-        "name": "ProfSynapse"
+        "name": "Synaptic-Labs-AI"
       },
       "category": "development",
       "keywords": ["pact", "vsm", "viable-system-model", "agents", "orchestration", "development", "architecture", "testing", "n8n"],
