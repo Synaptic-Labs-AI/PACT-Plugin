@@ -108,7 +108,7 @@ For consequence-level disagreements:
 
 ## On Completion — HANDOFF (Required)
 
-When your work is done:
+When your work is done, you store the HANDOFF and remain `in_progress`. **You do NOT mark your own tasks `completed`** — the lead is the authoritative completion signal.
 
 1. **Store HANDOFF in task metadata**:
    ```
@@ -122,15 +122,59 @@ When your work is done:
    }})
    ```
    If `TaskUpdate` fails, include the full HANDOFF in your `SendMessage` content as a fallback.
-2. **Complete task — BOTH actions required, in this order**:
-   a. `SendMessage(to="lead", message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]", summary="Task complete: [brief]")`
-   b. `TaskUpdate(taskId, status="completed")`
 
-   > ⚠️ Your task is NOT complete until BOTH calls succeed. SendMessage alone is insufficient — the `TaskUpdate(status="completed")` call is required to fire the TaskCompleted event. The lead's `TaskGet` verification is the primary HANDOFF-presence check; a missing or empty `metadata.handoff` will be flagged and your completion rejected until you store the HANDOFF. The `agent_handoff_emitter.py` hook that journals the completion is a pure journal-writer — it does NOT block, so your metadata.handoff content is load-bearing for both the lead's gate and institutional memory.
+2. **Notify the lead**:
+   ```
+   SendMessage(to="team-lead",
+     message="[{sender}→lead] Task complete. [1-2 sentences: what was done + any HIGH uncertainties]",
+     summary="Task complete: [brief]")
+   ```
 
-3. **Self-claim follow-up work**: Check `TaskList` for unassigned, unblocked tasks matching your domain
-4. If found: `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin
-5. If none: idle (you may be consulted or shut down)
+3. **SET `intentional_wait` and idle**:
+   ```
+   TaskUpdate(taskId, metadata={"intentional_wait": {
+       "reason": "awaiting_lead_completion",
+       "expected_resolver": "lead",
+       "since": "<canonical_since() output: tz-aware ISO-8601 UTC>"
+   }})
+   ```
+
+4. **Idle.** The lead reads `metadata.handoff`, judges acceptance, and either:
+   - **Accepts**: `TaskUpdate(taskId, status="completed")` plus a wake-signal SendMessage. On wake, CLEAR `intentional_wait` and check `TaskList` for follow-up work.
+   - **Rejects**: writes `metadata.handoff_rejection = {reason, corrections, since, revision_number}` plus a wake-signal SendMessage. Follow §On Rejection below.
+
+> ⚠️ Do NOT call `TaskUpdate(taskId, status="completed")` on your own task. The lead-as-completion-gate is the discipline; teammate self-completion bypasses HANDOFF inspection. Two narrow exemptions (signal-tasks; secretary memory-save) are documented at the relevant agent bodies — those carve-outs apply only to those agents, not to you unless your agent body says so.
+
+> **Why idle, not poll?** You cannot self-wake while idle. The lead's wake-signal SendMessage brings you back to read the acceptance/rejection. Trust the wake; do not poll TaskList speculatively.
+
+After wake on acceptance, check `TaskList` for unassigned, unblocked tasks matching your domain (Task B from your dispatch pair, or other follow-up work). If found, claim via `TaskUpdate(taskId, owner="your-name", status="in_progress")` and begin. If none, idle (you may be consulted or shut down).
+
+## On Rejection (Wake-Signal Receipt)
+
+If the lead rejects your teachback or HANDOFF, you wake on the inbound SendMessage. Your task remains `in_progress`; the lead has written rejection details to metadata.
+
+**On wake**:
+
+1. **CLEAR your existing `intentional_wait`**:
+   ```
+   TaskUpdate(taskId, metadata={"intentional_wait": None})
+   ```
+
+2. **Read the rejection metadata**:
+   - For Task A (teachback): `TaskGet(taskId).metadata.teachback_rejection`
+   - For Task B (work): `TaskGet(taskId).metadata.handoff_rejection`
+
+   The shape is `{"reason": str, "corrections": [str, ...], "since": ISO8601, "revision_number": int}`.
+
+3. **Revise**. For teachback rejection: rewrite `metadata.teachback_submit` per the corrections. For HANDOFF rejection: revise the deliverable (re-edit files, re-run tests, etc.) and rewrite `metadata.handoff`.
+
+4. **Re-submit on the SAME task** (do NOT create a new task):
+   - Increment `metadata.revision_number` (start at 1 on first revision; the lead writes `revision_number` into the rejection record, you increment to N+1 on each subsequent revision).
+   - SendMessage the lead: `"[{sender}→lead] Revised teachback/HANDOFF on Task #{id}. See metadata.{teachback_submit|handoff} (revision {N})."`
+   - Re-SET `intentional_wait{reason=awaiting_lead_completion, since=<fresh canonical_since() output>}`.
+   - Idle.
+
+> **Revision visibility**: on revision (`revision_number > 1`), the journal `agent_handoff` event from your *first* completion is preserved (one event per task lifetime). The secretary's harvest path reads `metadata.handoff` directly when `revision_number > 1`, so your revised content reaches institutional memory. The metadata write is sufficient.
 
 ### HANDOFF Format
 
@@ -182,6 +226,7 @@ output (even zero-content) blocks the next inbox delivery.
 - **Idle-waiting for a protocol-defined resolution** (teachback, lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
+- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata. Do NOT poll TaskList while idle — you cannot self-wake to do so. The lead's wake-signal SendMessage is the resolver.
 - **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.
@@ -336,8 +381,6 @@ When you receive a `shutdown_request`:
 
 ## Completion Integrity (SACROSANCT)
 
-Only report work as completed if you actually performed the changes. Never fabricate
-a completion HANDOFF. If files don't exist, can't be edited, or tools fail, report
-a BLOCKER via `SendMessage` -- never invent results.
+Only report work as ready for lead-review if you actually performed the changes. Never fabricate a completion HANDOFF; the lead inspects `metadata.handoff` before transitioning status to `completed`. If files don't exist, can't be edited, or tools fail, report a BLOCKER via `SendMessage` — never invent results.
 
 **Do not create git commits.** All staging and committing is the lead's responsibility. Your job ends at the HANDOFF.
