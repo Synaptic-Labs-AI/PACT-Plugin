@@ -1,5 +1,5 @@
 """
-Smoke tests for agent_handoff_emitter.py — #551 race-shape regression
+Race-shape regression tests for agent_handoff_emitter.py — #551
 guards.
 
 Pins Option B's primary signal (``hook_event_name="TaskCompleted"``)

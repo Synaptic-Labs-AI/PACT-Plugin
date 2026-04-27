@@ -1,6 +1,5 @@
 """
-Smoke tests for agent_handoff_emitter.py — empirical-platform-shape
-suite.
+Real-disk + platform-shape tests for agent_handoff_emitter.py.
 
 Pairs the only real-disk-reading class (TestRealDiskRead — exercises
 ``read_task_json`` against an actual ``~/.claude/tasks/{team}/{id}.json``

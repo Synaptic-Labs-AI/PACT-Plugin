@@ -1,6 +1,6 @@
 """
-Smoke tests for agent_handoff_emitter.py — exit-code-zero invariants
-under malformed/missing/exception-raising input shapes.
+Robustness tests for agent_handoff_emitter.py — exit-code-zero
+invariants under malformed/missing/exception-raising input shapes.
 
 AC #8 demands the emitter never propagate a non-zero exit:
 - TestMalformedStdin: invalid JSON, empty stdin, missing required fields.

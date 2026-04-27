@@ -1,5 +1,5 @@
 """
-Smoke tests for agent_handoff_emitter.py — emit-or-suppress gates.
+Emit-or-suppress gate tests for agent_handoff_emitter.py.
 
 Covers the happy path, the disk-status fallback gate (#528 regression
 guard), the production-shape Option-E handoff-presence gate, and the

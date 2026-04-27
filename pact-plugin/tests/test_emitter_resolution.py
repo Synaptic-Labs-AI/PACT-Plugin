@@ -1,6 +1,6 @@
 """
-Smoke tests for agent_handoff_emitter.py — teammate-name resolution
-and fallback-field stderr discipline.
+Teammate-name resolution tests for agent_handoff_emitter.py —
+plus fallback-field stderr discipline.
 
 Both classes share the "field-resolution under partial input" thread:
 - TestTeammateNamePrecedence: ``task_data.owner or input_data.teammate_name``

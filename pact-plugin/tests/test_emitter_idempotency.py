@@ -1,5 +1,5 @@
 """
-Smoke tests for agent_handoff_emitter.py — marker-side dedup family.
+Idempotency tests for agent_handoff_emitter.py — marker-side dedup family.
 
 Covers the O_EXCL marker mechanism that prevents duplicate emission:
 - TestIdempotency: second-fire suppression for the same (team, task_id).

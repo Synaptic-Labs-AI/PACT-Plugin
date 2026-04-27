@@ -1,16 +1,4 @@
-"""
-Smoke tests for agent_handoff_emitter.py — path-sanitization helper
-plus integration coverage for degenerate post-sanitize values.
-
-Three concern bundles (preserved as nested sub-classes):
-- TestSanitizeHelper: direct unit coverage for ``_sanitize_path_component``.
-- TestDegenerateInputsDoNotCreateMarker: integration coverage that the
-  ``("", ".", "..")`` guard prevents marker creation for degenerate
-  task_id / team_name on either axis (and both together).
-- TestIntegrationPathTraversalAttempts: integration coverage that
-  path-traversal inputs sanitize to a basename inside the team marker
-  dir and never escape to parent or absolute paths.
-"""
+"""Path sanitization tests for agent_handoff_emitter.py."""
 from pathlib import Path
 
 import pytest
@@ -22,29 +10,16 @@ class TestPathSanitization:
     """Direct coverage for `_sanitize_path_component` helper + integration
     coverage for degenerate post-sanitize values.
 
-    Gap addressed (4-reviewer corroboration: architect-blind Y1 +
-    backend-blind Y3 + test-blind TB-Y1 + test-blind TB-Y2): the helper
-    shipped in dd6e434 with zero direct unit coverage. All cycle-1 testing
-    went through integration. The helper uses `re.sub(r"[/\\\\]|\\.\\.", "", v)`
-    which strips `/`, `\\`, and `..` substrings — but leaves single-dot
-    segments untouched. This creates degenerate post-sanitize values
-    (`''`, `'.'`, `'..'`) which, pre-guard, collapsed the marker path onto
-    an existing directory (`marker_dir / '.'` → marker_dir itself),
-    permanently suppressing future emits for the degenerate key.
+    The helper uses `re.sub(r"[/\\\\]|\\.\\.", "", v)` which strips `/`,
+    `\\`, and `..` substrings — but leaves single-dot segments untouched.
+    This creates degenerate post-sanitize values (`''`, `'.'`, `'..'`)
+    which, pre-guard, collapsed the marker path onto an existing
+    directory (`marker_dir / '.'` → marker_dir itself), permanently
+    suppressing future emits for the degenerate key.
 
-    Security-reviewer's task #24 adds the guard:
+    The guard:
         if team_name in ("", ".", "..") or task_id in ("", ".", ".."):
             return False  # emit without marker
-
-    This class covers:
-      - SanitizeHelper: direct unit tests pin the regex's stripping behavior
-        AND the documented single-dot preservation quirk.
-      - DegenerateTaskIdDoesNotCreateMarker: integration tests verify the
-        guard — degenerate post-sanitize values emit the journal event but
-        do NOT create a marker file (paired with task #24 guard).
-      - IntegrationPathTraversalAttempts: integration tests confirm that
-        path-traversal inputs produce markers inside the team dir, never
-        escaping to parent/sibling paths.
     """
 
     class TestSanitizeHelper:
