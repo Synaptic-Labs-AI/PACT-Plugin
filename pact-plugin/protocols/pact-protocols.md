@@ -466,7 +466,7 @@ Teachback verifies understanding **downstream** (next agent → lead). Agreement
 5. Orchestrator proceeds with verified understanding (commit, create PR, etc.)
 ```
 
-For multiple concurrent specialists: broadcast your understanding of all deliverables. Each specialist confirms their piece.
+For multiple concurrent specialists: send your understanding of all deliverables to each specialist individually. Each specialist confirms their piece.
 
 #### Fallback: Specialist Unavailable
 
@@ -750,7 +750,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: broadcast stop to all teammates via `SendMessage(to="*")`, preserve work-in-progress, do NOT commit partial work
+- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT
@@ -1653,7 +1653,6 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 | `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
 | `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
 | `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
-| `SendMessage` (type: `"broadcast"`) | Message to all teammates | Cross-scope coordination (used sparingly) |
 | `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
 | `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
 | `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |

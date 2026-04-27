@@ -139,7 +139,6 @@ When Claude Code Agent Teams reaches stable release, it could serve as an altern
 | `TeamCreate` | Create a team (with `team_name`, optional `description`) | One team per scoped orchestration |
 | `Task` (with `team_name`, `name`) | Spawn a teammate into the team | One teammate per sub-scope |
 | `SendMessage` (type: `"message"`) | Direct message from teammate to lead | Handoff delivery, blocker reporting |
-| `SendMessage` (type: `"broadcast"`) | Message to all teammates | Cross-scope coordination (used sparingly) |
 | `SendMessage` (type: `"shutdown_request"`) | Request teammate graceful exit | Sub-scope completion acknowledgment |
 | `TaskCreate`/`TaskUpdate` | Shared task list management | Status tracking across sub-scopes |
 | `TeamDelete` | Remove team and task directories | Cleanup after scoped orchestration completes |

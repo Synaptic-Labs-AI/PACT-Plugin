@@ -430,7 +430,23 @@ Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
 - comPACT specialists shut down when user chooses "Pause work for now"
 
-**Structured message constraint**: `shutdown_request` and other structured protocol messages (e.g., `plan_approval_request`) **cannot** be broadcast via `to: "*"` — broadcasts only support plain text. Always send structured messages individually to each teammate by name.
+**Inter-teammate messages always go individually by name.** `SendMessage` requires a specific `to=` recipient — there is no broadcast addressing mode. To reach multiple teammates (HALT, shutdown, plan approval, structured protocol messages, plain-text announcements), iterate over the relevant teammates and send one `SendMessage` per recipient. Use the [Lead-Side HALT Fan-Out](#lead-side-halt-fan-out) idiom as the canonical pattern.
+
+#### Lead-Side HALT Fan-Out
+
+To stop all in-progress teammates (HALT, shutdown, or any other lead-to-many signal), iterate `TaskList` for tasks with `status="in_progress"` and send the signal individually to each owner:
+
+    in_progress = [t for t in TaskList() if t["status"] == "in_progress" and t["owner"]]
+    for task in in_progress:
+        SendMessage(
+            to=task["owner"],
+            message=f"[lead→{task['owner']}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+            summary=f"HALT: {category}",
+        )
+
+Each message lands at the teammate's next idle boundary (see [Algedonic-Signal Latency Caveat](../../protocols/pact-communication-charter.md#algedonic-signal-latency-caveat)). For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
+
+Use the same iterate-by-name pattern for any other lead-to-many signal (graceful shutdown via `shutdown_request`, `plan_approval_request`, plain-text announcements). There is no broadcast addressing mode.
 
 ### Intentional Waiting (orchestrator responsibilities)
 

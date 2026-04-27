@@ -18,6 +18,7 @@ The rules below govern how messages delivered via this tool actually behave.
 - Agents read queued messages in FIFO order on reaching idle.
 - No cancellation primitive exists — a follow-up message cannot supersede a queued earlier one.
 - The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
+- `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out) for the canonical pattern).
 
 ### Lead-Side Discipline — Verify Before Dispatching
 

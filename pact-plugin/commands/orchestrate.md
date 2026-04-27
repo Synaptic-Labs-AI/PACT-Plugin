@@ -798,7 +798,7 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
-**HALT handling**: On HALT signal, immediately `SendMessage(to="*", message="[lead→all] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.", summary="HALT: {category}")` to stop all running teammates before presenting to user.
+**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
 
 ### Blocker Recovery: Resume vs. Fresh Spawn
 
