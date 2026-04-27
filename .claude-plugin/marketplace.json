@@ -1,5 +1,5 @@
 {
-  "name": "pact-marketplace",
+  "name": "pact-plugin",
   "owner": {
     "name": "Synaptic Labs",
     "url": "https://github.com/Synaptic-Labs-AI"
@@ -9,7 +9,7 @@
   },
   "plugins": [
     {
-      "name": "PACT",
+      "name": "pact",
       "source": "./pact-plugin",
       "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
       "version": "3.20.0",
