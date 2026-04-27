@@ -38,6 +38,46 @@ def clean_env_no_claude_project_dir():
         yield
 
 
+def _isolate_walkup_to(monkeypatch, tmp_path):
+    """Confine the walk-up search to the test's tmp_path subtree.
+
+    `_find_project_root_under_test` walks Path.parents up to "/" looking
+    for project markers. On macOS, pytest's tmp_path lives under
+    /private/var/folders/.../T/, and unrelated processes can leak markers
+    (e.g., a stray `.claude/` dir) into that shared parent. The walk-up
+    correctly returns the leaked marker, but the test loses isolation
+    against ambient state.
+
+    This helper monkeypatches Path.exists and Path.is_dir to return False
+    for any path that is NOT inside `tmp_path`. Within tmp_path, the
+    original behavior is preserved. Effect: walk-up across ancestors above
+    tmp_path always sees "no markers" regardless of ambient state.
+    """
+    tmp_resolved = tmp_path.resolve()
+    original_exists = Path.exists
+    original_is_dir = Path.is_dir
+
+    def _is_inside(p):
+        try:
+            resolved = p.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return resolved == tmp_resolved or tmp_resolved in resolved.parents
+
+    def _patched_exists(self):
+        if _is_inside(self):
+            return original_exists(self)
+        return False
+
+    def _patched_is_dir(self):
+        if _is_inside(self):
+            return original_is_dir(self)
+        return False
+
+    monkeypatch.setattr(Path, "exists", _patched_exists)
+    monkeypatch.setattr(Path, "is_dir", _patched_is_dir)
+
+
 # Path to the actual source file for equivalence checking
 _MEMORY_API_PATH = (
     Path(__file__).parent.parent / "skills" / "pact-memory" / "scripts" / "memory_api.py"
@@ -337,11 +377,15 @@ class TestDetectProjectId:
 class TestFindProjectRoot:
     """Tests for PACTMemory._find_project_root() walk-up helper."""
 
-    def test_returns_start_when_no_markers(self, tmp_path):
+    def test_returns_start_when_no_markers(self, tmp_path, monkeypatch):
         """No markers anywhere on the path → returns start unchanged."""
         nested = tmp_path / "a" / "b" / "c"
         nested.mkdir(parents=True)
-        # tmp_path is a clean isolated directory — no .git, .claude, CLAUDE.md
+        # tmp_path is a clean isolated directory — no .git, .claude, CLAUDE.md.
+        # Confine the walk-up to tmp_path so ambient markers above (e.g., a
+        # stray .claude/ leaked into macOS /var/folders/.../T/ by an unrelated
+        # process) cannot win the walk-up.
+        _isolate_walkup_to(monkeypatch, tmp_path)
         result = _find_project_root_under_test(nested)
         # Walk-up found nothing → falls back to start
         assert result == nested
@@ -477,12 +521,16 @@ class TestCwdSubdirectoryDetection:
         assert result == "root-project"
 
     def test_cwd_no_markers_falls_back_to_cwd_basename(
-        self, clean_env_no_claude_project_dir, tmp_path
+        self, clean_env_no_claude_project_dir, tmp_path, monkeypatch
     ):
         """No markers found walking up → fall back to cwd basename (legacy behavior)."""
-        # tmp_path is clean: no .git, .claude, CLAUDE.md anywhere
+        # tmp_path is clean: no .git, .claude, CLAUDE.md anywhere.
+        # Confine the walk-up to tmp_path so ambient markers above (e.g., a
+        # stray .claude/ leaked into macOS /var/folders/.../T/ by an unrelated
+        # process) cannot win the walk-up.
         leaf = tmp_path / "orphan-dir"
         leaf.mkdir()
+        _isolate_walkup_to(monkeypatch, tmp_path)
 
         with patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=leaf):
