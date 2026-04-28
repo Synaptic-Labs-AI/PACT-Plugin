@@ -15,18 +15,16 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 
 ## Pre-Response Channel Check
 
-Before any response output, identify the addressee and pick the channel:
+Before any response output, identify the addressee and pick the channel (post-decision sibling: [Pre-Send Self-Check](../../protocols/pact-communication-charter.md#pre-send-self-check)):
 
 - Addressee is **user** (or self-narration) → text output is appropriate.
 - Addressee is **lead, peer, or any other agent** → SendMessage is REQUIRED. Plain text is invisible to other agents.
 - Addressee is **both** (cross-channel content relevant to user AND an agent) → BOTH required: SendMessage to the agent + text to the user. Neither alone delivers the content to both audiences.
 
-This gate fires at response START, not at SendMessage decision time. It complements (does not duplicate) the post-decision Pre-Send Self-Check in [Communication Charter Part I](../../protocols/pact-communication-charter.md#pre-send-self-check), which runs after the channel has already been chosen.
-
 ### Failure modes this gate catches
 
-- **Format-cue hijack.** Inbound `<teammate-message>` blocks framed as `[sender→recipient]` visually resemble a user turn; the response generator's "answer the speaker" reflex defaults to plain text. The speaker is an agent and the channel back is SendMessage — text replies are invisible to them.
-- **Candor-question / conversational-register pull.** Personal-shaped or candor-framed questions ("did you run X?", "reply candidly") pull toward prose register. A structured tool-call feels stilted; a candid prose admission feels natural. Social register does not override channel discipline — if the addressee is an agent, SendMessage is still required.
+- **Format-cue hijack.** Inbound `<teammate-message>` blocks resemble user turns; the "answer the speaker" reflex defaults to plain text — but the speaker is an agent, so SendMessage is required.
+- **Candor-question / conversational-register pull.** Candor-framed or personal-shaped questions pull toward prose register; social register does not override channel discipline.
 
 If you are unsure who the addressee is, choose **both**.
 
