@@ -68,6 +68,8 @@ Before every SendMessage, run through:
 4. **Could this be a peer-to-peer message**, avoiding a routing hop through me?
 5. **Have I verified my framing against the final phase output** (the doc, the HANDOFF, the diagnostic file), or am I working from an interim progress signal? Progress signals are pre-revision snapshots; post-progress information the agent absorbed before completion may have superseded them. *(Failure shape: a teammate's mid-task progress signal flags concern X; their final HANDOFF resolves X; a course-correction dispatched off the progress signal lands as obsolete instruction.)*
 
+*Pre-decision sibling: see [Pre-Response Channel Check](../skills/pact-agent-teams/SKILL.md#pre-response-channel-check) (also in [orchestration/SKILL.md](../skills/orchestration/SKILL.md#pre-response-channel-check)) for the response-START gate that runs before this check.*
+
 #### Forwarding-Chain Hygiene
 
 If teammate A produces info teammate B needs, prefer direct A→B SendMessage with a brief CC-summary to the team-lead, rather than A→lead→B routing. Halves idle-boundary latency. Reserve team-lead-routing for cases where the team-lead specifically owns the routing decision (priority arbitration, scope reassignment).

@@ -120,6 +120,10 @@ class TestPreResponseChannelCheckGate:
     INVARIANT_BOTH_ADDRESSEE = "Addressee is **both**"
     INVARIANT_FORMAT_CUE = "Format-cue hijack"
     INVARIANT_CANDOR = "Candor-question"
+    INVARIANT_SENDMESSAGE_REQUIRED = "SendMessage is REQUIRED"
+    INVARIANT_PLAIN_TEXT_INVISIBLE = "Plain text is invisible to other agents"
+    INVARIANT_CHOOSE_BOTH_FALLBACK = "If you are unsure who the addressee is, choose **both**"
+    INVARIANT_CHARTER_LINK = "../../protocols/pact-communication-charter.md#pre-send-self-check"
     LEAD_GRAY_AREA_PHRASE = "Lead-side gray-area trap"
 
     def test_teammate_side_has_gate(self):
@@ -131,6 +135,10 @@ class TestPreResponseChannelCheckGate:
             self.INVARIANT_BOTH_ADDRESSEE,
             self.INVARIANT_FORMAT_CUE,
             self.INVARIANT_CANDOR,
+            self.INVARIANT_SENDMESSAGE_REQUIRED,
+            self.INVARIANT_PLAIN_TEXT_INVISIBLE,
+            self.INVARIANT_CHOOSE_BOTH_FALLBACK,
+            self.INVARIANT_CHARTER_LINK,
         ):
             assert phrase in text, f"pact-agent-teams missing gate phrase: {phrase!r}"
 
@@ -143,6 +151,10 @@ class TestPreResponseChannelCheckGate:
             self.INVARIANT_BOTH_ADDRESSEE,
             self.INVARIANT_FORMAT_CUE,
             self.INVARIANT_CANDOR,
+            self.INVARIANT_SENDMESSAGE_REQUIRED,
+            self.INVARIANT_PLAIN_TEXT_INVISIBLE,
+            self.INVARIANT_CHOOSE_BOTH_FALLBACK,
+            self.INVARIANT_CHARTER_LINK,
         ):
             assert phrase in text, f"orchestration missing gate phrase: {phrase!r}"
 
@@ -158,11 +170,12 @@ class TestPreResponseChannelCheckGate:
             "lead-side gray-area trap belongs only in orchestration/SKILL.md"
         )
 
-    def test_gate_appears_before_anchor_section(self):
+    def test_teammate_gate_appears_before_on_start(self):
         teammate = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
         assert teammate.index("## Pre-Response Channel Check") < teammate.index("## On Start"), \
             "pact-agent-teams: gate must appear before On Start"
 
+    def test_lead_gate_appears_before_communication(self):
         lead = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
         assert lead.index("### Pre-Response Channel Check") < lead.index("### Communication"), \
             "orchestration: gate must appear before Communication"

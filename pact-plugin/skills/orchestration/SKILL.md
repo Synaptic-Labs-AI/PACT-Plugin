@@ -101,7 +101,7 @@ Workflow commands handle recovery automatically. Your context window doesn't sur
 
 ### Pre-Response Channel Check
 
-Before any response output, identify the addressee and pick the channel (post-decision sibling: [Pre-Send Self-Check](../../protocols/pact-communication-charter.md#pre-send-self-check)):
+Before any response output, identify the addressee and pick the channel (post-channel-choice complement: [Pre-Send Self-Check](../../protocols/pact-communication-charter.md#pre-send-self-check)):
 
 - Addressee is **user** (or self-narration) → text output is appropriate.
 - Addressee is **team-lead or teammate** → SendMessage is REQUIRED. Plain text is invisible to other agents.
