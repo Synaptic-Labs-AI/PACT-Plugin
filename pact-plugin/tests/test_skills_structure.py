@@ -125,6 +125,7 @@ class TestPreResponseChannelCheckGate:
     INVARIANT_CHOOSE_BOTH_FALLBACK = "If you are unsure who the addressee is, choose **both**"
     INVARIANT_CHARTER_LINK = "../../protocols/pact-communication-charter.md#pre-send-self-check"
     LEAD_GRAY_AREA_PHRASE = "Lead-side gray-area trap"
+    TEAMMATE_GRAY_AREA_PHRASE = "Teammate-side gray-area trap"
 
     def test_teammate_side_has_gate(self):
         text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
@@ -168,6 +169,18 @@ class TestPreResponseChannelCheckGate:
         text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
         assert self.LEAD_GRAY_AREA_PHRASE not in text, (
             "lead-side gray-area trap belongs only in orchestration/SKILL.md"
+        )
+
+    def test_teammate_side_has_gray_area_addendum(self):
+        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        assert self.TEAMMATE_GRAY_AREA_PHRASE in text, (
+            "pact-agent-teams must include the teammate-side gray-area trap addendum"
+        )
+
+    def test_lead_side_does_not_have_teammate_addendum(self):
+        text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        assert self.TEAMMATE_GRAY_AREA_PHRASE not in text, (
+            "teammate-side gray-area trap belongs only in pact-agent-teams/SKILL.md"
         )
 
     def test_teammate_gate_appears_before_on_start(self):
