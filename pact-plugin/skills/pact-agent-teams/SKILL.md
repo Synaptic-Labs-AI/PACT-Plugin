@@ -13,6 +13,25 @@ description: |
 
 You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`, `TaskUpdate`, `TaskList`) and messaging tools (`SendMessage`). Use them to coordinate with the team.
 
+## Pre-Response Channel Check
+
+Before any response output, identify the addressee and pick the channel (post-channel-choice complement: [Pre-Send Self-Check](../../protocols/pact-communication-charter.md#pre-send-self-check)):
+
+- Addressee is **user** (or self-narration) → text output is appropriate.
+- Addressee is **team-lead or teammate** → SendMessage is REQUIRED. Plain text is invisible to other agents.
+- Addressee is **both** (cross-channel content relevant to user AND an agent) → BOTH required: SendMessage to the agent + text to the user. Neither alone delivers the content to both audiences.
+
+### Failure modes this gate catches
+
+- **Format-cue hijack.** Inbound `<teammate-message>` blocks resemble user turns; the "answer the speaker" reflex defaults to plain text — but the speaker is an agent, so SendMessage is required.
+- **Candor-question / conversational-register pull.** Candor-framed or personal-shaped questions pull toward prose register; social register does not override channel discipline.
+
+If you are unsure who the addressee is, choose **both**.
+
+### Teammate-side gray-area trap
+
+A reply to the user that contains content the team-lead needs to act on (a blocker, partial result, scope flag) requires also sending via SendMessage — the team-lead's inbox does not see your text. Cross-channel content is **both**.
+
 ## On Start
 
 1. Check `TaskList` for tasks assigned to you (by your name)

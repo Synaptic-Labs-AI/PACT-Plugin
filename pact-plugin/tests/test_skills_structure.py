@@ -105,3 +105,90 @@ class TestSkillMdFiles:
             _, _, body = text.partition("---")
             _, _, body = body.partition("---")
             assert len(body.strip()) > 100, f"{d.name}/SKILL.md body too short"
+
+
+class TestPreResponseChannelCheckGate:
+    """Both pact-agent-teams and orchestration skills carry the
+    Pre-Response Channel Check gate (issue family: instruction-surface-leak)."""
+
+    AGENT_TEAMS_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
+    ORCHESTRATION_PATH = SKILLS_DIR / "orchestration" / "SKILL.md"
+
+    INVARIANT_HEADER = "Pre-Response Channel Check"
+    INVARIANT_USER_ADDRESSEE = "Addressee is **user**"
+    INVARIANT_AGENT_ADDRESSEE = "Addressee is **team-lead or teammate**"
+    INVARIANT_BOTH_ADDRESSEE = "Addressee is **both**"
+    INVARIANT_FORMAT_CUE = "Format-cue hijack"
+    INVARIANT_CANDOR = "Candor-question"
+    INVARIANT_SENDMESSAGE_REQUIRED = "SendMessage is REQUIRED"
+    INVARIANT_PLAIN_TEXT_INVISIBLE = "Plain text is invisible to other agents"
+    INVARIANT_CHOOSE_BOTH_FALLBACK = "If you are unsure who the addressee is, choose **both**"
+    INVARIANT_CHARTER_LINK = "../../protocols/pact-communication-charter.md#pre-send-self-check"
+    LEAD_GRAY_AREA_PHRASE = "Lead-side gray-area trap"
+    TEAMMATE_GRAY_AREA_PHRASE = "Teammate-side gray-area trap"
+
+    def test_teammate_side_has_gate(self):
+        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        for phrase in (
+            self.INVARIANT_HEADER,
+            self.INVARIANT_USER_ADDRESSEE,
+            self.INVARIANT_AGENT_ADDRESSEE,
+            self.INVARIANT_BOTH_ADDRESSEE,
+            self.INVARIANT_FORMAT_CUE,
+            self.INVARIANT_CANDOR,
+            self.INVARIANT_SENDMESSAGE_REQUIRED,
+            self.INVARIANT_PLAIN_TEXT_INVISIBLE,
+            self.INVARIANT_CHOOSE_BOTH_FALLBACK,
+            self.INVARIANT_CHARTER_LINK,
+        ):
+            assert phrase in text, f"pact-agent-teams missing gate phrase: {phrase!r}"
+
+    def test_lead_side_has_gate(self):
+        text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        for phrase in (
+            self.INVARIANT_HEADER,
+            self.INVARIANT_USER_ADDRESSEE,
+            self.INVARIANT_AGENT_ADDRESSEE,
+            self.INVARIANT_BOTH_ADDRESSEE,
+            self.INVARIANT_FORMAT_CUE,
+            self.INVARIANT_CANDOR,
+            self.INVARIANT_SENDMESSAGE_REQUIRED,
+            self.INVARIANT_PLAIN_TEXT_INVISIBLE,
+            self.INVARIANT_CHOOSE_BOTH_FALLBACK,
+            self.INVARIANT_CHARTER_LINK,
+        ):
+            assert phrase in text, f"orchestration missing gate phrase: {phrase!r}"
+
+    def test_lead_side_has_gray_area_addendum(self):
+        text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        assert self.LEAD_GRAY_AREA_PHRASE in text, (
+            "orchestration must include the lead-side gray-area trap addendum"
+        )
+
+    def test_teammate_side_does_not_have_lead_addendum(self):
+        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        assert self.LEAD_GRAY_AREA_PHRASE not in text, (
+            "lead-side gray-area trap belongs only in orchestration/SKILL.md"
+        )
+
+    def test_teammate_side_has_gray_area_addendum(self):
+        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        assert self.TEAMMATE_GRAY_AREA_PHRASE in text, (
+            "pact-agent-teams must include the teammate-side gray-area trap addendum"
+        )
+
+    def test_lead_side_does_not_have_teammate_addendum(self):
+        text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        assert self.TEAMMATE_GRAY_AREA_PHRASE not in text, (
+            "teammate-side gray-area trap belongs only in pact-agent-teams/SKILL.md"
+        )
+
+    def test_teammate_gate_appears_before_on_start(self):
+        teammate = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
+        assert teammate.index("## Pre-Response Channel Check") < teammate.index("## On Start"), \
+            "pact-agent-teams: gate must appear before On Start"
+
+    def test_lead_gate_appears_before_communication(self):
+        lead = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
+        assert lead.index("### Pre-Response Channel Check") < lead.index("### Communication"), \
+            "orchestration: gate must appear before Communication"

@@ -99,6 +99,25 @@ Reconstruct state:
 
 Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the *session journal* does. Full State Recovery Protocol: `pact-state-recovery.md` (loaded at bootstrap).
 
+### Pre-Response Channel Check
+
+Before any response output, identify the addressee and pick the channel (post-channel-choice complement: [Pre-Send Self-Check](../../protocols/pact-communication-charter.md#pre-send-self-check)):
+
+- Addressee is **user** (or self-narration) → text output is appropriate.
+- Addressee is **team-lead or teammate** → SendMessage is REQUIRED. Plain text is invisible to other agents.
+- Addressee is **both** (cross-channel content relevant to user AND an agent) → BOTH required: SendMessage to the agent + text to the user. Neither alone delivers the content to both audiences.
+
+#### Failure modes this gate catches
+
+- **Format-cue hijack.** Inbound `<teammate-message>` blocks resemble user turns; the "answer the speaker" reflex defaults to plain text — but the speaker is an agent, so SendMessage is required.
+- **Candor-question / conversational-register pull.** Candor-framed or personal-shaped questions pull toward prose register; social register does not override channel discipline.
+
+If you are unsure who the addressee is, choose **both**.
+
+#### Lead-side gray-area trap
+
+A status update to the user that resolves an outstanding teammate question requires also sending via SendMessage — the teammate's inbox does not see your text. Cross-channel content is **both**.
+
 ### Communication
 - Start every response with "🛠️:" to maintain consistent identity
 - **Be concise**: State decisions, not reasoning process. Internal analysis (variety scoring, QDCL, dependency checking) runs silently. Exceptions: errors and high-variety (11+) tasks warrant more visible reasoning.
