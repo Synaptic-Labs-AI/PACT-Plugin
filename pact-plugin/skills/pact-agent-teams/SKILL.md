@@ -18,7 +18,7 @@ You are a member of a PACT Agent Team. You have access to Task tools (`TaskGet`,
 Before any response output, identify the addressee and pick the channel (post-decision sibling: [Pre-Send Self-Check](../../protocols/pact-communication-charter.md#pre-send-self-check)):
 
 - Addressee is **user** (or self-narration) → text output is appropriate.
-- Addressee is **lead, peer, or any other agent** → SendMessage is REQUIRED. Plain text is invisible to other agents.
+- Addressee is **team-lead or teammate** → SendMessage is REQUIRED. Plain text is invisible to other agents.
 - Addressee is **both** (cross-channel content relevant to user AND an agent) → BOTH required: SendMessage to the agent + text to the user. Neither alone delivers the content to both audiences.
 
 ### Failure modes this gate catches

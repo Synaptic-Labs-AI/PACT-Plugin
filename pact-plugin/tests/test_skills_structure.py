@@ -116,7 +116,7 @@ class TestPreResponseChannelCheckGate:
 
     INVARIANT_HEADER = "Pre-Response Channel Check"
     INVARIANT_USER_ADDRESSEE = "Addressee is **user**"
-    INVARIANT_AGENT_ADDRESSEE = "Addressee is **lead, peer, or any other agent**"
+    INVARIANT_AGENT_ADDRESSEE = "Addressee is **team-lead or teammate**"
     INVARIANT_BOTH_ADDRESSEE = "Addressee is **both**"
     INVARIANT_FORMAT_CUE = "Format-cue hijack"
     INVARIANT_CANDOR = "Candor-question"
