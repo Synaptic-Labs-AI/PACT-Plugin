@@ -22,14 +22,17 @@ fi
 PASS=0
 FAIL=0
 
-# Extract bytes from SSOT spanning `## <start>` (inclusive) up to the line
-# before `## <end>` (exclusive), then strip a single trailing blank line if
-# present. Heading match is exact-string on the H2 line minus the leading
-# `## ` prefix. Output appended to the file path passed as $3.
+# Extract bytes from a source markdown file spanning `## <start>` (inclusive)
+# up to the line before `## <end>` (exclusive), then strip a single trailing
+# blank line if present. Heading match is exact-string on the H2 line minus
+# the leading `## ` prefix. Output appended to the file path passed as $4.
+#
+# Args: source_file start_heading end_heading outfile
 extract_section() {
-    local start="$1"
-    local end="$2"
-    local outfile="$3"
+    local source_file="$1"
+    local start="$2"
+    local end="$3"
+    local outfile="$4"
 
     awk -v start="## $start" -v end="## $end" '
         # Toggle fence state on lines beginning with ```; ignore start/end
@@ -44,7 +47,7 @@ extract_section() {
             if (n > 0 && buf[n] == "") n--
             for (i = 1; i <= n; i++) print buf[i]
         }
-    ' "$SOURCE" >> "$outfile"
+    ' "$source_file" >> "$outfile"
 }
 
 # Verify a standalone extract against one or more (start_heading, end_heading)
@@ -75,7 +78,7 @@ verify() {
         if [ $first -eq 0 ]; then
             echo "" >> "$tmpfile"
         fi
-        extract_section "$1" "$2" "$tmpfile"
+        extract_section "$SOURCE" "$1" "$2" "$tmpfile"
         first=0
         shift 2
     done
@@ -87,6 +90,59 @@ verify() {
         echo "✗ $name: DIFFERS"
         echo "  Diff output:"
         diff "$PROTOCOLS_DIR/$file" "$tmpfile" 2>&1 | head -20 | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Verify a callsite's H2-sentinel-delimited block against a canonical fixture.
+# Twin of verify() for the inbox-wake canonical-mirror surface: reads from
+# per-callsite source files (pact-plugin/commands/*.md) and diffs against
+# canonical fixture files (pact-plugin/tests/fixtures/inbox-wake-canonical/*.txt).
+# Reuses the generalized extract_section() — no awk duplication.
+#
+# Counter-test recipe (exercised by pact-plugin/tests/test_inbox_wake_canonical_mirror.py
+# via subprocess + tempfile mutation): copy a callsite to a tempfile, mutate
+# one byte inside its sentinel-delimited block (e.g., `sed 's/Monitor(/MONITOR(/'`),
+# point this script at the mutated copy, and assert the script exits non-zero.
+# The script's deterministic-exit-on-DIFFERS shape (FAIL increment + final
+# exit 1) is what makes it counter-testable; the actual counter-test artifact
+# lives in the Python test harness.
+#
+# Args: callsite_file fixture_file name start_heading end_heading
+verify_inbox_wake() {
+    local callsite="$1"
+    local fixture="$2"
+    local name="$3"
+    local start="$4"
+    local end="$5"
+
+    if [ ! -f "$callsite" ]; then
+        echo "✗ $name: CALLSITE NOT FOUND ($callsite)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    if [ ! -f "$fixture" ]; then
+        echo "✗ $name: FIXTURE NOT FOUND ($fixture)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap 'rm -f "$tmpfile"' RETURN
+
+    # Reuse the generalized extract_section() — appends to tmpfile, which is
+    # empty (mktemp), so single-call append is equivalent to overwrite.
+    extract_section "$callsite" "$start" "$end" "$tmpfile"
+
+    if diff -q "$fixture" "$tmpfile" > /dev/null 2>&1; then
+        echo "✓ $name: MATCH"
+        PASS=$((PASS + 1))
+    else
+        echo "✗ $name: DIFFERS"
+        echo "  Diff output:"
+        diff "$fixture" "$tmpfile" 2>&1 | head -20 | sed 's/^/    /'
         FAIL=$((FAIL + 1))
     fi
 }
@@ -117,6 +173,38 @@ verify "pact-s2-coordination.md"  "S2 Coordination" \
 verify "pact-phase-transitions.md" "Phase Transitions" \
     "Phase Handoffs"              "Task Hierarchy" \
     "Test Engagement"             "Agent Stall Detection"
+
+# ---------------------------------------------------------------------------
+# Inbox-wake canonical blocks (#591) — Monitor (5 callsites)
+# Each callsite mirrors the canonical Monitor block byte-equivalent between
+# `## Inbox Wake — Arm Monitor (start)` and `## Inbox Wake — Arm Monitor (end)`
+# H2 sentinels. Diff target: pact-plugin/tests/fixtures/inbox-wake-canonical/monitor-block.txt
+INBOX_FIXTURES="pact-plugin/tests/fixtures/inbox-wake-canonical"
+COMMANDS_DIR="pact-plugin/commands"
+
+verify_inbox_wake "$COMMANDS_DIR/orchestrate.md"  "$INBOX_FIXTURES/monitor-block.txt"  "Monitor @ orchestrate"  "Inbox Wake — Arm Monitor (start)"  "Inbox Wake — Arm Monitor (end)"
+verify_inbox_wake "$COMMANDS_DIR/comPACT.md"      "$INBOX_FIXTURES/monitor-block.txt"  "Monitor @ comPACT"      "Inbox Wake — Arm Monitor (start)"  "Inbox Wake — Arm Monitor (end)"
+verify_inbox_wake "$COMMANDS_DIR/rePACT.md"       "$INBOX_FIXTURES/monitor-block.txt"  "Monitor @ rePACT"       "Inbox Wake — Arm Monitor (start)"  "Inbox Wake — Arm Monitor (end)"
+verify_inbox_wake "$COMMANDS_DIR/plan-mode.md"    "$INBOX_FIXTURES/monitor-block.txt"  "Monitor @ plan-mode"    "Inbox Wake — Arm Monitor (start)"  "Inbox Wake — Arm Monitor (end)"
+verify_inbox_wake "$COMMANDS_DIR/peer-review.md"  "$INBOX_FIXTURES/monitor-block.txt"  "Monitor @ peer-review"  "Inbox Wake — Arm Monitor (start)"  "Inbox Wake — Arm Monitor (end)"
+
+# Inbox-wake canonical blocks (#591) — Cron (5 callsites; peer-review wraps inside conditional)
+verify_inbox_wake "$COMMANDS_DIR/orchestrate.md"  "$INBOX_FIXTURES/cron-block.txt"     "Cron @ orchestrate"     "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
+verify_inbox_wake "$COMMANDS_DIR/comPACT.md"      "$INBOX_FIXTURES/cron-block.txt"     "Cron @ comPACT"         "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
+verify_inbox_wake "$COMMANDS_DIR/rePACT.md"       "$INBOX_FIXTURES/cron-block.txt"     "Cron @ rePACT"          "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
+verify_inbox_wake "$COMMANDS_DIR/plan-mode.md"    "$INBOX_FIXTURES/cron-block.txt"     "Cron @ plan-mode"       "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
+verify_inbox_wake "$COMMANDS_DIR/peer-review.md"  "$INBOX_FIXTURES/cron-block.txt"     "Cron @ peer-review"     "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
+
+# Inbox-wake canonical blocks (#591) — Write State File (5 callsites)
+verify_inbox_wake "$COMMANDS_DIR/orchestrate.md"  "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ orchestrate"  "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/comPACT.md"      "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ comPACT"      "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/rePACT.md"       "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ rePACT"       "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/plan-mode.md"    "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ plan-mode"    "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/peer-review.md"  "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ peer-review"  "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+
+# Inbox-wake canonical blocks (#591) — Teardown (2 callsites)
+verify_inbox_wake "$COMMANDS_DIR/wrap-up.md"      "$INBOX_FIXTURES/teardown-block.txt" "Teardown @ wrap-up"     "Inbox Wake — Teardown (start)"     "Inbox Wake — Teardown (end)"
+verify_inbox_wake "$COMMANDS_DIR/pause.md"        "$INBOX_FIXTURES/teardown-block.txt" "Teardown @ pause"       "Inbox Wake — Teardown (start)"     "Inbox Wake — Teardown (end)"
 
 echo ""
 echo "=== Summary ==="

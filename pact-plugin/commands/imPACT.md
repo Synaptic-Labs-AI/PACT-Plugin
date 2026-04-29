@@ -24,6 +24,8 @@ These are orchestrator-side operations (agents report blockers via `SendMessage`
 
 **Note**: Agents report blockers via `SendMessage` to the team-lead ("BLOCKER: {description}"). The orchestrator creates blocker Tasks and uses `addBlockedBy` to block the agent's task. When the blocker is resolved (marked completed), the agent's task becomes unblocked.
 
+> **Inbox-wake inheritance**: imPACT inherits the parent workflow's wake mechanism; do NOT arm or teardown the inbox-wake Monitor + Cron. The parent `/PACT:orchestrate` (or `/PACT:comPACT` / `/PACT:rePACT` / `/PACT:plan-mode` / `/PACT:peer-review`) already armed the wake at workflow start, and the parent's `/PACT:wrap-up` or `/PACT:pause` will tear it down at workflow end.
+
 ---
 
 ## Core Principle: Diagnose, Don't Fix
