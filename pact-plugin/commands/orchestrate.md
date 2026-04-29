@@ -244,7 +244,96 @@ Sequential execution is the exception requiring explicit justification. When ass
 
 1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. This creates both the feature branch and its worktree. All subsequent phases work in the worktree.
 2. **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
-3. **Check for plan** in `docs/plans/` matching this task
+3. **Arm inbox-wake mechanism**: Run the canonical Monitor block, write the registry state file, then run the canonical Cron block. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
+
+## Inbox Wake — Arm Monitor (start)
+
+```markdown
+Monitor(
+  description="pact-inbox-monitor:{team_name}:team-lead",
+  command="""
+    TEAM_DIR="$HOME/.claude/teams/{team_name}"
+    INBOX="$TEAM_DIR/inboxes/team-lead.json"
+    HB_FILE="$TEAM_DIR/inbox-wake-heartbeat.json"
+    HB_TMP="$TEAM_DIR/inbox-wake-heartbeat.json.tmp"
+    LAST_COUNT=-1
+    HB_INTERVAL=300
+    HB_LAST=0
+    while true; do
+      NOW=$(date +%s)
+      if [ -f "$INBOX" ]; then
+        COUNT=$(jq 'length' "$INBOX" 2>/dev/null || echo 0)
+      else
+        COUNT=0
+      fi
+      if [ "$COUNT" != "$LAST_COUNT" ] && [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
+        echo "INBOX_GREW count=$COUNT prev=$LAST_COUNT ts=$NOW"
+      fi
+      LAST_COUNT=$COUNT
+      printf '{"v":1,"count":%d,"ts":%d}\n' "$COUNT" "$NOW" > "$HB_TMP" && mv -f "$HB_TMP" "$HB_FILE"
+      if [ $((NOW - HB_LAST)) -ge $HB_INTERVAL ]; then
+        echo "HEARTBEAT count=$COUNT ts=$NOW"
+        HB_LAST=$NOW
+      fi
+      sleep 5
+    done
+  """,
+  persistent=True
+)
+```
+
+## Inbox Wake — Arm Monitor (end)
+
+After `Monitor` returns `M_ID`, write the registry state file (atomic-rename) so the cron's recovery rule can read it:
+
+```bash
+STATE_FILE="$HOME/.claude/teams/{team_name}/inbox-wake-state.json"
+STATE_TMP="$STATE_FILE.tmp"
+printf '{"v":1,"monitor_task_id":"%s","cron_job_id":"%s","armed_at":%d}\n' "$M_ID" "$C_ID" "$(date +%s)" > "$STATE_TMP" && mv -f "$STATE_TMP" "$STATE_FILE"
+```
+
+`C_ID` is captured from the `CronCreate` call below — write the state file AFTER both `Monitor` and `CronCreate` have returned successfully. If either fails, do NOT write the state file (the recovery rule's Branch A cold-start will re-arm on the next cron-fire).
+
+## Inbox Wake — Arm Cron (start)
+
+```markdown
+CronCreate(
+  description="pact-inbox-cron:{team_name}:team-lead",
+  schedule="*/4 * * * *",
+  durable=False,
+  recurring=True,
+  prompt="""
+PACT inbox-wake recovery check. Run the following AS the lead, this turn:
+
+1. Read the registry sidecar files:
+   - STATE_FILE: ~/.claude/teams/{team_name}/inbox-wake-state.json
+   - HB_FILE: ~/.claude/teams/{team_name}/inbox-wake-heartbeat.json
+
+2. BRANCH on file presence + heartbeat freshness:
+
+   Branch A — STATE_FILE missing → COLD START:
+     a. Re-run the canonical block under this workflow's command file's "Inbox Wake — Arm Monitor" H2 section. Capture the returned task_id as M_ID.
+     b. Re-run THIS workflow's command file's "Inbox Wake — Arm Cron" H2 section to re-arm the cron. Capture the returned cron_job_id as C_ID. (Note: the recovery check itself is fired BY the cron; if STATE_FILE is missing, we are in cold-start, so a re-arm of the cron is the correct response — the prior cron may have been from a stale session. CronCreate is idempotent under deterministic-naming + per-session in-memory CronList scope.)
+     c. Write STATE_FILE with: {"v":1,"monitor_task_id":"<M_ID>","cron_job_id":"<C_ID>","armed_at":<current_epoch>}. Use atomic-rename via *.tmp + mv. DONE.
+
+   Branch B — STATE_FILE present + HB_FILE present + HB_FILE.ts is fresh (current_epoch - ts < 420):
+     No-op. The Monitor is alive and emitting heartbeats. DONE.
+
+   Branch C — STATE_FILE present + (HB_FILE missing OR HB_FILE.ts is stale (current_epoch - ts >= 420)):
+     a. Read STATE_FILE.monitor_task_id as M_ID_OLD. TaskStop(M_ID_OLD). On benign error (task already stopped / not found), continue.
+     b. Unlink HB_FILE if present. Unlink STATE_FILE.
+     c. Goto Branch A (cold-start the Monitor; cron does NOT need re-arming because the cron-fire that triggered THIS rule proves the cron is alive).
+
+3. FAIL-OPEN: if any file Read errors (malformed JSON, schema mismatch v != 1, etc.), treat as Branch C (stop+unlink+re-arm). If any TaskStop / Monitor / CronCreate / atomic-rename errors, log to stdout for the cron-fire turn and continue with the remaining branch steps. Cost asymmetry: false-arm = one extra cache-warm fire; false-skip = unbounded blind window.
+
+This rule is FROZEN. Do NOT modify behavior beyond what is written above. Do NOT escalate to user unless TaskStop returns a non-benign error (a benign error is "task already stopped" or "task not found").
+"""
+)
+```
+
+## Inbox Wake — Arm Cron (end)
+
+4. **Check for plan** in `docs/plans/` matching this task
 
 ### Plan Status Handling
 
