@@ -213,7 +213,7 @@ Implement the sub-component:
 
 **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 
-**Arm inbox-wake mechanism**: Run the canonical Monitor block, write the registry state file, then run the canonical Cron block. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
+**Arm inbox-wake mechanism**: Run the canonical Monitor block, run the canonical Cron block, then write the registry state file. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
 
 > **Nesting note**: if `/PACT:rePACT` is invoked nested within `/PACT:orchestrate` (or any other parent workflow that already armed the wake mechanism), the parent's wake-arming applies — do NOT re-arm. Detect by checking `~/.claude/teams/{team_name}/inbox-wake-state.json`: if present and the heartbeat file is fresh (current_epoch − HB_FILE.ts < 420), skip the arm step entirely and proceed to the dispatch sections below.
 

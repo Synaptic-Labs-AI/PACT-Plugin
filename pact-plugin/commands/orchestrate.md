@@ -244,7 +244,7 @@ Sequential execution is the exception requiring explicit justification. When ass
 
 1. **Set up worktree**: If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. This creates both the feature branch and its worktree. All subsequent phases work in the worktree.
 2. **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
-3. **Arm inbox-wake mechanism**: Run the canonical Monitor block, write the registry state file, then run the canonical Cron block. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
+3. **Arm inbox-wake mechanism**: Run the canonical Monitor block, run the canonical Cron block, then write the registry state file. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
 
 ## Inbox Wake — Arm Monitor (start)
 

@@ -102,7 +102,7 @@ Skip specialists clearly not relevant (e.g., skip database engineer for pure UI 
 
 **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 
-**Arm inbox-wake mechanism**: Run the canonical Monitor block, write the registry state file, then run the canonical Cron block. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
+**Arm inbox-wake mechanism**: Run the canonical Monitor block, run the canonical Cron block, then write the registry state file. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
 
 ## Inbox Wake — Arm Monitor (start)
 

@@ -102,7 +102,7 @@ If either procedure FAILs: the design's load-bearing claim is refuted. File an a
 
 ## 7. Test 3 — Monitor-Crash → Cron Recovery (manual integration)
 
-The recovery-rule's prose-pseudocode semantics are covered by the unit tests in `pact-plugin/tests/test_inbox_monitor_wake.py::TestRecoveryRuleBranchLogic` (heartbeat-staleness threshold + 3-branch tree shape). The live wall-clock variant — arm Monitor, kill it, wait for the cron-fire to detect staleness and re-arm — is deferred to this runbook step because a 7-min CI test is flake-prone and slow.
+The recovery-rule's prose-pseudocode semantics are covered by the unit tests in `pact-plugin/tests/test_inbox_wake_recovery.py::TestRecoveryRuleBranchLogic` (heartbeat-staleness threshold + 3-branch tree shape). The live wall-clock variant — arm Monitor, kill it, wait for the cron-fire to detect staleness and re-arm — is deferred to this runbook step because a 7-min CI test is flake-prone and slow.
 
 ### Procedure
 
