@@ -103,6 +103,28 @@ JSON
 
 The timestamp (`ts`) is set automatically by `make_event()` and serves the same purpose as the previous `paused_at` field.
 
+### 5.5. Wake-Mechanism Teardown
+
+Tear down the inbox-wake mechanism armed at workflow start. Run the canonical teardown block below.
+
+## Inbox Wake — Teardown (start)
+
+```markdown
+1. Read STATE_FILE: ~/.claude/teams/{team_name}/inbox-wake-state.json. If missing, skip to step 5 (nothing to tear down).
+
+2. TaskStop(STATE_FILE.monitor_task_id). On benign error (task already stopped / not found), continue.
+
+3. CronDelete(STATE_FILE.cron_job_id). On benign error, continue.
+
+   (Belt-and-suspenders for stale-cron edge case: also CronList and CronDelete any job whose description equals "pact-inbox-cron:{team_name}:team-lead" — catches the case where STATE_FILE.cron_job_id refers to a job that auto-expired or was rotated. CronList IS a valid enumerate primitive for crons, unlike the missing Monitor enumerate primitive.)
+
+4. Unlink ~/.claude/teams/{team_name}/inbox-wake-heartbeat.json (and its .tmp sibling if present). Unlink ~/.claude/teams/{team_name}/inbox-wake-state.json.
+
+5. DONE.
+```
+
+## Inbox Wake — Teardown (end)
+
 ### 6. Shut Down Teammates
 
 Send `shutdown_request` individually to each active teammate **by name** and wait for responses. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
