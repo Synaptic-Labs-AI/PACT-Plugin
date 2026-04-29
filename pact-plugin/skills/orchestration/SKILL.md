@@ -467,6 +467,19 @@ Each message lands at the teammate's next idle boundary (see [Algedonic-Signal L
 
 Use the same iterate-by-name pattern for any other team-lead-to-many signal (graceful shutdown via `shutdown_request`, `plan_approval_request`, plain-text announcements). There is no broadcast addressing mode.
 
+### Inbox Wake Arming (lead-side)
+
+The lead's session arms a `Monitor` + `CronCreate` pair at workflow start so inbound `SendMessage` notifications wake the lead reliably (bypasses the path-2 `useInboxPoller` `!isLoading && !focusedInputDialog` gate via stdout-line-as-event delivery). File-based registry pattern: lead writes `~/.claude/teams/{team_name}/inbox-wake-state.json` (Monitor task_id + cron_job_id + armed_at) at arm time; the Monitor itself writes `~/.claude/teams/{team_name}/inbox-wake-heartbeat.json` every 5s with atomic-rename. The cron's recovery rule reads both files on every fire and re-arms the Monitor on staleness (FAIL-OPEN).
+
+Naming convention (deterministic, per-team): Monitor description `pact-inbox-monitor:{team_name}:team-lead`; Cron description `pact-inbox-cron:{team_name}:team-lead`. The recovery rule itself lives in the cron prompt body (Tier-0 durability — restored every cron-fire turn regardless of skill restoration).
+
+Arm + teardown procedures are inlined verbatim in the workflow command files (canonical-mirror discipline enforced by `scripts/verify-protocol-extracts.sh`):
+- Arm: `commands/orchestrate.md`, `commands/comPACT.md`, `commands/rePACT.md`, `commands/plan-mode.md`, `commands/peer-review.md` (each between team-verify step and first dispatch).
+- Teardown: `commands/wrap-up.md` (step 3.5), `commands/pause.md` (before Shut Down Teammates step).
+- Inheritance: `commands/imPACT.md` inherits the parent workflow's wake; do NOT arm or teardown.
+
+Delivery-model context: see [pact-communication-charter.md Part I §Wake Mechanism](../../protocols/pact-communication-charter.md#wake-mechanism-monitor--cron) for the path-1 (in-process teammates, reactive event-loop) vs path-2 (lead session, needs Monitor for stdout-line-as-event delivery) asymmetry.
+
 ### Intentional Waiting (orchestrator responsibilities)
 
 Teammates signal protocol-defined waits via the `intentional_wait` task metadata
