@@ -1,0 +1,35 @@
+## Inbox Wake — Arm Monitor (start)
+
+```markdown
+Monitor(
+  description="pact-inbox-monitor:{team_name}:team-lead",
+  command="""
+    TEAM_DIR="$HOME/.claude/teams/{team_name}"
+    INBOX="$TEAM_DIR/inboxes/team-lead.json"
+    HB_FILE="$TEAM_DIR/inbox-wake-heartbeat.json"
+    HB_TMP="$TEAM_DIR/inbox-wake-heartbeat.json.tmp"
+    LAST_COUNT=-1
+    HB_INTERVAL=300
+    HB_LAST=0
+    while true; do
+      NOW=$(date +%s)
+      if [ -f "$INBOX" ]; then
+        COUNT=$(jq 'length' "$INBOX" 2>/dev/null || echo 0)
+      else
+        COUNT=0
+      fi
+      if [ "$COUNT" != "$LAST_COUNT" ] && [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
+        echo "INBOX_GREW count=$COUNT prev=$LAST_COUNT ts=$NOW"
+      fi
+      LAST_COUNT=$COUNT
+      printf '{"v":1,"count":%d,"ts":%d}\n' "$COUNT" "$NOW" > "$HB_TMP" && mv -f "$HB_TMP" "$HB_FILE"
+      if [ $((NOW - HB_LAST)) -ge $HB_INTERVAL ]; then
+        echo "HEARTBEAT count=$COUNT ts=$NOW"
+        HB_LAST=$NOW
+      fi
+      sleep 5
+    done
+  """,
+  persistent=True
+)
+```
