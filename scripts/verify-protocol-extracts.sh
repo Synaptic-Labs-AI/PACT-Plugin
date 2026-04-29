@@ -22,14 +22,17 @@ fi
 PASS=0
 FAIL=0
 
-# Extract bytes from SSOT spanning `## <start>` (inclusive) up to the line
-# before `## <end>` (exclusive), then strip a single trailing blank line if
-# present. Heading match is exact-string on the H2 line minus the leading
-# `## ` prefix. Output appended to the file path passed as $3.
+# Extract bytes from a source markdown file spanning `## <start>` (inclusive)
+# up to the line before `## <end>` (exclusive), then strip a single trailing
+# blank line if present. Heading match is exact-string on the H2 line minus
+# the leading `## ` prefix. Output appended to the file path passed as $4.
+#
+# Args: source_file start_heading end_heading outfile
 extract_section() {
-    local start="$1"
-    local end="$2"
-    local outfile="$3"
+    local source_file="$1"
+    local start="$2"
+    local end="$3"
+    local outfile="$4"
 
     awk -v start="## $start" -v end="## $end" '
         # Toggle fence state on lines beginning with ```; ignore start/end
@@ -44,7 +47,7 @@ extract_section() {
             if (n > 0 && buf[n] == "") n--
             for (i = 1; i <= n; i++) print buf[i]
         }
-    ' "$SOURCE" >> "$outfile"
+    ' "$source_file" >> "$outfile"
 }
 
 # Verify a standalone extract against one or more (start_heading, end_heading)
@@ -75,7 +78,7 @@ verify() {
         if [ $first -eq 0 ]; then
             echo "" >> "$tmpfile"
         fi
-        extract_section "$1" "$2" "$tmpfile"
+        extract_section "$SOURCE" "$1" "$2" "$tmpfile"
         first=0
         shift 2
     done
@@ -92,19 +95,18 @@ verify() {
 }
 
 # Verify a callsite's H2-sentinel-delimited block against a canonical fixture.
-# Twin of verify() for the inbox-wake canonical-mirror surface (#591): reuses
-# the same awk extractor logic but reads from per-callsite source files
-# (pact-plugin/commands/*.md) and diffs against canonical fixture files
-# (pact-plugin/tests/fixtures/inbox-wake-canonical/*.txt). Purely additive —
-# does not touch the existing 18 protocol verify() calls.
+# Twin of verify() for the inbox-wake canonical-mirror surface: reads from
+# per-callsite source files (pact-plugin/commands/*.md) and diffs against
+# canonical fixture files (pact-plugin/tests/fixtures/inbox-wake-canonical/*.txt).
+# Reuses the generalized extract_section() — no awk duplication.
 #
-# Counter-test recipe (exercised by pact-plugin/tests/test_inbox_monitor_wake.py
-# in TEST phase via subprocess + tempfile mutation): copy a callsite to a
-# tempfile, mutate one byte inside its sentinel-delimited block (e.g.,
-# `sed 's/Monitor(/MONITOR(/'`), point this script at the mutated copy, and
-# assert the script exits non-zero. The script's deterministic-exit-on-DIFFERS
-# shape (FAIL increment + final exit 1) is what makes it counter-testable;
-# the actual counter-test artifact lives in the Python test harness.
+# Counter-test recipe (exercised by pact-plugin/tests/test_inbox_wake_canonical_mirror.py
+# via subprocess + tempfile mutation): copy a callsite to a tempfile, mutate
+# one byte inside its sentinel-delimited block (e.g., `sed 's/Monitor(/MONITOR(/'`),
+# point this script at the mutated copy, and assert the script exits non-zero.
+# The script's deterministic-exit-on-DIFFERS shape (FAIL increment + final
+# exit 1) is what makes it counter-testable; the actual counter-test artifact
+# lives in the Python test harness.
 #
 # Args: callsite_file fixture_file name start_heading end_heading
 verify_inbox_wake() {
@@ -130,18 +132,9 @@ verify_inbox_wake() {
     tmpfile=$(mktemp)
     trap 'rm -f "$tmpfile"' RETURN
 
-    # Inline the awk extractor against an arbitrary source file.
-    # extract_section() above is hard-coded to read from $SOURCE.
-    awk -v start="## $start" -v end="## $end" '
-        /^```/ { in_fence = !in_fence }
-        !in_fence && $0 == start { capture = 1 }
-        !in_fence && capture && $0 == end { capture = 0; exit }
-        capture { buf[++n] = $0 }
-        END {
-            if (n > 0 && buf[n] == "") n--
-            for (i = 1; i <= n; i++) print buf[i]
-        }
-    ' "$callsite" > "$tmpfile"
+    # Reuse the generalized extract_section() — appends to tmpfile, which is
+    # empty (mktemp), so single-call append is equivalent to overwrite.
+    extract_section "$callsite" "$start" "$end" "$tmpfile"
 
     if diff -q "$fixture" "$tmpfile" > /dev/null 2>&1; then
         echo "✓ $name: MATCH"
