@@ -100,7 +100,31 @@ If either procedure FAILs: the design's load-bearing claim is refuted. File an a
 
 ---
 
-## 7. Recording Results
+## 7. Test 3 — Monitor-Crash → Cron Recovery (manual integration)
+
+The recovery-rule's prose-pseudocode semantics are covered by the unit tests in `pact-plugin/tests/test_inbox_monitor_wake.py::TestRecoveryRuleBranchLogic` (heartbeat-staleness threshold + 3-branch tree shape). The live wall-clock variant — arm Monitor, kill it, wait for the cron-fire to detect staleness and re-arm — is deferred to this runbook step because a 7-min CI test is flake-prone and slow.
+
+### Procedure
+
+1. Setup per §3 (start a fresh session in any workflow-arming command). Confirm `~/.claude/teams/{team_name}/inbox-wake-state.json` and `inbox-wake-heartbeat.json` are present.
+2. Note `armed_at` and the heartbeat's `ts` field.
+3. `TaskStop(STATE_FILE.monitor_task_id)` — kill the Monitor without writing teardown.
+4. **Do nothing**. Wait for the next cron-fire (≤ 4 minutes). The heartbeat file's `ts` will not advance once the Monitor is dead, so within 7 minutes (420s threshold) the heartbeat will go stale.
+5. After the next cron-fire that follows the staleness boundary, re-inspect the registry:
+   - `STATE_FILE` should exist with a fresh `armed_at` AND a fresh `monitor_task_id` (different from the killed one).
+   - `inbox-wake-heartbeat.json` should have a current `ts` (within last 5s).
+   - `TaskList` should show a new `pact-inbox-monitor:{team_name}:team-lead` task (the re-armed Monitor).
+
+### Pass / fail
+
+- **PASS**: registry refreshes within 11 minutes of TaskStop (4 min worst-case cron-fire + 7 min staleness boundary). The new `monitor_task_id` is healthy (heartbeat advancing).
+- **FAIL**: registry never refreshes after 12 minutes; OR the new monitor's heartbeat is also stalled; OR multiple `pact-inbox-monitor` tasks accumulate (recovery rule's TaskStop on the old monitor failed silently).
+
+If PASS, the recovery rule is confirmed end-to-end. If FAIL, triage via the cron-fire turn's stdout (look for the recovery-rule's branch log lines).
+
+---
+
+## 8. Recording Results
 
 Append a dated entry to `pact-plugin/tests/runbooks/inbox-monitor-wake-runs.md` (create the file if it does not exist) with:
 
@@ -108,6 +132,7 @@ Append a dated entry to `pact-plugin/tests/runbooks/inbox-monitor-wake-runs.md` 
 - Test 1: each `Δ` value across the trial series; PASS/FAIL.
 - Test 2 Procedure A: `T1`, `T2`, gated-state-still-asserted-at-T2 (yes/no); PASS/FAIL.
 - Test 2 Procedure B: same fields; PASS/FAIL.
+- Test 3 (optional, gated): wall-clock from TaskStop to registry-refresh; new `monitor_task_id` healthy (yes/no); PASS/FAIL.
 - Notes: any anomalies (Monitor auto-stop, cron-fire interference, recovery-rule activations during the trial).
 
-A run with all three PASS is sufficient evidence for the empirical ACs. A run with any FAIL must be triaged before the wake-mechanism work merges.
+A run with Tests 1 + 2 PASS is sufficient evidence for the empirical ACs. Test 3 is optional but recommended quarterly — automated coverage of the recovery rule is unit-level (parses the prose-pseudocode); Test 3 is the live confirmation. A run with any FAIL must be triaged before the wake-mechanism work merges.
