@@ -34,17 +34,34 @@ class TestRePACTNestingNoteFreshness:
     the 420s freshness threshold. Same threshold as the cron's recovery
     rule Branch B/C boundary — drift would create a behavior mismatch
     between nested-skip and cold-start-recover.
+
+    Region-scoped to the nesting note prose only: file-scoped substring
+    match would pass on incidental occurrences elsewhere in rePACT.md
+    (the file references `inbox-wake-state.json` 7 times across canonical
+    blocks and prose). Anchored between `**Nesting note**:` and the
+    `## Inbox Wake — Arm Monitor (start)` H2 sentinel that follows it.
     """
+
+    NESTING_NOTE_START = "**Nesting note**:"
+    NESTING_NOTE_END = "## Inbox Wake — Arm Monitor (start)"
 
     def test_nesting_note_contains_state_file_and_threshold(self):
         text = _read(COMMANDS_DIR / "rePACT.md")
-        assert "inbox-wake-state.json" in text, (
-            "rePACT.md missing STATE_FILE reference"
+        assert self.NESTING_NOTE_START in text, (
+            "rePACT.md missing `**Nesting note**:` anchor — region-scoped "
+            "assertion has nothing to bind to"
+        )
+        nesting_region = _between(
+            text, self.NESTING_NOTE_START, self.NESTING_NOTE_END
+        )
+        assert "inbox-wake-state.json" in nesting_region, (
+            "rePACT.md nesting note missing STATE_FILE reference"
         )
         # The 420s threshold (7 minutes) is the freshness boundary.
-        assert "420" in text, (
-            "rePACT.md missing 420s freshness threshold — must match "
-            "cron prompt body's Branch B/C boundary to avoid behavior drift"
+        assert "420" in nesting_region, (
+            "rePACT.md nesting note missing 420s freshness threshold — "
+            "must match cron prompt body's Branch B/C boundary to avoid "
+            "behavior drift"
         )
 
 
@@ -93,6 +110,26 @@ class TestPeerReviewCronListConditional:
             "conditional CronList logic belongs OUTSIDE the sentinel pair"
         )
 
+    def test_arm_step_sentinel_ordering(self):
+        """The arm step has 3 sentinel-wrapped blocks. Their textual order
+        in peer-review.md is `Arm Monitor (start)` < `Write State File
+        (start)` < `Arm Cron (start)` — same as every other ARMING_FILE.
+        Pin the order so a reorder regression (e.g., moving the Write
+        State File block below Cron because someone misread the prose
+        'write state file AFTER both Monitor and CronCreate') is caught
+        loud. The prose's 'AFTER' is operative-ordering — what the LLM
+        executes — not textual ordering of the sentinel blocks.
+        """
+        text = _read(self.PATH)
+        monitor_idx = text.index("## Inbox Wake — Arm Monitor (start)")
+        state_idx = text.index("## Inbox Wake — Write State File (start)")
+        cron_idx = text.index("## Inbox Wake — Arm Cron (start)")
+        assert monitor_idx < state_idx < cron_idx, (
+            f"peer-review.md arm-step sentinel ordering broken: expected "
+            f"Monitor < WriteStateFile < Cron; got Monitor={monitor_idx}, "
+            f"WriteStateFile={state_idx}, Cron={cron_idx}"
+        )
+
 
 class TestRecoveryRuleBranchLogic:
     """Integration regression (Option B per team-lead direction): parse the
@@ -108,6 +145,22 @@ class TestRecoveryRuleBranchLogic:
         """Return the canonical cron-block fixture body (single source of
         truth — same bytes as what each ARMING_FILE inlines)."""
         return _read(FIXTURES_DIR / "cron-block.txt")
+
+    def test_three_branch_tree_ordered_a_b_c(self, cron_prompt_body):
+        """The 3 branches must appear in A → B → C order in the prompt
+        body. Other tests slice the body by `Branch X` index pairs to
+        scope per-branch assertions; that slicing implicitly relies on
+        A < B < C ordering. A future copy-edit that reorders the branches
+        (e.g., to 'B → A → C' for narrative flow) would silently break
+        every branch-scoped test downstream — pin the ordering here.
+        """
+        a_idx = cron_prompt_body.index("Branch A")
+        b_idx = cron_prompt_body.index("Branch B")
+        c_idx = cron_prompt_body.index("Branch C")
+        assert a_idx < b_idx < c_idx, (
+            f"recovery rule branches must appear in A < B < C order; got "
+            f"A={a_idx}, B={b_idx}, C={c_idx}"
+        )
 
     def test_three_branch_tree_present(self, cron_prompt_body):
         """The recovery rule must declare three branches: A (cold-start),
@@ -173,15 +226,18 @@ class TestRecoveryRuleBranchLogic:
             cron_prompt_body.index("FAIL-OPEN"):
         ], "FAIL-OPEN narrative must route errors to Branch C (re-arm)"
 
-    def test_heartbeat_staleness_threshold_matches_logic(self, tmp_path):
-        """Synthetic-fixture sanity check on the threshold semantics.
+    def test_heartbeat_staleness_threshold_arithmetic(self, tmp_path):
+        """Arithmetic self-check on the synthetic-fixture construction.
 
-        Build a fake heartbeat file with `ts = current_epoch - 500` (500s
-        old, > 420s threshold), and assert that the staleness predicate
-        encoded in the cron prompt body would route this to Branch C.
-        We don't execute the prompt body; we verify the threshold value
-        used in the prose matches the fixture's age, which is the
-        load-bearing claim ('420 means 420 actually triggers staleness')."""
+        This test does NOT exercise the recovery rule — it only confirms
+        that a fixture built with `ts = current_epoch - 500` is correctly
+        classified as STALE relative to the 420s threshold (500 >= 420).
+        The actual recovery-rule semantics are verified by
+        `test_branch_c_stale_recovery_unlinks` (parses cron-block.txt and
+        asserts Branch C's threshold + behavior); the live wall-clock
+        end-to-end test is deferred to runbook §7 (Test 3) per #444
+        precedent. Renamed from `_matches_logic` for honesty about scope.
+        """
         hb = tmp_path / "inbox-wake-heartbeat.json"
         ts = int(time.time()) - 500  # 500s old → STALE per 420s threshold
         hb.write_text(json.dumps({"v": 1, "count": 0, "ts": ts}))
@@ -194,8 +250,8 @@ class TestRecoveryRuleBranchLogic:
             f"{threshold}s — fixture-construction bug, not a recovery-rule bug"
         )
 
-    def test_heartbeat_freshness_below_threshold(self, tmp_path):
-        """Mirror of the staleness test: a heartbeat with `ts = current_epoch
+    def test_heartbeat_freshness_threshold_arithmetic(self, tmp_path):
+        """Mirror arithmetic self-check: a heartbeat with `ts = current_epoch
         - 100` (100s old, < 420s threshold) is FRESH and routes to Branch B."""
         hb = tmp_path / "inbox-wake-heartbeat.json"
         ts = int(time.time()) - 100  # 100s old → FRESH per 420s threshold

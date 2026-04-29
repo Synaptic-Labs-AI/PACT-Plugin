@@ -3,10 +3,11 @@ Canonical-mirror invariant tests for the inbox-wake surface.
 
 Covers:
   - Fixture file shape (first line is the literal start-sentinel H2).
-  - Verify-script subprocess (the 30/30 PASS contract in CI).
+  - Verify-script subprocess (the 35/35 PASS contract in CI).
   - Counter-test layer (mutate one byte, assert non-zero exit) per
     architect D9 + memory 3e665bc5 (PR #580 phantom-green lesson).
-  - Verify-script call-list size guard (12 inbox-wake invocations).
+  - Verify-script call-list size guard (17 inbox-wake invocations:
+    5 Monitor + 5 Cron + 5 WriteStateFile + 2 Teardown).
 """
 import re
 import subprocess
@@ -17,6 +18,7 @@ from fixtures.inbox_wake import (
     FIXTURES_DIR, VERIFY_SCRIPT, _REPO_ROOT,
     MONITOR_START, MONITOR_END,
     CRON_START, CRON_END,
+    STATE_START, STATE_END,
     TEARDOWN_START, TEARDOWN_END,
     _read, _between, _build_repo_subset, _run_verify,
 )
@@ -51,8 +53,8 @@ class TestFixtureFileShape:
 
 class TestVerifyScript:
     """The shell-side mirror invariant: `bash scripts/verify-protocol-extracts.sh`
-    exits 0 (30/30 PASS) when all canonical content is byte-equivalent to
-    fixtures.
+    exits 0 (35/35 PASS: 18 protocol + 17 inbox-wake) when all canonical
+    content is byte-equivalent to fixtures.
     """
 
     def test_verify_script_exists_and_executable(self):
@@ -84,10 +86,11 @@ class TestVerifyScriptCounterTest:
     fails when content drifts. Without this, a script that returns 0
     unconditionally would silently mask all drift (phantom-green).
 
-    Mutation is parametrized across all 3 fixture types (Monitor / Cron /
-    Teardown) so a `verify_inbox_wake` failure mode that only triggers for
-    one fixture (e.g., a fixture-path bug that resolves only Monitor
-    entries to real fixtures) cannot hide as phantom-green on the others.
+    Mutation is parametrized across all 4 fixture types (Monitor / Cron /
+    WriteStateFile / Teardown) so a `verify_inbox_wake` failure mode that
+    only triggers for one fixture (e.g., a fixture-path bug that resolves
+    only Monitor entries to real fixtures) cannot hide as phantom-green
+    on the others.
     """
 
     def test_baseline_passes_on_copy(self, tmp_path):
@@ -121,6 +124,13 @@ class TestVerifyScriptCounterTest:
                 "Cron @ orchestrate",
             ),
             (
+                "state",
+                "orchestrate.md",
+                STATE_START, STATE_END,
+                "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
+                "WriteStateFile @ orchestrate",
+            ),
+            (
                 "teardown",
                 "wrap-up.md",
                 TEARDOWN_START, TEARDOWN_END,
@@ -128,7 +138,7 @@ class TestVerifyScriptCounterTest:
                 "Teardown @ wrap-up",
             ),
         ],
-        ids=["monitor", "cron", "teardown"],
+        ids=["monitor", "cron", "state", "teardown"],
     )
     def test_mutated_canonical_block_fails(
         self, tmp_path, fixture_kind, host_file,

@@ -121,6 +121,11 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 
 **Verify session team exists**: The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
 
+> **Nesting note**: if `/PACT:peer-review` is invoked nested within `/PACT:orchestrate` (or any other parent workflow that already armed the wake mechanism), the parent's wake-arming applies — do NOT re-arm. Detect by checking `~/.claude/teams/{team_name}/inbox-wake-state.json`. Three cases:
+> - **STATE_FILE present + HB fresh (current_epoch − HB_FILE.ts < 420)**: parent is alive and emitting heartbeats. Skip both Monitor and Cron arm; proceed to the dispatch sections below.
+> - **STATE_FILE present + HB stale (current_epoch − HB_FILE.ts >= 420)**: do NOT re-arm here — the parent's cron Branch C will detect staleness and re-arm on its next fire (≤4min). Skip both Monitor and Cron arm; proceed to the dispatch sections below.
+> - **STATE_FILE missing**: no parent armed (or teardown already ran); fall through to the canonical Monitor arm + conditional Cron arm (CronList-then-arm) steps below as if peer-review were a top-level invocation.
+
 **Arm inbox-wake mechanism**: Run the canonical Monitor block unconditionally (Monitor cannot be enumerated by description; the recovery rule de-dupes via heartbeat-file freshness on the next cron-fire). For the cron, run `CronList` first; if a job with description `pact-inbox-cron:{team_name}:team-lead` is already present (parent workflow already armed), pass through and skip the CronCreate. Otherwise, run the canonical Cron block. After both succeed, write the STATE_FILE.
 
 Capture `Monitor` task_id as `M_ID` and (if armed by this command) `CronCreate` cron_job_id as `C_ID`. If the cron was already present, read its job_id from the matching `CronList` entry and use that as `C_ID`.
@@ -201,7 +206,7 @@ PACT inbox-wake recovery check. Run the following AS the lead, this turn:
 
    Branch A — STATE_FILE missing → COLD START:
      a. Re-run the canonical block under this workflow's command file's "Inbox Wake — Arm Monitor" H2 section. Capture the returned task_id as M_ID.
-     b. Re-run THIS workflow's command file's "Inbox Wake — Arm Cron" H2 section to re-arm the cron. Capture the returned cron_job_id as C_ID. (Note: the recovery check itself is fired BY the cron; if STATE_FILE is missing, we are in cold-start, so a re-arm of the cron is the correct response — the prior cron may have been from a stale session. CronCreate is idempotent under deterministic-naming + per-session in-memory CronList scope.)
+     b. Re-run THIS workflow's command file's "Inbox Wake — Arm Cron" H2 section to re-arm the cron. Capture the returned cron_job_id as C_ID. (Note: the recovery check itself is fired BY the cron; if STATE_FILE is missing, we are in cold-start, so a re-arm of the cron is the correct response — the prior cron may have been from a stale session. CronCreate is idempotent under deterministic-naming + per-session in-memory CronList scope. If you cannot determine which workflow file is "this" at cron-fire time, default to orchestrate.md's canonical blocks for both steps (a) and (b); the canonical Monitor and Cron blocks are byte-equivalent across all 5 ARMING_FILES per scripts/verify-protocol-extracts.sh, so any callsite is correct.)
      c. Write STATE_FILE with: {"v":1,"monitor_task_id":"<M_ID>","cron_job_id":"<C_ID>","armed_at":<current_epoch>}. Use atomic-rename via *.tmp + mv. DONE.
 
    Branch B — STATE_FILE present + HB_FILE present + HB_FILE.ts is fresh (current_epoch - ts < 420):

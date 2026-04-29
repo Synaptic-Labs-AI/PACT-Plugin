@@ -294,7 +294,7 @@ PACT inbox-wake recovery check. Run the following AS the lead, this turn:
 
    Branch A — STATE_FILE missing → COLD START:
      a. Re-run the canonical block under this workflow's command file's "Inbox Wake — Arm Monitor" H2 section. Capture the returned task_id as M_ID.
-     b. Re-run THIS workflow's command file's "Inbox Wake — Arm Cron" H2 section to re-arm the cron. Capture the returned cron_job_id as C_ID. (Note: the recovery check itself is fired BY the cron; if STATE_FILE is missing, we are in cold-start, so a re-arm of the cron is the correct response — the prior cron may have been from a stale session. CronCreate is idempotent under deterministic-naming + per-session in-memory CronList scope.)
+     b. Re-run THIS workflow's command file's "Inbox Wake — Arm Cron" H2 section to re-arm the cron. Capture the returned cron_job_id as C_ID. (Note: the recovery check itself is fired BY the cron; if STATE_FILE is missing, we are in cold-start, so a re-arm of the cron is the correct response — the prior cron may have been from a stale session. CronCreate is idempotent under deterministic-naming + per-session in-memory CronList scope. If you cannot determine which workflow file is "this" at cron-fire time, default to orchestrate.md's canonical blocks for both steps (a) and (b); the canonical Monitor and Cron blocks are byte-equivalent across all 5 ARMING_FILES per scripts/verify-protocol-extracts.sh, so any callsite is correct.)
      c. Write STATE_FILE with: {"v":1,"monitor_task_id":"<M_ID>","cron_job_id":"<C_ID>","armed_at":<current_epoch>}. Use atomic-rename via *.tmp + mv. DONE.
 
    Branch B — STATE_FILE present + HB_FILE present + HB_FILE.ts is fresh (current_epoch - ts < 420):

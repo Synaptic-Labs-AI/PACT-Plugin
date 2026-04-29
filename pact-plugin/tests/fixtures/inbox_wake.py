@@ -55,12 +55,15 @@ MONITOR_START = "## Inbox Wake — Arm Monitor (start)"
 MONITOR_END = "## Inbox Wake — Arm Monitor (end)"
 CRON_START = "## Inbox Wake — Arm Cron (start)"
 CRON_END = "## Inbox Wake — Arm Cron (end)"
+STATE_START = "## Inbox Wake — Write State File (start)"
+STATE_END = "## Inbox Wake — Write State File (end)"
 TEARDOWN_START = "## Inbox Wake — Teardown (start)"
 TEARDOWN_END = "## Inbox Wake — Teardown (end)"
 
 ALL_SENTINELS = (
     MONITOR_START, MONITOR_END,
     CRON_START, CRON_END,
+    STATE_START, STATE_END,
     TEARDOWN_START, TEARDOWN_END,
 )
 

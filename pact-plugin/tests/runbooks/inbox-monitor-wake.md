@@ -32,11 +32,11 @@ Both ACs are manual because they test behavior of the **lead's own session under
 
 1. In the lead session, invoke an ARMING workflow command (e.g., `/PACT:orchestrate`). The command auto-arms Monitor + Cron using the canonical strings in the tracked fixture files: `pact-plugin/tests/fixtures/inbox-wake-canonical/monitor-block.txt` (Monitor) and `pact-plugin/tests/fixtures/inbox-wake-canonical/cron-block.txt` (Cron). The fixtures are byte-equivalent to the canonical blocks inlined at every workflow-command callsite (verified by extension to `verify-protocol-extracts.sh`). Substitute the live `{team_name}` UUID in the runtime tool invocation.
 
-2. **Confirm Monitor is armed**: run `TaskList` and verify a task with description `pact-inbox-monitor:{team_name}:team-lead` is present and `status=in_progress`.
+2. **Confirm Monitor is armed**: read the state file at `~/.claude/teams/{team_name}/inbox-wake-state.json` and verify it has a non-empty `monitor_task_id` field plus a recent `armed_at` timestamp. The lead writes this file at arm time after `Monitor` returns its task_id; presence of a fresh `monitor_task_id` is the file-based-registry signal that Monitor is armed. (`TaskList` does NOT enumerate platform background tasks like Monitor / Bash run_in_background / Cron — it lists `TaskCreate` items only — so a TaskList check is not a valid Monitor-armed signal.)
 
 3. **Confirm Cron is armed**: run `CronList` and verify a job with description `pact-inbox-cron:{team_name}:team-lead` is present.
 
-4. **Confirm Monitor is healthy**: read the Monitor task's recent stdout (via `TaskGet` or the monitor log under `~/.claude/teams/{team_name}/monitors/`) and verify at least one `HEARTBEAT count=N ts=T` line within the last 5 minutes.
+4. **Confirm Monitor is healthy**: read the heartbeat file at `~/.claude/teams/{team_name}/inbox-wake-heartbeat.json` and verify its `ts` field is fresh (current_epoch − ts < 420 seconds, i.e. within ~7 min). The Monitor writes this file every 5 seconds via atomic-rename; a fresh `ts` is the canonical liveness signal the cron's recovery rule consumes. (`HEARTBEAT count=N ts=T` lines on Monitor stdout are visibility-only and emitted every ~5 min; the file-based heartbeat is the load-bearing signal.)
 
 If any of steps 2-4 fail, do NOT proceed — file the failure as an arm-step regression and stop. The wake mechanism is not under test if it isn't actually armed.
 
@@ -93,16 +93,35 @@ If either procedure FAILs: the design's load-bearing claim is refuted. File an a
 
 ## 6. Teardown
 
-1. `TaskStop` the Monitor task: find it via `TaskList` filtered by `pact-inbox-monitor:{team_name}:team-lead`, then `TaskStop(task_id)` for each match.
-2. `CronDelete` the Cron job: find it via `CronList` filtered by `pact-inbox-cron:{team_name}:team-lead`, then `CronDelete(job_id)` for each match.
-3. **Confirm clean**: re-run `TaskList` and `CronList`; both filters should return 0 matches.
-4. Errors on missing IDs are benign (the canonical teardown block treats them as no-ops).
+Apply the canonical teardown block at `pact-plugin/tests/fixtures/inbox-wake-canonical/teardown-block.txt` (mirrored byte-equivalent in `commands/wrap-up.md` and `commands/pause.md`). The canonical sequence reads the file-based registry and tears down by ID — `TaskList` does NOT enumerate platform background tasks (Monitor / Bash run_in_background / Cron), so `TaskList`-based teardown is not a valid path.
+
+1. **Read STATE_FILE**: `~/.claude/teams/{team_name}/inbox-wake-state.json`. If missing, skip to step 5 (nothing to tear down — orphan-Monitor case is bounded by Monitor's `persistent: true` session-tied lifetime).
+2. **Stop the Monitor by ID**: `TaskStop(STATE_FILE.monitor_task_id)`. Benign error on already-stopped / not-found is expected; continue.
+3. **Delete the Cron by ID**: `CronDelete(STATE_FILE.cron_job_id)`. Benign error on already-deleted / auto-expired is expected; continue. Belt-and-suspenders: also run `CronList` and `CronDelete` any job whose description equals `pact-inbox-cron:{team_name}:team-lead` — `CronList` IS a valid enumerate primitive for crons (unlike Monitor), and this catches the case where `STATE_FILE.cron_job_id` refers to a job that auto-expired or rotated.
+4. **Unlink registry files**: `~/.claude/teams/{team_name}/inbox-wake-heartbeat.json` (and its `.tmp` sibling if present), then `~/.claude/teams/{team_name}/inbox-wake-state.json`.
+5. **Confirm clean**: `CronList` should return 0 matches for `pact-inbox-cron:{team_name}:team-lead`; both registry files at `~/.claude/teams/{team_name}/inbox-wake-{state,heartbeat}.json` should be absent (`ls` returns no-such-file). Monitor enumeration is not a valid check; trust the `TaskStop` return.
 
 ---
 
 ## 7. Test 3 — Monitor-Crash → Cron Recovery (manual integration)
 
 The recovery-rule's prose-pseudocode semantics are covered by the unit tests in `pact-plugin/tests/test_inbox_wake_recovery.py::TestRecoveryRuleBranchLogic` (heartbeat-staleness threshold + 3-branch tree shape). The live wall-clock variant — arm Monitor, kill it, wait for the cron-fire to detect staleness and re-arm — is deferred to this runbook step because a 7-min CI test is flake-prone and slow.
+
+### Inspection commands (reusable across procedure steps)
+
+```bash
+# Inspect the state file (registry: monitor_task_id, cron_job_id, armed_at)
+cat ~/.claude/teams/{team_name}/inbox-wake-state.json | jq
+
+# Inspect the heartbeat file (Monitor's liveness signal: count, ts)
+cat ~/.claude/teams/{team_name}/inbox-wake-heartbeat.json | jq
+
+# Compute heartbeat staleness in seconds (negative = ahead of clock; large positive = stale)
+echo $(( $(date +%s) - $(jq .ts ~/.claude/teams/{team_name}/inbox-wake-heartbeat.json) ))
+
+# Sanity-check canonical-mirror invariant before/after the run
+bash scripts/verify-protocol-extracts.sh
+```
 
 ### Procedure
 
@@ -111,14 +130,14 @@ The recovery-rule's prose-pseudocode semantics are covered by the unit tests in 
 3. `TaskStop(STATE_FILE.monitor_task_id)` — kill the Monitor without writing teardown.
 4. **Do nothing**. Wait for the next cron-fire (≤ 4 minutes). The heartbeat file's `ts` will not advance once the Monitor is dead, so within 7 minutes (420s threshold) the heartbeat will go stale.
 5. After the next cron-fire that follows the staleness boundary, re-inspect the registry:
-   - `STATE_FILE` should exist with a fresh `armed_at` AND a fresh `monitor_task_id` (different from the killed one).
+   - `STATE_FILE` should exist with a fresh `armed_at` AND a fresh `monitor_task_id` (different from the killed one). The fresh `monitor_task_id` IS the re-armed Monitor's signal — file-based registry is the source of truth, since `TaskList` does not enumerate platform background tasks.
    - `inbox-wake-heartbeat.json` should have a current `ts` (within last 5s).
-   - `TaskList` should show a new `pact-inbox-monitor:{team_name}:team-lead` task (the re-armed Monitor).
+   - The fresh heartbeat AND the changed `monitor_task_id` together confirm the recovery rule succeeded: TaskStop on the old monitor + cold-start arm of a new one + STATE_FILE rewrite, all per the canonical Branch C → Branch A flow.
 
 ### Pass / fail
 
 - **PASS**: registry refreshes within 11 minutes of TaskStop (4 min worst-case cron-fire + 7 min staleness boundary). The new `monitor_task_id` is healthy (heartbeat advancing).
-- **FAIL**: registry never refreshes after 12 minutes; OR the new monitor's heartbeat is also stalled; OR multiple `pact-inbox-monitor` tasks accumulate (recovery rule's TaskStop on the old monitor failed silently).
+- **FAIL**: registry never refreshes after 12 minutes; OR the new monitor's heartbeat is also stalled; OR `STATE_FILE.monitor_task_id` after the cron-fire window equals the task_id you killed (recovery rule did not arm a fresh Monitor — Branch A or Branch C path failed). Note: orphan-Monitor accumulation cannot be observed via `TaskList` (Monitor is a platform background task, not enumerable); it can only be detected at the OS-process level (out of scope for this runbook).
 
 If PASS, the recovery rule is confirmed end-to-end. If FAIL, triage via the cron-fire turn's stdout (look for the recovery-rule's branch log lines).
 
