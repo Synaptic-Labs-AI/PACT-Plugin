@@ -20,6 +20,19 @@ The rules below govern how messages delivered via this tool actually behave.
 - The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
 - `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) for the canonical pattern).
 
+### Wake Mechanism (Monitor + Cron)
+
+Inbox-message delivery is asymmetric across the two consumer paths:
+
+- **Path-1 — in-process teammates (Agent Teams subagents)**: a reactive `waitForNextPromptOrShutdown` event-loop wakes the teammate as soon as a message lands. No external wake mechanism is needed; idle-boundary delivery happens within the same process.
+- **Path-2 — lead session**: idle-boundary delivery is gated by `useInboxPoller`'s `!isLoading && !focusedInputDialog` precondition. While the lead is mid-turn or has a modal dialog focused, queued inbox messages do not surface — even though they have been written to the inbox file. Without an external wake mechanism, a lead can sit idle holding queued teammate messages indefinitely.
+
+To bridge the path-2 gap, the lead's session arms a stdout-line-emitting `Monitor` plus a `*/4 * * * *` `CronCreate` watchdog at workflow start. The Monitor polls the lead's inbox file every 5s; on any inbox-count grow, it emits a stdout line, which the harness translates into a turn-spawn that bypasses the `useInboxPoller` gate. The Cron is a recovery primitive: it fires a turn every ~4 minutes regardless of dialog state, reads a file-based registry (`~/.claude/teams/{team_name}/inbox-wake-state.json` + `inbox-wake-heartbeat.json`), and re-arms the Monitor on staleness. Both arming and teardown procedures live in the workflow command files (see `commands/orchestrate.md`, `commands/comPACT.md`, `commands/rePACT.md`, `commands/plan-mode.md`, `commands/peer-review.md` for arm; `commands/wrap-up.md` and `commands/pause.md` for teardown). `commands/imPACT.md` inherits the parent workflow's wake.
+
+The file-based registry pattern (state file written by the lead at arm time; heartbeat file written by the Monitor every 5s with atomic-rename) is forced by a structural constraint: the platform exposes no "enumerate active Monitors by description" primitive. `TaskList` lists work tasks (`TaskCreate` items), not platform background tasks (Monitor / Bash run_in_background / Cron). The recovery rule therefore tracks Monitor identity and liveness through file presence + freshness, not enumeration.
+
+For lead-side procedural guidance, see [Inbox Wake Arming (lead-side)](../skills/orchestration/SKILL.md#inbox-wake-arming-lead-side). The recovery rule itself is embedded verbatim in the cron prompt body (Tier-0 durability — restored every cron-fire turn regardless of skill restoration).
+
 ### Lead-Side Discipline — Verify Before Dispatching
 
 #### Verify State Before Correction
