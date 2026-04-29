@@ -259,15 +259,20 @@ Monitor(
     LAST_COUNT=-1
     HB_INTERVAL=300
     HB_LAST=0
+    trap 'rm -f "$HB_TMP"' EXIT
     while true; do
       NOW=$(date +%s)
       if [ -f "$INBOX" ]; then
-        COUNT=$(jq 'length' "$INBOX" 2>/dev/null || echo 0)
+        COUNT=$(jq 'length' "$INBOX" 2>/dev/null)
+        if [ -z "$COUNT" ]; then
+          echo "JQ_ERROR ts=$NOW"
+          COUNT=0
+        fi
       else
         COUNT=0
       fi
       if [ "$LAST_COUNT" -eq -1 ] && [ "$COUNT" -gt 0 ]; then
-        echo "INBOX_GREW count=$COUNT prev=0 ts=$NOW reason=startup"
+        echo "INBOX_GREW count=$COUNT ts=$NOW reason=startup"
       fi
       if [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
         echo "INBOX_GREW count=$COUNT prev=$LAST_COUNT ts=$NOW"
@@ -328,8 +333,9 @@ PACT inbox-wake recovery check. Run the following AS the lead, this turn:
 
    Branch C — STATE_FILE present + (HB_FILE missing OR HB_FILE.ts is stale (current_epoch - ts >= 420)):
      a. Read STATE_FILE.monitor_task_id as M_ID_OLD. TaskStop(M_ID_OLD). On benign error (task already stopped / not found), continue.
-     b. Unlink HB_FILE if present. Unlink STATE_FILE.
-     c. Goto Branch A (cold-start the Monitor; cron does NOT need re-arming because the cron-fire that triggered THIS rule proves the cron is alive). (Branch A step (c) writes a fresh STATE_FILE.)
+     b. Execute Branch A's actions inline (cold-start the Monitor, then re-arm Cron, then write fresh STATE_FILE via atomic rename — Branch A step (c)'s write OVERWRITES the stale STATE_FILE entry). Cron re-arm in this context does NOT introduce a duplicate cron because the cron-fire that triggered THIS rule proves the cron is alive; CronCreate is idempotent under deterministic-naming + per-session in-memory CronList scope.
+     c. Unlink HB_FILE if it still exists. (The new Monitor will overwrite HB_FILE via its own atomic rename within 5s; this explicit unlink is belt-and-suspenders to remove the stale-ts file in case the new Monitor crashes before its first heartbeat write — without it, a subsequent cron-fire could read the stale ts and incorrectly conclude the new Monitor is alive.)
+     (Eliminates the transient window where neither Monitor exists AND STATE_FILE is missing: Branch A's atomic-rename STATE_FILE write happens before STATE_FILE deletion, so any concurrent reader always sees either the stale or the fresh entry, never absence.)
 
 3. FAIL-OPEN: if any file Read errors (malformed JSON, schema mismatch v != 1, etc.), treat as Branch C (stop+unlink+re-arm). If any TaskStop / Monitor / CronCreate / atomic-rename errors, log to stdout for the cron-fire turn and continue with the remaining branch steps. Cost asymmetry: false-arm = one extra cache-warm fire; false-skip = unbounded blind window.
 

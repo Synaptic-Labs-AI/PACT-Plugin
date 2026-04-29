@@ -217,14 +217,66 @@ class TestRecoveryRuleBranchLogic:
         """Per architect §Section 2 §FAIL-OPEN semantics: malformed-file or
         schema-mismatch falls through to Branch C (re-arm), not Branch B
         (no-op). False-arm is bounded; false-skip is unbounded blind window.
+
+        Region-scope the FAIL-OPEN clause and assert it explicitly names
+        BOTH error categories that route to Branch C: file-read errors
+        (malformed JSON) AND schema mismatches. A loose substring check
+        on the whole prompt body could pass even if FAIL-OPEN's routing
+        clause is silent on schema mismatch (which is the load-bearing
+        failure-mode for v=2 schema drift).
         """
         assert "FAIL-OPEN" in cron_prompt_body, (
             "recovery rule must declare FAIL-OPEN error semantics"
         )
-        # The narrative must explicitly route errors to Branch C.
-        assert "Branch C" in cron_prompt_body[
-            cron_prompt_body.index("FAIL-OPEN"):
-        ], "FAIL-OPEN narrative must route errors to Branch C (re-arm)"
+        # Region-scope: FAIL-OPEN clause runs from the marker to the next
+        # blank-line paragraph break.
+        fo_idx = cron_prompt_body.index("FAIL-OPEN")
+        try:
+            fo_end = cron_prompt_body.index("\n\n", fo_idx)
+        except ValueError:
+            fo_end = len(cron_prompt_body)
+        fo_clause = cron_prompt_body[fo_idx:fo_end]
+        # Branch C routing must appear inside the FAIL-OPEN clause itself.
+        assert "Branch C" in fo_clause, (
+            "FAIL-OPEN clause must explicitly route errors to Branch C "
+            "(re-arm), not just mention Branch C somewhere later in the body"
+        )
+        # The clause must name both error categories — malformed JSON
+        # (file-read errors) AND schema mismatch (v != 1, etc.). Each
+        # one is a distinct routing trigger; pinning both prevents drift
+        # that silently drops one category from the fall-through.
+        assert "malformed JSON" in fo_clause or "malformed-file" in fo_clause.lower(), (
+            "FAIL-OPEN clause must name `malformed JSON` (or `malformed-file`) "
+            "as a Branch C routing trigger"
+        )
+        assert "schema mismatch" in fo_clause.lower(), (
+            "FAIL-OPEN clause must name `schema mismatch` as a Branch C "
+            "routing trigger — load-bearing for v=2-schema-drift handling"
+        )
+
+    def test_schema_mismatch_clause_specifies_v_not_one(self, cron_prompt_body):
+        """The FAIL-OPEN clause's schema-mismatch routing must name the
+        specific shape that triggers it (`v != 1`). A copy-edit that
+        loosens this to a generic `schema mismatch` mention without
+        naming the version field would silently accept e.g. `version: 1`
+        as a substitute, opening a v=2 schema drift hole.
+        """
+        fo_idx = cron_prompt_body.index("FAIL-OPEN")
+        try:
+            fo_end = cron_prompt_body.index("\n\n", fo_idx)
+        except ValueError:
+            fo_end = len(cron_prompt_body)
+        fo_clause = cron_prompt_body[fo_idx:fo_end]
+        assert "v != 1" in fo_clause or "v!=1" in fo_clause, (
+            "FAIL-OPEN clause schema-mismatch trigger must name `v != 1` "
+            "specifically — generic `schema mismatch` text alone leaves "
+            "the version-field shape unpinned"
+        )
+        # And the routing target must be Branch C (re-arm), not Branch B.
+        assert "Branch C" in fo_clause, (
+            "schema-mismatch routing must land in Branch C (re-arm), "
+            "not Branch B (no-op) — false-skip is unbounded blind window"
+        )
 
     def test_heartbeat_staleness_threshold_arithmetic(self, tmp_path):
         """Arithmetic self-check on the synthetic-fixture construction.
@@ -312,4 +364,67 @@ class TestRunbookLatencyBoundInvariant:
             f"({worst_case_seconds // 60} min). Update one or the other "
             "to restore the cross-document invariant."
         )
+
+
+class TestCronCreateIdempotencyClaim:
+    """Pin the prose-level idempotency claim in the cron prompt body.
+
+    CronCreate idempotency is a platform-managed invariant we do not (and
+    cannot) test live from this suite — there is no platform-API mock
+    available in-tree. What we CAN pin is that the recovery rule's prose
+    explicitly claims idempotency under deterministic-naming, since the
+    rule's correctness depends on Branch A's cold-start re-arm being safe
+    to fire even when a prior cron with the same description still exists.
+    A copy-edit that drops the idempotency note silently weakens Branch A's
+    correctness justification.
+    """
+
+    def test_cron_prompt_body_pins_idempotency_under_deterministic_naming(self):
+        cron_text = _read(FIXTURES_DIR / "cron-block.txt")
+        assert "idempotent" in cron_text.lower(), (
+            "cron-block.txt missing `idempotent` claim — Branch A cold-start "
+            "re-arm correctness depends on CronCreate being idempotent under "
+            "deterministic-naming"
+        )
+        assert "deterministic-naming" in cron_text or "deterministic naming" in cron_text, (
+            "cron-block.txt missing `deterministic-naming` qualifier on the "
+            "idempotency claim — load-bearing for re-arm safety"
+        )
+
+
+class TestStaticCrossDocFreshnessThreshold:
+    """The 420s freshness threshold appears across multiple surfaces:
+    cron-block.txt (Branch B/C boundary), runbook §7 (manual integration
+    test bound), and the rePACT/peer-review/comPACT/plan-mode nesting
+    notes. Drift on any one would create a behavior mismatch — e.g.,
+    nesting note says 420s but cron prompt says 360s, then a nested
+    rePACT skips re-arm using a stale-freshness window the parent's
+    cron will still treat as live.
+    """
+
+    SURFACES_REQUIRED = (
+        "pact-plugin/tests/fixtures/inbox-wake-canonical/cron-block.txt",
+        "pact-plugin/tests/runbooks/inbox-monitor-wake.md",
+        "pact-plugin/commands/rePACT.md",
+        "pact-plugin/commands/peer-review.md",
+        "pact-plugin/commands/comPACT.md",
+        "pact-plugin/commands/plan-mode.md",
+    )
+
+    def test_420s_threshold_present_on_every_surface(self):
+        # Use _PLUGIN_ROOT.parent (= worktree root) to resolve the paths.
+        from fixtures.inbox_wake import _REPO_ROOT
+        for rel_path in self.SURFACES_REQUIRED:
+            path = _REPO_ROOT / rel_path
+            assert path.exists(), (
+                f"cross-doc invariant scope file missing: {rel_path}"
+            )
+            text = path.read_text(encoding="utf-8")
+            assert "420" in text, (
+                f"{rel_path} missing 420s freshness threshold reference — "
+                "drift between this surface and the cron-block.txt Branch B/C "
+                "boundary would cause behavior mismatch (nested-skip vs "
+                "cold-start-recover)"
+            )
+
 

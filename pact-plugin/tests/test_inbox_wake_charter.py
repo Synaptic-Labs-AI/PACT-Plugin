@@ -6,6 +6,8 @@ subsection that documents path-1 vs path-2 delivery-model asymmetry +
 file-based-registry rationale. Cross-refs from
 `skills/orchestration/SKILL.md` depend on the subsection's stable presence.
 """
+import re
+
 from fixtures.inbox_wake import CHARTER_PATH, SKILLS_DIR, _read
 
 
@@ -69,7 +71,10 @@ class TestWakeMechanismCharterAnchor:
             "Wake Mechanism subsection missing useInboxPoller reference — "
             "the gate that motivates the wake mechanism"
         )
-        assert "!isLoading" in section and "focusedInputDialog" in section, (
+        # Permissive whitespace match on `!isLoading` — accepts `!isLoading`,
+        # `! isLoading`, `!  isLoading`, etc. — so a copy-edit that adds
+        # a space after the `!` for readability does not silently fail.
+        assert re.search(r"!\s*isLoading", section) and "focusedInputDialog" in section, (
             "Wake Mechanism subsection missing the specific gate "
             "precondition (`!isLoading && !focusedInputDialog`) — this is "
             "the load-bearing claim the wake mechanism is designed to bypass"

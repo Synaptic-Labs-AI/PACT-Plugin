@@ -11,15 +11,20 @@ Monitor(
     LAST_COUNT=-1
     HB_INTERVAL=300
     HB_LAST=0
+    trap 'rm -f "$HB_TMP"' EXIT
     while true; do
       NOW=$(date +%s)
       if [ -f "$INBOX" ]; then
-        COUNT=$(jq 'length' "$INBOX" 2>/dev/null || echo 0)
+        COUNT=$(jq 'length' "$INBOX" 2>/dev/null)
+        if [ -z "$COUNT" ]; then
+          echo "JQ_ERROR ts=$NOW"
+          COUNT=0
+        fi
       else
         COUNT=0
       fi
       if [ "$LAST_COUNT" -eq -1 ] && [ "$COUNT" -gt 0 ]; then
-        echo "INBOX_GREW count=$COUNT prev=0 ts=$NOW reason=startup"
+        echo "INBOX_GREW count=$COUNT ts=$NOW reason=startup"
       fi
       if [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
         echo "INBOX_GREW count=$COUNT prev=$LAST_COUNT ts=$NOW"

@@ -103,7 +103,7 @@ JSON
 
 The timestamp (`ts`) is set automatically by `make_event()` and serves the same purpose as the previous `paused_at` field.
 
-## 5.5. Wake-Mechanism Teardown
+### 5.5. Wake-Mechanism Teardown
 
 Tear down the inbox-wake mechanism armed at workflow start. Run the canonical teardown block below.
 

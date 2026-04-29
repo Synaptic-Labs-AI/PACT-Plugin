@@ -4,13 +4,16 @@ Static structural tests for the inbox-wake ARMING surface.
 Covers (per #591):
   - Sentinel-pair presence + ordering at every ARMING_FILE.
   - Cron schedule literal pinning (twin grep-gate per memory bb101a99).
-  - STATE_FILE inline-prose glue between Monitor (end) and Cron (start).
+  - STATE_FILE block content sanity between Monitor (end) and Cron (start).
 
-The byte-equivalence of the captured canonical block bodies against
-fixtures is enforced by `scripts/verify-protocol-extracts.sh` (see
+The STATE_FILE write step lives in its own canonical-mirror block —
+`## Inbox Wake — Write State File (start)`/`(end)` — between the Monitor
+and Cron sentinel pairs. Byte-equivalence of the WriteStateFile block
+body against `pact-plugin/tests/fixtures/inbox-wake-canonical/state-file-block.txt`
+is enforced by `scripts/verify-protocol-extracts.sh` (see
 test_inbox_wake_canonical_mirror.py). These tests verify the structural
-surface — sentinel pairs are present, ordered, and the inline-prose
-glue between them references the registry file.
+surface — sentinel pairs are present and ordered, and the STATE_FILE
+block content references the registry file + schema fields.
 """
 import re
 
@@ -94,12 +97,18 @@ class TestCronLiteralPinning:
 
 
 class TestStateFileWritePhrase:
-    """CF7 inline-prose glue: each ARMING_FILE writes the STATE_FILE between
-    Monitor (end) and Cron (start). The STATE_FILE write step is NOT under
-    canonical-mirror sentinels — drift across callsites would only be
-    caught by manual review or this regression. Pins:
-      (a) the file path appears in the inline-prose region, AND
-      (b) the v=1 schema marker appears in that region.
+    """CF7 STATE_FILE block content: each ARMING_FILE has the STATE_FILE
+    write step between Monitor (end) and Cron (start). Post-cycle-2 F1
+    promotion: the write step lives in its own canonical-mirror block
+    (`## Inbox Wake — Write State File (start)`/`(end)`) inside that
+    region, with byte-equivalence enforced by verify-protocol-extracts.sh.
+    These tests pin content sanity within the captured region:
+      (a) the file path appears in the region,
+      (b) the v=1 schema marker appears in that region,
+      (c) the monitor_task_id schema field appears in that region.
+    Each is individually load-bearing: a copy-edit that drops any one
+    silently breaks the recovery rule's contract with the lead's arm
+    step.
     """
 
     @pytest.mark.parametrize("name", ARMING_FILES)
@@ -107,8 +116,19 @@ class TestStateFileWritePhrase:
         text = _read(COMMANDS_DIR / name)
         between = _between(text, MONITOR_END, CRON_START)
         assert "inbox-wake-state.json" in between, (
-            f"{name} missing STATE_FILE write phrase between Monitor (end) "
-            "and Cron (start) sentinels — CF7 inline-prose glue"
+            f"{name} missing STATE_FILE path between Monitor (end) "
+            "and Cron (start) sentinels"
+        )
+        # JSON shape sanity within the same captured region — drift from
+        # the canonical schema (v=1 + monitor_task_id) would silently
+        # break recovery-rule reads.
+        assert re.search(r'"v"\s*:\s*1', between), (
+            f"{name} STATE_FILE block missing v=1 schema marker between "
+            "Monitor and Cron sentinels"
+        )
+        assert "monitor_task_id" in between, (
+            f"{name} STATE_FILE block missing `monitor_task_id` schema "
+            "field between Monitor and Cron sentinels"
         )
 
     @pytest.mark.parametrize("name", ARMING_FILES)

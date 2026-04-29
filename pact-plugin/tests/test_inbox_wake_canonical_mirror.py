@@ -86,11 +86,14 @@ class TestVerifyScriptCounterTest:
     fails when content drifts. Without this, a script that returns 0
     unconditionally would silently mask all drift (phantom-green).
 
-    Mutation is parametrized across all 4 fixture types (Monitor / Cron /
-    WriteStateFile / Teardown) so a `verify_inbox_wake` failure mode that
-    only triggers for one fixture (e.g., a fixture-path bug that resolves
-    only Monitor entries to real fixtures) cannot hide as phantom-green
-    on the others.
+    Mutation is parametrized across all 17 verify-script invocations
+    (5 Monitor + 5 Cron + 5 WriteStateFile + 2 Teardown) so a
+    `verify_inbox_wake` failure mode that only triggers for one specific
+    host-file invocation (e.g., a typo in the call list that resolves to
+    a wrong fixture for one entry) cannot hide as phantom-green on the
+    others. The 4 fixture-kind buckets (Monitor/Cron/State/Teardown)
+    each define a single mutation target; we sweep every host file the
+    verify-script enumerates.
     """
 
     def test_baseline_passes_on_copy(self, tmp_path):
@@ -108,37 +111,66 @@ class TestVerifyScriptCounterTest:
 
     @pytest.mark.parametrize(
         "fixture_kind,host_file,start_sentinel,end_sentinel,mutation_target,mutation_replacement,expected_failure_marker",
+        # 17 entries: per-host-file sweep across all verify-script
+        # invocations. Mutation target is constant within a fixture kind
+        # (canonical content is byte-equivalent across host files); only
+        # host_file + expected_failure_marker vary. Failure marker stem
+        # tracks the verify-script's output format
+        # (`<FixtureKind> @ <host-stem>`).
         [
-            (
-                "monitor",
-                "orchestrate.md",
-                MONITOR_START, MONITOR_END,
-                "Monitor(", "MONITOR(",
-                "Monitor @ orchestrate",
-            ),
-            (
-                "cron",
-                "orchestrate.md",
-                CRON_START, CRON_END,
-                "CronCreate(", "CRONCREATE(",
-                "Cron @ orchestrate",
-            ),
-            (
-                "state",
-                "orchestrate.md",
-                STATE_START, STATE_END,
-                "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
-                "WriteStateFile @ orchestrate",
-            ),
-            (
-                "teardown",
-                "wrap-up.md",
-                TEARDOWN_START, TEARDOWN_END,
-                "TaskStop", "TASKSTOP",
-                "Teardown @ wrap-up",
-            ),
+            # Monitor: 5 ARMING_FILES.
+            ("monitor", "orchestrate.md", MONITOR_START, MONITOR_END,
+             "Monitor(", "MONITOR(", "Monitor @ orchestrate"),
+            ("monitor", "comPACT.md", MONITOR_START, MONITOR_END,
+             "Monitor(", "MONITOR(", "Monitor @ comPACT"),
+            ("monitor", "rePACT.md", MONITOR_START, MONITOR_END,
+             "Monitor(", "MONITOR(", "Monitor @ rePACT"),
+            ("monitor", "plan-mode.md", MONITOR_START, MONITOR_END,
+             "Monitor(", "MONITOR(", "Monitor @ plan-mode"),
+            ("monitor", "peer-review.md", MONITOR_START, MONITOR_END,
+             "Monitor(", "MONITOR(", "Monitor @ peer-review"),
+            # Cron: 5 ARMING_FILES.
+            ("cron", "orchestrate.md", CRON_START, CRON_END,
+             "CronCreate(", "CRONCREATE(", "Cron @ orchestrate"),
+            ("cron", "comPACT.md", CRON_START, CRON_END,
+             "CronCreate(", "CRONCREATE(", "Cron @ comPACT"),
+            ("cron", "rePACT.md", CRON_START, CRON_END,
+             "CronCreate(", "CRONCREATE(", "Cron @ rePACT"),
+            ("cron", "plan-mode.md", CRON_START, CRON_END,
+             "CronCreate(", "CRONCREATE(", "Cron @ plan-mode"),
+            ("cron", "peer-review.md", CRON_START, CRON_END,
+             "CronCreate(", "CRONCREATE(", "Cron @ peer-review"),
+            # State: 5 ARMING_FILES.
+            ("state", "orchestrate.md", STATE_START, STATE_END,
+             "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
+             "WriteStateFile @ orchestrate"),
+            ("state", "comPACT.md", STATE_START, STATE_END,
+             "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
+             "WriteStateFile @ comPACT"),
+            ("state", "rePACT.md", STATE_START, STATE_END,
+             "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
+             "WriteStateFile @ rePACT"),
+            ("state", "plan-mode.md", STATE_START, STATE_END,
+             "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
+             "WriteStateFile @ plan-mode"),
+            ("state", "peer-review.md", STATE_START, STATE_END,
+             "inbox-wake-state.json", "INBOX-WAKE-STATE.json",
+             "WriteStateFile @ peer-review"),
+            # Teardown: 2 TEARDOWN_FILES.
+            ("teardown", "wrap-up.md", TEARDOWN_START, TEARDOWN_END,
+             "TaskStop", "TASKSTOP", "Teardown @ wrap-up"),
+            ("teardown", "pause.md", TEARDOWN_START, TEARDOWN_END,
+             "TaskStop", "TASKSTOP", "Teardown @ pause"),
         ],
-        ids=["monitor", "cron", "state", "teardown"],
+        ids=[
+            "monitor-orchestrate", "monitor-comPACT", "monitor-rePACT",
+            "monitor-plan-mode", "monitor-peer-review",
+            "cron-orchestrate", "cron-comPACT", "cron-rePACT",
+            "cron-plan-mode", "cron-peer-review",
+            "state-orchestrate", "state-comPACT", "state-rePACT",
+            "state-plan-mode", "state-peer-review",
+            "teardown-wrap-up", "teardown-pause",
+        ],
     )
     def test_mutated_canonical_block_fails(
         self, tmp_path, fixture_kind, host_file,
@@ -204,12 +236,23 @@ class TestVerifyScriptCallList:
     def test_call_list_has_seventeen_inbox_wake_entries(self):
         text = _read(VERIFY_SCRIPT)
         # `verify_inbox_wake` is the twin function for inbox-wake entries.
-        # Count its invocations in the call list (excluding the function
-        # definition itself, which uses the name as `verify_inbox_wake()`).
-        invocation_pattern = re.compile(r"^verify_inbox_wake ", re.MULTILINE)
-        invocations = invocation_pattern.findall(text)
-        assert len(invocations) == 17, (
-            f"verify script has {len(invocations)} verify_inbox_wake "
-            "invocations, expected 17 (5 Monitor + 5 Cron + 5 Write State "
-            "File + 2 Teardown)"
+        # Anchor to start-of-line + space + double-quote: matches actual
+        # invocations (whose first arg is quoted, like `"$COMMANDS_DIR/...`)
+        # and excludes the definition `verify_inbox_wake() {`. The previous
+        # regex `^verify_inbox_wake ` (without trailing quote) would miss
+        # an invocation that drops quotes around its first arg, but the
+        # current shape is uniform — tighter anchor catches accidental
+        # paste of unquoted-arg invocations.
+        invocation_lines = re.findall(
+            r'^verify_inbox_wake "[^"]+"\s+"[^"]+"\s+"[^"]+"\s+"[^"]+"\s+"[^"]+"\s*$',
+            text,
+            re.MULTILINE,
+        )
+        assert len(invocation_lines) == 17, (
+            f"verify script has {len(invocation_lines)} verify_inbox_wake "
+            "invocations matching the canonical 5-arg quoted shape, "
+            "expected 17 (5 Monitor + 5 Cron + 5 Write State File + "
+            "2 Teardown). A loose count via `^verify_inbox_wake ` may "
+            "show more if a future refactor drops quotes around args; the "
+            "5-arg-quoted regex catches that drift."
         )
