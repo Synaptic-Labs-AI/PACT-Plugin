@@ -18,7 +18,10 @@ Monitor(
       else
         COUNT=0
       fi
-      if [ "$COUNT" != "$LAST_COUNT" ] && [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
+      if [ "$LAST_COUNT" -eq -1 ] && [ "$COUNT" -gt 0 ]; then
+        echo "INBOX_GREW count=$COUNT prev=0 ts=$NOW reason=startup"
+      fi
+      if [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
         echo "INBOX_GREW count=$COUNT prev=$LAST_COUNT ts=$NOW"
       fi
       LAST_COUNT=$COUNT

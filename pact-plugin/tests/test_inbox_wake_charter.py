@@ -57,11 +57,22 @@ class TestWakeMechanismCharterAnchor:
         )
 
     def test_orchestration_skill_references_charter_subsection(self):
-        """Cross-ref discipline: skills/orchestration/SKILL.md's Inbox Wake
-        pointer must link back to the charter file so an LLM reading
-        the skill can find the delivery-model context."""
+        """Cross-ref discipline: skills/orchestration/SKILL.md must contain
+        the `### Inbox Wake Arming` H3 pointer subsection AND a charter-file
+        reference. Substring match on the charter filename alone is too weak
+        — the file references the charter ~5x for unrelated concerns, so
+        deletion of the inbox-wake pointer would slip past a presence-only
+        check. Anchoring on both the H3 and the charter ref pins the two
+        load-bearing pieces.
+        """
         skill_text = _read(SKILLS_DIR / "orchestration" / "SKILL.md")
+        h3_anchor = "### Inbox Wake Arming"
         charter_ref = "pact-communication-charter.md"
+        assert h3_anchor in skill_text, (
+            "skills/orchestration/SKILL.md missing the "
+            f"`{h3_anchor}` H3 pointer subsection — required so an LLM "
+            "reading the skill can find the inbox-wake mechanism context"
+        )
         assert charter_ref in skill_text, (
             "skills/orchestration/SKILL.md missing reference to "
             f"{charter_ref} — cross-ref to Wake Mechanism subsection"

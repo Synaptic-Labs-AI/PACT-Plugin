@@ -17,12 +17,13 @@ recovery) is documented in `pact-plugin/tests/runbooks/inbox-monitor-wake.md`
 §7 as a manual runbook step (#444 precedent).
 """
 import json
+import re
 import time
 
 import pytest
 
 from fixtures.inbox_wake import (
-    COMMANDS_DIR, FIXTURES_DIR,
+    COMMANDS_DIR, FIXTURES_DIR, RUNBOOK_PATH,
     CRON_START, CRON_END,
     _read, _between,
 )
@@ -208,23 +209,51 @@ class TestRecoveryRuleBranchLogic:
             f"threshold is {threshold}s — fixture-construction bug"
         )
 
-    def test_state_file_schema_round_trip(self, tmp_path):
-        """STATE_FILE schema (CF7) round-trips as expected JSON: the v=1
-        envelope + monitor_task_id + cron_job_id + armed_at fields are all
-        readable by `json.loads`. Regression guard against the inline-prose
-        glue drifting to a non-JSON shape."""
-        sf = tmp_path / "inbox-wake-state.json"
-        payload = {
-            "v": 1,
-            "monitor_task_id": "test-monitor-id",
-            "cron_job_id": "test-cron-id",
-            "armed_at": int(time.time()),
-        }
-        sf.write_text(json.dumps(payload))
-        loaded = json.loads(sf.read_text())
-        assert loaded == payload
-        for field in ("v", "monitor_task_id", "cron_job_id", "armed_at"):
-            assert field in loaded, (
-                f"STATE_FILE schema missing required field {field!r}"
-            )
-        assert loaded["v"] == 1
+
+class TestRunbookLatencyBoundInvariant:
+    """Cross-document drift guard: the runbook §7 latency PASS condition
+    ('within 11 minutes of TaskStop') must equal the cron cadence + the
+    420s staleness threshold. A change to either constant in cron-block.txt
+    without a corresponding runbook update would silently invalidate the
+    runbook's PASS condition.
+    """
+
+    def test_runbook_latency_bound_matches_cron_constants(self):
+        cron_text = _read(FIXTURES_DIR / "cron-block.txt")
+        # Parse cadence from the canonical schedule literal `*/N * * * *`.
+        cadence_match = re.search(r'schedule="\*/(\d+) \* \* \* \*"', cron_text)
+        assert cadence_match, (
+            "cron-block.txt missing canonical `schedule=\"*/N * * * *\"` literal"
+        )
+        cadence_minutes = int(cadence_match.group(1))
+        cadence_seconds = cadence_minutes * 60
+
+        # The 420s threshold is referenced in the prose-pseudocode body.
+        assert "420" in cron_text, (
+            "cron-block.txt missing 420s freshness threshold"
+        )
+        threshold_seconds = 420
+
+        worst_case_seconds = cadence_seconds + threshold_seconds
+
+        runbook_text = _read(RUNBOOK_PATH)
+        # Runbook §7 PASS condition: "registry refreshes within 11 minutes
+        # of TaskStop". Pin the exact phrase so reformatting the runbook
+        # surfaces the dependency.
+        assert "within 11 minutes of TaskStop" in runbook_text, (
+            "runbook missing the '11 minutes of TaskStop' PASS-condition "
+            "phrase — drift between cron constants and the documented "
+            "latency bound is no longer invariant-checked"
+        )
+        runbook_minutes = 11
+        # Tolerance: the 5s monitor poll interval is below minute-resolution.
+        # Worst-case = cadence + threshold; runbook bound rounds up to the
+        # nearest minute. Verify equality at minute resolution.
+        assert worst_case_seconds // 60 == runbook_minutes, (
+            f"runbook documents {runbook_minutes}-minute worst-case but "
+            f"cron-block.txt encodes cadence ({cadence_seconds}s) + "
+            f"threshold ({threshold_seconds}s) = {worst_case_seconds}s "
+            f"({worst_case_seconds // 60} min). Update one or the other "
+            "to restore the cross-document invariant."
+        )
+

@@ -1,0 +1,11 @@
+## Inbox Wake — Write State File (start)
+
+After `Monitor` returns `M_ID`, write the registry state file (atomic-rename) so the cron's recovery rule can read it:
+
+```bash
+STATE_FILE="$HOME/.claude/teams/{team_name}/inbox-wake-state.json"
+STATE_TMP="$STATE_FILE.tmp"
+printf '{"v":1,"monitor_task_id":"%s","cron_job_id":"%s","armed_at":%d}\n' "$M_ID" "$C_ID" "$(date +%s)" > "$STATE_TMP" && mv -f "$STATE_TMP" "$STATE_FILE"
+```
+
+`C_ID` is captured from the `CronCreate` call below — write the state file AFTER both `Monitor` and `CronCreate` have returned successfully. If either fails, do NOT write the state file (the recovery rule's Branch A cold-start will re-arm on the next cron-fire).

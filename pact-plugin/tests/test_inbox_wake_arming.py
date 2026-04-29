@@ -12,6 +12,8 @@ test_inbox_wake_canonical_mirror.py). These tests verify the structural
 surface — sentinel pairs are present, ordered, and the inline-prose
 glue between them references the registry file.
 """
+import re
+
 import pytest
 
 from fixtures.inbox_wake import (
@@ -114,8 +116,10 @@ class TestStateFileWritePhrase:
         text = _read(COMMANDS_DIR / name)
         between = _between(text, MONITOR_END, CRON_START)
         # CF7 schema is {"v":1,"monitor_task_id":...,"cron_job_id":...,...}.
-        # Pin the v=1 marker so a future schema bump is caught.
-        assert '"v":1' in between or '"v": 1' in between, (
+        # Pin the v=1 marker so a future schema bump is caught. Permissive
+        # whitespace match — accepts `"v":1`, `"v": 1`, `"v" : 1`, etc.;
+        # rejects nothing semantically valid.
+        assert re.search(r'"v"\s*:\s*1', between), (
             f"{name} STATE_FILE write phrase missing v=1 schema marker "
             "between Monitor and Cron sentinels"
         )

@@ -145,7 +145,10 @@ Monitor(
       else
         COUNT=0
       fi
-      if [ "$COUNT" != "$LAST_COUNT" ] && [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
+      if [ "$LAST_COUNT" -eq -1 ] && [ "$COUNT" -gt 0 ]; then
+        echo "INBOX_GREW count=$COUNT prev=0 ts=$NOW reason=startup"
+      fi
+      if [ "$LAST_COUNT" -ge 0 ] && [ "$COUNT" -gt "$LAST_COUNT" ]; then
         echo "INBOX_GREW count=$COUNT prev=$LAST_COUNT ts=$NOW"
       fi
       LAST_COUNT=$COUNT
@@ -163,6 +166,8 @@ Monitor(
 
 ## Inbox Wake — Arm Monitor (end)
 
+## Inbox Wake — Write State File (start)
+
 After `Monitor` returns `M_ID`, write the registry state file (atomic-rename) so the cron's recovery rule can read it:
 
 ```bash
@@ -171,9 +176,11 @@ STATE_TMP="$STATE_FILE.tmp"
 printf '{"v":1,"monitor_task_id":"%s","cron_job_id":"%s","armed_at":%d}\n' "$M_ID" "$C_ID" "$(date +%s)" > "$STATE_TMP" && mv -f "$STATE_TMP" "$STATE_FILE"
 ```
 
-`C_ID` is captured from the `CronCreate` call below — write the state file AFTER both `Monitor` and `CronCreate` (or `CronList` lookup) have returned successfully. If either fails, do NOT write the state file (the recovery rule's Branch A cold-start will re-arm on the next cron-fire).
+`C_ID` is captured from the `CronCreate` call below — write the state file AFTER both `Monitor` and `CronCreate` have returned successfully. If either fails, do NOT write the state file (the recovery rule's Branch A cold-start will re-arm on the next cron-fire).
 
-**Conditional cron arm**: invoke `CronList()`; if any returned entry has `description == "pact-inbox-cron:{team_name}:team-lead"`, set `C_ID` to that entry's job_id and SKIP the canonical Cron block below (pass-through). Otherwise, execute the canonical Cron block to create a fresh cron, capturing the returned cron_job_id as `C_ID`.
+## Inbox Wake — Write State File (end)
+
+**Conditional cron arm**: invoke `CronList()`; if any returned entry has `description == "pact-inbox-cron:{team_name}:team-lead"`, set `C_ID` to that entry's job_id and SKIP the canonical Cron block below (pass-through). For peer-review's conditional path, treat the matching CronList entry's job_id as `C_ID` for the STATE_FILE write step above. Otherwise, execute the canonical Cron block to create a fresh cron, capturing the returned cron_job_id as `C_ID`.
 
 ## Inbox Wake — Arm Cron (start)
 
@@ -203,7 +210,7 @@ PACT inbox-wake recovery check. Run the following AS the lead, this turn:
    Branch C — STATE_FILE present + (HB_FILE missing OR HB_FILE.ts is stale (current_epoch - ts >= 420)):
      a. Read STATE_FILE.monitor_task_id as M_ID_OLD. TaskStop(M_ID_OLD). On benign error (task already stopped / not found), continue.
      b. Unlink HB_FILE if present. Unlink STATE_FILE.
-     c. Goto Branch A (cold-start the Monitor; cron does NOT need re-arming because the cron-fire that triggered THIS rule proves the cron is alive).
+     c. Goto Branch A (cold-start the Monitor; cron does NOT need re-arming because the cron-fire that triggered THIS rule proves the cron is alive). (Branch A step (c) writes a fresh STATE_FILE.)
 
 3. FAIL-OPEN: if any file Read errors (malformed JSON, schema mismatch v != 1, etc.), treat as Branch C (stop+unlink+re-arm). If any TaskStop / Monitor / CronCreate / atomic-rename errors, log to stdout for the cron-fire turn and continue with the remaining branch steps. Cost asymmetry: false-arm = one extra cache-warm fire; false-skip = unbounded blind window.
 

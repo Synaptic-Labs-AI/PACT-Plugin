@@ -11,7 +11,7 @@
 This runbook validates two empirical acceptance criteria for the inbox-monitor wake mechanism (a Monitor + Cron pair on the lead's inbox file):
 
 - **AC1 — 5s wake**: in a fresh PACT session, the lead receives an inbound `SendMessage` notification within 5 seconds of emit, every time.
-- **AC2 — gate-bypass**: Monitor stdout fires a turn on the lead's session even when that session has `isLoading=true` OR `focusedInputDialog=true` — bypassing `useInboxPoller`'s `!isLoading && !focusedInputDialog` gate at `useInboxPoller.ts:107,843,954`.
+- **AC2 — gate-bypass**: Monitor stdout fires a turn on the lead's session even when that session has `isLoading=true` OR `focusedInputDialog=true` — bypassing `useInboxPoller`'s `!isLoading && !focusedInputDialog` gate.
 
 Both ACs are manual because they test behavior of the **lead's own session under specific UI states**. A subagent cannot fabricate `isLoading=true` or `focusedInputDialog=true` on a different session from within itself, so an automated probe cannot satisfy the actual claim.
 
@@ -87,7 +87,7 @@ If FAIL: file an algedonic ALERT with the recorded `Δ` series and the Monitor s
 - **PASS**: turn fires within 10s of `T1` (5s poll + 200ms batch + turn-spawn overhead) AND the gated state was still asserted at `T2`. This confirms Monitor's stdout-line-as-event mechanism bypasses `useInboxPoller`'s `!isLoading && !focusedInputDialog` gate.
 - **FAIL**: lead's session does NOT spawn a turn until the gated state clears (i.e., the gate held; Monitor stdout did NOT bypass it).
 
-If either procedure FAILs: the design's load-bearing claim is refuted. File an algedonic ALERT with `T1`/`T2`/state evidence; the implementation transitions to BLOCKED pending redesign. Cite this runbook's recorded values and the `useInboxPoller.ts:107,843,954` source citations as the evidence triangle to surface.
+If either procedure FAILs: the design's load-bearing claim is refuted. File an algedonic ALERT with `T1`/`T2`/state evidence; the implementation transitions to BLOCKED pending redesign. Cite this runbook's recorded values and the `useInboxPoller` `!isLoading && !focusedInputDialog` gate as the evidence triangle to surface.
 
 ---
 

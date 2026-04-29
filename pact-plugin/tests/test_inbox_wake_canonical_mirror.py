@@ -15,7 +15,9 @@ import pytest
 
 from fixtures.inbox_wake import (
     FIXTURES_DIR, VERIFY_SCRIPT, _REPO_ROOT,
-    MONITOR_START, CRON_START, TEARDOWN_START, MONITOR_END,
+    MONITOR_START, MONITOR_END,
+    CRON_START, CRON_END,
+    TEARDOWN_START, TEARDOWN_END,
     _read, _between, _build_repo_subset, _run_verify,
 )
 
@@ -82,7 +84,10 @@ class TestVerifyScriptCounterTest:
     fails when content drifts. Without this, a script that returns 0
     unconditionally would silently mask all drift (phantom-green).
 
-    Single-file mutation is sufficient per architect §Section 6 LOW.
+    Mutation is parametrized across all 3 fixture types (Monitor / Cron /
+    Teardown) so a `verify_inbox_wake` failure mode that only triggers for
+    one fixture (e.g., a fixture-path bug that resolves only Monitor
+    entries to real fixtures) cannot hide as phantom-green on the others.
     """
 
     def test_baseline_passes_on_copy(self, tmp_path):
@@ -98,65 +103,103 @@ class TestVerifyScriptCounterTest:
             f"stderr:\n{result.stderr}"
         )
 
-    def test_mutated_canonical_block_fails(self, tmp_path):
-        """Mutate one byte inside orchestrate.md's canonical Monitor block
-        and assert the verify script exits non-zero. Targets the literal
-        `Monitor(` token (case change) — guaranteed to land between
-        sentinels (it's part of the canonical fixture body)."""
+    @pytest.mark.parametrize(
+        "fixture_kind,host_file,start_sentinel,end_sentinel,mutation_target,mutation_replacement,expected_failure_marker",
+        [
+            (
+                "monitor",
+                "orchestrate.md",
+                MONITOR_START, MONITOR_END,
+                "Monitor(", "MONITOR(",
+                "Monitor @ orchestrate",
+            ),
+            (
+                "cron",
+                "orchestrate.md",
+                CRON_START, CRON_END,
+                "CronCreate(", "CRONCREATE(",
+                "Cron @ orchestrate",
+            ),
+            (
+                "teardown",
+                "wrap-up.md",
+                TEARDOWN_START, TEARDOWN_END,
+                "TaskStop", "TASKSTOP",
+                "Teardown @ wrap-up",
+            ),
+        ],
+        ids=["monitor", "cron", "teardown"],
+    )
+    def test_mutated_canonical_block_fails(
+        self, tmp_path, fixture_kind, host_file,
+        start_sentinel, end_sentinel,
+        mutation_target, mutation_replacement,
+        expected_failure_marker,
+    ):
+        """Mutate one byte inside the canonical block at a specific host
+        file and assert the verify script exits non-zero with the failure
+        attributed to THIS fixture's invocation. Per-fixture parametrization
+        guards against per-fixture phantom-green (a verify_inbox_wake
+        failure mode that only triggers for one fixture kind cannot hide
+        on the others)."""
         repo_root = _build_repo_subset(tmp_path)
-        target = repo_root / "pact-plugin" / "commands" / "orchestrate.md"
+        target = repo_root / "pact-plugin" / "commands" / host_file
         text = target.read_text(encoding="utf-8")
-        # Confirm the mutation site exists between Monitor sentinels.
-        between = _between(text, MONITOR_START, MONITOR_END)
-        assert "Monitor(" in between, (
-            "test precondition broken: 'Monitor(' is no longer present "
-            "inside orchestrate.md's Monitor sentinel pair — mutation "
-            "target needs updating"
+        # Confirm the mutation site exists between the sentinels.
+        between = _between(text, start_sentinel, end_sentinel)
+        assert mutation_target in between, (
+            f"test precondition broken: {mutation_target!r} is no longer "
+            f"present inside {host_file}'s {fixture_kind} sentinel pair — "
+            "mutation target needs updating"
         )
-        # Mutate ONE occurrence (the first one inside the canonical block).
-        # We rebuild the file: replace inside the captured range only, so
-        # the mutation can never accidentally hit prose outside the sentinels.
-        mutated_between = between.replace("Monitor(", "MONITOR(", 1)
+        # Mutate ONE occurrence inside the captured range only — the
+        # mutation cannot accidentally hit prose outside the sentinels.
+        mutated_between = between.replace(mutation_target, mutation_replacement, 1)
         new_text = (
-            text[: text.index(MONITOR_START) + len(MONITOR_START)]
+            text[: text.index(start_sentinel) + len(start_sentinel)]
             + mutated_between
-            + text[text.index(MONITOR_END):]
+            + text[text.index(end_sentinel):]
         )
         assert new_text != text, "mutation produced no change"
         target.write_text(new_text, encoding="utf-8")
 
         result = _run_verify(repo_root)
         assert result.returncode != 0, (
-            "verify script returned 0 against a MUTATED canonical block — "
-            "phantom-green: the script does not actually catch drift\n"
+            f"verify script returned 0 against a MUTATED {fixture_kind} "
+            "canonical block — phantom-green: the script does not actually "
+            "catch drift on this fixture\n"
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
-        # The failure must reference the inbox-wake surface, not just any
-        # protocol entry. Catches the case where the script fails for the
-        # wrong reason (e.g., a protocol entry got corrupted in the copy).
-        assert "Monitor @ orchestrate" in result.stdout, (
-            "verify script failed but not on the mutated surface — "
-            "subset-copy may have corrupted unrelated entries"
+        # The failure must reference THIS fixture's inbox-wake surface, not
+        # just any protocol entry. Catches the case where the script fails
+        # for the wrong reason (e.g., a protocol entry got corrupted in the
+        # copy) or where the failure is attributed to a different fixture.
+        assert expected_failure_marker in result.stdout, (
+            f"verify script failed but not on the mutated {fixture_kind} "
+            f"surface (expected {expected_failure_marker!r}) — subset-copy "
+            "may have corrupted unrelated entries, or the failure landed "
+            "on a different fixture's invocation"
         )
 
 
 class TestVerifyScriptCallList:
-    """The verify script's per-callsite call list must enumerate exactly 12
-    inbox-wake entries: 5 Monitor + 5 Cron + 2 Teardown. Regression guard:
-    if a future refactor drops a callsite from the call list, the verify
-    script's PASS count drops silently from 30 to 29 but this test fails
-    loud here.
+    """The verify script's per-callsite call list must enumerate exactly 17
+    inbox-wake entries: 5 Monitor + 5 Cron + 5 Write State File + 2 Teardown.
+    Regression guard: if a future refactor drops a callsite from the call
+    list, the verify script's PASS count drops silently from 35 to 34 but
+    this test fails loud here.
     """
 
-    def test_call_list_has_twelve_inbox_wake_entries(self):
+    def test_call_list_has_seventeen_inbox_wake_entries(self):
         text = _read(VERIFY_SCRIPT)
         # `verify_inbox_wake` is the twin function for inbox-wake entries.
         # Count its invocations in the call list (excluding the function
         # definition itself, which uses the name as `verify_inbox_wake()`).
         invocation_pattern = re.compile(r"^verify_inbox_wake ", re.MULTILINE)
         invocations = invocation_pattern.findall(text)
-        assert len(invocations) == 12, (
+        assert len(invocations) == 17, (
             f"verify script has {len(invocations)} verify_inbox_wake "
-            "invocations, expected 12 (5 Monitor + 5 Cron + 2 Teardown)"
+            "invocations, expected 17 (5 Monitor + 5 Cron + 5 Write State "
+            "File + 2 Teardown)"
         )

@@ -202,6 +202,13 @@ verify_inbox_wake "$COMMANDS_DIR/rePACT.md"       "$INBOX_FIXTURES/cron-block.tx
 verify_inbox_wake "$COMMANDS_DIR/plan-mode.md"    "$INBOX_FIXTURES/cron-block.txt"     "Cron @ plan-mode"       "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
 verify_inbox_wake "$COMMANDS_DIR/peer-review.md"  "$INBOX_FIXTURES/cron-block.txt"     "Cron @ peer-review"     "Inbox Wake — Arm Cron (start)"     "Inbox Wake — Arm Cron (end)"
 
+# Inbox-wake canonical blocks (#591) — Write State File (5 callsites)
+verify_inbox_wake "$COMMANDS_DIR/orchestrate.md"  "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ orchestrate"  "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/comPACT.md"      "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ comPACT"      "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/rePACT.md"       "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ rePACT"       "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/plan-mode.md"    "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ plan-mode"    "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+verify_inbox_wake "$COMMANDS_DIR/peer-review.md"  "$INBOX_FIXTURES/state-file-block.txt"  "WriteStateFile @ peer-review"  "Inbox Wake — Write State File (start)"  "Inbox Wake — Write State File (end)"
+
 # Inbox-wake canonical blocks (#591) — Teardown (2 callsites)
 verify_inbox_wake "$COMMANDS_DIR/wrap-up.md"      "$INBOX_FIXTURES/teardown-block.txt" "Teardown @ wrap-up"     "Inbox Wake — Teardown (start)"     "Inbox Wake — Teardown (end)"
 verify_inbox_wake "$COMMANDS_DIR/pause.md"        "$INBOX_FIXTURES/teardown-block.txt" "Teardown @ pause"       "Inbox Wake — Teardown (start)"     "Inbox Wake — Teardown (end)"

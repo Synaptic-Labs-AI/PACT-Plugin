@@ -20,6 +20,7 @@ PROTOCOLS_DIR = _PLUGIN_ROOT / "protocols"
 FIXTURES_DIR = _PLUGIN_ROOT / "tests" / "fixtures" / "inbox-wake-canonical"
 SKILLS_DIR = _PLUGIN_ROOT / "skills"
 HOOKS_DIR = _PLUGIN_ROOT / "hooks"
+RUNBOOK_PATH = _PLUGIN_ROOT / "tests" / "runbooks" / "inbox-monitor-wake.md"
 VERIFY_SCRIPT = _REPO_ROOT / "scripts" / "verify-protocol-extracts.sh"
 
 ARMING_FILES = [
@@ -80,26 +81,40 @@ def _between(text: str, start: str, end: str) -> str:
     return text[s:e]
 
 
+# Source-tree spec for `_build_repo_subset`. Each entry is
+# `(source_path, dst_relative_path, kind)` where `kind` is "tree" for
+# directory copies (shutil.copytree) or "file" for single-file copies
+# (shutil.copy2). UPDATE THIS LOCKSTEP with any extension to
+# `scripts/verify-protocol-extracts.sh` that reads new sources — if the
+# script grows a new input dependency and this list isn't updated, the
+# counter-test will fail for the wrong reason (missing file in tempdir,
+# not a real script bug).
+VERIFY_SCRIPT_INPUTS = [
+    (PROTOCOLS_DIR, "pact-plugin/protocols", "tree"),
+    (COMMANDS_DIR, "pact-plugin/commands", "tree"),
+    (FIXTURES_DIR, "pact-plugin/tests/fixtures/inbox-wake-canonical", "tree"),
+    (VERIFY_SCRIPT, "scripts/verify-protocol-extracts.sh", "file"),
+]
+
+
 def _build_repo_subset(dst: Path) -> Path:
     """Copy the verify-script's source tree into a tempdir.
 
-    The script reads from these paths relative to its cwd:
-      - pact-plugin/protocols/  (existing 18 protocol entries)
-      - pact-plugin/commands/   (12 inbox-wake entries)
-      - pact-plugin/tests/fixtures/inbox-wake-canonical/  (canonical fixtures)
-      - scripts/verify-protocol-extracts.sh
-    Returns the path to the copied repo root.
+    Sources read by the script are listed in the module-level
+    `VERIFY_SCRIPT_INPUTS` constant (see comment above the constant for
+    update discipline). Returns the path to the copied repo root.
     """
     repo_dst = dst / "repo"
-    (repo_dst / "pact-plugin" / "tests" / "fixtures").mkdir(parents=True)
-    (repo_dst / "scripts").mkdir(parents=True)
-    shutil.copytree(PROTOCOLS_DIR, repo_dst / "pact-plugin" / "protocols")
-    shutil.copytree(COMMANDS_DIR, repo_dst / "pact-plugin" / "commands")
-    shutil.copytree(
-        FIXTURES_DIR,
-        repo_dst / "pact-plugin" / "tests" / "fixtures" / "inbox-wake-canonical",
-    )
-    shutil.copy2(VERIFY_SCRIPT, repo_dst / "scripts" / "verify-protocol-extracts.sh")
+    repo_dst.mkdir(parents=True)
+    for src, rel_dst, kind in VERIFY_SCRIPT_INPUTS:
+        target = repo_dst / rel_dst
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "tree":
+            shutil.copytree(src, target)
+        elif kind == "file":
+            shutil.copy2(src, target)
+        else:
+            raise ValueError(f"unknown VERIFY_SCRIPT_INPUTS kind: {kind!r}")
     return repo_dst
 
 
