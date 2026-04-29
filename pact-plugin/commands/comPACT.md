@@ -155,7 +155,14 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
 
 1. **Set up worktree** — If already in a worktree for this feature, reuse it. Otherwise, invoke `/PACT:worktree-setup` with the feature branch name. All subsequent work happens in the worktree.
 2. **Verify session team exists** — The `{team_name}` team should already exist from session start. If not, create it now: `TeamCreate(team_name="{team_name}")`.
-3. **Arm inbox-wake mechanism** — Run the canonical Monitor block, run the canonical Cron block, then write the registry state file. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
+3. **Arm inbox-wake mechanism** — see nesting note + arm-step below. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
+
+> **Nesting note**: if `/PACT:comPACT` is invoked nested within `/PACT:orchestrate` (or any other parent workflow that already armed the wake mechanism), the parent's wake-arming applies — do NOT re-arm. Detect by checking `~/.claude/teams/{team_name}/inbox-wake-state.json`. Three cases:
+> - **STATE_FILE present + HB fresh (current_epoch − HB_FILE.ts < 420)**: parent is alive and emitting heartbeats. Skip both Monitor and Cron arm; proceed to the dispatch sections below.
+> - **STATE_FILE present + HB stale (current_epoch − HB_FILE.ts >= 420)**: do NOT re-arm here — the parent's cron Branch C will detect staleness and re-arm on its next fire (≤4min). Skip both Monitor and Cron arm; proceed to the dispatch sections below.
+> - **STATE_FILE missing**: no parent armed (or teardown already ran); fall through to the canonical Monitor + Cron arm steps below as if comPACT were a top-level invocation.
+
+**Arm inbox-wake mechanism (case-3 fallthrough only)** — If you fell through to case 3 of the nesting note above (STATE_FILE missing): run the canonical Monitor block, run the canonical Cron block, then write the registry state file. Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`.
 
 ## Inbox Wake — Arm Monitor (start)
 

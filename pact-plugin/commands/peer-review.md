@@ -126,9 +126,9 @@ This trigger fires only when remediation occurred and changed things. Skip if no
 > - **STATE_FILE present + HB stale (current_epoch − HB_FILE.ts >= 420)**: do NOT re-arm here — the parent's cron Branch C will detect staleness and re-arm on its next fire (≤4min). Skip both Monitor and Cron arm; proceed to the dispatch sections below.
 > - **STATE_FILE missing**: no parent armed (or teardown already ran); fall through to the canonical Monitor arm + conditional Cron arm (CronList-then-arm) steps below as if peer-review were a top-level invocation.
 
-**Arm inbox-wake mechanism**: Run the canonical Monitor block unconditionally (Monitor cannot be enumerated by description; the recovery rule de-dupes via heartbeat-file freshness on the next cron-fire). For the cron, run `CronList` first; if a job with description `pact-inbox-cron:{team_name}:team-lead` is already present (parent workflow already armed), pass through and skip the CronCreate. Otherwise, run the canonical Cron block. After both succeed, write the STATE_FILE.
+**Arm inbox-wake mechanism (case-3 fallthrough only)**: If you fell through to case 3 of the nesting note above (STATE_FILE missing): run the canonical Monitor block, then run `CronList`; if a job with description `pact-inbox-cron:{team_name}:team-lead` is already present, set `C_ID` to that entry's job_id and skip the canonical Cron block. Otherwise, run the canonical Cron block. After both succeed, write the STATE_FILE.
 
-Capture `Monitor` task_id as `M_ID` and (if armed by this command) `CronCreate` cron_job_id as `C_ID`. If the cron was already present, read its job_id from the matching `CronList` entry and use that as `C_ID`.
+Capture `Monitor` task_id as `M_ID` and `CronCreate` cron_job_id as `C_ID`. If the cron was already present, read its job_id from the matching `CronList` entry and use that as `C_ID`.
 
 ## Inbox Wake — Arm Monitor (start)
 
