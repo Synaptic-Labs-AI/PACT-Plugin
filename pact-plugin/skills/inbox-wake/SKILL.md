@@ -14,7 +14,7 @@ Per-agent wake mechanism for PACT teams: a single Monitor task per agent watches
 
 ## Overview
 
-> **Monitor is an alarm clock, not a mailbox.** On `INBOX_GREW`, end the turn and return to idle — the platform's idle-delivery is the channel-of-record for content. Never read the inbox file or parse the wake's stdout payload yourself.
+> **Monitor is an alarm clock, not a mailbox.** On `INBOX_GREW`, end the turn and return to idle without emitting acknowledgment text or narrating the wake event — the platform's idle-delivery is the channel-of-record for content. Never read the inbox file or parse the wake's stdout payload yourself.
 >
 > **Wake surfaces between tool calls within a turn, not mid-tool.** Monitor's `INBOX_GREW` emit cannot interrupt a single in-flight tool call. The platform queues `INBOX_GREW` events that fire during a long-running tool and delivers them when the tool returns, bundled with the tool's result. The wake mechanism's promise is "messages surface between tool calls within a turn," NOT "instant interrupt anywhere." For multi-tool turns the wake reliably opens the poller-gate between tools; for single long tools (e.g., a 90-second blocking sleep) the agent is effectively unwakeable until the tool returns.
 
@@ -22,7 +22,7 @@ Problem this solves: during long-running operations, the platform's `useInboxPol
 
 Single-Monitor model, no in-session watchdog. Lifetime is session-scoped per agent. Inbox path is a single JSON file (`inboxes/{agent-name}.json`), not a directory.
 
-**Audit**: both alarm-clock paragraphs are non-negotiable. The first prevents an editing LLM from writing "parse the wake stdout to extract content" — wake is signal, not content. The second prevents an editing LLM from inferring mid-tool interrupt from "wake on inbox grow" — the substrate's actual capability is between-tool, not anywhere. Removing either paragraph silently overpromises the mechanism.
+**Audit**: both alarm-clock paragraphs are non-negotiable. The first prevents two failure modes: (a) an editing LLM writing "parse the wake stdout to extract content" — wake is signal, not content; and (b) the woken agent emitting acknowledgment text like "(Alarm.)" or "(Idle ping.)" instead of returning to silent idle — empirically observed even with the wait-in-silence feedback memory loaded, so the no-narration clause must be explicit in the principle anchor itself. The second prevents an editing LLM from inferring mid-tool interrupt from "wake on inbox grow" — the substrate's actual capability is between-tool, not anywhere. Removing either paragraph silently overpromises the mechanism.
 
 ## When to Invoke
 
