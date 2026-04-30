@@ -11,7 +11,7 @@ asserts:
 - Fail-open exit-0 + suppressOutput sentinel on malformed stdin /
   missing team_name / unexpected exception.
 - hooks.json registers the emitter under PostToolUse with matcher
-  TaskCreate|TaskUpdate|Task|Agent.
+  TaskCreate|TaskUpdate.
 """
 
 import json
@@ -88,7 +88,7 @@ def test_hooks_json_registers_emitter_under_post_tool_use():
     posts = cfg["hooks"]["PostToolUse"]
     found = [
         entry for entry in posts
-        if entry.get("matcher") == "TaskCreate|TaskUpdate|Task|Agent"
+        if entry.get("matcher") == "TaskCreate|TaskUpdate"
     ]
     assert found, "PostToolUse with required matcher not registered"
     cmds = []

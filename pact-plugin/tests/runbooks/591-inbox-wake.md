@@ -6,7 +6,7 @@ Implementation references:
 - Arm command: [pact-plugin/commands/watch-inbox.md](../../commands/watch-inbox.md)
 - Teardown command: [pact-plugin/commands/unwatch-inbox.md](../../commands/unwatch-inbox.md)
 - Charter contract surface: [pact-plugin/protocols/pact-communication-charter.md §Wake Mechanism](../../protocols/pact-communication-charter.md#wake-mechanism)
-- Lifecycle hook: `pact-plugin/hooks/wake_lifecycle_emitter.py` (PostToolUse, matcher `TaskCreate|TaskUpdate|Task|Agent`)
+- Lifecycle hook: `pact-plugin/hooks/wake_lifecycle_emitter.py` (PostToolUse, matcher `TaskCreate|TaskUpdate`)
 - Resume-arm hook: `pact-plugin/hooks/session_init.py` (Option-C resume gap closure)
 - Registry cleanup hook: `pact-plugin/hooks/session_end.py` (`cleanup_wake_registry`)
 

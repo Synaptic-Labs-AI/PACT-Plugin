@@ -193,7 +193,7 @@
         ]
       },
       {
-        "matcher": "TaskCreate|TaskUpdate|Task|Agent",
+        "matcher": "TaskCreate|TaskUpdate",
         "hooks": [
           {
             "type": "command",

@@ -156,16 +156,14 @@ def test_f7_stdout_discipline_in_monitor_block(cmd_text):
     assert ">&2" in monitor
 
 
-def test_long_single_tool_failure_mode_with_empirical_anchor(cmd_text):
+def test_long_single_tool_failure_mode_documented(cmd_text):
     fm = _section_body(cmd_text, "## Failure Modes")
     assert "Long single-tool calls block wake delivery" in fm
-    # Empirical timing anchor — without it the scope claim could be
-    # silently edited away.
-    assert (
-        "2026-04-30" in fm
-        and "00:01:34" in fm
-        and "00:02:23" in fm
-    )
+    # Pin the present-tense scope rule so the entry cannot be silently
+    # edited into a vague claim. Both phrases together establish the
+    # between-tool-call boundary.
+    assert "between tool calls" in fm
+    assert "not mid-tool" in fm
 
 
 # ---------- Alarm-clock framing (audit-anchor invariant) ----------

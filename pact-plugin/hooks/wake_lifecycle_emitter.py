@@ -4,7 +4,7 @@ Location: pact-plugin/hooks/wake_lifecycle_emitter.py
 Summary: PostToolUse hook that emits watch-inbox/unwatch-inbox directives
          for the inbox-wake command pair on first/last active-task transitions.
 Used by: hooks.json PostToolUse hook with matcher
-         `TaskCreate|TaskUpdate|Task|Agent`.
+         `TaskCreate|TaskUpdate`.
 
 Lifecycle automation:
 - On TaskCreate that transitions the team's active-task count from 0 to

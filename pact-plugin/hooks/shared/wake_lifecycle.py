@@ -119,10 +119,9 @@ def count_active_tasks(team_name: str) -> int:
     Path-traversal defense: the team_name flows into a filesystem join
     used to enumerate task files. A poisoned context file or future
     constructor change passing attacker-influenced data must not escape
-    the tasks root. is_safe_path_component is a positive allowlist
-    matching the pattern used by cleanup_wake_registry in session_end.py
-    — symmetric validation across all wake-lifecycle consumers per the
-    review-security-engineer SE-1 finding.
+    the tasks root. is_safe_path_component is a positive allowlist;
+    apply it on every wake-lifecycle consumer that joins team_name into
+    a filesystem path (mirrors session_end.py::cleanup_wake_registry).
     """
     if not is_safe_path_component(team_name):
         return 0
