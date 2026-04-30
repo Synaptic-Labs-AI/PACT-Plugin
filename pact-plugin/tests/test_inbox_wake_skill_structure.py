@@ -3,7 +3,7 @@ Structural invariants for pact-plugin/skills/inbox-wake/SKILL.md.
 
 File-parsing assertions only — no skill execution. Pin section presence,
 load-bearing literal phrases (F1/F6/F7), the alarm-clock framing,
-20/20/60 timing constants, lead-only narrowing, and negative invariants
+30/60/120 timing constants, lead-only narrowing, and negative invariants
 (no Cron, no Recovery, no symmetric per-agent tokens).
 """
 
@@ -186,16 +186,67 @@ def test_alarm_clock_no_narration_clause(skill_text):
     )
 
 
-# ---------- 20/20/60 timing fences ----------
+# ---------- 30/60/120 timing fences ----------
 
 @pytest.mark.parametrize("token", [
-    "POLL=20",
-    "QUIET_REQUIRED=20",
-    "MAX_DELAY=60",
+    "POLL=30",
+    "QUIET_REQUIRED=60",
+    "MAX_DELAY=120",
 ])
 def test_timing_constant_present(skill_text, token):
     monitor = _section_body(skill_text, "## Monitor Block")
     assert token in monitor
+
+
+def test_audit_documents_quiet_equals_two_times_poll(skill_text):
+    """Pin the QUIET = 2*POLL design rationale anchor in the Monitor
+    Block audit annotation. Without this anchor, a future LLM could
+    set QUIET == POLL (the prior 20/20/60 coincidence) and still
+    satisfy the lower-bound invariant `QUIET_REQUIRED ≥ POLL`,
+    silently regressing burst coalescing strength.
+
+    Robust substring fallback: any of these phrases anchors the ratio.
+    """
+    monitor = _section_body(skill_text, "## Monitor Block")
+    candidates = [
+        "two consecutive quiet poll cycles",
+        "two quiet poll cycles",
+        "QUIET = 2*POLL",
+        "QUIET = 2 * POLL",
+        "QUIET_REQUIRED = 2*POLL",
+        "QUIET_REQUIRED = 2 * POLL",
+        "2 × POLL",
+    ]
+    assert any(c in monitor for c in candidates), (
+        "Monitor Block audit must anchor QUIET = 2*POLL design choice. "
+        f"None of {candidates} found in §Monitor Block."
+    )
+
+
+def test_audit_documents_max_delay_ratio_to_quiet(skill_text):
+    """Pin the MAX_DELAY = 2*QUIET (= 4*POLL) design-choice anchor.
+    The lower-bound invariant `MAX_DELAY ≥ 2*POLL` does not pin the
+    specific design ratio; without an explicit anchor a future tuning
+    could pick MAX_DELAY=70 and still pass the lower-bound check
+    while breaking the sustained-traffic ceiling design intent.
+
+    Robust substring fallback: any of these phrases anchors the ratio.
+    """
+    monitor = _section_body(skill_text, "## Monitor Block")
+    candidates = [
+        "MAX_DELAY = 2*QUIET",
+        "MAX_DELAY = 2 * QUIET",
+        "MAX_DELAY = 4*POLL",
+        "MAX_DELAY = 4 * POLL",
+        "twice QUIET",
+        "2 × QUIET",
+        "4 × POLL",
+        "two QUIET",
+    ]
+    assert any(c in monitor for c in candidates), (
+        "Monitor Block audit must anchor MAX_DELAY = 2*QUIET (= 4*POLL) "
+        f"design choice. None of {candidates} found in §Monitor Block."
+    )
 
 
 # ---------- State machine edge tokens ----------

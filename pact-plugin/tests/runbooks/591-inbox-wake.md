@@ -1,6 +1,6 @@
 # Inbox-Wake Runbook (#591)
 
-End-to-end operator runbook for the lead-side inbox-wake mechanism. Use this to verify a fresh-session arm/teardown cycle, observe 20/20/60 quiet-window coalescing, diagnose failure modes, and inspect runtime state.
+End-to-end operator runbook for the lead-side inbox-wake mechanism. Use this to verify a fresh-session arm/teardown cycle, observe 30/60/120 quiet-window coalescing, diagnose failure modes, and inspect runtime state.
 
 Implementation references:
 - Skill body: [pact-plugin/skills/inbox-wake/SKILL.md](../../skills/inbox-wake/SKILL.md)
@@ -20,22 +20,22 @@ The hook registration takes effect at the **next fresh session** after these fil
 | **Arm — first active task** | PostToolUse fires after `TaskCreate` (or `TaskUpdate` with owner assignment) and the team transitions 0→1 active teammate task | `wake_lifecycle_emitter.py` emits `additionalContext` directive: *"Invoke Skill('PACT:inbox-wake') + Arm before continuing."* The lead invokes the skill on its next turn. |
 | **Arm — session resume** | `SessionStart` fires and the team's task list already has active teammate tasks (resumed session) | `session_init.py` Option-C path: hook reads `~/.claude/tasks/{team}/` filtered by `_lifecycle_relevant`; if count ≥ 1, emits unconditional Arm directive via `additionalContext`. |
 | **Teardown — last active task** | PostToolUse fires after `TaskUpdate(status=completed)` and the team transitions 1→0 active teammate tasks | `wake_lifecycle_emitter.py` emits Teardown directive: *"Invoke Skill('PACT:inbox-wake') + Teardown — no remaining teammate work."* |
-| **Teardown — operator command** | Lead invokes `/wrap-up`, `/pause`, or `/imPACT` (force-termination outcome) | Command body contains an explicit `Skill("PACT:inbox-wake") + Teardown` invocation as parallel safety net. Belt-and-suspenders against PostToolUse miss. |
+| **Teardown — operator command** | Lead invokes `/wrap-up` (after all teammate tasks have completed) | Command body contains an explicit `Skill("PACT:inbox-wake") + Teardown` invocation as a hook-silent-fail safety net. Active-task count is naturally 0 at this point, so the Teardown is harmless and useful as a catch for the rare case where the PostToolUse 1→0 directive was missed. |
 | **Registry cleanup** | `SessionEnd` fires (any session-termination path including force-termination) | `session_end.py::cleanup_wake_registry(team_name)` unlinks `inbox-wake-state.json` if present. Hook cannot reach `TaskStop` — Monitor process dies with the session. |
 
-The PostToolUse hook is the **primary** lifecycle mechanism. The command-file callsites (`/wrap-up`, `/pause`, `/imPACT`) are a **parallel safety net** — both fire under normal flow, and the skill's idempotent Arm + best-effort Teardown make double-fires harmless.
+The PostToolUse hook is the **primary** lifecycle mechanism. The `/wrap-up` command body is the **only command-file callsite** — a hook-silent-fail safety net for the all-tasks-completed exit. `/pause` and `/imPACT` deliberately do NOT invoke Teardown: those commands run with active teammate tasks remaining, and the lead's Monitor must stay armed for them. The skill's idempotent Arm + best-effort Teardown make the /wrap-up safety-net fire harmless even when the PostToolUse 1→0 directive already ran.
 
 ---
 
-## 2. 20/20/60 Behavioral Verification
+## 2. 30/60/120 Behavioral Verification
 
 The Monitor's state machine has three timing constants:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `POLL` | 20 s | Polling cadence; granularity floor for grow detection |
-| `QUIET_REQUIRED` | 20 s | Required consecutive quiet seconds before LAST_GROW emits |
-| `MAX_DELAY` | 60 s | Sustained-traffic ceiling; emits MAX_DELAY edge if a burst never reaches QUIET_REQUIRED |
+| `POLL` | 30 s | Polling cadence; granularity floor for grow detection |
+| `QUIET_REQUIRED` | 60 s | Required consecutive quiet seconds before LAST_GROW emits |
+| `MAX_DELAY` | 120 s | Sustained-traffic ceiling; emits MAX_DELAY edge if a burst never reaches QUIET_REQUIRED |
 
 The state machine emits `INBOX_GREW size=… ts=… edge=…` lines on three edges: `FIRST_GROW`, `LAST_GROW`, `MAX_DELAY`. Each emit ends the turn (stdout discipline).
 
@@ -44,18 +44,18 @@ The state machine emits `INBOX_GREW size=… ts=… edge=…` lines on three edg
 In a fresh session with at least one active teammate task (Monitor armed):
 
 1. Send a single message to the lead's inbox from a teammate (e.g., a peer ping).
-2. Observe the lead wakes within ~20–40 s with one `INBOX_GREW … edge=FIRST_GROW` emit.
-3. Wait 20+ s with no further inbox writes.
+2. Observe the lead wakes within ~30–60 s with one `INBOX_GREW … edge=FIRST_GROW` emit.
+3. Wait 60+ s with no further inbox writes.
 4. Observe the lead wakes again with one `INBOX_GREW … edge=LAST_GROW` emit.
 
 Two emits per discrete burst is the design target. Three or more emits within a quiet window indicates a state-machine regression.
 
 ### 2.2 Verify MAX_DELAY ceiling (sustained traffic)
 
-1. Have a peer write to the lead's inbox repeatedly at intervals < 20 s for at least 70 s (preventing the burst from reaching QUIET_REQUIRED).
+1. Have a peer write to the lead's inbox repeatedly at intervals < 30 s for at least 130 s (preventing the burst from reaching QUIET_REQUIRED).
 2. Observe `INBOX_GREW … edge=FIRST_GROW` at the start of the burst.
-3. Observe `INBOX_GREW … edge=MAX_DELAY` after ~60 s of sustained traffic.
-4. After traffic stops and 20 s of quiet pass, observe `INBOX_GREW … edge=LAST_GROW`.
+3. Observe `INBOX_GREW … edge=MAX_DELAY` after ~120 s of sustained traffic.
+4. After traffic stops and 60 s of quiet pass, observe `INBOX_GREW … edge=LAST_GROW`.
 
 MAX_DELAY caps unbounded suppression — without it, sustained traffic produces zero LAST_GROW emits and the lead never wakes during the burst.
 
@@ -65,7 +65,7 @@ MAX_DELAY caps unbounded suppression — without it, sustained traffic produces 
 ps -ef | grep '[i]nbox-wake' | head -5
 ```
 
-A persistent `Monitor`-spawned shell holding the `while true; sleep 20` loop should appear once the lead is armed. Process count > 1 for the same team indicates a concurrent re-arm orphan (rare; cleaned up by next Teardown).
+A persistent `Monitor`-spawned shell holding the `while true; sleep 30` loop should appear once the lead is armed. Process count > 1 for the same team indicates a concurrent re-arm orphan (rare; cleaned up by next Teardown).
 
 ---
 
@@ -190,8 +190,8 @@ The minimum cycle to confirm the mechanism works in a fresh session after merge:
 4. Confirm STATE_FILE exists: `ls ~/.claude/teams/{team_name}/inbox-wake-state.json`.
 5. Have the teammate idle, then send a peer ping that grows the lead's inbox.
 6. Observe the lead wakes with `INBOX_GREW … edge=FIRST_GROW`.
-7. After 20 s quiet, observe `INBOX_GREW … edge=LAST_GROW`.
+7. After 60 s quiet, observe `INBOX_GREW … edge=LAST_GROW`.
 8. Complete all teammate tasks; verify Teardown directive lands and STATE_FILE is unlinked.
-9. Run `/PACT:wrap-up`; verify (idempotent) the parallel-safety-net Teardown invocation completes without error against an already-torn-down state.
+9. Run `/PACT:wrap-up`; verify (idempotent) the hook-silent-fail safety-net Teardown invocation completes without error against an already-torn-down state.
 
 A successful run hits all 9 steps. Step failures map to the failure modes in §3.

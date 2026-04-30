@@ -4,8 +4,8 @@ description: |
   Arms a Monitor on the lead's inbox that fires a turn on inbox-grow, closing
   the poller-gated wake window during long-running operations. Lead-only:
   Arm at SessionStart (or on PostToolUse first-active-task transition);
-  Teardown on PostToolUse last-active-task transition (authoritative) with
-  `/wrap-up` as parallel safety net.
+  Teardown at `/wrap-up` (parallel safety net) and on PostToolUse
+  last-active-task transition.
 ---
 
 # Inbox-Wake Skill
@@ -18,7 +18,7 @@ Lead-side wake mechanism for PACT teams: a single `Monitor` task watches the lea
 >
 > **Wake surfaces between tool calls within a turn, not mid-tool.** Monitor's `INBOX_GREW` emit cannot interrupt a single in-flight tool call. The platform queues `INBOX_GREW` events that fire during a long-running tool and delivers them when the tool returns, bundled with the tool's result. The wake mechanism's promise is "messages surface between tool calls within a turn," NOT "instant interrupt anywhere." For multi-tool turns the wake reliably opens the poller-gate between tools; for single long tools (e.g., a 90-second blocking sleep) the lead is effectively unwakeable until the tool returns.
 
-Problem this solves: during long-running operations, the platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long blocking tool calls leave inbound messages stuck until the next idle boundary. See [Communication Charter Part I — Delivery Model](../../protocols/pact-communication-charter.md#delivery-model). The Monitor's stdout emit forces a turn at the next between-tool-call boundary, bounding latency by the poll interval (20 s) rather than by the next opportunistic idle.
+Problem this solves: during long-running operations, the platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long blocking tool calls leave inbound messages stuck until the next idle boundary. See [Communication Charter Part I — Delivery Model](../../protocols/pact-communication-charter.md#delivery-model). The Monitor's stdout emit forces a turn at the next between-tool-call boundary, bounding latency by the poll interval (30 s) rather than by the next opportunistic idle.
 
 Single-Monitor model, no in-session watchdog. Lifetime is scoped to the period during which the lead holds assigned, uncompleted teammate tasks. Inbox path is a single JSON file (`inboxes/team-lead.json`), not a directory.
 
@@ -31,7 +31,7 @@ Single-Monitor model, no in-session watchdog. Lifetime is scoped to the period d
 | **Arm** | First active teammate task created (PostToolUse hook detects 0→1 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
 | **Arm** | Resume into a session with active tasks already on disk | `session_init.py` `additionalContext` directive (Option-C resume gap closure) |
 | **Teardown** | Last active teammate task completed (PostToolUse hook detects 1→0 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
-| **Teardown** | `/wrap-up` command body (parallel safety net; hook-silent-fail catch) | Command-file Skill invocation |
+| **Teardown** | `/wrap-up` runs after all tasks complete (count already 0; redundant-but-correct hook-silent-fail catch) | Command-file Skill invocation in `/wrap-up` |
 
 This skill has only Arm and Teardown — no Recovery operation, no in-session watchdog. A silently-dead Monitor is undetectable in-session and the mechanism degrades to "no wake" until the next Arm fire (next first-active transition or next SessionStart-with-active-tasks).
 
@@ -62,9 +62,9 @@ PREV=0
 STATE="PENDING"
 QUIET_START=0
 BURST_START=0
-POLL=20
-QUIET_REQUIRED=20
-MAX_DELAY=60
+POLL=30
+QUIET_REQUIRED=60
+MAX_DELAY=120
 while true; do
   NOW=$(date +%s)
   if [ -f "$INBOX" ]; then
@@ -91,10 +91,10 @@ while true; do
 done
 ```
 
-State-machine semantics (POLL=20, QUIET_REQUIRED=20, MAX_DELAY=60):
+State-machine semantics (POLL=30, QUIET_REQUIRED=60, MAX_DELAY=120):
 
 - **PENDING**: idle; no recent growth. On observed grow → emit `edge=FIRST_GROW`, transition to GROWING, record `BURST_START` and `QUIET_START` at now.
-- **GROWING**: at least one grow has fired in this burst. On further grow → no emit by default; refresh `QUIET_START` at now (resets the quiet timer). If the burst has been growing continuously past `MAX_DELAY` (60 s) since `BURST_START` → emit `edge=MAX_DELAY`, reset `BURST_START` to now (sustained-traffic ceiling). On no grow for `QUIET_REQUIRED` consecutive seconds (20 s) → emit `edge=LAST_GROW`, transition back to PENDING.
+- **GROWING**: at least one grow has fired in this burst. On further grow → no emit by default; refresh `QUIET_START` at now (resets the quiet timer). If the burst has been growing continuously past `MAX_DELAY` (120 s) since `BURST_START` → emit `edge=MAX_DELAY`, reset `BURST_START` to now (sustained-traffic ceiling). On no grow for `QUIET_REQUIRED` consecutive seconds (60 s, two consecutive quiet poll cycles) → emit `edge=LAST_GROW`, transition back to PENDING.
 
 Discipline:
 - **Single-file inbox.** The inbox is `inboxes/team-lead.json` — a single JSON file, NOT a directory. Byte-grow detection via `wc -c`, NOT directory inotify.
@@ -103,7 +103,7 @@ Discipline:
 
 Spawn via `Monitor(persistent=true, cmd=<above>)`; the returned task ID is captured for STATE_FILE write.
 
-**Audit**: the design target is ONE emit per discrete burst (FIRST_GROW + LAST_GROW bracket the burst), with MAX_DELAY as the hard ceiling for sustained traffic that never reaches `QUIET_REQUIRED` quiet seconds. POLL=20 sets the granularity floor (no point checking quiet-time at finer resolution than the poll); QUIET_REQUIRED=20 means one quiet poll cycle must pass before LAST_GROW fires; MAX_DELAY=60 caps unbounded suppression. Relationship: `QUIET_REQUIRED ≥ POLL` is required (otherwise quiet-detection is sub-resolution) and `MAX_DELAY ≥ 2*POLL` is required (otherwise the ceiling fires before the natural LAST_GROW would). An editing LLM tempted to shrink POLL "for snappier wake" must adjust both QUIET_REQUIRED and MAX_DELAY to preserve the relationship; an editing LLM tempted to drop the state machine "to simplify" reintroduces wake-fire inflation under bursty traffic. F1 (single-file inbox) is the load-bearing wake trigger; an editing LLM who confuses inbox-as-directory will silently break wake delivery — the inbox path must remain `inboxes/team-lead.json`.
+**Audit**: the design target is ONE emit per discrete burst (FIRST_GROW + LAST_GROW bracket the burst), with MAX_DELAY as the hard ceiling for sustained traffic that never reaches `QUIET_REQUIRED` quiet seconds. POLL=30 sets the granularity floor (no point checking quiet-time at finer resolution than the poll); QUIET_REQUIRED=60 means TWO consecutive quiet poll cycles must pass before LAST_GROW fires; MAX_DELAY=120 caps unbounded suppression. Relationship: `QUIET_REQUIRED ≥ POLL` is required (otherwise quiet-detection is sub-resolution) and `MAX_DELAY ≥ 2*POLL` is required (otherwise the ceiling fires before the natural LAST_GROW would). Two design-choice ratios are pinned beyond the bare minimum constraints. (a) `QUIET_REQUIRED = 2*POLL` — a deliberate tightening over the minimum `QUIET_REQUIRED = POLL` (one-poll confirmation) to capture multi-message reviewer bursts with internal sub-pauses as ONE logical burst, not multiple ping-pong FIRST_GROW + LAST_GROW pairs. (b) `MAX_DELAY = 2*QUIET_REQUIRED` (equivalently `MAX_DELAY = 4*POLL`) — sets the sustained-traffic ceiling at roughly two coalesced bursts so it caps unbounded suppression without re-fragmenting natural burst boundaries. An editing LLM tempted to shrink QUIET_REQUIRED back to `= POLL` (one quiet poll cycle) must understand: that ratio fires LAST_GROW after a single quiet poll, breaking burst coalescence under reviewer-style traffic patterns where 30-50 s sub-pauses are normal. An editing LLM tempted to set `MAX_DELAY = QUIET_REQUIRED` (or smaller) refragments coalesced bursts — the ceiling would fire mid-burst, defeating the quiet-window's purpose. An editing LLM tempted to shrink POLL "for snappier wake" must adjust both QUIET_REQUIRED and MAX_DELAY to preserve all three relationships (≥ POLL, = 2*POLL for QUIET, = 2*QUIET for MAX_DELAY); an editing LLM tempted to drop the state machine "to simplify" reintroduces wake-fire inflation under bursty traffic. F1 (single-file inbox) is the load-bearing wake trigger; an editing LLM who confuses inbox-as-directory will silently break wake delivery — the inbox path must remain `inboxes/team-lead.json`.
 
 ## WriteStateFile Block
 
@@ -163,7 +163,7 @@ If `v` is not `1`, Arm treats the STATE_FILE as not-armed and cold-starts, overw
 
 ### Wake-fire inflation under bursty traffic
 
-> **Wake-fire inflation**: a naive Monitor that emits `INBOX_GREW` on every poll-observed growth would fire one turn per poll cycle during a burst (e.g., five queued teammate replies arriving within seconds → five separate turns, each consuming a tool-result roundtrip's token cost). The 20/20/60 quiet-window state machine coalesces a discrete burst into ONE turn at FIRST_GROW + ONE turn at LAST_GROW (after `QUIET_REQUIRED=20` consecutive quiet seconds). For traffic that never reaches the quiet window — sustained writes from a long-running peer — `MAX_DELAY=60` re-emits at most every 60 s so the lead does not silently accumulate an unbounded inbox-grow window. The design target is the smallest emit count that keeps wake timeliness within a 60-second worst-case ceiling.
+> **Wake-fire inflation**: a naive Monitor that emits `INBOX_GREW` on every poll-observed growth would fire one turn per poll cycle during a burst (e.g., five queued teammate replies arriving within seconds → five separate turns, each consuming a tool-result roundtrip's token cost). The 30/60/120 quiet-window state machine coalesces a discrete burst into ONE turn at FIRST_GROW + ONE turn at LAST_GROW (after `QUIET_REQUIRED=60` consecutive quiet seconds, two consecutive quiet poll cycles). For traffic that never reaches the quiet window — sustained writes from a long-running peer — `MAX_DELAY=120` re-emits at most every 120 s so the lead does not silently accumulate an unbounded inbox-grow window. The design target is the smallest emit count that keeps wake timeliness within a 120-second worst-case ceiling.
 
 **Audit**: an editing LLM tempted to "simplify" by removing the quiet-window state machine reverts to one emit per poll cycle, which is the original wake-fire inflation problem this design closes. The relationship `QUIET_REQUIRED ≥ POLL` and `MAX_DELAY ≥ 2*POLL` must be preserved on any timing tune. An editing LLM tempted to drop MAX_DELAY "because LAST_GROW will fire eventually" misses the sustained-traffic case where the inbox never goes quiet for `QUIET_REQUIRED` seconds — without MAX_DELAY, sustained traffic produces zero LAST_GROW emits and the lead never wakes during the burst.
 
@@ -173,7 +173,7 @@ If two Arm directives race (rare; first-active-transition firing concurrently wi
 
 ## Verification
 
-See dogfood runbook `pact-plugin/tests/runbooks/591-inbox-wake.md` for end-to-end verification (fresh-session arm via first-active-task transition, inbox-grow wake under quiet-window coalescing, teardown via last-active-task transition, force-termination cleanup). Structural-pattern tests in `pact-plugin/tests/test_inbox_wake_skill_structure.py` and siblings verify skill-body invariants (section presence, F1/F6/F7 phrasing, alarm-clock anchor, 20/20/60 timing fences, state-machine names).
+See dogfood runbook `pact-plugin/tests/runbooks/591-inbox-wake.md` for end-to-end verification (fresh-session arm via first-active-task transition, inbox-grow wake under quiet-window coalescing, teardown via last-active-task transition, force-termination cleanup). Structural-pattern tests in `pact-plugin/tests/test_inbox_wake_skill_structure.py` and siblings verify skill-body invariants (section presence, F1/F6/F7 phrasing, alarm-clock anchor, 30/60/120 timing fences, state-machine names).
 
 ## References
 
