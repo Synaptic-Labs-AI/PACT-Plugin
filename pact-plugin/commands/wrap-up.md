@@ -31,6 +31,7 @@ This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the prima
 
 - **Identify** any temporary files created during the session (e.g., `temp_test.py`, `debug.log`, `foo.txt`, `test_output.json`).
 - **Delete** these files to leave the workspace clean.
+- **Tear down the lead's wake mechanism**: invoke `Skill("PACT:inbox-wake")` and execute the Teardown operation with `agent_name="team-lead"`. This stops the lead's Monitor task and unlinks the `inbox-wake-state-team-lead.json` sidecar. Teardown is best-effort — tolerate `TaskStop` not-found errors per the skill's [Teardown Block](../skills/inbox-wake/SKILL.md#teardown-block). Run BEFORE step 6 (Worktree Cleanup) so the Monitor is stopped while the worktree state file is still reachable for the unlink.
 
 ## 4. Orchestration Retrospective (Second-Order Cybernetics)
 

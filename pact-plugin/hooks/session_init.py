@@ -708,6 +708,20 @@ def main():
         # wrapper at the call site.
         context_parts.append(format_plugin_banner())
 
+        # 4d. Wake-arm directive — Tier-0 additionalContext (#591). Emits
+        # unconditionally on every SessionStart fire (startup/resume/clear/compact)
+        # per "Hook-emitted directives: unconditional > conditional" Working Memory
+        # entry. Arm is idempotent: the skill's Arm operation no-ops if a valid
+        # STATE_FILE is already on disk, so re-emission is cheap. There is no
+        # watchdog in D1 — a silently-dead Monitor is undetectable in-session and
+        # the mechanism degrades to "no wake" until the next SessionStart re-arms.
+        context_parts.append(
+            'Arm wake mechanism: invoke Skill("PACT:inbox-wake") and execute the '
+            'Arm operation before any teammate dispatch. Arm is idempotent — invoke '
+            'unconditionally on every SessionStart (startup, resume, clear, compact); '
+            'the skill no-ops if a valid STATE_FILE is already on disk.'
+        )
+
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
 

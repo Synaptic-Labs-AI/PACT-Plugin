@@ -57,6 +57,52 @@ def get_project_slug() -> str:
     return ""
 
 
+def cleanup_wake_registry(team_name: str) -> None:
+    """Best-effort removal of inbox-wake STATE_FILE sidecars for the given team.
+
+    Belt-and-suspenders for force-termination edge cases (SIGKILL, crash)
+    where the primary skill-invocation Teardown path didn't run. Cannot
+    stop the orphaned Monitors — those are agent-runtime tools unreachable
+    from this hook context. Sidecar removal lets the next session's Arm
+    cold-start cleanly instead of seeing a STATE_FILE pointing at a
+    long-dead Monitor.
+
+    Per-agent STATE_FILE: every agent (lead AND every teammate spawned in
+    the team) owns its own `inbox-wake-state-{agent-name}.json`. This helper
+    globs the entire family and unlinks each — the lead's
+    `inbox-wake-state-team-lead.json` and every teammate's
+    `inbox-wake-state-{teammate-name}.json`.
+
+    D1 has no heartbeat sidecar — single STATE_FILE per agent only.
+
+    Path-traversal discipline (#492/#543 risk class):
+      - team_name validated via is_safe_path_component (existing helper).
+      - resolved path asserted under teams_root via relative_to(teams_root).
+      - Glob pattern `inbox-wake-state-*.json` is constrained to the validated
+        team_dir; Path.glob returns paths anchored to team_dir, so symlink-
+        escape via the glob result is closed by the prior relative_to check.
+      - Path.unlink wrapped in try/except OSError (missing_ok=True suppresses
+        FileNotFoundError; other OSError subtypes still raise — caught here
+        per module-wide fail-open posture).
+    """
+    if not team_name or not is_safe_path_component(team_name):
+        return  # fail-closed on invalid team name
+    teams_root = (Path.home() / ".claude" / "teams").resolve()
+    team_dir = (teams_root / team_name).resolve()
+    try:
+        team_dir.relative_to(teams_root)
+    except ValueError:
+        return  # team_dir escaped teams_root (symlink attack defense)
+    try:
+        for state_file in team_dir.glob("inbox-wake-state-*.json"):
+            try:
+                state_file.unlink(missing_ok=True)
+            except OSError:
+                pass  # fail-open per module convention
+    except OSError:
+        pass  # fail-open if glob itself fails (e.g., team_dir vanished)
+
+
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
@@ -801,6 +847,16 @@ def main():
         # Callsite short-circuit on empty team_name is the belt-and-suspenders
         # layer around the internal fail-closed guard.
         current_team_name = get_team_name()
+
+        # Wake-registry cleanup (#591). Belt-and-suspenders for force-
+        # termination paths. Cannot reach TaskStop from hook context;
+        # only the registry sidecar is removable here. D1 has no
+        # heartbeat sidecar — single STATE_FILE per agent only. Glob
+        # `inbox-wake-state-*.json` to catch lead AND every teammate's
+        # sidecar in one pass (symmetric per-agent arming, §15.4).
+        if current_team_name:
+            cleanup_wake_registry(current_team_name)
+
         teams_r, teams_s = 0, 0
         tasks_r, tasks_s = 0, 0
         teams_reaper_ran = False
