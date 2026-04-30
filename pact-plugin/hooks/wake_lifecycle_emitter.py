@@ -18,18 +18,20 @@ Lifecycle automation:
   TaskUpdate(completed) leaving residual active tasks): no directive
   emitted.
 
-Pre/post derivation:
+Transition detection (post-only):
 - post = count_active_tasks(team_name) — the count AFTER the tool's
-  effect is on disk.
-- pre = post adjusted by reverse-applying this tool's effect:
-    * TaskCreate: pre = post - 1 if the just-created task is
-      _lifecycle_relevant else pre = post.
-    * TaskUpdate(status=completed): pre = post + 1 if the just-completed
-      task WAS _lifecycle_relevant under its non-completed status else
-      pre = post.
-- Carve-out filters apply identically pre/post (signal-task type and
-  exempt-agent owner do not depend on status), so a task counted at
-  pre is still counted at post unless its status changed.
+  effect is on disk. count_active_tasks already filters out signal-
+  tasks and self-complete-exempt agents, so post is the lifecycle-
+  relevant count.
+- TaskCreate + post == 1 → emit Arm (a TaskCreate that lifts the count
+  to 1 must have been the first lifecycle-relevant task; carve-out
+  creations leave post unchanged at 0).
+- TaskUpdate(status=completed) + post == 0 → emit Teardown. Skill's
+  Teardown is idempotent (no-op if STATE_FILE absent), so over-eager
+  emission on edge cases (completion of a never-counted signal-task
+  while post==0) is benign.
+- Any other tool fire (non-status TaskUpdate, Task/Agent spawn,
+  TaskCreate at post != 1, TaskUpdate(completed) at post > 0): no-op.
 
 Output schema (load-bearing):
 {
@@ -66,10 +68,7 @@ if str(_hooks_dir) not in sys.path:
 
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
-from shared.wake_lifecycle import (
-    _lifecycle_relevant,
-    count_active_tasks,
-)
+from shared.wake_lifecycle import count_active_tasks
 
 # Suppress the false "hook error" UI surface on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -97,45 +96,6 @@ _TEARDOWN_DIRECTIVE = (
 # active-task count (the TaskCreate that preceded the spawn already
 # accounted for the task), so they fall through to the no-op path.
 _TASK_MUTATING_TOOLS = ("TaskCreate", "TaskUpdate")
-
-
-def _read_task_from_disk(team_name: str, task_id: str) -> dict[str, Any] | None:
-    """
-    Read a single task JSON from ~/.claude/tasks/{team_name}/{task_id}.json.
-
-    Returns None on any read or parse failure; never raises. Used to
-    determine the just-mutated task's lifecycle relevance (pre-mutation
-    state for TaskUpdate, post-mutation state for TaskCreate).
-
-    Path-traversal defense: team_name and task_id flow into a filesystem
-    join. Both are short string components; this function applies a
-    minimal traversal-fragment strip via Path() composition with
-    explicit existence check. Upstream callers in this module short-
-    circuit on empty / non-string inputs before reaching here.
-    """
-    if not isinstance(team_name, str) or not team_name:
-        return None
-    if not isinstance(task_id, str) or not task_id:
-        return None
-    # Reject obvious traversal attempts in the task_id component. The
-    # team_name comes from get_team_name() which is already canonicalized
-    # at session_init.py team-creation time; task_id comes from the
-    # tool_input/tool_response payloads, which are platform-controlled
-    # but defense-in-depth here is cheap.
-    if "/" in task_id or "\\" in task_id or ".." in task_id:
-        return None
-
-    task_path = Path.home() / ".claude" / "tasks" / team_name / f"{task_id}.json"
-    if not task_path.exists():
-        return None
-    try:
-        content = task_path.read_text(encoding="utf-8")
-        task = json.loads(content)
-    except (IOError, OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(task, dict):
-        return None
-    return task
 
 
 def _extract_task_id(input_data: dict[str, Any]) -> str | None:
@@ -208,52 +168,36 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     """
     Return the directive prose to emit, or None for no-op.
 
-    Drives the pre/post derivation: count_active_tasks is the post
-    state; the just-mutated task's lifecycle relevance reverses the
-    effect to derive pre. Emit Arm on 0->1, Teardown on 1->0, no-op
-    on every other shape.
+    Post-only transition detection:
+    - TaskCreate + post == 1 → Arm.
+    - TaskUpdate(status=completed) + post == 0 → Teardown.
+
+    count_active_tasks already filters carve-outs (signal-tasks,
+    self-complete-exempt owners), so post == 1 after a TaskCreate
+    means the create added the first lifecycle-relevant task, and
+    post == 0 after a status-completed TaskUpdate means the team
+    has no remaining lifecycle-relevant work. The skill's Arm and
+    Teardown are both idempotent, so any over-eager emit on edge
+    cases is benign.
     """
     tool_name = input_data.get("tool_name")
     if tool_name not in _TASK_MUTATING_TOOLS:
         return None
 
-    task_id = _extract_task_id(input_data)
-    if not task_id:
+    if not _extract_task_id(input_data):
         return None
 
     post = count_active_tasks(team_name)
-    task = _read_task_from_disk(team_name, task_id)
-    if task is None:
-        return None
 
     if tool_name == "TaskCreate":
-        # The new task is on disk. If it counts as lifecycle_relevant,
-        # pre = post - 1; otherwise the create did not change the count.
-        if not _lifecycle_relevant(task):
-            return None
-        pre = post - 1
-        if pre == 0 and post == 1:
+        if post == 1:
             return _ARM_DIRECTIVE
         return None
 
     # tool_name == "TaskUpdate"
     if not _is_status_completed_update(input_data):
-        # Non-status TaskUpdate (owner, metadata, subject, etc.).
         return None
-
-    # The task is already at status=completed on disk; lifecycle_relevant
-    # currently returns False for it. Reverse-apply: the task WAS
-    # lifecycle_relevant if its non-status carve-outs (signal-type,
-    # exempt-owner) would have admitted it. Construct a hypothetical
-    # pre-completion view: same task with status=in_progress.
-    hypothetical_pre = dict(task)
-    hypothetical_pre["status"] = "in_progress"
-    if not _lifecycle_relevant(hypothetical_pre):
-        # The just-completed task would not have counted under any
-        # active status; the completion did not change the active count.
-        return None
-    pre = post + 1
-    if pre == 1 and post == 0:
+    if post == 0:
         return _TEARDOWN_DIRECTIVE
     return None
 

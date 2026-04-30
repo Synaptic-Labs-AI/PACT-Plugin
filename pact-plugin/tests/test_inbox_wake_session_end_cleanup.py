@@ -168,3 +168,72 @@ def test_cleanup_wake_registry_call_site_in_session_end(src):
     cleanup_wake_registry is wired into the main session_end flow with
     the current team_name."""
     assert "cleanup_wake_registry(current_team_name)" in src
+
+
+# ---------- Behavioral: cleanup_wake_registry actually fires from session_end.main ----------
+
+import subprocess  # noqa: E402  — used by the behavioral test below
+import sys  # noqa: E402
+
+SESSION_END_HOOK = (
+    Path(__file__).resolve().parent.parent / "hooks" / "session_end.py"
+)
+
+
+def test_session_end_main_unlinks_state_file_via_callsite(tmp_path):
+    """Behavioral pin (B4): structurally pinning the callsite is
+    false-RED-prone on benign refactor (rename of the helper, swap to
+    keyword-arg call, etc.). This pipes synthesized stdin through
+    session_end.main() in a subprocess, with a real STATE_FILE staged
+    on disk under a synthesized HOME. After the hook returns, the
+    state file must be gone — proves the callsite reaches the actual
+    cleanup helper, not just that the source line is present."""
+    home = tmp_path / "home"
+    home.mkdir()
+    # Build a complete pact-session-context so session_end resolves
+    # team_name without falling through to the empty-team_name branch
+    # that skips the callsite.
+    sid = "test-session-id-1234"
+    pdir = "/tmp/test-end-flow"
+    team = "pact-cleanup-target"
+    slug = Path(pdir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / sid
+    sess_dir.mkdir(parents=True)
+    (sess_dir / "pact-session-context.json").write_text(
+        '{{"team_name":"{0}","session_id":"{1}","project_dir":"{2}",'
+        '"plugin_root":"","started_at":"2026-04-30T00:00:00Z"}}'.format(
+            team, sid, pdir
+        ),
+        encoding="utf-8",
+    )
+    # Stage the team dir with a STATE_FILE that the callsite must remove.
+    team_dir = home / ".claude" / "teams" / team
+    team_dir.mkdir(parents=True)
+    state_file = team_dir / "inbox-wake-state.json"
+    state_file.write_text(
+        '{"v":1,"monitor_task_id":"x","armed_at":"2026-04-30T00:00:00Z"}',
+        encoding="utf-8",
+    )
+    assert state_file.exists()
+
+    payload = '{"session_id":"' + sid + '","cwd":"' + pdir + '"}'
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
+    proc = subprocess.run(
+        [sys.executable, str(SESSION_END_HOOK)],
+        input=payload.encode("utf-8"),
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+    # session_end may print warnings or journal-failure notes on stderr;
+    # exit code is the contract. Best-effort cleanup means non-zero is
+    # not expected under our happy-path setup.
+    assert proc.returncode == 0, (
+        f"session_end exited {proc.returncode}; stderr={proc.stderr!r}"
+    )
+    # The behavioral assertion: state file must be gone.
+    assert not state_file.exists(), (
+        "session_end.main did not unlink the STATE_FILE — callsite "
+        "may be unreachable or guarded out"
+    )

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
+from shared.session_state import is_safe_path_component
 
 # Signal-task types — inline literal mirrors the convention at
 # agent_handoff_emitter.py:78 and task_utils.find_blockers. The carve-out
@@ -103,7 +104,8 @@ def count_active_tasks(team_name: str) -> int:
     Count lifecycle-relevant tasks under ~/.claude/tasks/{team_name}/.
 
     Returns 0 when:
-      - team_name is empty or non-string,
+      - team_name fails is_safe_path_component (rejects empty, non-string,
+        traversal fragments, separators, controls, whitespace),
       - the tasks directory does not exist,
       - any unexpected error reading the directory.
 
@@ -113,8 +115,16 @@ def count_active_tasks(team_name: str) -> int:
     Pure function; never raises. Fail-open as "no active tasks" — the
     wake mechanism degrades to baseline idle-poll on read failure rather
     than crashing the calling hook (livelock-safety > observability).
+
+    Path-traversal defense: the team_name flows into a filesystem join
+    used to enumerate task files. A poisoned context file or future
+    constructor change passing attacker-influenced data must not escape
+    the tasks root. is_safe_path_component is a positive allowlist
+    matching the pattern used by cleanup_wake_registry in session_end.py
+    — symmetric validation across all wake-lifecycle consumers per the
+    review-security-engineer SE-1 finding.
     """
-    if not isinstance(team_name, str) or not team_name:
+    if not is_safe_path_component(team_name):
         return 0
 
     tasks_dir = Path.home() / ".claude" / "tasks" / team_name

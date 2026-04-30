@@ -65,3 +65,97 @@ def test_directive_appended_to_context_parts(src):
     assert (
         "Active teammate tasks detected on session start." in src
     )
+
+
+# ---------- Behavioral: session_init Arm-emit gate fires only when count>0 ----------
+
+import json  # noqa: E402
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+SESSION_INIT_HOOK = SESSION_INIT_PATH
+
+
+_ARM_DIRECTIVE_PHRASE = "Active teammate tasks detected on session start."
+
+
+def _stage_pact_session(home: Path, team: str, sid: str, pdir: str) -> None:
+    slug = Path(pdir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / sid
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    (sess_dir / "pact-session-context.json").write_text(
+        json.dumps({
+            "team_name": team,
+            "session_id": sid,
+            "project_dir": pdir,
+            "plugin_root": "",
+            "started_at": "2026-04-30T00:00:00Z",
+        }),
+        encoding="utf-8",
+    )
+
+
+def _stage_active_task(home: Path, team: str) -> None:
+    tasks_dir = home / ".claude" / "tasks" / team
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    (tasks_dir / "1.json").write_text(
+        json.dumps({"id": "1", "status": "in_progress", "owner": "backend-coder"}),
+        encoding="utf-8",
+    )
+
+
+def _run_session_init(home: Path, sid: str, pdir: str, source: str = "resume") -> dict:
+    payload = json.dumps({"session_id": sid, "cwd": pdir, "source": source})
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update({"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
+    proc = subprocess.run(
+        [sys.executable, str(SESSION_INIT_HOOK)],
+        input=payload.encode("utf-8"),
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"session_init exited {proc.returncode}; stderr={proc.stderr!r}"
+    return json.loads(proc.stdout.decode("utf-8") or "{}")
+
+
+def test_session_init_omits_arm_directive_when_no_active_tasks(tmp_path):
+    """Behavioral pin (B4): Arm-emit gate must fire only when
+    count_active_tasks > 0. Pure-structural source-grep is false-RED-prone
+    on benign refactor (e.g., extracting a helper); subprocess execution
+    confirms the gate's actual emit semantics. With zero active tasks
+    on disk, the directive prose must NOT appear in additionalContext."""
+    home = tmp_path / "home"; home.mkdir()
+    # session_id[:8] filters to [a-f0-9-]; use a pure-hex session_id so
+    # generate_team_name returns a predictable team name.
+    sid = "abcdef01-no-tasks-here"
+    pdir = "/tmp/pi-empty"
+    team = "pact-abcdef01"
+    _stage_pact_session(home, team, sid, pdir)
+    # Stage the team's tasks dir but leave it empty.
+    (home / ".claude" / "tasks" / team).mkdir(parents=True)
+    out = _run_session_init(home, sid, pdir)
+    additional = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+    assert _ARM_DIRECTIVE_PHRASE not in additional, (
+        "Arm directive emitted with zero active tasks — gate is broken"
+    )
+
+
+def test_session_init_emits_arm_directive_when_active_tasks_present(tmp_path):
+    """Symmetric behavioral pin: with one active task on disk,
+    additionalContext must carry the Arm directive's precondition phrase."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "deadbeef-active-task-present"
+    pdir = "/tmp/pi-active"
+    team = "pact-deadbeef"
+    _stage_pact_session(home, team, sid, pdir)
+    _stage_active_task(home, team)
+    out = _run_session_init(home, sid, pdir)
+    additional = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+    assert _ARM_DIRECTIVE_PHRASE in additional, (
+        "Arm directive missing despite active task on disk — gate is broken"
+    )
+    # And the directive references the canonical skill slug + Arm op.
+    assert 'Skill("PACT:inbox-wake")' in additional
+    assert "execute the Arm operation" in additional

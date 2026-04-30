@@ -208,6 +208,36 @@ def test_arm_includes_idempotency_clause(tmp_path):
     assert "idempotent" in out["hookSpecificOutput"]["additionalContext"]
 
 
+def test_arm_directive_contains_precondition_phrase(tmp_path):
+    """Pin the canonical Arm precondition prose so an editing LLM
+    stripping it for terseness loses the directive's WHY-context.
+    Symmetric with session_init's pinned 'Active teammate tasks
+    detected on session start' phrase."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "t"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "1", status="pending", owner="x")
+    out = _emit_output({
+        "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
+        "tool_input": {"taskId": "1"}, "tool_response": {"id": "1"},
+    }, home)
+    assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_teardown_directive_contains_precondition_phrase(tmp_path):
+    """Pin the canonical Teardown precondition prose."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "t"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "1", status="completed", owner="x")
+    out = _emit_output({
+        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {"id": "1", "status": "completed"},
+    }, home)
+    assert "Last active teammate task completed" in out["hookSpecificOutput"]["additionalContext"]
+
+
 def test_no_op_on_second_active_task_create(tmp_path):
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
@@ -299,8 +329,13 @@ def test_no_teardown_on_non_status_taskupdate(tmp_path):
     assert out == {"suppressOutput": True}
 
 
-def test_no_teardown_on_completion_of_signal_task(tmp_path):
-    """Completing a signal-task that never counted does not change tally."""
+def test_teardown_emits_on_signal_task_completion_at_post_zero(tmp_path):
+    """A1 simplification (see emitter docstring): post-only transition
+    detector emits Teardown on any status=completed TaskUpdate when
+    post==0, including the signal-task completion case where the task
+    never contributed to the active count. Skill's Teardown is
+    idempotent (no-op if STATE_FILE absent), so this over-eager emit
+    is benign by design — replaces the prior hypothetical_pre filter."""
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
     _write_session_context(home, sid, pdir, team)
@@ -315,7 +350,9 @@ def test_no_teardown_on_completion_of_signal_task(tmp_path):
         "tool_input": {"taskId": "sig", "status": "completed"},
         "tool_response": {"id": "sig", "status": "completed"},
     }, home)
-    assert out == {"suppressOutput": True}
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "Teardown" in hso["additionalContext"]
 
 
 # ---------- _decide_directive direct unit coverage ----------

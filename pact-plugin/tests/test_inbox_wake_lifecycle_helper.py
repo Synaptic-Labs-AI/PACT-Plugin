@@ -176,3 +176,71 @@ def test_lifecycle_relevant_never_raises():
         except Exception as exc:  # pragma: no cover
             pytest.fail(f"_lifecycle_relevant raised on {bad!r}: {exc}")
         assert isinstance(result, bool)
+
+
+# Adversarial-shape sweep across the (status, owner, metadata) cartesian
+# product. Pins pure-never-raises for the predicate against arbitrary
+# task shapes — required to gate the future try/except cleanup at
+# session_init.py:728-730 (the gate depends on the WHOLE call chain
+# being raise-free, not just the count_active_tasks entry point).
+_BAD_STATUSES = [
+    None, "", "kaboom", 42, 3.14, [], {}, True, b"bytes",
+]
+_BAD_OWNERS = [
+    None, "", 42, [], {}, ["secretary"], {"name": "x"}, True,
+]
+_BAD_METADATAS = [
+    "string", 42, [], True,
+    {"completion_type": 42},  # wrong type for completion_type
+    {"completion_type": "signal", "type": []},  # wrong type for type
+    {"completion_type": "signal", "type": "blocker", "extra": object()},
+    {"nested": {"deep": {"very": "deep"}}},
+]
+
+
+@pytest.mark.parametrize("status", _BAD_STATUSES)
+def test_lifecycle_relevant_never_raises_on_adversarial_status(status):
+    task = {"status": status, "owner": "x", "metadata": {}}
+    try:
+        result = wl._lifecycle_relevant(task)
+    except Exception as exc:  # pragma: no cover
+        pytest.fail(f"_lifecycle_relevant raised on status={status!r}: {exc}")
+    assert isinstance(result, bool)
+
+
+@pytest.mark.parametrize("owner", _BAD_OWNERS)
+def test_lifecycle_relevant_never_raises_on_adversarial_owner(owner):
+    task = {"status": "in_progress", "owner": owner, "metadata": {}}
+    try:
+        result = wl._lifecycle_relevant(task)
+    except Exception as exc:  # pragma: no cover
+        pytest.fail(f"_lifecycle_relevant raised on owner={owner!r}: {exc}")
+    assert isinstance(result, bool)
+
+
+@pytest.mark.parametrize("metadata", _BAD_METADATAS)
+def test_lifecycle_relevant_never_raises_on_adversarial_metadata(metadata):
+    task = {"status": "in_progress", "owner": "x", "metadata": metadata}
+    try:
+        result = wl._lifecycle_relevant(task)
+    except Exception as exc:  # pragma: no cover
+        pytest.fail(f"_lifecycle_relevant raised on metadata={metadata!r}: {exc}")
+    assert isinstance(result, bool)
+
+
+@pytest.mark.parametrize("task", [
+    {"status": "in_progress", "owner": ["secretary"], "metadata": []},
+    {"status": [], "owner": {}, "metadata": "string"},
+    {"status": None, "owner": None, "metadata": None},
+    {"status": "pending", "owner": "kaboom", "metadata": {"completion_type": []}},
+    {"status": 42, "owner": 99, "metadata": {"type": []}},
+])
+def test_lifecycle_relevant_never_raises_on_combined_adversarial_shapes(task):
+    """Cross-field adversarial combinations — catches interactions
+    between the status gate, owner-membership check, and metadata
+    parse paths."""
+    try:
+        result = wl._lifecycle_relevant(task)
+    except Exception as exc:  # pragma: no cover
+        pytest.fail(f"_lifecycle_relevant raised on {task!r}: {exc}")
+    assert isinstance(result, bool)
