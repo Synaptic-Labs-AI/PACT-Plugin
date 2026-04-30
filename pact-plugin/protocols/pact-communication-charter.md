@@ -20,6 +20,19 @@ The rules below govern how messages delivered via this tool actually behave.
 - The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
 - `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) for the canonical pattern).
 
+### Wake Mechanism
+
+The platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long-running tool calls leave inbound messages stuck until the next idle boundary. The lead-side wake mechanism (lead-only — teammates rely on the standard idle-delivery channel) closes this gap with a `Monitor` that watches the lead's inbox file and emits a turn at the next between-tool-call boundary.
+
+Implementation: [Skill("PACT:inbox-wake")](../skills/inbox-wake/SKILL.md). The skill's [§Overview](../skills/inbox-wake/SKILL.md#overview) and [§Failure Modes](../skills/inbox-wake/SKILL.md#failure-modes) anchor the full contract; the rules below summarize the surface that callers and authors of related protocols need:
+
+- **Lead-only.** Exactly one Monitor per session, scoped to the period during which the lead holds assigned, uncompleted teammate tasks. No teammate-side wake.
+- **Between-tool-call, not mid-tool.** The wake surfaces queued messages between tool calls within a turn. Events that fire during a single long-running tool call (e.g., a 90-second blocking `sleep`) are queued and delivered when the tool returns, bundled with the tool's result. The wake does NOT interrupt a tool mid-call.
+- **Signal, not content.** The Monitor's stdout emit is an alarm clock that ends the turn so the platform's idle-delivery channel surfaces queued messages. The lead does not read the inbox file or parse the wake's stdout payload — content arrives via the standard inbox channel.
+- **No-narration on wake.** On wake, the lead returns to silent idle. No "(Alarm.)" / "(Idle ping.)" acknowledgment text — that would consume the idle slot the next inbound message needs.
+- **Arm and Teardown.** Arm fires on PostToolUse first-active-task transition and on session resume with active tasks already on disk. Teardown fires on PostToolUse last-active-task transition, on `/wrap-up` / `/pause` / `/imPACT` force-termination paths (parallel safety net), and on `session_end` registry cleanup.
+- **No watchdog.** The mechanism degrades to no-wake on silent Monitor death until the next Arm fire — no in-session detection. The trade-off is documented in the skill's [§Failure Modes — Silent Monitor death](../skills/inbox-wake/SKILL.md#silent-monitor-death).
+
 ### Lead-Side Discipline — Verify Before Dispatching
 
 #### Verify State Before Correction

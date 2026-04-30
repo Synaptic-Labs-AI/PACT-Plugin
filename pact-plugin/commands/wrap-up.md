@@ -95,6 +95,8 @@ The `session_consolidated` write fires under the `true` branch regardless of whe
 
 ## 6. Worktree Cleanup
 
+Invoke `Skill("PACT:inbox-wake")` and execute the Teardown operation before worktree cleanup. This stops the lead's Monitor task and unlinks the STATE_FILE; it is the parallel-safety-net path that runs alongside the PostToolUse 1→0 last-active Teardown directive. Idempotent and best-effort — see [skills/inbox-wake/SKILL.md §Teardown Block](../skills/inbox-wake/SKILL.md#teardown-block).
+
 Check for open PRs associated with the current worktree branch:
 - **PR merged or no PR**: Invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.
 - **PR still open**: Skip worktree cleanup. Write a `session_paused` event to the journal (see the `session_paused` field table in [pause.md step 5](pause.md#5-write-paused-state-to-session-journal) for the event schema — wrap-up writes only the `session_paused` event here; the `session_consolidated` event was already emitted in step 5 above). Set `consolidation_completed: true` because wrap-up steps 1-4 already performed memory consolidation. Report: "Worktree preserved — PR still open. Use `/PACT:pause` to consolidate and pause, or `/PACT:peer-review` to continue review."
