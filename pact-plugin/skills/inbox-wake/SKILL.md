@@ -4,8 +4,8 @@ description: |
   Arms a Monitor on the lead's inbox that fires a turn on inbox-grow, closing
   the poller-gated wake window during long-running operations. Lead-only:
   Arm at SessionStart (or on PostToolUse first-active-task transition);
-  Teardown at session-end paths (`/wrap-up`, `/pause`, `/imPACT`) and on
-  PostToolUse last-active-task transition.
+  Teardown on PostToolUse last-active-task transition (authoritative) with
+  `/wrap-up` as parallel safety net.
 ---
 
 # Inbox-Wake Skill
@@ -31,7 +31,7 @@ Single-Monitor model, no in-session watchdog. Lifetime is scoped to the period d
 | **Arm** | First active teammate task created (PostToolUse hook detects 0→1 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
 | **Arm** | Resume into a session with active tasks already on disk | `session_init.py` `additionalContext` directive (Option-C resume gap closure) |
 | **Teardown** | Last active teammate task completed (PostToolUse hook detects 1→0 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
-| **Teardown** | `/wrap-up`, `/pause`, `/imPACT` command bodies (parallel safety net) | Command-file Skill invocation |
+| **Teardown** | `/wrap-up` command body (parallel safety net; hook-silent-fail catch) | Command-file Skill invocation |
 
 This skill has only Arm and Teardown — no Recovery operation, no in-session watchdog. A silently-dead Monitor is undetectable in-session and the mechanism degrades to "no wake" until the next Arm fire (next first-active transition or next SessionStart-with-active-tasks).
 

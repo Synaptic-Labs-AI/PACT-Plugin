@@ -1,16 +1,25 @@
 """
 Cross-file consistency invariants for the inbox-wake feature.
 
-Pin the Skill("PACT:inbox-wake") + Teardown invocations across the
-three command bodies that own session-end paths (wrap-up, pause,
-imPACT) and the charter §Wake Mechanism cross-ref to the skill body.
-F7 cross-file consistency: charter must echo "between tool calls,
-not mid-tool" so SKILL.md and charter remain aligned.
+Pin the Skill("PACT:inbox-wake") + Teardown invocation in wrap-up.md
+(the only command body that retains the callsite post-cycle-2; runs
+after all tasks complete, so count is already 0 and the callsite is
+both correct and useful as a hook-silent-fail safety net).
+
+Negative assertions for imPACT.md and pause.md: these were removed in
+F3-followup (Option C) because their unconditional Teardown destroyed
+still-needed Monitors when other teammates remained active. The
+PostToolUse 1→0 hook handles the lifecycle automatically. The
+negative assertions here are a regression guard against future
+re-introduction.
+
+Charter §Wake Mechanism cross-ref pins ensure SKILL.md and charter
+remain aligned on lead-only scope, F7 between-tool-calls scope, and
+signal-not-content corollary.
 """
 
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / "commands"
@@ -23,26 +32,44 @@ def _read(path: Path) -> str:
 
 # ---------- Teardown invocations in command bodies ----------
 
-@pytest.mark.parametrize("command_file", [
-    "wrap-up.md",
-    "pause.md",
-    "imPACT.md",
-])
-def test_command_invokes_inbox_wake_teardown(command_file):
-    text = _read(COMMANDS_DIR / command_file)
+def test_wrap_up_invokes_inbox_wake_teardown():
+    """wrap-up.md retains the Teardown callsite — it fires after all
+    tasks are completed, so the count is already 0 and the callsite is
+    both correct and useful as a hook-silent-fail safety net."""
+    text = _read(COMMANDS_DIR / "wrap-up.md")
     assert 'Skill("PACT:inbox-wake")' in text, (
-        f"{command_file} missing Skill slug invocation"
+        "wrap-up.md missing Skill slug invocation"
     )
     assert "Teardown" in text, (
-        f"{command_file} missing Teardown operation reference"
+        "wrap-up.md missing Teardown operation reference"
     )
 
 
-def test_impact_teardown_is_force_termination_scoped():
-    """imPACT's Teardown is conditional on force-termination dropping
-    the team's active count to zero — confirm the scope-limiting prose."""
+def test_impact_md_does_not_invoke_inbox_wake():
+    """F3-followup (Option C): imPACT.md's force-termination Teardown
+    was removed because it destroyed still-needed Monitors when other
+    teammates remained active. The PostToolUse 1→0 hook handles the
+    lifecycle automatically. This negative assertion is a regression
+    guard against future re-introduction."""
     text = _read(COMMANDS_DIR / "imPACT.md")
-    assert "force-termination" in text or "force termination" in text
+    assert 'Skill("PACT:inbox-wake")' not in text, (
+        "imPACT.md must NOT invoke Skill(\"PACT:inbox-wake\") — "
+        "unconditional Teardown destroys Monitors needed by remaining "
+        "teammates. PostToolUse 1→0 hook handles lifecycle automatically."
+    )
+
+
+def test_pause_md_does_not_invoke_inbox_wake():
+    """F3-followup (Option C): pause.md's pre-shutdown Teardown was
+    removed for the same reason as imPACT.md — destroying Monitors
+    needed by remaining teammates regresses the failure mode #591 was
+    designed to fix."""
+    text = _read(COMMANDS_DIR / "pause.md")
+    assert 'Skill("PACT:inbox-wake")' not in text, (
+        "pause.md must NOT invoke Skill(\"PACT:inbox-wake\") — "
+        "unconditional Teardown destroys Monitors needed by remaining "
+        "teammates. PostToolUse 1→0 hook handles lifecycle automatically."
+    )
 
 
 # ---------- Charter cross-reference ----------
