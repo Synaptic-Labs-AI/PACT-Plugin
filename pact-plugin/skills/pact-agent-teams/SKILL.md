@@ -391,6 +391,8 @@ Before returning your final output:
 
 When you receive a `shutdown_request`:
 
+> Before approving `shutdown_request`, invoke `Skill("PACT:inbox-wake")` and execute the Teardown operation with `agent_name="<your-name>"`. This stops your Monitor task (`TaskStop`, ignoring not-found errors) and unlinks your `inbox-wake-state-<your-name>.json` sidecar. Teardown is best-effort — if your Monitor died silently mid-session (per §Failure Modes), `TaskStop` returns a tool_use_error that you tolerate and continue to unlink. Approving shutdown_request without prior Teardown leaves your Monitor process orphaned in the harness's runtime store; it harmlessly dies with the session-process termination, but the registry sidecar then requires belt-and-suspenders cleanup via the lead's session_end.py `cleanup_wake_registry` glob.
+
 | Situation | Response |
 |-----------|----------|
 | Idle, consultant with no active questions, or domain no longer relevant | Approve |

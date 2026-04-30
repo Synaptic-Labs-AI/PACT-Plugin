@@ -116,6 +116,18 @@ Before resending an apparently-unacknowledged message, verify the addressee has 
 - For immediate halt of in-flight teammate work, user-side manual interrupt is required.
 - The team-lead's responsibility to "surface immediately" means at the team-lead's next idle, not at arbitrary real-time.
 
+### Wake Mechanism
+
+Inbox-grow events fire a turn on the **addressed agent** (lead or teammate) during poller-gated waits. Both directions of the dispatch graph are covered: teammate→lead replies and lead→teammate dispatches. The wake mechanism is best-effort: when armed, it bounds idle-boundary delivery latency by Monitor's 2-s poll interval. There is no in-session watchdog; a silently-dead Monitor degrades the channel to baseline (the agent's existing idle-poll behavior).
+
+Each agent (lead AND every teammate) arms its own Monitor on its own single-file inbox via `wc -c` byte-grow; the Monitor emits `INBOX_GREW` on stdout to fire a turn on the addressed agent; the agent returns to idle and the platform's `useInboxPoller` delivers the message. Single skill, two invocation sites — see [implementation: Skill("PACT:inbox-wake")](../skills/inbox-wake/SKILL.md) for canonical mechanics.
+
+Lifetime is session-scoped per agent. The lead's Monitor is armed at SessionStart via `session_init.py`; each teammate's Monitor is armed at SubagentStart via `peer_inject.py` (per-spawn). Re-arm is idempotent — the skill no-ops if a valid STATE_FILE is already on disk for the agent. Teardown fires at session-end paths for the lead (`/wrap-up`, `/pause`) and at `shutdown_request` approval for teammates (see `pact-agent-teams` `## Shutdown`).
+
+Wake is **signal**, not content. On `INBOX_GREW`, the addressed agent ends the turn and returns to idle — the platform's idle-delivery is the channel-of-record for content. See the skill body's [§Overview alarm-clock framing](../skills/inbox-wake/SKILL.md#overview) for the principle anchor.
+
+D1 design intentionally has no watchdog. The audit artifact at `docs/architecture/591-inbox-wake-skill-redesign.md` predates the kill-mechanism finding (PREPARE §C) and should not be used as a reference for charter content.
+
 ## Part II — Written Output
 
 ## Pillar 1 — Plain English

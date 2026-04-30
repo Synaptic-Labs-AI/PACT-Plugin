@@ -103,7 +103,13 @@ JSON
 
 The timestamp (`ts`) is set automatically by `make_event()` and serves the same purpose as the previous `paused_at` field.
 
-### 6. Shut Down Teammates
+### 6. Tear Down the Lead's Wake Mechanism
+
+Invoke `Skill("PACT:inbox-wake")` and execute the Teardown operation with `agent_name="team-lead"`. This stops the lead's Monitor task (`TaskStop`, ignoring not-found errors) and unlinks `inbox-wake-state-team-lead.json`. Teardown is best-effort — see [Teardown Block](../skills/inbox-wake/SKILL.md#teardown-block) for the exact sequence.
+
+Run BEFORE step 7 (teammate shutdown). Teammates execute their own Teardown as part of approving `shutdown_request` (see `pact-agent-teams` `## Shutdown`). On resume, `session_init.py` re-arms the lead's Monitor at SessionStart; per-teammate Monitors are re-armed at SubagentStart on respawn.
+
+### 7. Shut Down Teammates
 
 Send `shutdown_request` individually to each active teammate **by name** and wait for responses. The secretary must have completed consolidation tasks (steps 1 and 3) before receiving the shutdown request.
 
@@ -114,7 +120,7 @@ For each active teammate:
 
 Do NOT delete the team — it will be garbage-collected or reused on resume.
 
-### 7. Report
+### 8. Report
 
 ```
 "Session paused. PR #{N} open at {url}. Resume with `/PACT:peer-review`."
