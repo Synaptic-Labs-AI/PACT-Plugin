@@ -55,6 +55,25 @@ _BOOTSTRAP_PRELUDE_TEMPLATE = (
 )
 
 
+# Wake-arm directive — Tier-0 additionalContext (#591). Emitted per
+# SubagentStart fire alongside the bootstrap prelude, peer list, and
+# trailing reminders. {agent_name} interpolates via the existing
+# safe_name pattern at the call site so the skill watches the correct
+# inbox (inboxes/{agent_name}.json) and writes the correct STATE_FILE
+# (inbox-wake-state-{agent_name}.json). Idempotent in the skill — the
+# directive emits unconditionally; the skill no-ops if a valid
+# STATE_FILE is already on disk for this agent. Per architect §15.2,
+# Tier-0 hook delivery is the chosen channel (vs Tier-1 skill body)
+# because #444's "hook-emitted directives: unconditional > conditional"
+# discipline is non-negotiable for spawn-time directives.
+_WAKE_ARM_TEMPLATE = (
+    "\n\nArm wake mechanism: invoke Skill(\"PACT:inbox-wake\") and execute the "
+    "Arm operation before any tool call. Pass agent_name=\"{agent_name}\" so the "
+    "skill watches the correct inbox. Arm is idempotent — invoke unconditionally; "
+    "the skill no-ops if a valid STATE_FILE is already on disk for this agent."
+)
+
+
 def _sanitize_agent_name(agent_name: str) -> str:
     """Strip characters from agent_name that could break out of the
     PACT ROLE marker format.
@@ -167,12 +186,15 @@ def get_peer_context(
         )
 
     prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name=safe_name)
+    wake_arm = _WAKE_ARM_TEMPLATE.format(agent_name=safe_name)
     # Output ordering: prelude → peer_context → "\n\n" → plugin banner →
-    # _TEACHBACK_REMINDER → _COMPLETION_AUTHORITY_NOTE. The plugin banner
-    # is a single line with no leading/trailing newlines, so an explicit
-    # "\n\n" separator goes between peer_context and the banner.
-    # _TEACHBACK_REMINDER and _COMPLETION_AUTHORITY_NOTE each begin with
-    # "\n\n", preserving visual spacing through the trailing reminders.
+    # _TEACHBACK_REMINDER → _COMPLETION_AUTHORITY_NOTE → wake_arm. The
+    # plugin banner is a single line with no leading/trailing newlines, so
+    # an explicit "\n\n" separator goes between peer_context and the banner.
+    # _TEACHBACK_REMINDER, _COMPLETION_AUTHORITY_NOTE, and _WAKE_ARM_TEMPLATE
+    # each begin with "\n\n", preserving visual spacing through the trailing
+    # reminders. Wake-arm is chain-end (#591) — additive vs the prelude
+    # template; future audits find it without searching template internals.
     return (
         prelude
         + peer_context
@@ -180,6 +202,7 @@ def get_peer_context(
         + format_plugin_banner()
         + _TEACHBACK_REMINDER
         + _COMPLETION_AUTHORITY_NOTE
+        + wake_arm
     )
 
 

@@ -55,7 +55,11 @@ class TestPeerInject:
         assert "frontend-coder" in result
         assert "database-engineer" in result
         assert "backend-coder" not in result
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
 
     def test_excludes_spawning_agent(self, tmp_path):
         from peer_inject import (
@@ -82,7 +86,11 @@ class TestPeerInject:
 
         assert "backend-coder" in result
         assert "architect" not in result
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
 
     def test_returns_none_when_no_team_config(self, tmp_path):
         from peer_inject import get_peer_context
@@ -118,7 +126,11 @@ class TestPeerInject:
         )
 
         assert "only active teammate" in result.lower()
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
 
     def test_noop_when_no_team_name(self, tmp_path):
         from peer_inject import get_peer_context
@@ -210,7 +222,11 @@ class TestTeachbackReminder:
             teams_dir=str(tmp_path / "teams")
         )
 
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
         assert "TEACHBACK TIMING" in result
 
     def test_reminder_appended_when_alone(self, tmp_path):
@@ -236,7 +252,11 @@ class TestTeachbackReminder:
         )
 
         assert "only active teammate" in result.lower()
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
 
     def test_reminder_contains_key_instructions(self):
         """The teachback reminder must mention the key instructions:
@@ -301,12 +321,24 @@ class TestTeachbackReminder:
         )
 
         assert "coder-2" in result
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
 
         # Slice out the peer-list segment: drop the prelude (everything up to
         # and including the first blank-line gap before "Active teammates")
-        # and drop the trailing reminders.
-        suffix_len = len(_TEACHBACK_REMINDER) + len(_COMPLETION_AUTHORITY_NOTE)
+        # and drop the trailing reminders. Trailing chain post-#591 is
+        # _TEACHBACK_REMINDER + _COMPLETION_AUTHORITY_NOTE + _WAKE_ARM_TEMPLATE
+        # (rendered with agent_name="coder-1").
+        from peer_inject import _WAKE_ARM_TEMPLATE
+        wake_arm_rendered = _WAKE_ARM_TEMPLATE.format(agent_name="coder-1")
+        suffix_len = (
+            len(_TEACHBACK_REMINDER)
+            + len(_COMPLETION_AUTHORITY_NOTE)
+            + len(wake_arm_rendered)
+        )
         before_reminder = result[:-suffix_len]
         peer_list_section = before_reminder.split("Active teammates on your team:", 1)[1]
         assert "coder-1" not in peer_list_section
@@ -1050,7 +1082,11 @@ class TestCompletionAuthorityNote:
         )
 
         assert _COMPLETION_AUTHORITY_NOTE in result
-        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+        # Chain-end is the wake-arm directive (#591); completion-authority
+        # note immediately precedes it. Was result.endswith(...) pre-#591.
+        assert _COMPLETION_AUTHORITY_NOTE in result
+        assert result.index(_COMPLETION_AUTHORITY_NOTE) + len(_COMPLETION_AUTHORITY_NOTE) \
+            == result.index('\n\nArm wake mechanism: invoke Skill("PACT:inbox-wake")')
         # Teachback reminder precedes completion-authority note.
         assert result.index(_TEACHBACK_REMINDER) < result.index(_COMPLETION_AUTHORITY_NOTE)
 
