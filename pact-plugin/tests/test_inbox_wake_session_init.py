@@ -30,17 +30,18 @@ def test_calls_count_active_tasks(src):
     assert src.count("count_active_tasks(team_name)") >= 1
 
 
-def test_directive_references_inbox_wake_skill_slug(src):
-    assert 'Skill("PACT:inbox-wake")' in src
-
-
-def test_directive_invokes_arm_operation(src):
-    # The directive prose appended to context_parts must name the Arm op.
-    assert "execute the Arm operation" in src
+def test_directive_references_watch_inbox_command_slug(src):
+    assert 'Skill("PACT:watch-inbox")' in src
 
 
 def test_directive_includes_idempotency_clause(src):
-    assert "Arm is idempotent" in src
+    # Cycle 4 directive prose: "Idempotent — no-op if a valid
+    # STATE_FILE is already on disk." Source is split across two
+    # quoted strings via Python implicit-concat, so substring matches
+    # must accommodate the line break — pin shorter fragments.
+    assert "idempotent" in src.lower()
+    assert "no-op if a valid" in src
+    assert "STATE_FILE is already on disk" in src
 
 
 def test_directive_includes_active_task_trigger_phrase(src):
@@ -156,6 +157,5 @@ def test_session_init_emits_arm_directive_when_active_tasks_present(tmp_path):
     assert _ARM_DIRECTIVE_PHRASE in additional, (
         "Arm directive missing despite active task on disk — gate is broken"
     )
-    # And the directive references the canonical skill slug + Arm op.
-    assert 'Skill("PACT:inbox-wake")' in additional
-    assert "execute the Arm operation" in additional
+    # And the directive references the canonical command slug.
+    assert 'Skill("PACT:watch-inbox")' in additional

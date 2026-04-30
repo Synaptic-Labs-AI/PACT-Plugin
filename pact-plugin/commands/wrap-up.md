@@ -95,7 +95,7 @@ The `session_consolidated` write fires under the `true` branch regardless of whe
 
 ## 6. Worktree Cleanup
 
-Invoke `Skill("PACT:inbox-wake")` and execute the Teardown operation before worktree cleanup. This stops the lead's Monitor task and unlinks the STATE_FILE; it is the parallel-safety-net path that runs alongside the PostToolUse 1→0 last-active Teardown directive. Idempotent and best-effort — see [skills/inbox-wake/SKILL.md §Teardown Block](../skills/inbox-wake/SKILL.md#teardown-block).
+Invoke `Skill("PACT:unwatch-inbox")` before worktree cleanup. This stops the lead's Monitor task and unlinks the STATE_FILE; it is the hook-silent-fail safety-net path that runs alongside the PostToolUse 1→0 last-active Teardown directive. Idempotent and best-effort — see [unwatch-inbox §Operation](unwatch-inbox.md#operation).
 
 Check for open PRs associated with the current worktree branch:
 - **PR merged or no PR**: Invoke `/PACT:worktree-cleanup` to remove the worktree cleanly.

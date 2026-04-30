@@ -3,7 +3,8 @@
 End-to-end operator runbook for the lead-side inbox-wake mechanism. Use this to verify a fresh-session arm/teardown cycle, observe 30/60/120 quiet-window coalescing, diagnose failure modes, and inspect runtime state.
 
 Implementation references:
-- Skill body: [pact-plugin/skills/inbox-wake/SKILL.md](../../skills/inbox-wake/SKILL.md)
+- Arm command: [pact-plugin/commands/watch-inbox.md](../../commands/watch-inbox.md)
+- Teardown command: [pact-plugin/commands/unwatch-inbox.md](../../commands/unwatch-inbox.md)
 - Charter contract surface: [pact-plugin/protocols/pact-communication-charter.md §Wake Mechanism](../../protocols/pact-communication-charter.md#wake-mechanism)
 - Lifecycle hook: `pact-plugin/hooks/wake_lifecycle_emitter.py` (PostToolUse, matcher `TaskCreate|TaskUpdate|Task|Agent`)
 - Resume-arm hook: `pact-plugin/hooks/session_init.py` (Option-C resume gap closure)
@@ -17,13 +18,14 @@ The hook registration takes effect at the **next fresh session** after these fil
 
 | Event | Trigger | Mechanism |
 |---|---|---|
-| **Arm — first active task** | PostToolUse fires after `TaskCreate` (or `TaskUpdate` with owner assignment) and the team transitions 0→1 active teammate task | `wake_lifecycle_emitter.py` emits `additionalContext` directive: *"Invoke Skill('PACT:inbox-wake') + Arm before continuing."* The lead invokes the skill on its next turn. |
+| **Arm — first active task** | PostToolUse fires after `TaskCreate` (or `TaskUpdate` with owner assignment) and the team transitions 0→1 active teammate task | `wake_lifecycle_emitter.py` emits `additionalContext` directive: *"Invoke Skill('PACT:watch-inbox') before continuing."* The lead invokes the command on its next turn. |
 | **Arm — session resume** | `SessionStart` fires and the team's task list already has active teammate tasks (resumed session) | `session_init.py` Option-C path: hook reads `~/.claude/tasks/{team}/` filtered by `_lifecycle_relevant`; if count ≥ 1, emits unconditional Arm directive via `additionalContext`. |
-| **Teardown — last active task** | PostToolUse fires after `TaskUpdate(status=completed)` and the team transitions 1→0 active teammate tasks | `wake_lifecycle_emitter.py` emits Teardown directive: *"Invoke Skill('PACT:inbox-wake') + Teardown — no remaining teammate work."* |
-| **Teardown — operator command** | Lead invokes `/wrap-up` (after all teammate tasks have completed) | Command body contains an explicit `Skill("PACT:inbox-wake") + Teardown` invocation as a hook-silent-fail safety net. Active-task count is naturally 0 at this point, so the Teardown is harmless and useful as a catch for the rare case where the PostToolUse 1→0 directive was missed. |
+| **Teardown — last active task** | PostToolUse fires after `TaskUpdate(status=completed)` and the team transitions 1→0 active teammate tasks | `wake_lifecycle_emitter.py` emits Teardown directive: *"Invoke Skill('PACT:unwatch-inbox') — no remaining teammate work."* |
+| **Teardown — operator command** | Lead invokes `/wrap-up` (after all teammate tasks have completed) | Command body contains an explicit `Skill("PACT:unwatch-inbox")` invocation as a hook-silent-fail safety net. Active-task count is naturally 0 at this point, so the Teardown is harmless and useful as a catch for the rare case where the PostToolUse 1→0 directive was missed. |
+| **Manual user invocation** | User types `/PACT:watch-inbox` or `/PACT:unwatch-inbox` in chat | Debug/recovery surface. Idempotent on watch-inbox (STATE_FILE-present check no-ops); best-effort on unwatch-inbox (tolerates already-stopped Monitor). Useful for re-arming after silent Monitor death or silencing Monitor noise mid-session. |
 | **Registry cleanup** | `SessionEnd` fires (any session-termination path including force-termination) | `session_end.py::cleanup_wake_registry(team_name)` unlinks `inbox-wake-state.json` if present. Hook cannot reach `TaskStop` — Monitor process dies with the session. |
 
-The PostToolUse hook is the **primary** lifecycle mechanism. The `/wrap-up` command body is the **only command-file callsite** — a hook-silent-fail safety net for the all-tasks-completed exit. `/pause` and `/imPACT` deliberately do NOT invoke Teardown: those commands run with active teammate tasks remaining, and the lead's Monitor must stay armed for them. The skill's idempotent Arm + best-effort Teardown make the /wrap-up safety-net fire harmless even when the PostToolUse 1→0 directive already ran.
+The PostToolUse hook is the **primary** lifecycle mechanism. The `/wrap-up` command body is the **only command-file callsite** — a hook-silent-fail safety net for the all-tasks-completed exit. `/pause` and `/imPACT` deliberately do NOT invoke Teardown: those commands run with active teammate tasks remaining, and the lead's Monitor must stay armed for them. The watch-inbox command's idempotent cold-start check + unwatch-inbox's best-effort Teardown make the /wrap-up safety-net fire harmless even when the PostToolUse 1→0 directive already ran.
 
 ---
 
@@ -83,7 +85,7 @@ cat ~/.claude/teams/{team_name}/inbox-wake-state.json
 
 If the file shows `v=1` and a `monitor_task_id`, the lead believes it is armed but the Monitor process has died. This is the **silent death** failure mode — undetectable in-session.
 
-Recovery: invoke `Skill("PACT:inbox-wake") + Arm` manually on the lead. Arm sees STATE_FILE present and is a no-op by default; force re-arm by first deleting the STATE_FILE:
+Recovery: invoke `Skill("PACT:watch-inbox")` manually on the lead. watch-inbox sees STATE_FILE present and is a no-op by default; force re-arm by first deleting the STATE_FILE:
 
 ```
 rm ~/.claude/teams/{team_name}/inbox-wake-state.json
@@ -186,7 +188,7 @@ The minimum cycle to confirm the mechanism works in a fresh session after merge:
 
 1. Start a fresh session in a project with the plugin installed at the merged version.
 2. Run `/PACT:orchestrate` or `/PACT:comPACT` with any small feature; observe a teammate task is created.
-3. Verify `wake_lifecycle_emitter.py` fired Arm: check the lead's next turn for `additionalContext` text "Invoke Skill('PACT:inbox-wake') + Arm".
+3. Verify `wake_lifecycle_emitter.py` fired Arm: check the lead's next turn for `additionalContext` text "Invoke Skill('PACT:watch-inbox')".
 4. Confirm STATE_FILE exists: `ls ~/.claude/teams/{team_name}/inbox-wake-state.json`.
 5. Have the teammate idle, then send a peer ping that grows the lead's inbox.
 6. Observe the lead wakes with `INBOX_GREW … edge=FIRST_GROW`.

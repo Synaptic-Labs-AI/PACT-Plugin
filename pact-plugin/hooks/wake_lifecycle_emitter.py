@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/wake_lifecycle_emitter.py
-Summary: PostToolUse hook that emits Arm/Teardown directives for the
-         inbox-wake skill on first/last active-task transitions.
+Summary: PostToolUse hook that emits watch-inbox/unwatch-inbox directives
+         for the inbox-wake command pair on first/last active-task transitions.
 Used by: hooks.json PostToolUse hook with matcher
          `TaskCreate|TaskUpdate|Task|Agent`.
 
 Lifecycle automation:
 - On TaskCreate that transitions the team's active-task count from 0 to
-  1, emit an Arm directive instructing the lead to invoke
-  Skill("PACT:inbox-wake") + Arm.
+  1, emit a watch-inbox directive instructing the lead to invoke
+  Skill("PACT:watch-inbox").
 - On TaskUpdate(status=completed) that transitions the team's
-  active-task count from 1 to 0, emit a Teardown directive instructing
-  the lead to invoke Skill("PACT:inbox-wake") + Teardown.
+  active-task count from 1 to 0, emit an unwatch-inbox directive
+  instructing the lead to invoke Skill("PACT:unwatch-inbox").
 - On any other tool fire (TaskUpdate without status->completed,
   Task/Agent teammate spawn, TaskCreate at non-zero pre-state,
   TaskUpdate(completed) leaving residual active tasks): no directive
@@ -74,21 +74,21 @@ from shared.wake_lifecycle import count_active_tasks
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 # Directive prose — verbatim text emitted via additionalContext on
-# transitions. Imperative voice; references the canonical Skill slug
-# `PACT:inbox-wake`; idempotency clause prevents the lead from adding
+# transitions. Imperative voice; references the canonical command-pair
+# slugs `PACT:watch-inbox` (Arm role) and `PACT:unwatch-inbox` (Teardown
+# role); idempotency / best-effort clauses prevent the lead from adding
 # their own conditional self-diagnosis (#444 unconditional discipline).
 _ARM_DIRECTIVE = (
     'First active teammate task created. '
-    'Invoke Skill("PACT:inbox-wake") and execute the Arm operation '
-    'before any further teammate dispatch. Arm is idempotent — the '
-    'skill no-ops if a valid STATE_FILE is already on disk.'
+    'Invoke Skill("PACT:watch-inbox") before any further teammate '
+    'dispatch. Idempotent — no-op if a valid STATE_FILE is already on disk.'
 )
 
 _TEARDOWN_DIRECTIVE = (
     'Last active teammate task completed. '
-    'Invoke Skill("PACT:inbox-wake") and execute the Teardown operation '
-    'to stop the Monitor and unlink the STATE_FILE. Teardown is '
-    'best-effort — tolerates a Monitor that died silently mid-session.'
+    'Invoke Skill("PACT:unwatch-inbox") to stop the Monitor and unlink '
+    'the STATE_FILE. Best-effort — tolerates a Monitor that died '
+    'silently mid-session.'
 )
 
 # Tools whose PostToolUse fires this hook is registered against. Task

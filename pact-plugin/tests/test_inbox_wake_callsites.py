@@ -1,21 +1,26 @@
 """
 Cross-file consistency invariants for the inbox-wake feature.
 
-Pin the Skill("PACT:inbox-wake") + Teardown invocation in wrap-up.md
-(the only command body that retains the callsite post-cycle-2; runs
-after all tasks complete, so count is already 0 and the callsite is
-both correct and useful as a hook-silent-fail safety net).
+Cycle 4 migrated the inbox-wake skill into a command-pair:
+- watch-inbox (Arm role) at pact-plugin/commands/watch-inbox.md
+- unwatch-inbox (Teardown role) at pact-plugin/commands/unwatch-inbox.md
 
-Negative assertions for imPACT.md and pause.md: these were removed in
-F3-followup (Option C) because their unconditional Teardown destroyed
-still-needed Monitors when other teammates remained active. The
-PostToolUse 1→0 hook handles the lifecycle automatically. The
-negative assertions here are a regression guard against future
+Pin the Skill("PACT:unwatch-inbox") invocation in wrap-up.md (the only
+command body that retains the callsite post-cycle-2; runs after all
+tasks complete, so count is already 0 and the callsite is both correct
+and useful as a hook-silent-fail safety net).
+
+Negative assertions for imPACT.md and pause.md: their callsites were
+removed in F3-followup (Option C) because their unconditional Teardown
+destroyed still-needed Monitors when other teammates remained active.
+The PostToolUse 1→0 hook handles the lifecycle automatically. The
+negative assertions here forbid all THREE slugs (legacy inbox-wake +
+new watch-inbox + unwatch-inbox) as defense-in-depth against future
 re-introduction.
 
-Charter §Wake Mechanism cross-ref pins ensure SKILL.md and charter
-remain aligned on lead-only scope, F7 between-tool-calls scope, and
-signal-not-content corollary.
+Charter §Wake Mechanism cross-ref pins ensure command bodies and
+charter remain aligned on lead-only scope, F7 between-tool-calls
+scope, and signal-not-content corollary.
 """
 
 from pathlib import Path
@@ -25,51 +30,57 @@ ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / "commands"
 PROTOCOLS_DIR = ROOT / "protocols"
 
+_FORBIDDEN_SLUGS = (
+    'Skill("PACT:inbox-wake")',
+    'Skill("PACT:watch-inbox")',
+    'Skill("PACT:unwatch-inbox")',
+)
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-# ---------- Teardown invocations in command bodies ----------
+# ---------- Teardown invocation in wrap-up.md ----------
 
-def test_wrap_up_invokes_inbox_wake_teardown():
-    """wrap-up.md retains the Teardown callsite — it fires after all
-    tasks are completed, so the count is already 0 and the callsite is
-    both correct and useful as a hook-silent-fail safety net."""
+def test_wrap_up_invokes_unwatch_inbox():
+    """wrap-up.md retains the unwatch-inbox callsite — it fires after
+    all tasks are completed, so the count is already 0 and the callsite
+    is both correct and useful as a hook-silent-fail safety net."""
     text = _read(COMMANDS_DIR / "wrap-up.md")
-    assert 'Skill("PACT:inbox-wake")' in text, (
-        "wrap-up.md missing Skill slug invocation"
-    )
-    assert "Teardown" in text, (
-        "wrap-up.md missing Teardown operation reference"
+    assert 'Skill("PACT:unwatch-inbox")' in text, (
+        "wrap-up.md missing unwatch-inbox slug invocation"
     )
 
 
-def test_impact_md_does_not_invoke_inbox_wake():
-    """F3-followup (Option C): imPACT.md's force-termination Teardown
-    was removed because it destroyed still-needed Monitors when other
-    teammates remained active. The PostToolUse 1→0 hook handles the
-    lifecycle automatically. This negative assertion is a regression
-    guard against future re-introduction."""
+# ---------- Negative assertions for imPACT.md and pause.md ----------
+
+def test_impact_md_does_not_invoke_any_inbox_slug():
+    """F3-followup (Option C) + cycle 4: imPACT.md's force-termination
+    Teardown was removed because it destroyed still-needed Monitors
+    when other teammates remained active. The PostToolUse 1→0 hook
+    handles the lifecycle automatically. Negative assertion forbids
+    ALL three slugs (legacy inbox-wake + watch-inbox + unwatch-inbox)
+    as defense-in-depth against future re-introduction."""
     text = _read(COMMANDS_DIR / "imPACT.md")
-    assert 'Skill("PACT:inbox-wake")' not in text, (
-        "imPACT.md must NOT invoke Skill(\"PACT:inbox-wake\") — "
-        "unconditional Teardown destroys Monitors needed by remaining "
-        "teammates. PostToolUse 1→0 hook handles lifecycle automatically."
-    )
+    for slug in _FORBIDDEN_SLUGS:
+        assert slug not in text, (
+            f"imPACT.md must NOT invoke {slug} — unconditional callsite "
+            f"destroys/re-arms Monitors needed by remaining teammates. "
+            f"PostToolUse hook handles lifecycle automatically."
+        )
 
 
-def test_pause_md_does_not_invoke_inbox_wake():
-    """F3-followup (Option C): pause.md's pre-shutdown Teardown was
-    removed for the same reason as imPACT.md — destroying Monitors
-    needed by remaining teammates regresses the failure mode #591 was
-    designed to fix."""
+def test_pause_md_does_not_invoke_any_inbox_slug():
+    """F3-followup (Option C) + cycle 4: pause.md's pre-shutdown
+    callsite was removed for the same reason as imPACT.md.
+    Defense-in-depth — forbid all three slugs."""
     text = _read(COMMANDS_DIR / "pause.md")
-    assert 'Skill("PACT:inbox-wake")' not in text, (
-        "pause.md must NOT invoke Skill(\"PACT:inbox-wake\") — "
-        "unconditional Teardown destroys Monitors needed by remaining "
-        "teammates. PostToolUse 1→0 hook handles lifecycle automatically."
-    )
+    for slug in _FORBIDDEN_SLUGS:
+        assert slug not in text, (
+            f"pause.md must NOT invoke {slug} — unconditional callsite "
+            f"destroys/re-arms Monitors needed by remaining teammates."
+        )
 
 
 # ---------- Charter cross-reference ----------
@@ -80,17 +91,25 @@ def test_charter_has_wake_mechanism_section():
     assert "### Wake Mechanism" in text
 
 
-def test_charter_links_to_skill_body_via_relative_path():
-    """Slug-link form (relative-path markdown link), NOT @~/ pattern."""
+def test_charter_links_to_command_pair_via_relative_paths():
+    """Slug-link form (relative-path markdown link), NOT @~/ pattern.
+    Cycle 4: charter cross-ref now points at the command pair, not the
+    legacy single skill body."""
     text = _read(PROTOCOLS_DIR / "pact-communication-charter.md")
-    # Find the Wake Mechanism section.
     section_start = text.find("### Wake Mechanism")
     assert section_start >= 0
-    # The cross-ref must use relative path to the skill body.
     section = text[section_start:section_start + 5000]
-    assert "../skills/inbox-wake/SKILL.md" in section
-    # And must NOT use the deprecated @~/ pattern.
+    # Charter must reference both new commands (or at minimum the
+    # primary watch-inbox command — robust fallback if charter author
+    # links only the primary).
+    assert (
+        "../commands/watch-inbox.md" in section
+        or "../commands/unwatch-inbox.md" in section
+    )
+    # And must NOT use the deprecated @~/ pattern, nor link to the
+    # legacy skill body that no longer exists.
     assert "@~/" not in section
+    assert "../skills/inbox-wake/SKILL.md" not in section
 
 
 def test_charter_echoes_lead_only_scope():

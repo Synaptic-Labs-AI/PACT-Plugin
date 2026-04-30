@@ -24,13 +24,13 @@ The rules below govern how messages delivered via this tool actually behave.
 
 The platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long-running tool calls leave inbound messages stuck until the next idle boundary. The lead-side wake mechanism (lead-only — teammates rely on the standard idle-delivery channel) closes this gap with a `Monitor` that watches the lead's inbox file and emits a turn at the next between-tool-call boundary.
 
-Implementation: [Skill("PACT:inbox-wake")](../skills/inbox-wake/SKILL.md). The skill's [§Overview](../skills/inbox-wake/SKILL.md#overview) and [§Failure Modes](../skills/inbox-wake/SKILL.md#failure-modes) anchor the full contract; the rules below summarize the surface that callers and authors of related protocols need:
+Implementation: a command-pair — [Skill("PACT:watch-inbox")](../commands/watch-inbox.md) (Arm) and [Skill("PACT:unwatch-inbox")](../commands/unwatch-inbox.md) (Teardown). The watch-inbox command's [§Overview](../commands/watch-inbox.md#overview) and [§Failure Modes](../commands/watch-inbox.md#failure-modes) anchor the full contract; the rules below summarize the surface that callers and authors of related protocols need:
 
 - **Lead-only.** Exactly one Monitor per session, scoped to the period during which the lead holds assigned, uncompleted teammate tasks. No teammate-side wake.
-- **[Between-tool-call, not mid-tool](../skills/inbox-wake/SKILL.md#long-single-tool-calls-block-wake-delivery).** The wake surfaces queued messages between tool calls within a turn; it does NOT interrupt a tool mid-call.
-- **[Signal, not content; no-narration on wake](../skills/inbox-wake/SKILL.md#overview).** The Monitor's stdout emit is an alarm clock that ends the turn — content still arrives via the standard inbox channel — and the lead returns to silent idle without acknowledgment text.
-- **[Arm and Teardown trigger sites](../skills/inbox-wake/SKILL.md#when-to-invoke).** Arm on first-active-task transition and on session-resume with active tasks. Teardown on last-active-task transition, on `/wrap-up` (hook-silent-fail safety net for the all-tasks-completed exit), and on `session_end` registry cleanup.
-- **No watchdog.** The mechanism degrades to no-wake on silent Monitor death until the next Arm fire — no in-session detection. The trade-off is documented in the skill's [§Failure Modes — Silent Monitor death](../skills/inbox-wake/SKILL.md#silent-monitor-death).
+- **[Between-tool-call, not mid-tool](../commands/watch-inbox.md#long-single-tool-calls-block-wake-delivery).** The wake surfaces queued messages between tool calls within a turn; it does NOT interrupt a tool mid-call.
+- **[Signal, not content; no-narration on wake](../commands/watch-inbox.md#overview).** The Monitor's stdout emit is an alarm clock that ends the turn — content still arrives via the standard inbox channel — and the lead returns to silent idle without acknowledgment text.
+- **Arm and Teardown trigger sites.** [Arm](../commands/watch-inbox.md#when-to-invoke) on first-active-task transition and on session-resume with active tasks. [Teardown](../commands/unwatch-inbox.md#when-to-invoke) on last-active-task transition, on `/wrap-up` (which invokes [Skill("PACT:unwatch-inbox")](../commands/unwatch-inbox.md) as a hook-silent-fail safety net for the all-tasks-completed exit), and on `session_end` registry cleanup.
+- **No watchdog.** The mechanism degrades to no-wake on silent Monitor death until the next Arm fire — no in-session detection. The trade-off is documented in [watch-inbox §Failure Modes — Silent Monitor death](../commands/watch-inbox.md#silent-monitor-death).
 
 ### Lead-Side Discipline — Verify Before Dispatching
 

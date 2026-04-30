@@ -1,16 +1,9 @@
 ---
-name: inbox-wake
-description: |
-  Arms a Monitor on the lead's inbox that fires a turn on inbox-grow, closing
-  the poller-gated wake window during long-running operations. Lead-only:
-  Arm at SessionStart (or on PostToolUse first-active-task transition);
-  Teardown at `/wrap-up` (parallel safety net) and on PostToolUse
-  last-active-task transition.
+description: Arm the lead's inbox-watch Monitor — spawn a Monitor on the team-lead inbox, write STATE_FILE atomically. Hook-invoked on first active teammate task; user-invoked manually for debug or recovery.
 ---
+# Watch Inbox
 
-# Inbox-Wake Skill
-
-Lead-side wake mechanism for PACT teams: a single `Monitor` task watches the lead's inbox file via `wc -c` byte-grow and fires a turn at the next between-tool-call boundary, with quiet-window coalescing to bound emit count under bursty traffic.
+Arm the lead-side wake mechanism: a single `Monitor` task watches `inboxes/team-lead.json` via `wc -c` byte-grow and fires a turn at the next between-tool-call boundary, with quiet-window coalescing to bound emit count under bursty traffic.
 
 ## Overview
 
@@ -18,7 +11,7 @@ Lead-side wake mechanism for PACT teams: a single `Monitor` task watches the lea
 >
 > **Wake surfaces between tool calls within a turn, not mid-tool.** Monitor's `INBOX_GREW` emit cannot interrupt a single in-flight tool call. The platform queues `INBOX_GREW` events that fire during a long-running tool and delivers them when the tool returns, bundled with the tool's result. The wake mechanism's promise is "messages surface between tool calls within a turn," NOT "instant interrupt anywhere." For multi-tool turns the wake reliably opens the poller-gate between tools; for single long tools (e.g., a 90-second blocking sleep) the lead is effectively unwakeable until the tool returns.
 
-Problem this solves: during long-running operations, the platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long blocking tool calls leave inbound messages stuck until the next idle boundary. See [Communication Charter Part I — Delivery Model](../../protocols/pact-communication-charter.md#delivery-model). The Monitor's stdout emit forces a turn at the next between-tool-call boundary, bounding latency by the poll interval (30 s) rather than by the next opportunistic idle.
+Problem this solves: during long-running operations, the platform's `useInboxPoller` only delivers queued `SendMessage` between tool calls; long blocking tool calls leave inbound messages stuck until the next idle boundary. See [Communication Charter Part I — Delivery Model](../protocols/pact-communication-charter.md#delivery-model). The Monitor's stdout emit forces a turn at the next between-tool-call boundary, bounding latency by the poll interval (30 s) rather than by the next opportunistic idle.
 
 Single-Monitor model, no in-session watchdog. Lifetime is scoped to the period during which the lead holds assigned, uncompleted teammate tasks. Inbox path is a single JSON file (`inboxes/team-lead.json`), not a directory.
 
@@ -26,31 +19,26 @@ Single-Monitor model, no in-session watchdog. Lifetime is scoped to the period d
 
 ## When to Invoke
 
-| Operation | Trigger | Site |
-|---|---|---|
-| **Arm** | First active teammate task created (PostToolUse hook detects 0→1 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
-| **Arm** | Resume into a session with active tasks already on disk | `session_init.py` `additionalContext` directive (Option-C resume gap closure) |
-| **Teardown** | Last active teammate task completed (PostToolUse hook detects 1→0 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
-| **Teardown** | `/wrap-up` runs after all tasks complete (count already 0; redundant-but-correct hook-silent-fail catch) | Command-file Skill invocation in `/wrap-up` |
+| Trigger | Site |
+|---|---|
+| First active teammate task created (PostToolUse hook detects 0→1 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
+| Resume into a session with active tasks already on disk | `session_init.py` `additionalContext` directive (Option-C resume gap closure) |
+| User-typed manual invocation (debug, recovery from silent Monitor death) | `/PACT:watch-inbox` slash invocation |
 
-This skill has only Arm and Teardown — no Recovery operation, no in-session watchdog. A silently-dead Monitor is undetectable in-session and the mechanism degrades to "no wake" until the next Arm fire (next first-active transition or next SessionStart-with-active-tasks).
+Arm is idempotent. Re-invoking when STATE_FILE is already present and valid is a no-op — cheap on every directive re-fire.
 
-**Audit**: an editing LLM tempted to add a Recovery operation hits the explicit prohibition above plus the kill-mechanism rationale in `## Failure Modes` — the cron+Monitor watchdog combination kills its own Monitor; this design deliberately drops the watchdog layer.
+## Operation
 
-## Operations
+Single procedure — the command IS the operation. No Arm/Teardown sub-section.
 
-### Arm
+1. Read STATE_FILE at `~/.claude/teams/{team_name}/inbox-wake-state.json`.
+2. If STATE_FILE is present and parses with `v=1`: no-op (already armed; cheap on every re-invocation).
+3. Otherwise cold-start:
+   1. Spawn the Monitor (see `## Monitor Block`).
+   2. Capture the returned `monitor_task_id`.
+   3. Write the STATE_FILE atomically (see `## WriteStateFile Block`).
 
-Idempotent. The lead invokes Arm with no parameters; paths are fixed (lead-only).
-
-1. If STATE_FILE is present and parses with `v=1`: no-op (already armed; cheap on every Arm-directive re-fire).
-2. Otherwise cold-start: spawn the Monitor (see `## Monitor Block`); capture the returned `monitor_task_id`; write the STATE_FILE atomically (see `## WriteStateFile Block`).
-
-### Teardown
-
-Best-effort. See `## Teardown Block` for the exact sequence. Tolerates a Monitor that died silently mid-session.
-
-**Audit**: idempotency lives in the skill (STATE_FILE-presence check), NOT in the directive that invokes it. An editing LLM tempted to add an "if not already armed" guard at the directive site would re-introduce LLM-self-diagnosis as the gate, which is the failure mode the unconditional-emit discipline closes (see `## References` — hook-emitted directives unconditional > conditional).
+**Audit**: idempotency lives in this command (STATE_FILE-presence check), NOT in the directive that invokes it. An editing LLM tempted to add an "if not already armed" guard at the directive site would re-introduce LLM-self-diagnosis as the gate, which is the failure mode the unconditional-emit discipline closes.
 
 ## Monitor Block
 
@@ -125,41 +113,23 @@ Schema is intentionally minimal — exactly 3 fields: `v`, `monitor_task_id`, `a
 
 **Audit**: STATE_FILE has 3 fields, no more. If you find yourself adding a 4th field, stop and re-read `## Failure Modes` on silent Monitor death. An editing LLM reasoning by analogy with prior watchdog-augmented designs might re-add a watchdog job id; do not. Lead-only scope means no per-agent suffix either — the filename is fixed (`inbox-wake-state.json`), and there is one Monitor per session.
 
-## Teardown Block
-
-Order is load-bearing: stop the live Monitor before unlinking the registry sidecar.
-
-1. Read STATE_FILE; if absent or invalid (malformed JSON / `v ≠ 1`), skip step 2 — nothing to stop.
-2. `TaskStop(STATE_FILE.monitor_task_id)` — **ignoring not-found errors** (the Monitor may have died silently mid-session).
-3. Unlink STATE_FILE — `Path.unlink(missing_ok=True)`.
-
-Teardown is best-effort. The Monitor may have died silently — `TaskStop` will return a `tool_use_error` in that case. Tolerate not-found and continue to step 3. Do not abort teardown on TaskStop failure; an undeleted STATE_FILE is worse than a failed TaskStop because it leaves a phantom registry entry that confuses the next session's Arm.
-
-Ordering rationale: the inverse ordering would leave a brief window where a STATE_FILE-less Monitor still runs but Arm sees no STATE_FILE and re-arms — creating an orphan.
-
-**Audit**: F6 tolerance phrasing (**"ignoring not-found errors"**) is the load-bearing fragment. An editing LLM "tightening up error handling" by removing the phrase silently restores crash-on-stale-ID. The principle anchor — Teardown is best-effort because a torn-down session may have already lost its Monitor — tells the editing LLM why the phrase exists.
-
 ## Failure Modes
 
 ### Malformed STATE_FILE
 
-If the STATE_FILE exists but fails to parse as JSON, Arm treats it as not-armed and cold-starts. The pre-existing file is overwritten by the atomic-rename write.
-
-### Schema-version mismatch
-
-If `v` is not `1`, Arm treats the STATE_FILE as not-armed and cold-starts, overwriting on write. Future schema bumps must increment `v` and re-arm cleanly.
+If the STATE_FILE exists but fails to parse as JSON, this command treats it as not-armed and cold-starts. The pre-existing file is overwritten by the atomic-rename write.
 
 ### Silent Monitor death
 
-> **Silent Monitor death**: this design has no in-session watchdog. If the Monitor task dies silently mid-session (process crash, OOM, harness GC, undisclosed lifetime cap), the wake mechanism degrades to no-wake until the next Arm fire (next first-active-task transition or next SessionStart-with-active-tasks). Detection is not possible from inside the lead's session; a manual `Skill("PACT:inbox-wake") + Arm` invocation will re-arm if the lead notices missed messages by other means (e.g., a teammate complaining about no response). This is a deliberate trade against the cron-fire-kills-Monitor self-defeating loop empirically observed 2026-04-29 (cron-fire #1 at 22:49:36Z killed `monitor_task_id=bu1pmbva7` ~19 s later; isolated Monitor in same session survived ≥10 min — see PREPARE §C, hypothesis H1 HIGH-confidence). Future work tracked separately if/when the platform offers a watchdog primitive that does not kill the watched task.
+> **Silent Monitor death**: this design has no in-session watchdog. If the Monitor task dies silently mid-session (process crash, OOM, harness GC, undisclosed lifetime cap), the wake mechanism degrades to no-wake until the next Arm fire (next first-active-task transition or next SessionStart-with-active-tasks). Detection is not possible from inside the lead's session; a manual `/PACT:watch-inbox` invocation will re-arm if the lead notices missed messages by other means (e.g., a teammate complaining about no response). This is a deliberate trade against the cron-fire-kills-Monitor self-defeating loop empirically observed 2026-04-29 (cron-fire #1 at 22:49:36Z killed `monitor_task_id=bu1pmbva7` ~19 s later; isolated Monitor in same session survived ≥10 min). Future work tracked separately if/when the platform offers a watchdog primitive that does not kill the watched task.
 
-**Audit**: this paragraph is the principle anchor for the central trade-off (no watchdog). An editing LLM later proposing "let's add a heartbeat + cron watchdog after all" gets the empirical reason in prose: the cron+Monitor combination kills its own Monitor. The verbatim cite of `monitor_task_id=bu1pmbva7` and `2026-04-29T22:49:36Z` makes the rationale unambiguous and traceable to PREPARE §C.
+**Audit**: this paragraph is the principle anchor for the central trade-off (no watchdog). An editing LLM later proposing "let's add a heartbeat + cron watchdog after all" gets the empirical reason in prose: the cron+Monitor combination kills its own Monitor. The verbatim cite of `monitor_task_id=bu1pmbva7` and `2026-04-29T22:49:36Z` makes the rationale unambiguous and traceable.
 
 ### Long single-tool calls block wake delivery
 
 > **Long single-tool calls block wake delivery**: Monitor's `INBOX_GREW` stdout emit fires when the inbox grows, but events that fire during a long-running single tool call (e.g., a 90-second blocking `sleep`) are queued and delivered to the lead only when that tool returns, bundled with the tool's result. The wake mechanism does NOT interrupt a tool mid-call. For multi-tool turns the wake surfaces between tool calls; for single long tools the lead is effectively unwakeable until the tool returns. Verified 2026-04-30T00:00–00:02Z in session pact-5951b31c. Test: 90-second blocking `sleep` running in parallel with a peer-dispatched delayed reply. Peer sent at 00:01:34Z; Monitor `INBOX_GREW` fired at 00:01:43Z and 00:01:45Z (during the sleep); Bash returned at the full 90s (00:02:23Z); teammate-message content delivered in the *next* turn via standard idle-delivery, not mid-tool.
 
-**Audit**: this paragraph is the principle anchor for the scope claim ("between tool calls, not mid-tool"). An editing LLM reading the skill body and seeing "wake on inbox grow" will reasonably infer mid-tool interrupt unless explicitly told otherwise. That inference is wrong. The §Overview's second alarm-clock paragraph + this entry together correctly scope the substrate's actual capability — the wake is a between-tool-call signal. The empirical timing tokens (00:01:34Z send, 00:01:43Z + 00:01:45Z `INBOX_GREW` fire-during-tool, 00:02:23Z tool return, next-turn delivery) make the constraint observable and reproducible, not just asserted.
+**Audit**: this paragraph is the principle anchor for the scope claim ("between tool calls, not mid-tool"). An editing LLM reading this command and seeing "wake on inbox grow" will reasonably infer mid-tool interrupt unless explicitly told otherwise. That inference is wrong. The §Overview's second alarm-clock paragraph + this entry together correctly scope the substrate's actual capability — the wake is a between-tool-call signal. The empirical timing tokens (00:01:34Z send, 00:01:43Z + 00:01:45Z `INBOX_GREW` fire-during-tool, 00:02:23Z tool return, next-turn delivery) make the constraint observable and reproducible, not just asserted.
 
 ### Wake-fire inflation under bursty traffic
 
@@ -169,17 +139,19 @@ If `v` is not `1`, Arm treats the STATE_FILE as not-armed and cold-starts, overw
 
 ### Concurrent re-arm
 
-If two Arm directives race (rare; first-active-transition firing concurrently with a SessionStart-resume Arm), both may attempt cold-start. Atomic-rename write makes STATE_FILE corruption impossible; the second write wins, the loser's Monitor task is orphaned but the next Teardown's `TaskStop(STATE_FILE.monitor_task_id)` only stops the winner. Orphan accumulation is bounded by the rarity of the race; force-termination cleanup via `cleanup_wake_registry` covers the registry sidecar regardless.
+If two Arm directives race (rare; first-active-transition firing concurrently with a SessionStart-resume Arm), both may attempt cold-start. Atomic-rename write makes STATE_FILE corruption impossible; the second write wins, the loser's Monitor task is orphaned but the next `/PACT:unwatch-inbox` invocation's `TaskStop(STATE_FILE.monitor_task_id)` only stops the winner. Orphan accumulation is bounded by the rarity of the race; force-termination cleanup via `cleanup_wake_registry` covers the registry sidecar regardless.
 
 ## Verification
 
-See dogfood runbook `pact-plugin/tests/runbooks/591-inbox-wake.md` for end-to-end verification (fresh-session arm via first-active-task transition, inbox-grow wake under quiet-window coalescing, teardown via last-active-task transition, force-termination cleanup). Structural-pattern tests in `pact-plugin/tests/test_inbox_wake_skill_structure.py` and siblings verify skill-body invariants (section presence, F1/F6/F7 phrasing, alarm-clock anchor, 30/60/120 timing fences, state-machine names).
+Confirm Monitor armed:
+
+1. STATE_FILE exists at `~/.claude/teams/{team_name}/inbox-wake-state.json` and parses with `v=1`.
+2. `STATE_FILE.monitor_task_id` resolves to a live Monitor task (visible in TaskList, status running).
+
+See dogfood runbook `pact-plugin/tests/runbooks/591-inbox-wake.md` for end-to-end verification (fresh-session arm via first-active-task transition, inbox-grow wake under quiet-window coalescing, teardown via last-active-task transition, force-termination cleanup).
 
 ## References
 
-- [Communication Charter Part I §Wake Mechanism](../../protocols/pact-communication-charter.md#wake-mechanism) — protocol contract surface
-- [Communication Charter Part I §Delivery Model](../../protocols/pact-communication-charter.md#delivery-model) — async-at-idle-boundary delivery model
-- Approved plan: `docs/plans/591-inbox-wake-skill-lead-only-plan.md`
-- Authoritative design: `docs/architecture/591-inbox-wake-skill.md` (Monitor-only, lead-only scope)
-- PREPARE deliverable: `docs/preparation/591-inbox-wake-skill.md` — §C kill-mechanism investigation; §D alternative wake mechanisms
-- Routing-channel probe: `docs/preparation/591-routing-probe.md` — locks PostToolUse with matcher `TaskCreate|TaskUpdate|Task|Agent` as the only viable directive channel for hook-emitted Arm/Teardown
+- [`/PACT:unwatch-inbox`](unwatch-inbox.md) — paired teardown command.
+- [Communication Charter Part I §Wake Mechanism](../protocols/pact-communication-charter.md#wake-mechanism) — protocol contract surface.
+- [Communication Charter Part I §Delivery Model](../protocols/pact-communication-charter.md#delivery-model) — async-at-idle-boundary delivery model.

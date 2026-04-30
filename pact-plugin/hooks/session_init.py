@@ -731,9 +731,9 @@ def main():
         if active_count > 0:
             context_parts.append(
                 'Active teammate tasks detected on session start. '
-                'Invoke Skill("PACT:inbox-wake") and execute the Arm operation '
-                'before any further teammate dispatch. Arm is idempotent — '
-                'the skill no-ops if a valid STATE_FILE is already on disk.'
+                'Invoke Skill("PACT:watch-inbox") before any further '
+                'teammate dispatch. Idempotent — no-op if a valid '
+                'STATE_FILE is already on disk.'
             )
 
         # 5a. Write session context file FIRST so get_session_dir() works for

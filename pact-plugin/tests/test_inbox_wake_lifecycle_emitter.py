@@ -192,8 +192,7 @@ def test_arm_emitted_on_first_task_create(tmp_path):
     out = _emit_output(payload, home)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Skill(\"PACT:inbox-wake\")" in hso["additionalContext"]
-    assert "Arm" in hso["additionalContext"]
+    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]
 
 
 def test_arm_includes_idempotency_clause(tmp_path):
@@ -205,7 +204,29 @@ def test_arm_includes_idempotency_clause(tmp_path):
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "1"}, "tool_response": {"id": "1"},
     }, home)
-    assert "idempotent" in out["hookSpecificOutput"]["additionalContext"]
+    additional = out["hookSpecificOutput"]["additionalContext"]
+    # Case-insensitive — directive prose capitalizes 'Idempotent' but
+    # the substring 'idempotent' must still appear somewhere.
+    assert "idempotent" in additional.lower()
+    # Pin the no-op clause as well — anchors the WHY of idempotency.
+    assert "no-op if a valid STATE_FILE" in additional
+
+
+def test_teardown_includes_best_effort_clause(tmp_path):
+    """Symmetric to Arm idempotency: pin the best-effort clause + the
+    'tolerates Monitor that died silently' rationale."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "t"
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "1", status="completed", owner="x")
+    out = _emit_output({
+        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
+        "tool_input": {"taskId": "1", "status": "completed"},
+        "tool_response": {"id": "1", "status": "completed"},
+    }, home)
+    additional = out["hookSpecificOutput"]["additionalContext"]
+    assert "best-effort" in additional.lower()
+    assert "tolerates a Monitor that died silently" in additional
 
 
 def test_arm_directive_contains_precondition_phrase(tmp_path):
@@ -297,8 +318,7 @@ def test_teardown_emitted_on_last_active_completion(tmp_path):
     }, home)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Teardown" in hso["additionalContext"]
-    assert "Skill(\"PACT:inbox-wake\")" in hso["additionalContext"]
+    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 
 
 def test_no_teardown_when_other_active_remains(tmp_path):
@@ -352,7 +372,7 @@ def test_teardown_emits_on_signal_task_completion_at_post_zero(tmp_path):
     }, home)
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUse"
-    assert "Teardown" in hso["additionalContext"]
+    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 
 
 # ---------- _decide_directive direct unit coverage ----------
