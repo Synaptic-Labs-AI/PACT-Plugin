@@ -80,6 +80,7 @@ from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
+from shared.wake_lifecycle import count_active_tasks
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
@@ -710,6 +711,30 @@ def main():
 
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
+
+        # 4d. Wake-arm directive (resume-with-active-tasks gap closure).
+        # PostToolUse on Task-mutating tools handles 0->1 transitions
+        # within a session, but a session resuming with tasks already in
+        # flight has no such transition to observe. Hook-side
+        # count_active_tasks check + unconditional Arm emit when the
+        # team has any active teammate work on disk. The hook does the
+        # diagnosis; the directive itself is unconditional per the
+        # hook-emitted-directives discipline (#444 unconditional >
+        # conditional). Tier-0 additionalContext via context_parts
+        # append; resume / startup / clear / compact all reach this
+        # branch identically — Arm is idempotent in the skill, so
+        # redundant emission no-ops cheaply.
+        try:
+            active_count = count_active_tasks(team_name)
+        except Exception:
+            active_count = 0
+        if active_count > 0:
+            context_parts.append(
+                'Active teammate tasks detected on session start. '
+                'Invoke Skill("PACT:inbox-wake") and execute the Arm operation '
+                'before any further teammate dispatch. Arm is idempotent — '
+                'the skill no-ops if a valid STATE_FILE is already on disk.'
+            )
 
         # 5a. Write session context file FIRST so get_session_dir() works for
         # subsequent journal writes. write_context() populates the _cache

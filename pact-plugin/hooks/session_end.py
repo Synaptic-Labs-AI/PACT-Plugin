@@ -459,6 +459,52 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
         return None
 
 
+def cleanup_wake_registry(team_name: str) -> None:
+    """
+    Best-effort removal of the inbox-wake STATE_FILE sidecar for the
+    given team.
+
+    Belt-and-suspenders for force-termination edge cases (SIGKILL,
+    crash, hard process tree teardown) where the primary skill-driven
+    Teardown path did not run. Cannot stop the orphaned Monitor task —
+    that is an agent-runtime tool unreachable from this hook context.
+    Sidecar removal lets the next session's Arm cold-start cleanly
+    instead of seeing a STATE_FILE pointing at a long-dead Monitor.
+
+    Lead-only scope: a single fixed-name STATE_FILE at
+    ~/.claude/teams/{team_name}/inbox-wake-state.json. No glob, no
+    per-agent suffix.
+
+    Path-traversal discipline:
+      - team_name validated via is_safe_path_component (positive
+        allowlist); rejects ``, `..`, `/`, controls, separators.
+      - teams_root resolved once; team_dir resolved and asserted under
+        teams_root via relative_to (symlink-escape defense).
+      - Path.unlink wrapped in try/except OSError; missing_ok=True
+        suppresses FileNotFoundError, other OSError subtypes are
+        swallowed per the module-wide fail-open posture.
+
+    Pure side-effect; never raises.
+    """
+    if not team_name or not is_safe_path_component(team_name):
+        return
+    try:
+        teams_root = (Path.home() / ".claude" / "teams").resolve()
+    except OSError:
+        return
+    team_dir = teams_root / team_name
+    try:
+        resolved_team_dir = team_dir.resolve()
+        resolved_team_dir.relative_to(teams_root)
+    except (OSError, ValueError):
+        return  # symlink escape or unreadable path
+    state_file = resolved_team_dir / "inbox-wake-state.json"
+    try:
+        state_file.unlink(missing_ok=True)
+    except OSError:
+        pass  # fail-open per module convention
+
+
 def cleanup_old_teams(
     current_team_name: str,
     teams_base_dir: str | None = None,
@@ -801,6 +847,15 @@ def main():
         # Callsite short-circuit on empty team_name is the belt-and-suspenders
         # layer around the internal fail-closed guard.
         current_team_name = get_team_name()
+
+        # Wake-registry cleanup (#591). Belt-and-suspenders for force-
+        # termination paths where the primary skill-driven Teardown did
+        # not run. Cannot reach TaskStop from hook context; only the
+        # registry sidecar is removable here. Single-file unlink
+        # (lead-only — fixed STATE_FILE name, no glob).
+        if current_team_name:
+            cleanup_wake_registry(current_team_name)
+
         teams_r, teams_s = 0, 0
         tasks_r, tasks_s = 0, 0
         teams_reaper_ran = False
