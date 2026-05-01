@@ -293,3 +293,58 @@ def test_failure_modes_entry_present(cmd_text, entry):
 def test_references_section_links_to_unwatch_inbox(cmd_text):
     refs = _section_body(cmd_text, "## References")
     assert "unwatch-inbox" in refs
+
+
+# ---------- Lead-Session Guard (arch-F1) ----------
+
+def test_lead_session_guard_section_present(cmd_text):
+    """Arm command must refuse to execute from a teammate session.
+    Without the guard, a /PACT:watch-inbox invocation in a teammate
+    session would arm Monitor in the wrong process; wake fires in the
+    teammate session, lead silently misses every signal."""
+    assert "## Lead-Session Guard" in cmd_text
+
+
+def test_lead_session_guard_compares_session_id_to_team_config_lead(cmd_text):
+    """The guard's signal source MUST be `session_id` against
+    `team_config.leadSessionId` — NOT a hypothetical `agent_type` field
+    on pact-session-context.json. The team config is the canonical
+    source of truth for lead identity; replicating that into
+    session-context creates two-source-of-truth drift."""
+    guard = _section_body(cmd_text, "## Lead-Session Guard")
+    assert "leadSessionId" in guard
+    assert "session_id" in guard
+    assert "refuse" in guard.lower()
+
+
+# ---------- Monitor bash shell-injection-vector absence (sec-F1) ----------
+
+def test_monitor_bash_has_no_shell_injection_vectors(cmd_text):
+    """Coarse but stable invariant: the Monitor bash block must contain
+    no shell-injection vectors (positional args, eval, command-
+    substitution against external commands, backticks). The actual
+    security property is "no user-controlled string flows into shell
+    interpretation"; a positive allowlist of safe-vars is brittle
+    across future Monitor changes, so we negative-allowlist the dangerous
+    primitives instead."""
+    monitor = _section_body(cmd_text, "## Monitor Block")
+    # Extract the bash fence body. The block starts with ```bash.
+    if "```bash" not in monitor:
+        pytest.fail("Monitor Block must contain a ```bash fenced block")
+    bash_body = monitor.split("```bash", 1)[1].split("```", 1)[0]
+
+    forbidden_tokens = [
+        "$1", "$2", "$3", "$@", "$*",  # positional args (untrusted caller input)
+        "eval ",                        # arbitrary string execution
+        "`",                            # backticks (legacy command substitution)
+        "$(curl",                       # network command-substitution
+        "$(wget",
+        "$(nc ",
+        "$(bash",
+        "$(sh ",
+        "$(eval",
+    ]
+    for tok in forbidden_tokens:
+        assert tok not in bash_body, (
+            f"Monitor bash contains shell-injection vector: {tok!r}"
+        )

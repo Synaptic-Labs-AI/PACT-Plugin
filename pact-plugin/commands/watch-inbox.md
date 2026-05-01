@@ -31,6 +31,7 @@ Arm is idempotent. Re-invoking when STATE_FILE is already present and valid is a
 
 Single procedure — the command IS the operation. No Arm/Teardown sub-section.
 
+0. **Lead-session guard** (see `## Lead-Session Guard` below). If the current session is not the team-lead session, refuse and return — do NOT proceed to step 1.
 1. Read STATE_FILE at `~/.claude/teams/{team_name}/inbox-wake-state.json`.
 2. If STATE_FILE is present and parses with `v=1`: no-op (already armed; cheap on every re-invocation).
 3. Otherwise cold-start:
@@ -39,6 +40,29 @@ Single procedure — the command IS the operation. No Arm/Teardown sub-section.
    3. Write the STATE_FILE atomically (see `## WriteStateFile Block`).
 
 **Audit**: idempotency lives in this command (STATE_FILE-presence check), NOT in the directive that invokes it. An editing LLM tempted to add an "if not already armed" guard at the directive site would re-introduce LLM-self-diagnosis as the gate, which is the failure mode the unconditional-emit discipline closes.
+
+## Lead-Session Guard
+
+Refuse to execute when invoked from a teammate session. The wake mechanism is lead-only: arming Monitor in a teammate session would watch the lead's inbox file from the wrong process, fire the wake in the teammate's session, and the lead would silently miss every signal.
+
+```python
+team_name = pact_session_context["team_name"]
+session_id = pact_session_context["session_id"]
+team_config = json.loads(
+    (Path.home() / ".claude" / "teams" / team_name / "config.json").read_text()
+)
+if session_id != team_config.get("leadSessionId"):
+    refuse(
+        "This command only runs in the team-lead session. "
+        "Teammates use their own inbox at "
+        "~/.claude/teams/{team_name}/inboxes/{teammate-name}.json — "
+        "no Monitor is required for teammates; the platform's idle-delivery "
+        "covers their inbox-read path."
+    )
+    return
+```
+
+**Audit**: signal source is `session_id == team_config.leadSessionId`, NOT a hypothetical `agent_type` field on `pact-session-context.json`. The session-context schema is `{team_name, session_id, project_dir, plugin_root, started_at}` by design — adding an `agent_type` field would couple every hook's session-init to a teammate-vs-lead discriminator that already exists at canonical depth in the team config (`leadSessionId`). An editing LLM tempted to "just add agent_type to session-context" should stop: the team config is the single source of truth for team membership and lead identity; replicating that signal into session-context creates two-source-of-truth drift. The guard runs at command-invoke time, NOT at directive-emit time — directives emitted by `wake_lifecycle_emitter.py` and `session_init.py` already only fire in lead sessions (the lifecycle emitter's pre/post derivation runs in the lead's PostToolUse path; SessionStart fires per session and the directive is teammate-harmless because this guard refuses cold-start). The guard's purpose is to defend against user-typed `/PACT:watch-inbox` invocation from a teammate session, which is the only invocation path the directive-side filtering does not cover.
 
 ## Monitor Block
 

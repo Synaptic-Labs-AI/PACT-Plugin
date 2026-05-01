@@ -10,13 +10,13 @@ Lifecycle automation:
 - On TaskCreate that transitions the team's active-task count from 0 to
   1, emit a watch-inbox directive instructing the lead to invoke
   Skill("PACT:watch-inbox").
-- On TaskUpdate(status=completed) that transitions the team's
-  active-task count from 1 to 0, emit an unwatch-inbox directive
-  instructing the lead to invoke Skill("PACT:unwatch-inbox").
-- On any other tool fire (TaskUpdate without status->completed,
-  Task/Agent teammate spawn, TaskCreate at non-zero pre-state,
-  TaskUpdate(completed) leaving residual active tasks): no directive
-  emitted.
+- On TaskUpdate(status in {completed, deleted}) that transitions the
+  team's active-task count from 1 to 0, emit an unwatch-inbox directive
+  instructing the lead to invoke Skill("PACT:unwatch-inbox"). Both
+  terminal statuses end active work and are treated symmetrically.
+- On any other tool fire (TaskUpdate without a terminal-status
+  transition, TaskCreate at non-zero pre-state, terminal-status
+  TaskUpdate leaving residual active tasks): no directive emitted.
 
 Transition detection (post-only):
 - post = count_active_tasks(team_name) — the count AFTER the tool's
@@ -26,12 +26,12 @@ Transition detection (post-only):
 - TaskCreate + post == 1 → emit Arm (a TaskCreate that lifts the count
   to 1 must have been the first lifecycle-relevant task; carve-out
   creations leave post unchanged at 0).
-- TaskUpdate(status=completed) + post == 0 → emit Teardown. Skill's
-  Teardown is idempotent (no-op if STATE_FILE absent), so over-eager
-  emission on edge cases (completion of a never-counted signal-task
-  while post==0) is benign.
-- Any other tool fire (non-status TaskUpdate, Task/Agent spawn,
-  TaskCreate at post != 1, TaskUpdate(completed) at post > 0): no-op.
+- TaskUpdate(status in {completed, deleted}) + post == 0 → emit
+  Teardown. Skill's Teardown is idempotent (no-op if STATE_FILE absent),
+  so over-eager emission on edge cases (terminal-status update of a
+  never-counted signal-task while post==0) is benign.
+- Any other tool fire (non-status TaskUpdate, TaskCreate at post != 1,
+  terminal-status TaskUpdate at post > 0): no-op.
 
 Output schema (load-bearing):
 {
@@ -123,10 +123,14 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_status_completed_update(input_data: dict[str, Any]) -> bool:
+_TERMINAL_STATUSES = ("completed", "deleted")
+
+
+def _is_terminal_status_update(input_data: dict[str, Any]) -> bool:
     """
-    Return True iff this TaskUpdate fired with a status->completed
-    transition.
+    Return True iff this TaskUpdate fired with a status transition into
+    a terminal state (completed or deleted). Both terminate active work
+    and should trigger a Teardown emit on a 1->0 transition.
 
     Probes the tool_input.status field (the request) primarily; falls
     back to tool_response.statusChange.to or tool_response.status if
@@ -136,15 +140,15 @@ def _is_status_completed_update(input_data: dict[str, Any]) -> bool:
     """
     tool_input = input_data.get("tool_input") or {}
     if isinstance(tool_input, dict):
-        if tool_input.get("status") == "completed":
+        if tool_input.get("status") in _TERMINAL_STATUSES:
             return True
 
     tool_response = input_data.get("tool_response") or {}
     if isinstance(tool_response, dict):
         status_change = tool_response.get("statusChange")
-        if isinstance(status_change, dict) and status_change.get("to") == "completed":
+        if isinstance(status_change, dict) and status_change.get("to") in _TERMINAL_STATUSES:
             return True
-        if tool_response.get("status") == "completed":
+        if tool_response.get("status") in _TERMINAL_STATUSES:
             return True
 
     return False
@@ -170,12 +174,12 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
 
     Post-only transition detection:
     - TaskCreate + post == 1 → Arm.
-    - TaskUpdate(status=completed) + post == 0 → Teardown.
+    - TaskUpdate(status in {completed, deleted}) + post == 0 → Teardown.
 
     count_active_tasks already filters carve-outs (signal-tasks,
     self-complete-exempt owners), so post == 1 after a TaskCreate
     means the create added the first lifecycle-relevant task, and
-    post == 0 after a status-completed TaskUpdate means the team
+    post == 0 after a terminal-status TaskUpdate means the team
     has no remaining lifecycle-relevant work. The skill's Arm and
     Teardown are both idempotent, so any over-eager emit on edge
     cases is benign.
@@ -195,7 +199,7 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
         return None
 
     # tool_name == "TaskUpdate"
-    if not _is_status_completed_update(input_data):
+    if not _is_terminal_status_update(input_data):
         return None
     if post == 0:
         return _TEARDOWN_DIRECTIVE

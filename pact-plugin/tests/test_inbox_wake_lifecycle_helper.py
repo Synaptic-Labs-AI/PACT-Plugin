@@ -244,3 +244,56 @@ def test_lifecycle_relevant_never_raises_on_combined_adversarial_shapes(task):
     except Exception as exc:  # pragma: no cover
         pytest.fail(f"_lifecycle_relevant raised on {task!r}: {exc}")
     assert isinstance(result, bool)
+
+
+# ---------- Dotfile exclusion (te-M2) ----------
+
+def test_count_active_tasks_excludes_dotfile_prefixed_json(tmp_path, monkeypatch):
+    """Dotfile-prefixed `.fake_task.json` files planted in the team
+    directory must not influence the count. (Path.glob('*.json') matches
+    dotfiles on POSIX, contra a common assumption — the explicit
+    `name.startswith('.')` guard in iter_team_task_jsons is what excludes
+    them.) Without that guard, an attacker who can write a single
+    dotfile into the team's tasks dir could inflate the active-tasks
+    count and suppress Teardown emit."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-dotfile"
+    d = tmp_path / ".claude" / "tasks" / team
+    d.mkdir(parents=True)
+    # One legitimate active task.
+    _stage_task(tmp_path, team, "real", status="in_progress", owner="x")
+    # Dotfile-prefixed shape that would be active if matched.
+    (d / ".fake_task.json").write_text(
+        json.dumps({"id": "fake", "status": "in_progress", "owner": "y"}),
+        encoding="utf-8",
+    )
+    # Dotfile-only file (pure leading-dot).
+    (d / ".hidden.json").write_text(
+        json.dumps({"id": "hidden", "status": "in_progress", "owner": "z"}),
+        encoding="utf-8",
+    )
+    assert wl.count_active_tasks(team) == 1
+
+
+# ---------- Symlink-escape defense (be-B1) ----------
+
+def test_count_active_tasks_returns_zero_when_team_dir_symlink_escapes_root(tmp_path, monkeypatch):
+    """Symlink-escape defense: even if `team_name` passes the safe-path
+    allowlist, a symlink at ~/.claude/tasks/{team_name} pointing outside
+    tasks_root must be detected via resolve()+relative_to and counted
+    as 0. Mirrors session_end.py::cleanup_wake_registry's defense."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tasks_root = tmp_path / ".claude" / "tasks"
+    tasks_root.mkdir(parents=True)
+    # Outside tasks_root: a directory with a real active task.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "real.json").write_text(
+        json.dumps({"id": "real", "status": "in_progress", "owner": "x"}),
+        encoding="utf-8",
+    )
+    # team_name is allowlist-safe, but the team_dir symlinks outside.
+    team = "team-sym"
+    (tasks_root / team).symlink_to(outside, target_is_directory=True)
+    # Without symlink-escape defense the count would be 1; with it, 0.
+    assert wl.count_active_tasks(team) == 0

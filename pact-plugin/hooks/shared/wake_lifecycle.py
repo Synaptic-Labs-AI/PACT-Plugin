@@ -6,7 +6,7 @@ Summary: Shared helper for inbox-wake lifecycle hooks. Counts active teammate
          agents do not count toward the wake-mechanism's "any active work"
          signal).
 Used by: pact-plugin/hooks/wake_lifecycle_emitter.py (PostToolUse hook on
-         TaskCreate / TaskUpdate / Task / Agent), and
+         TaskCreate / TaskUpdate), and
          pact-plugin/hooks/session_init.py (resume-with-active-tasks Arm
          directive emission).
 
@@ -36,12 +36,10 @@ and the inline-literal signal-task pattern at agent_handoff_emitter.py):
    These also self-complete; they do not require the lead's wake.
 """
 
-import json
-from pathlib import Path
 from typing import Any
 
 from shared.intentional_wait import SELF_COMPLETE_EXEMPT_AGENTS
-from shared.session_state import is_safe_path_component
+from shared.task_utils import iter_team_task_jsons
 
 # Signal-task types — inline literal mirrors the convention at
 # agent_handoff_emitter.py:78 and task_utils.find_blockers. The carve-out
@@ -103,44 +101,14 @@ def count_active_tasks(team_name: str) -> int:
     """
     Count lifecycle-relevant tasks under ~/.claude/tasks/{team_name}/.
 
-    Returns 0 when:
-      - team_name fails is_safe_path_component (rejects empty, non-string,
-        traversal fragments, separators, controls, whitespace),
-      - the tasks directory does not exist,
-      - any unexpected error reading the directory.
-
-    Individual unreadable / unparseable task files are skipped silently;
-    the count reflects only successfully-parsed lifecycle-relevant tasks.
+    Iteration + path-traversal defense (allowlist + symlink-escape) is
+    delegated to task_utils.iter_team_task_jsons, which is the single
+    source of truth for per-team task-file iteration. Individual
+    unreadable / unparseable task files are skipped silently; the count
+    reflects only successfully-parsed lifecycle-relevant tasks.
 
     Pure function; never raises. Fail-open as "no active tasks" — the
     wake mechanism degrades to baseline idle-poll on read failure rather
     than crashing the calling hook (livelock-safety > observability).
-
-    Path-traversal defense: the team_name flows into a filesystem join
-    used to enumerate task files. A poisoned context file or future
-    constructor change passing attacker-influenced data must not escape
-    the tasks root. is_safe_path_component is a positive allowlist;
-    apply it on every wake-lifecycle consumer that joins team_name into
-    a filesystem path (mirrors session_end.py::cleanup_wake_registry).
     """
-    if not is_safe_path_component(team_name):
-        return 0
-
-    tasks_dir = Path.home() / ".claude" / "tasks" / team_name
-    if not tasks_dir.exists():
-        return 0
-
-    count = 0
-    try:
-        for task_file in tasks_dir.glob("*.json"):
-            try:
-                content = task_file.read_text(encoding="utf-8")
-                task = json.loads(content)
-            except (IOError, OSError, json.JSONDecodeError):
-                continue
-            if _lifecycle_relevant(task):
-                count += 1
-    except (IOError, OSError):
-        return 0
-
-    return count
+    return sum(1 for task in iter_team_task_jsons(team_name) if _lifecycle_relevant(task))

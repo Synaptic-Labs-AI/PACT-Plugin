@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/hooks/shared/task_utils.py
 Summary: Shared Task system integration utilities for PACT hooks.
-Used by: session_init.py, agent_handoff_emitter.py
+Used by: session_init.py, agent_handoff_emitter.py, wake_lifecycle.py
 
 This module provides common functions for reading and analyzing Tasks from
 the Claude Task system. Tasks are stored at ~/.claude/tasks/{sessionId}/*.json
@@ -15,6 +15,7 @@ Functions:
     find_active_agents: Find all active agent tasks
     find_blockers: Find blocker/algedonic tasks
     build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
+    iter_team_task_jsons: Yield parsed task JSONs from a team dir (path-traversal safe)
     read_task_json: Read the raw task JSON by id + team_name (path-traversal safe)
 """
 
@@ -22,9 +23,10 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from shared.pact_context import get_session_id
+from shared.session_state import is_safe_path_component
 
 
 def get_task_list() -> list[dict[str, Any]] | None:
@@ -263,6 +265,60 @@ def build_post_compaction_checkpoint(
         lines.append("Next Step: **Check TaskList and ask user how to proceed.**")
 
     return "\n".join(lines)
+
+
+def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
+    """
+    Yield parsed task JSON dicts from ~/.claude/tasks/{team_name}/*.json.
+
+    Path-traversal defense (single source of truth for per-team task
+    iteration):
+      - team_name validated via is_safe_path_component (positive
+        allowlist; rejects empty, non-string, traversal fragments,
+        separators, controls, whitespace).
+      - tasks_root resolved once; team_dir resolved and asserted under
+        tasks_root via relative_to (symlink-escape defense).
+
+    Pure generator; never raises. Yields nothing on any error
+    (unsafe team_name, missing dir, symlink escape, IO error). Individual
+    unreadable / unparseable task files are skipped silently. Callers
+    treat "no tasks" as fail-open — wake mechanism degrades to baseline
+    idle-poll rather than crashing the hook.
+
+    Yields:
+        dict per successfully-parsed task JSON file.
+    """
+    if not is_safe_path_component(team_name):
+        return
+    try:
+        tasks_root = (Path.home() / ".claude" / "tasks").resolve()
+    except OSError:
+        return
+    team_dir = tasks_root / team_name
+    try:
+        resolved_team_dir = team_dir.resolve()
+        resolved_team_dir.relative_to(tasks_root)
+    except (OSError, ValueError):
+        return  # symlink escape or unreadable path
+    if not resolved_team_dir.exists():
+        return
+    try:
+        for task_file in resolved_team_dir.glob("*.json"):
+            # Exclude dotfile-prefixed JSON files: pathlib glob includes
+            # them, but the platform's task system never writes them.
+            # An attacker dropping one into the team's tasks dir could
+            # otherwise inflate the active-task count.
+            if task_file.name.startswith("."):
+                continue
+            try:
+                content = task_file.read_text(encoding="utf-8")
+                task = json.loads(content)
+            except (IOError, OSError, json.JSONDecodeError):
+                continue
+            if isinstance(task, dict):
+                yield task
+    except (IOError, OSError):
+        return
 
 
 def read_task_json(

@@ -392,3 +392,52 @@ def test_decide_directive_module_importable():
         {"tool_name": "TaskCreate", "tool_input": {}, "tool_response": {}},
         "team",
     ) is None
+
+
+# ---------- Terminal-status detection covers deleted (be-F2) ----------
+
+def test_teardown_emitted_on_status_deleted_at_post_zero(tmp_path):
+    """Both terminal statuses — `completed` and `deleted` — must trigger
+    Teardown when the team's active count drops to zero. A status=deleted
+    transition is structurally equivalent to status=completed for the
+    wake-lifecycle (the task is no longer active work). Without this,
+    a deleted-task TaskUpdate at post-zero leaves a phantom Monitor
+    armed against an inbox no one is watching."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "t"
+    _write_session_context(home, sid, pdir, team)
+    # Task on disk is deleted (post-state); pre-state was active.
+    _write_task(home, team, "1", status="deleted", owner="x")
+    out = _emit_output({
+        "tool_name": "TaskUpdate", "session_id": sid, "cwd": pdir,
+        "tool_input": {"taskId": "1", "status": "deleted"},
+        "tool_response": {"id": "1", "status": "deleted"},
+    }, home)
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        "Expected Teardown directive on status=deleted at post-zero "
+        f"(be-F2). Actual emit: {out!r}"
+    )
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
+
+
+def test_is_terminal_status_update_matches_completed_and_deleted(tmp_path):
+    """Direct unit test on the terminal-status predicate. The behavioral
+    contract is "task transitioned to a terminal status" — both
+    `completed` and `deleted` are terminal."""
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+    assert emitter._is_terminal_status_update({
+        "tool_input": {"status": "deleted"},
+        "tool_response": {},
+    }) is True
+    assert emitter._is_terminal_status_update({
+        "tool_input": {"status": "completed"},
+        "tool_response": {},
+    }) is True
+    # Sanity: an unrelated status remains False.
+    assert emitter._is_terminal_status_update({
+        "tool_input": {"status": "in_progress"},
+        "tool_response": {},
+    }) is False

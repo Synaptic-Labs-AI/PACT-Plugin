@@ -170,15 +170,13 @@ def test_teardown_uses_missing_ok(cmd_text):
 
 # ---------- Failure Modes coverage ----------
 
-@pytest.mark.parametrize("entry_substring", [
-    # Either F6-anchored failure mode form is acceptable; an editor may
-    # title it differently but the Monitor-died-mid-session concept must
-    # appear in §Failure Modes.
-    "Monitor",
-])
-def test_failure_modes_mentions_monitor_died_silently(cmd_text, entry_substring):
+def test_failure_modes_mentions_monitor_died_silently(cmd_text):
+    """The Monitor-died-mid-session concept must appear in §Failure Modes
+    with the specific phrasing — `"Monitor"` alone is too weak (passes on
+    any prose mentioning Monitor); the F6-anchored phrase pins the
+    failure-mode entry concretely."""
     fm = _section_body(cmd_text, "## Failure Modes")
-    assert entry_substring in fm
+    assert "Monitor died silently" in fm
 
 
 # ---------- Cross-link to watch-inbox ----------
@@ -186,3 +184,59 @@ def test_failure_modes_mentions_monitor_died_silently(cmd_text, entry_substring)
 def test_references_section_links_to_watch_inbox(cmd_text):
     refs = _section_body(cmd_text, "## References")
     assert "watch-inbox" in refs
+
+
+# ---------- Lead-Session Guard (arch-F1) ----------
+
+def test_lead_session_guard_section_present(cmd_text):
+    """Teardown must refuse to execute from a teammate session. Without
+    the guard, a teammate-session /PACT:unwatch-inbox would TaskStop the
+    lead's Monitor task ID — a cross-session operation that would
+    silently kill the lead's wake mechanism."""
+    assert "## Lead-Session Guard" in cmd_text
+
+
+def test_lead_session_guard_compares_session_id_to_team_config_lead(cmd_text):
+    """Same as arm command: signal source MUST be `session_id` against
+    `team_config.leadSessionId`. Two-source-of-truth defense."""
+    guard = _section_body(cmd_text, "## Lead-Session Guard")
+    assert "leadSessionId" in guard
+    assert "session_id" in guard
+    assert "refuse" in guard.lower()
+
+
+# ---------- task_id allowlist validation (sec-M1) ----------
+
+def test_teardown_validates_monitor_task_id_against_allowlist_regex(cmd_text):
+    """The Teardown sequence MUST validate STATE_FILE.monitor_task_id
+    against an allowlist regex BEFORE calling TaskStop. A poisoned
+    STATE_FILE could otherwise inject arbitrary strings into a tool-call
+    argument. The allowlist `^[a-z0-9]{6,}$` matches Claude Code's
+    task-id format and refuses anything else."""
+    teardown = _section_body(cmd_text, "## Teardown Block")
+    # Either the literal regex appears, or a clear validation step
+    # references the allowlist. The current canonical form pins the
+    # exact regex literally so an editing LLM cannot relax it silently.
+    assert "^[a-z0-9]{6,}$" in teardown
+
+
+def test_operation_section_validates_monitor_task_id_before_taskstop(cmd_text):
+    """Independent pin in the Operation section — the validation must be
+    in the load-bearing procedure list, not just the supplementary
+    Teardown Block. An editing LLM removing the regex from Operation
+    would leave the supplementary block as the only mention; this test
+    pins both surfaces."""
+    operation = _section_body(cmd_text, "## Operation")
+    assert "^[a-z0-9]{6,}$" in operation
+
+
+# ---------- TOCTOU audit comment (sec-M2) ----------
+
+def test_teardown_documents_toctou_window_audit(cmd_text):
+    """The Teardown Block must document the TOCTOU window between
+    resolve() and unlink() so an editing LLM understands why the window
+    is acceptable (same-user-trust assumption) and does not over-engineer
+    a defense that would not improve the security posture."""
+    teardown = _section_body(cmd_text, "## Teardown Block")
+    assert "TOCTOU" in teardown
+    assert "same-user" in teardown.lower()
