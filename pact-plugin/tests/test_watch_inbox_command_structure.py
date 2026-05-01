@@ -300,12 +300,19 @@ def test_references_section_links_to_unwatch_inbox(cmd_text):
 
 # ---------- Lead-Session Guard (arch-F1) ----------
 
-def test_lead_session_guard_section_present(cmd_text):
-    """Arm command must refuse to execute from a teammate session.
-    Without the guard, a /PACT:watch-inbox invocation in a teammate
-    session would arm Monitor in the wrong process; wake fires in the
-    teammate session, lead silently misses every signal."""
-    assert "## Lead-Session Guard" in cmd_text
+def test_lead_session_guard_section_has_body(cmd_text):
+    """Arm command must refuse to execute from a teammate session AND
+    must have a non-empty section body (not just an inline cross-ref).
+    Phantom-green guard: the prior `'## Lead-Session Guard' in cmd_text`
+    form passes on inline references like 'see `## Lead-Session Guard`
+    below'; this stricter form requires the actual H2 section to exist
+    and contain content."""
+    body = _section_body(cmd_text, "## Lead-Session Guard")
+    assert body.strip(), (
+        "Lead-Session Guard section is missing or empty — phantom-green "
+        "guard: only an inline cross-ref to the section, not the section "
+        "itself."
+    )
 
 
 def test_lead_session_guard_compares_session_id_to_team_config_lead(cmd_text):
@@ -346,6 +353,10 @@ def test_monitor_bash_has_no_shell_injection_vectors(cmd_text):
         "$(bash",
         "$(sh ",
         "$(eval",
+        "$(rm",                         # destructive shell-out
+        "$(python",                     # interpreter substitution (host filesystem read)
+        "<(",                           # process substitution (read FD from subshell)
+        ">(",                           # process substitution (write FD to subshell)
     ]
     for tok in forbidden_tokens:
         assert tok not in bash_body, (

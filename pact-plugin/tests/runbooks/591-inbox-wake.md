@@ -18,7 +18,7 @@ The hook registration takes effect at the **next fresh session** after these fil
 
 | Event | Trigger | Mechanism |
 |---|---|---|
-| **Arm — first active task** | PostToolUse fires after `TaskCreate` (or `TaskUpdate` with owner assignment) and the team transitions 0→1 active teammate task | `wake_lifecycle_emitter.py` emits `additionalContext` directive: *"Invoke Skill('PACT:watch-inbox') before continuing."* The lead invokes the command on its next turn. |
+| **Arm — first active task** | PostToolUse fires after `TaskCreate` and the team transitions 0→1 active teammate task | `wake_lifecycle_emitter.py` emits `additionalContext` directive: *"Invoke Skill('PACT:watch-inbox') before continuing."* The lead invokes the command on its next turn. |
 | **Arm — session resume** | `SessionStart` fires and the team's task list already has active teammate tasks (resumed session) | `session_init.py` Option-C path: hook reads `~/.claude/tasks/{team}/` filtered by `_lifecycle_relevant`; if count ≥ 1, emits unconditional Arm directive via `additionalContext`. |
 | **Teardown — last active task** | PostToolUse fires after `TaskUpdate` with terminal status (`completed` or `deleted`) and the team transitions 1→0 active teammate tasks | `wake_lifecycle_emitter.py` emits Teardown directive: *"Invoke Skill('PACT:unwatch-inbox') — no remaining teammate work."* |
 | **Teardown — operator command** | Lead invokes `/wrap-up` (after all teammate tasks have completed) | Command body contains an explicit `Skill("PACT:unwatch-inbox")` invocation as a hook-silent-fail safety net. Active-task count is naturally 0 at this point, so the Teardown is harmless and useful as a catch for the rare case where the PostToolUse 1→0 directive was missed. |

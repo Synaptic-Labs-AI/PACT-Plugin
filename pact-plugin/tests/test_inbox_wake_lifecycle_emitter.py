@@ -607,3 +607,67 @@ def test_count_active_tasks_called_on_taskcreate():
             "tool_response": {"id": "1"},
         }, "team-x")
         assert mock_count.call_count >= 1
+
+
+# ---------- Stdin payload size limit (sec-F1) ----------
+
+def test_oversized_stdin_payload_fails_open_with_suppress(tmp_path):
+    """Defense-in-depth size cap (sec-F1): a stdin payload exceeding
+    _MAX_PAYLOAD_BYTES must be rejected with suppressOutput / exit 0,
+    NOT parsed and not OOM. Synthesize a 2MB payload to comfortably
+    exceed any reasonable 1MB threshold; assert fail-open behavior.
+
+    The setup matches the WOULD-BE-ARM case (valid team_name, valid
+    session context, would-be 0->1 transition) so the suppress signal
+    can ONLY come from the size cap, not from any downstream guard like
+    missing team_name or non-lead session_id.
+
+    Counter-test-by-revert: removing the bounded read + size guard at
+    main() entry produces an Arm directive instead of suppressOutput
+    (the underlying path would otherwise emit Arm)."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "session-cap"; pdir = "/tmp/proj-cap"; team = "team-cap"
+    # Set up a valid lead-session context + active task on disk so the
+    # downstream path would emit Arm if the payload were processed.
+    _write_session_context(home, sid, pdir, team)
+    _write_task(home, team, "task-cap", status="in_progress", owner="x")
+    # Build a payload structurally valid but bloated — 2MB of filler
+    # padding. The structural shape is JSON so a no-cap path would
+    # attempt a full parse and (with valid context) emit Arm.
+    filler = "A" * (2 * 1024 * 1024)
+    payload_dict = {
+        "tool_name": "TaskCreate",
+        "session_id": sid,
+        "cwd": pdir,
+        "tool_input": {"taskId": "task-cap", "filler": filler},
+        "tool_response": {"id": "task-cap"},
+    }
+    payload_bytes = json.dumps(payload_dict).encode("utf-8")
+    assert len(payload_bytes) > 1024 * 1024, (
+        "Test setup: payload must exceed 1MB cap"
+    )
+    rc, out, _ = _run_emitter(payload_bytes, env_extra={"HOME": str(home), "CLAUDE_PROJECT_DIR": pdir})
+    assert rc == 0, "Expected fail-open exit-0 on oversized payload"
+    parsed = json.loads(out)
+    # Discriminator: with the cap in place, suppressOutput. Without the
+    # cap, the would-be-Arm path emits hookSpecificOutput.additionalContext.
+    assert parsed == {"suppressOutput": True}, (
+        f"Expected size-cap rejection (suppressOutput), got {parsed!r}. "
+        f"If parsed has hookSpecificOutput, the cap was bypassed and the "
+        f"would-be-Arm path emitted instead."
+    )
+
+
+def test_emitter_documents_payload_size_cap_constant():
+    """Source-level structural pin: the size cap constant must exist
+    as a module-global so an editing LLM cannot 'simplify' the bounded
+    read into an unbounded read by removing the cap inline."""
+    src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
+    assert "_MAX_PAYLOAD_BYTES" in src
+    # Cap must be a reasonable size (between 64KB and 16MB). Pin a
+    # range rather than a literal so a future tune (e.g., 2MB) doesn't
+    # require updating this test.
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+    assert isinstance(emitter._MAX_PAYLOAD_BYTES, int)
+    assert 64 * 1024 <= emitter._MAX_PAYLOAD_BYTES <= 16 * 1024 * 1024

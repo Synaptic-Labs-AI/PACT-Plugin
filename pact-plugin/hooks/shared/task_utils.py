@@ -310,6 +310,16 @@ def iter_team_task_jsons(team_name: str) -> Iterator[dict]:
             # otherwise inflate the active-task count.
             if task_file.name.startswith("."):
                 continue
+            # Per-file symlink defense: glob() returns symlink entries
+            # as their raw paths. Even though resolved_team_dir is
+            # asserted under tasks_root, a symlink inside it could
+            # resolve outside. Skip symlinks silently — the platform
+            # task system writes only regular files.
+            try:
+                if task_file.is_symlink():
+                    continue
+            except OSError:
+                continue
             try:
                 content = task_file.read_text(encoding="utf-8")
                 task = json.loads(content)

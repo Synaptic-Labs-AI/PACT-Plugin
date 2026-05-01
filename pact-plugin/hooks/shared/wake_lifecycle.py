@@ -68,14 +68,24 @@ def _lifecycle_relevant(task: Any) -> bool:
     Other statuses (completed, deleted, blocked) do not count.
 
     Carve-outs (apply only on top of a passing status check):
+      - Self-complete-exempt owner: owner in SELF_COMPLETE_EXEMPT_AGENTS.
+        Evaluated before the metadata-shape check so that owner-based
+        exemption holds even on corrupted metadata.
       - Signal-task pattern: metadata.completion_type == "signal" AND
         metadata.type in {"blocker", "algedonic"}.
-      - Self-complete-exempt owner: owner in SELF_COMPLETE_EXEMPT_AGENTS.
     """
     if not isinstance(task, dict):
         return False
 
     if task.get("status") not in _ACTIVE_STATUSES:
+        return False
+
+    # Self-complete-exempt agent carve-out. Hoisted above the metadata
+    # shape check so that a secretary-owned task with corrupted metadata
+    # is still exempt — symmetric with shared.intentional_wait.
+    # is_self_complete_exempt, which fail-closes on owner alone.
+    owner = task.get("owner")
+    if isinstance(owner, str) and owner in SELF_COMPLETE_EXEMPT_AGENTS:
         return False
 
     metadata = task.get("metadata") or {}
@@ -88,11 +98,6 @@ def _lifecycle_relevant(task: Any) -> bool:
     if metadata.get("completion_type") == "signal":
         if metadata.get("type") in _SIGNAL_TASK_TYPES:
             return False
-
-    # Self-complete-exempt agent carve-out.
-    owner = task.get("owner")
-    if isinstance(owner, str) and owner in SELF_COMPLETE_EXEMPT_AGENTS:
-        return False
 
     return True
 

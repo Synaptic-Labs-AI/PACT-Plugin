@@ -92,6 +92,28 @@ def test_lifecycle_relevant_counts_under_malformed_metadata():
     assert wl._lifecycle_relevant(task) is True
 
 
+@pytest.mark.parametrize("agent", sorted(SELF_COMPLETE_EXEMPT_AGENTS))
+def test_lifecycle_relevant_exempt_owner_with_corrupted_metadata(agent):
+    """Owner-check hoist (be-M1): a self-complete-exempt agent (e.g.
+    secretary) with non-dict metadata must STILL be exempt — return
+    False. Pre-hoist behavior was True because the metadata-shape gate
+    short-circuited to conservative-count BEFORE checking the owner
+    carve-out, so corrupted metadata accidentally promoted exempt agents
+    to lifecycle-relevant tasks. This is the inverse asymmetry of the
+    sibling test_lifecycle_relevant_counts_under_malformed_metadata: a
+    NON-exempt owner with corrupted metadata stays True (count it
+    conservatively); an EXEMPT owner with corrupted metadata flips to
+    False (the carve-out is owner-shape, not metadata-shape).
+
+    Counter-test-by-revert: reverting the owner carve-out below the
+    metadata-shape gate would flip this test RED."""
+    task = {"status": "in_progress", "owner": agent, "metadata": "not-a-dict"}
+    assert wl._lifecycle_relevant(task) is False, (
+        f"Exempt owner {agent!r} with corrupted metadata must remain "
+        f"exempt; pre-hoist behavior was True."
+    )
+
+
 # ---------- count_active_tasks ----------
 
 def test_count_active_tasks_returns_zero_on_empty_team_name(tmp_path, monkeypatch):
@@ -297,3 +319,35 @@ def test_count_active_tasks_returns_zero_when_team_dir_symlink_escapes_root(tmp_
     (tasks_root / team).symlink_to(outside, target_is_directory=True)
     # Without symlink-escape defense the count would be 1; with it, 0.
     assert wl.count_active_tasks(team) == 0
+
+
+# ---------- Per-file symlink defense (be-F1) ----------
+
+def test_count_active_tasks_skips_symlinked_task_files(tmp_path, monkeypatch):
+    """Per-file symlink defense (be-F1): even when the team_dir is
+    legitimate, individual task-file entries that are symlinks must be
+    skipped. The team_dir-level resolve()+relative_to defense catches
+    a malicious team_dir, but a regular team_dir with a planted symlink
+    inside (e.g., `~/.claude/tasks/team-x/task-1.json -> /etc/passwd`)
+    would otherwise be read by iter_team_task_jsons. Skip silently — the
+    platform task system writes only regular files.
+
+    Counter-test-by-revert: removing the per-file is_symlink guard
+    would let a planted symlink contribute to the count."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    team = "team-symfile"
+    d = tmp_path / ".claude" / "tasks" / team
+    d.mkdir(parents=True)
+    # One legitimate active task as a regular file.
+    _stage_task(tmp_path, team, "real", status="in_progress", owner="x")
+    # External payload that the symlink will point at (active-shaped).
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target = elsewhere / "planted.json"
+    target.write_text(
+        json.dumps({"id": "planted", "status": "in_progress", "owner": "y"}),
+        encoding="utf-8",
+    )
+    # Symlinked task file inside the team dir — must be skipped.
+    (d / "planted.json").symlink_to(target)
+    assert wl.count_active_tasks(team) == 1

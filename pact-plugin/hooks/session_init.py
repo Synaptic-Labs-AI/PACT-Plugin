@@ -712,7 +712,7 @@ def main():
         # 5. Remind orchestrator to create session-unique PACT team (or reuse on resume)
         team_name = generate_team_name(input_data)
 
-        # 4d. Wake-arm directive (resume-with-active-tasks gap closure).
+        # 5_pre. Wake-arm directive (resume-with-active-tasks gap closure).
         # PostToolUse on Task-mutating tools handles 0->1 transitions
         # within a session, but a session resuming with tasks already in
         # flight has no such transition to observe. Hook-side
@@ -724,11 +724,20 @@ def main():
         # append; resume / startup / clear / compact all reach this
         # branch identically — Arm is idempotent in the skill, so
         # redundant emission no-ops cheaply.
-        try:
-            active_count = count_active_tasks(team_name)
-        except Exception:
-            active_count = 0
+        #
+        # count_active_tasks honors the pure-never-raises contract
+        # (shared.wake_lifecycle module-wide pin); call it directly,
+        # no try/except wrapper required.
+        active_count = count_active_tasks(team_name)
         if active_count > 0:
+            # Audit anchor (editing-LLM warning): the directive prose
+            # below is UNCONDITIONAL by design. Do not introduce
+            # LLM-self-diagnosis here ("only emit if X"). Diagnostic
+            # logic belongs in the hook (Python side, this function);
+            # the directive (LLM side) carries no conditional wording.
+            # Tier-0 additionalContext is architecturally binding;
+            # conditional wording silently regresses to the
+            # LLM-self-diagnosis failure mode #444 forbids.
             context_parts.append(
                 'Active teammate tasks detected on session start. '
                 'Invoke Skill("PACT:watch-inbox") before any further '

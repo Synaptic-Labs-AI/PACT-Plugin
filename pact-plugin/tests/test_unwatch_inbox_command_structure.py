@@ -188,12 +188,19 @@ def test_references_section_links_to_watch_inbox(cmd_text):
 
 # ---------- Lead-Session Guard (arch-F1) ----------
 
-def test_lead_session_guard_section_present(cmd_text):
-    """Teardown must refuse to execute from a teammate session. Without
-    the guard, a teammate-session /PACT:unwatch-inbox would TaskStop the
-    lead's Monitor task ID — a cross-session operation that would
-    silently kill the lead's wake mechanism."""
-    assert "## Lead-Session Guard" in cmd_text
+def test_lead_session_guard_section_has_body(cmd_text):
+    """Teardown must refuse to execute from a teammate session AND the
+    section must have a non-empty body (not just inline cross-ref).
+    Phantom-green guard: the prior `'## Lead-Session Guard' in cmd_text`
+    form would pass on inline references like 'see `## Lead-Session
+    Guard` below'; this stricter form requires the actual H2 section to
+    exist and contain content."""
+    body = _section_body(cmd_text, "## Lead-Session Guard")
+    assert body.strip(), (
+        "Lead-Session Guard section is missing or empty — phantom-green "
+        "guard: only an inline cross-ref to the section, not the section "
+        "itself."
+    )
 
 
 def test_lead_session_guard_compares_session_id_to_team_config_lead(cmd_text):
@@ -211,13 +218,16 @@ def test_teardown_validates_monitor_task_id_against_allowlist_regex(cmd_text):
     """The Teardown sequence MUST validate STATE_FILE.monitor_task_id
     against an allowlist regex BEFORE calling TaskStop. A poisoned
     STATE_FILE could otherwise inject arbitrary strings into a tool-call
-    argument. The allowlist `^[a-z0-9]{6,}$` matches Claude Code's
-    task-id format and refuses anything else."""
+    argument. The allowlist `^[a-z0-9]{6,}\\Z` matches Claude Code's
+    task-id format and refuses anything else.
+
+    Anchor must be `\\Z` (absolute end-of-string), NOT `$`. Python
+    regex's `$` matches before a trailing newline by default, which
+    means a planted task_id like `bu4hxc2bh\\n; rm -rf ~` would pass
+    `re.match(r"^[a-z0-9]{6,}$", task_id)` despite the embedded
+    newline. `\\Z` matches only the absolute end of the string."""
     teardown = _section_body(cmd_text, "## Teardown Block")
-    # Either the literal regex appears, or a clear validation step
-    # references the allowlist. The current canonical form pins the
-    # exact regex literally so an editing LLM cannot relax it silently.
-    assert "^[a-z0-9]{6,}$" in teardown
+    assert "^[a-z0-9]{6,}\\Z" in teardown
 
 
 def test_operation_section_validates_monitor_task_id_before_taskstop(cmd_text):
@@ -227,7 +237,40 @@ def test_operation_section_validates_monitor_task_id_before_taskstop(cmd_text):
     would leave the supplementary block as the only mention; this test
     pins both surfaces."""
     operation = _section_body(cmd_text, "## Operation")
-    assert "^[a-z0-9]{6,}$" in operation
+    assert "^[a-z0-9]{6,}\\Z" in operation
+
+
+def test_task_id_regex_uses_absolute_end_anchor_not_dollar(cmd_text):
+    """Pin the `\\Z` (absolute-end) anchor across both regex surfaces.
+    `$` matches before a trailing newline in Python's default re mode,
+    creating a smuggling vector: `bu4hxc2bh\\n; rm -rf` passes
+    `^[a-z0-9]{6,}$` because `$` accepts the prefix-then-newline
+    shape. `\\Z` rejects any string with a trailing newline.
+
+    Restricts the search to the procedure-step lines (not audit prose
+    that may quote the old `$` form as a negative example). The
+    procedure step is the load-bearing surface — the audit prose can
+    legitimately reference both forms in a 'use this not that'
+    explanation."""
+    for section_name in ("## Operation", "## Teardown Block"):
+        body = _section_body(cmd_text, section_name)
+        # Filter to only the procedure-step lines: lines that begin with
+        # a digit + dot (numbered procedure step) AND mention the regex.
+        proc_lines = [
+            line for line in body.splitlines()
+            if line.strip()
+            and (line.lstrip()[:1].isdigit() or line.lstrip().startswith("- "))
+            and "[a-z0-9]" in line
+        ]
+        assert proc_lines, (
+            f"§{section_name} should contain a procedure step that names "
+            f"the task-id regex"
+        )
+        for line in proc_lines:
+            assert "\\Z" in line, (
+                f"§{section_name} procedure step uses unanchored `$` "
+                f"(newline-smuggling vector). Line: {line!r}"
+            )
 
 
 # ---------- TOCTOU audit comment (sec-M2) ----------

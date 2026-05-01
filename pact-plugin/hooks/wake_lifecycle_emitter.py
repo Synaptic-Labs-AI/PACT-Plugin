@@ -74,6 +74,12 @@ from shared.wake_lifecycle import count_active_tasks
 # Suppress the false "hook error" UI surface on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
+# Maximum stdin payload size in bytes. PostToolUse payloads carry
+# tool_input + tool_response JSON; even verbose Task-tool fires fit
+# comfortably under 1MB. A larger payload is a defense-in-depth
+# rejection signal (parser amplification / memory-exhaustion vector).
+_MAX_PAYLOAD_BYTES = 1024 * 1024
+
 # Directive prose — verbatim text emitted via additionalContext on
 # transitions. Imperative voice; references the canonical command-pair
 # slugs `PACT:watch-inbox` (Arm role) and `PACT:unwatch-inbox` (Teardown
@@ -260,8 +266,20 @@ def main() -> None:
     # standard forbids for any TaskCompleted/TeammateIdle/Stop-class
     # hook.
     try:
+        # Bounded read: cap stdin at _MAX_PAYLOAD_BYTES + 1 so we can
+        # distinguish "fits under cap" from "exceeds cap" without
+        # allocating an unbounded buffer. Reject (suppressOutput) on
+        # over-cap input — defense-in-depth against parser amplification.
         try:
-            input_data = json.load(sys.stdin)
+            buffer = sys.stdin.read(_MAX_PAYLOAD_BYTES + 1)
+        except (IOError, OSError):
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+        if len(buffer) > _MAX_PAYLOAD_BYTES:
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
+        try:
+            input_data = json.loads(buffer)
         except json.JSONDecodeError:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
