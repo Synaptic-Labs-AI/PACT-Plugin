@@ -191,6 +191,15 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/auditor_reminder.py\""
           }
         ]
+      },
+      {
+        "matcher": "TaskCreate|TaskUpdate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/wake_lifecycle_emitter.py\""
+          }
+        ]
       }
     ]
   }
