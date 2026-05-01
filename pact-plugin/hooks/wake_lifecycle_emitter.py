@@ -68,6 +68,7 @@ if str(_hooks_dir) not in sys.path:
 
 import shared.pact_context as pact_context
 from shared.pact_context import get_team_name
+from shared.session_state import is_safe_path_component
 from shared.wake_lifecycle import count_active_tasks
 
 # Suppress the false "hook error" UI surface on bare exit paths.
@@ -91,11 +92,48 @@ _TEARDOWN_DIRECTIVE = (
     'silently mid-session.'
 )
 
-# Tools whose PostToolUse fires this hook is registered against. Task
-# and Agent are the spawn-tool internal names; they do not change the
-# active-task count (the TaskCreate that preceded the spawn already
-# accounted for the task), so they fall through to the no-op path.
+# Tools accepted by _decide_directive. The hooks.json matcher prunes
+# other tools at the platform layer; this in-hook check is
+# belt-and-suspenders against future matcher widening.
 _TASK_MUTATING_TOOLS = ("TaskCreate", "TaskUpdate")
+
+
+def _is_lead_session(input_data: dict[str, Any], team_name: str) -> bool:
+    """
+    Return True iff the current session is the team's lead session.
+
+    Reads `session_id` from the PostToolUse stdin payload and
+    `leadSessionId` from ~/.claude/teams/{team_name}/config.json.
+    Mirrors the Lead-Session Guard pattern used by the watch-inbox /
+    unwatch-inbox skill bodies; team_config is the single source of
+    truth for lead identity.
+
+    Pure function; never raises. Returns False on missing/empty
+    session_id, missing/unsafe team_name, missing config.json, malformed
+    JSON, or filesystem error. The teammate session is the expected
+    non-lead path; silent fail-open avoids UI noise on every
+    teammate Task-tool fire.
+    """
+    raw_session_id = input_data.get("session_id")
+    if not isinstance(raw_session_id, str) or not raw_session_id:
+        return False
+    if not team_name or not is_safe_path_component(team_name):
+        return False
+    try:
+        config_path = (
+            Path.home() / ".claude" / "teams" / team_name / "config.json"
+        )
+        if not config_path.exists():
+            return False
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    lead_session_id = data.get("leadSessionId")
+    if not isinstance(lead_session_id, str) or not lead_session_id:
+        return False
+    return raw_session_id == lead_session_id
 
 
 def _extract_task_id(input_data: dict[str, Any]) -> str | None:
@@ -184,6 +222,9 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     Teardown are both idempotent, so any over-eager emit on edge
     cases is benign.
     """
+    if not _is_lead_session(input_data, team_name):
+        return None
+
     tool_name = input_data.get("tool_name")
     if tool_name not in _TASK_MUTATING_TOOLS:
         return None
@@ -191,17 +232,21 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     if not _extract_task_id(input_data):
         return None
 
-    post = count_active_tasks(team_name)
-
+    # Defer count_active_tasks (filesystem glob+parse) until after the
+    # cheap predicates have selected an actually-relevant tool fire.
+    # Metadata-only TaskUpdates (teachback_submit, intentional_wait,
+    # handoff, progress, memory_saved) outnumber terminal-status
+    # transitions on a typical task lifecycle; gating the I/O on the
+    # terminal-status check eliminates ~9k wasted reads/session.
     if tool_name == "TaskCreate":
-        if post == 1:
+        if count_active_tasks(team_name) == 1:
             return _ARM_DIRECTIVE
         return None
 
     # tool_name == "TaskUpdate"
     if not _is_terminal_status_update(input_data):
         return None
-    if post == 0:
+    if count_active_tasks(team_name) == 0:
         return _TEARDOWN_DIRECTIVE
     return None
 

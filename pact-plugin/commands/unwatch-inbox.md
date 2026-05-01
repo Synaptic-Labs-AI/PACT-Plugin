@@ -13,7 +13,7 @@ Best-effort cleanup. Tolerates a Monitor that died silently mid-session — the 
 
 | Trigger | Site |
 |---|---|
-| Last active teammate task completed (PostToolUse hook detects 1→0 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
+| Last active teammate task reaches terminal status (`completed` or `deleted`; PostToolUse hook detects 1→0 transition) | `wake_lifecycle_emitter.py` `additionalContext` directive |
 | Session-end safety net (count already 0; redundant-but-correct hook-silent-fail catch) | `/wrap-up` command body Skill invocation |
 | User-typed manual invocation (silence Monitor noise mid-session, e.g., during long-running solo work) | `/PACT:unwatch-inbox` slash invocation |
 
@@ -22,10 +22,11 @@ Best-effort cleanup. Tolerates a Monitor that died silently mid-session — the 
 Single procedure — the command IS the operation. Order is load-bearing: stop the live Monitor before unlinking the registry sidecar.
 
 0. **Lead-session guard** (see `## Lead-Session Guard` below). If the current session is not the team-lead session, refuse and return — do NOT proceed to step 1.
-1. Read STATE_FILE at `~/.claude/teams/{team_name}/inbox-wake-state.json`; if absent or invalid (malformed JSON / `v ≠ 1`), skip steps 2-3 — nothing to stop.
-2. Validate `STATE_FILE.monitor_task_id` against the Claude Code task-id allowlist regex `^[a-z0-9]{6,}$`. If invalid, skip step 3 — still proceed to step 4 (STATE_FILE unlink is independently safe and clears the corrupt registry entry).
-3. `TaskStop(STATE_FILE.monitor_task_id)` — **ignoring not-found errors** (the Monitor may have died silently mid-session).
-4. Unlink STATE_FILE — `Path.unlink(missing_ok=True)`.
+1. Read STATE_FILE at `~/.claude/teams/{team_name}/inbox-wake-state.json`; if absent or invalid (malformed JSON / `v ≠ 1`), skip steps 2-4 — nothing to stop.
+2. Validate `STATE_FILE.monitor_task_id` against the Claude Code task-id allowlist regex `^[a-z0-9]{6,}$`. If invalid, skip step 4 — still proceed to step 5 (STATE_FILE unlink is independently safe and clears the corrupt registry entry).
+3. Validate `STATE_FILE.armed_by_session_id` against the current session_id read from `pact-session-context.json`. If mismatch, skip step 4 — still proceed to step 5 (planted/cross-session STATE_FILE gets cleaned without weaponizing TaskStop).
+4. `TaskStop(STATE_FILE.monitor_task_id)` — **ignoring not-found errors** (the Monitor may have died silently mid-session).
+5. Unlink STATE_FILE — `Path.unlink(missing_ok=True)`.
 
 Ordering rationale: the inverse ordering would leave a brief window where a STATE_FILE-less Monitor still runs but the next [`/PACT:watch-inbox`](watch-inbox.md) sees no STATE_FILE and re-arms — creating an orphan.
 
@@ -54,15 +55,16 @@ if session_id != team_config.get("leadSessionId"):
 Best-effort sequence. Tolerates a Monitor that died silently mid-session.
 
 ```
-1. Read STATE_FILE; if absent or invalid (malformed JSON / v ≠ 1), skip steps 2-3.
-2. Validate STATE_FILE.monitor_task_id against ^[a-z0-9]{6,}$. If invalid, skip step 3.
-3. TaskStop(STATE_FILE.monitor_task_id) — ignoring not-found errors.
-4. Path.unlink(STATE_FILE, missing_ok=True).  # TOCTOU window between resolve() and unlink() is bounded by user-local-trust assumption — same-user attacker has equivalent capability via direct os.unlink.
+1. Read STATE_FILE; if absent or invalid (malformed JSON / v ≠ 1), skip steps 2-4.
+2. Validate STATE_FILE.monitor_task_id against ^[a-z0-9]{6,}$. If invalid, skip step 4.
+3. Validate STATE_FILE.armed_by_session_id == current pact_session_context["session_id"]. If mismatch, skip step 4.
+4. TaskStop(STATE_FILE.monitor_task_id) — ignoring not-found errors.
+5. Path.unlink(STATE_FILE, missing_ok=True).  # TOCTOU window between resolve() and unlink() is bounded by user-local-trust assumption — same-user attacker has equivalent capability via direct os.unlink.
 ```
 
-`TaskStop` will return a `tool_use_error` if the Monitor died silently. Tolerate not-found and continue to step 4. Do not abort teardown on `TaskStop` failure; an undeleted STATE_FILE is worse than a failed `TaskStop` because it leaves a phantom registry entry that confuses the next [`/PACT:watch-inbox`](watch-inbox.md) invocation.
+`TaskStop` will return a `tool_use_error` if the Monitor died silently. Tolerate not-found and continue to step 5. Do not abort teardown on `TaskStop` failure; an undeleted STATE_FILE is worse than a failed `TaskStop` because it leaves a phantom registry entry that confuses the next [`/PACT:watch-inbox`](watch-inbox.md) invocation.
 
-**Audit**: F6 tolerance phrasing (**"ignoring not-found errors"**) is the load-bearing fragment. An editing LLM "tightening up error handling" by removing the phrase silently restores crash-on-stale-ID. The principle anchor — teardown is best-effort because a torn-down session may have already lost its Monitor — tells the editing LLM why the phrase exists. The wake mechanism is opportunistic; teardown must be tolerant. The `^[a-z0-9]{6,}$` regex is the Claude Code task-id allowlist (most task IDs are short alphanumeric, e.g. `bu4hxc2bh`, `b3w334skp`); a STATE_FILE that fails this check is corrupt and must not flow into `TaskStop` as an unsanitized argument. Skipping `TaskStop` on validation failure is correct — the unlink that follows clears the corrupt registry entry, and the next `/PACT:watch-inbox` cold-starts a fresh Monitor with a fresh ID.
+**Audit**: F6 tolerance phrasing (**"ignoring not-found errors"**) is the load-bearing fragment. An editing LLM "tightening up error handling" by removing the phrase silently restores crash-on-stale-ID. The principle anchor — teardown is best-effort because a torn-down session may have already lost its Monitor — tells the editing LLM why the phrase exists. The wake mechanism is opportunistic; teardown must be tolerant. The `^[a-z0-9]{6,}$` regex is the Claude Code task-id allowlist (most task IDs are short alphanumeric, e.g. `bu4hxc2bh`, `b3w334skp`); a STATE_FILE that fails this check is corrupt and must not flow into `TaskStop` as an unsanitized argument. Skipping `TaskStop` on validation failure is correct — the unlink that follows clears the corrupt registry entry, and the next `/PACT:watch-inbox` cold-starts a fresh Monitor with a fresh ID. **Same-session validation prevents cross-session TaskStop weaponization. A concurrent same-user session that planted STATE_FILE will have its `armed_by_session_id` mismatched against the current Teardown session's `session_id`; Teardown refuses TaskStop but proceeds to unlink so the planted file doesn't accumulate.** Validation ordering is layered defense: task-id-regex (cheap shape check) gates first, then same-session integrity check; both fail-open to unlink so a planted or corrupt STATE_FILE is always cleaned. An editing LLM tempted to drop the integrity check "because the regex already validates" misses the failure mode entirely — regex-valid task IDs from the attacker's session can still point at the lead's active work; only the session_id match prevents cross-session TaskStop.
 
 ## Failure Modes
 

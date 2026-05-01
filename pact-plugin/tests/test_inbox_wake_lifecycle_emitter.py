@@ -56,7 +56,7 @@ def _pact_session_env(tmp_path: Path, team_name: str) -> dict:
     return {"HOME": str(home)}
 
 
-def _write_session_context(home: Path, session_id: str, project_dir: str, team_name: str) -> None:
+def _write_session_context(home: Path, session_id: str, project_dir: str, team_name: str, *, lead_session_id: str | None = None) -> None:
     # Match the resolution path used by pact_context._resolve_context_path:
     # ~/.claude/pact-sessions/<basename(project_dir)>/<session_id>/pact-session-context.json
     slug = Path(project_dir).name
@@ -70,6 +70,17 @@ def _write_session_context(home: Path, session_id: str, project_dir: str, team_n
             "plugin_root": "",
             "started_at": "2026-04-30T00:00:00Z",
         }),
+        encoding="utf-8",
+    )
+    # Team config drives the emitter's _is_lead_session guard. Default
+    # behavior: caller's session_id IS the lead (the standard test
+    # framing for these tests, which exercise lead-side behavior). Pass
+    # `lead_session_id="some-other-id"` to simulate a teammate session.
+    team_dir = home / ".claude" / "teams" / team_name
+    team_dir.mkdir(parents=True, exist_ok=True)
+    effective_lead = lead_session_id if lead_session_id is not None else session_id
+    (team_dir / "config.json").write_text(
+        json.dumps({"leadSessionId": effective_lead}),
         encoding="utf-8",
     )
 
@@ -441,3 +452,158 @@ def test_is_terminal_status_update_matches_completed_and_deleted(tmp_path):
         "tool_input": {"status": "in_progress"},
         "tool_response": {},
     }) is False
+
+
+# ---------- Lead-session guard (sec-M5 / te-MED-1) ----------
+
+def test_emitter_guards_on_lead_session_id_structural():
+    """Source-level structural pin: the emitter must call
+    `_is_lead_session` (or equivalent guard against
+    team_config.leadSessionId) before any directive emit. Without this
+    structural anchor, the emitter would fire Arm/Teardown directives
+    in teammate sessions (where they're inert at best, attacker-
+    weaponizable at worst — a teammate session that arms a Monitor
+    would watch the lead's inbox file from the wrong process)."""
+    src = (HOOK_DIR / "wake_lifecycle_emitter.py").read_text(encoding="utf-8")
+    assert "_is_lead_session" in src
+    assert "leadSessionId" in src
+
+
+def test_no_emit_when_session_id_does_not_match_lead(tmp_path):
+    """Behavioral pin: a teammate-session TaskCreate that would
+    otherwise emit Arm must be suppressed by the lead-session guard.
+    Synthesize a session_id distinct from the team config's
+    leadSessionId; verify the emit is suppressOutput."""
+    home = tmp_path / "home"; home.mkdir()
+    teammate_sid = "teammate-session-id"
+    lead_sid = "lead-session-id"
+    pdir = "/tmp/proj"
+    team = "team-guard"
+    # Session context: caller is the teammate; team config: lead is OTHER.
+    _write_session_context(home, teammate_sid, pdir, team, lead_session_id=lead_sid)
+    _write_task(home, team, "task-x", status="in_progress", owner="x")
+    payload = {
+        "tool_name": "TaskCreate",
+        "session_id": teammate_sid,
+        "cwd": pdir,
+        "tool_input": {"taskId": "task-x"},
+        "tool_response": {"id": "task-x"},
+    }
+    out = _emit_output(payload, home)
+    assert out == {"suppressOutput": True}, (
+        f"Teammate-session TaskCreate must be suppressed; got {out!r}"
+    )
+
+
+def test_no_emit_when_team_config_missing(tmp_path):
+    """If team config.json is missing, _is_lead_session fail-closes —
+    no emit. Documenting the fail-closed behavior so an editing LLM
+    cannot 'simplify' the guard into fail-open during refactor."""
+    home = tmp_path / "home"; home.mkdir()
+    sid = "s"; pdir = "/tmp/p"; team = "team-no-config"
+    # Write only the session-context, NOT the team config.
+    slug = Path(pdir).name
+    sess_dir = home / ".claude" / "pact-sessions" / slug / sid
+    sess_dir.mkdir(parents=True)
+    (sess_dir / "pact-session-context.json").write_text(
+        json.dumps({
+            "team_name": team, "session_id": sid, "project_dir": pdir,
+            "plugin_root": "", "started_at": "2026-04-30T00:00:00Z",
+        }), encoding="utf-8",
+    )
+    _write_task(home, team, "task-x", status="in_progress", owner="x")
+    payload = {
+        "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
+        "tool_input": {"taskId": "task-x"}, "tool_response": {"id": "task-x"},
+    }
+    out = _emit_output(payload, home)
+    assert out == {"suppressOutput": True}
+
+
+# ---------- Perf reorder (arch2-M2) ----------
+
+def test_count_active_tasks_not_called_on_metadata_only_taskupdate():
+    """Performance invariant: count_active_tasks (filesystem glob+parse)
+    must NOT run on a metadata-only TaskUpdate (no status change). The
+    count is gated behind the cheap _is_terminal_status_update check
+    so the typical task lifecycle (lots of metadata writes
+    teachback_submit, intentional_wait, handoff, progress, memory_saved
+    + a single status=completed transition) doesn't pay an O(N) team
+    scan per metadata write."""
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    # Patch the imported reference at the call site (NOT shared.wake_lifecycle).
+    # `from shared.wake_lifecycle import count_active_tasks` binds the name
+    # `count_active_tasks` into emitter's module globals, so patching the
+    # source module reference would miss this binding (phantom-green trap).
+    from unittest.mock import patch
+    with patch.object(emitter, "count_active_tasks") as mock_count:
+        # Metadata-only TaskUpdate: no status field, just owner change.
+        result = emitter._decide_directive({
+            "tool_name": "TaskUpdate",
+            "session_id": "sid", "cwd": "/tmp/p",
+            "tool_input": {"taskId": "1", "owner": "y"},
+            "tool_response": {"id": "1"},
+        }, "team-x")
+        # Without a lead-session guard pass, _decide_directive returns
+        # early; we want to specifically exercise the post-tool-name +
+        # post-task-id + non-terminal path. Bypass _is_lead_session by
+        # patching it to True for this perf-invariant probe.
+        # (The lead-session guard's correctness is covered separately
+        # above; here we isolate the count_active_tasks ordering.)
+
+    # Re-run with lead-guard bypassed to isolate the perf ordering invariant.
+    with patch.object(emitter, "_is_lead_session", return_value=True), \
+         patch.object(emitter, "count_active_tasks") as mock_count:
+        result = emitter._decide_directive({
+            "tool_name": "TaskUpdate",
+            "session_id": "sid", "cwd": "/tmp/p",
+            "tool_input": {"taskId": "1", "owner": "y"},
+            "tool_response": {"id": "1"},
+        }, "team-x")
+        assert result is None
+        assert mock_count.call_count == 0, (
+            f"count_active_tasks should NOT run on metadata-only TaskUpdate; "
+            f"called {mock_count.call_count} time(s)"
+        )
+
+
+def test_count_active_tasks_called_on_terminal_status_taskupdate():
+    """Sanity-paired with the perf invariant: terminal-status
+    TaskUpdates DO call count_active_tasks (otherwise the gate would be
+    completely bypassed and Teardown would never fire)."""
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    from unittest.mock import patch
+    with patch.object(emitter, "_is_lead_session", return_value=True), \
+         patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
+        result = emitter._decide_directive({
+            "tool_name": "TaskUpdate",
+            "session_id": "sid", "cwd": "/tmp/p",
+            "tool_input": {"taskId": "1", "status": "completed"},
+            "tool_response": {"id": "1", "status": "completed"},
+        }, "team-x")
+        assert mock_count.call_count >= 1, (
+            "Expected count_active_tasks to run on terminal-status TaskUpdate"
+        )
+
+
+def test_count_active_tasks_called_on_taskcreate():
+    """TaskCreate path also requires the count (to detect 0->1
+    transition). Mirror of the terminal-status sanity test."""
+    sys.path.insert(0, str(HOOK_DIR))
+    import wake_lifecycle_emitter as emitter
+
+    from unittest.mock import patch
+    with patch.object(emitter, "_is_lead_session", return_value=True), \
+         patch.object(emitter, "_extract_task_id", return_value="1"), \
+         patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
+        result = emitter._decide_directive({
+            "tool_name": "TaskCreate",
+            "session_id": "sid", "cwd": "/tmp/p",
+            "tool_input": {"taskId": "1"},
+            "tool_response": {"id": "1"},
+        }, "team-x")
+        assert mock_count.call_count >= 1

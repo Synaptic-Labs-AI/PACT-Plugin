@@ -240,3 +240,48 @@ def test_teardown_documents_toctou_window_audit(cmd_text):
     teardown = _section_body(cmd_text, "## Teardown Block")
     assert "TOCTOU" in teardown
     assert "same-user" in teardown.lower()
+
+
+# ---------- armed_by_session_id integrity validation (sec-M1) ----------
+
+def test_unwatch_inbox_validates_armed_by_session_id_before_taskstop(cmd_text):
+    """The Teardown sequence must validate STATE_FILE.armed_by_session_id
+    against the current session_id BEFORE calling TaskStop. Without this
+    check, a planted/cross-session STATE_FILE would let a different
+    same-user session weaponize TaskStop against the lead's active
+    Monitor or other tasks. The check fail-opens to unlink so the
+    planted file gets cleaned without invoking TaskStop on it."""
+    teardown = _section_body(cmd_text, "## Teardown Block")
+    assert "armed_by_session_id" in teardown
+
+
+def test_operation_validates_armed_by_session_id_before_taskstop(cmd_text):
+    """Independent pin in the Operation section — the validation must
+    appear in the load-bearing procedure list, not just the
+    supplementary Teardown Block."""
+    operation = _section_body(cmd_text, "## Operation")
+    assert "armed_by_session_id" in operation
+
+
+def test_teardown_audit_explains_cross_session_taskstop_threat(cmd_text):
+    """Audit anchor must name the threat model so an editing LLM
+    'tightening' the procedure does not silently strip the integrity
+    check by reasoning 'the regex already validates'. The audit must
+    explicitly name the cross-session TaskStop weaponization shape."""
+    teardown = _section_body(cmd_text, "## Teardown Block")
+    assert "cross-session" in teardown.lower()
+
+
+# ---------- arch2-M1: terminal-status doc wording ----------
+
+def test_when_to_invoke_uses_terminal_status_wording(cmd_text):
+    """The When-to-Invoke trigger row must reflect that BOTH `completed`
+    AND `deleted` terminal statuses fire the Teardown — not just
+    `completed`. After be-F2 (cycle 6), status=deleted is also a
+    terminal transition; the doc must match the implementation's
+    behavior or an editing LLM reading the doc will silently
+    misrepresent the contract."""
+    when = _section_body(cmd_text, "## When to Invoke")
+    assert "terminal status" in when
+    assert "completed" in when
+    assert "deleted" in when

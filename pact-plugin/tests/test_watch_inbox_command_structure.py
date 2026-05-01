@@ -249,9 +249,12 @@ def test_state_machine_states_present(cmd_text):
 
 # ---------- WriteStateFile schema (lead-only fence) ----------
 
-def test_writestate_block_has_three_fields(cmd_text):
+def test_writestate_block_has_four_fields(cmd_text):
+    """STATE_FILE schema: 4 fields. `armed_by_session_id` was added in
+    cycle 7 to enable cross-session TaskStop weaponization defense at
+    Teardown time (see unwatch-inbox §Teardown Block audit anchor)."""
     block = _section_body(cmd_text, "## WriteStateFile Block")
-    for field in ("v", "monitor_task_id", "armed_at"):
+    for field in ("v", "monitor_task_id", "armed_at", "armed_by_session_id"):
         assert f'"{field}"' in block, f"missing schema field: {field}"
 
 

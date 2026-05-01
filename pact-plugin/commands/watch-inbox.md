@@ -127,15 +127,16 @@ payload = {
     "v": 1,
     "monitor_task_id": <returned by Monitor>,
     "armed_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "armed_by_session_id": pact_session_context["session_id"],
 }
 tmp = state_path.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(payload), encoding="utf-8")
 os.replace(tmp, state_path)  # atomic rename
 ```
 
-Schema is intentionally minimal — exactly 3 fields: `v`, `monitor_task_id`, `armed_at`. There is no watchdog, so no watchdog-job-id and no liveness-pulse fields are written or read.
+Schema is intentionally minimal — exactly 4 fields: `v`, `monitor_task_id`, `armed_at`, `armed_by_session_id`. `armed_by_session_id` is the lead's session_id at Arm time, read from `pact-session-context.json`; the paired [`/PACT:unwatch-inbox`](unwatch-inbox.md) command validates it on Teardown to prevent cross-session TaskStop weaponization (see that command's `## Teardown Block` audit anchor). There is no watchdog, so no watchdog-job-id and no liveness-pulse fields are written or read.
 
-**Audit**: STATE_FILE has 3 fields, no more. If you find yourself adding a 4th field, stop and re-read `## Failure Modes` on silent Monitor death. An editing LLM reasoning by analogy with prior watchdog-augmented designs might re-add a watchdog job id; do not. Lead-only scope means no per-agent suffix either — the filename is fixed (`inbox-wake-state.json`), and there is one Monitor per session.
+**Audit**: STATE_FILE has exactly 4 fields after the cycle-7 security extension; no further fields. The watchdog-style family of fields (liveness pulses, cron-driven job identifiers, periodic-emit tokens) remains explicitly excluded — adding any of them re-introduces the cron-fire-kills-Monitor self-defeating loop documented in `## Failure Modes` on silent Monitor death. `armed_by_session_id` is the single security-driven exception, not a precedent that opens the gate. An editing LLM reasoning by analogy with prior watchdog-augmented designs must NOT re-add a watchdog job id. Lead-only scope means no per-agent suffix either — the filename is fixed (`inbox-wake-state.json`), and there is one Monitor per session.
 
 ## Failure Modes
 

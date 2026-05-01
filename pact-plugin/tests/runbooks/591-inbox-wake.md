@@ -20,7 +20,7 @@ The hook registration takes effect at the **next fresh session** after these fil
 |---|---|---|
 | **Arm — first active task** | PostToolUse fires after `TaskCreate` (or `TaskUpdate` with owner assignment) and the team transitions 0→1 active teammate task | `wake_lifecycle_emitter.py` emits `additionalContext` directive: *"Invoke Skill('PACT:watch-inbox') before continuing."* The lead invokes the command on its next turn. |
 | **Arm — session resume** | `SessionStart` fires and the team's task list already has active teammate tasks (resumed session) | `session_init.py` Option-C path: hook reads `~/.claude/tasks/{team}/` filtered by `_lifecycle_relevant`; if count ≥ 1, emits unconditional Arm directive via `additionalContext`. |
-| **Teardown — last active task** | PostToolUse fires after `TaskUpdate(status=completed)` and the team transitions 1→0 active teammate tasks | `wake_lifecycle_emitter.py` emits Teardown directive: *"Invoke Skill('PACT:unwatch-inbox') — no remaining teammate work."* |
+| **Teardown — last active task** | PostToolUse fires after `TaskUpdate` with terminal status (`completed` or `deleted`) and the team transitions 1→0 active teammate tasks | `wake_lifecycle_emitter.py` emits Teardown directive: *"Invoke Skill('PACT:unwatch-inbox') — no remaining teammate work."* |
 | **Teardown — operator command** | Lead invokes `/wrap-up` (after all teammate tasks have completed) | Command body contains an explicit `Skill("PACT:unwatch-inbox")` invocation as a hook-silent-fail safety net. Active-task count is naturally 0 at this point, so the Teardown is harmless and useful as a catch for the rare case where the PostToolUse 1→0 directive was missed. |
 | **Manual user invocation** | User types `/PACT:watch-inbox` or `/PACT:unwatch-inbox` in chat | Debug/recovery surface. Idempotent on watch-inbox (STATE_FILE-present check no-ops); best-effort on unwatch-inbox (tolerates already-stopped Monitor). Useful for re-arming after silent Monitor death or silencing Monitor noise mid-session. |
 | **Registry cleanup** | `SessionEnd` fires (any session-termination path including force-termination) | `session_end.py::cleanup_wake_registry(team_name)` unlinks `inbox-wake-state.json` if present. Hook cannot reach `TaskStop` — Monitor process dies with the session. |
@@ -123,7 +123,7 @@ Symptom: PostToolUse fires (visible in `~/.claude/sessions/{sid}/transcript.json
 
 Diagnosis: check `wake_lifecycle_emitter.py` JSON output schema. Required field is `hookSpecificOutput.hookEventName: "PostToolUse"`. Missing → silent schema-validation rejection by the platform. Verified empirically in PREPARE probe round 2.
 
-Recovery: not an operator concern — this is a code regression. File a bug; the structural test in `pact-plugin/tests/test_inbox_wake_lifecycle.py` should catch this before merge.
+Recovery: not an operator concern — this is a code regression. File a bug; the structural tests in `pact-plugin/tests/test_inbox_wake_lifecycle_emitter.py` (emit JSON shape) and `pact-plugin/tests/test_inbox_wake_lifecycle_helper.py` (helper logic) should catch this before merge.
 
 ### 3.5 Concurrent re-arm
 
