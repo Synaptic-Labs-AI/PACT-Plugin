@@ -1,8 +1,8 @@
 """
-Version-bump consistency invariants for the 3.21.0 release.
+Version-bump consistency invariants for the current release.
 
 The plugin version is tracked in 4 files; all four must carry the same
-version literal, with zero stale references to the prior 3.20.4.
+version literal, with zero stale references to the prior version.
 """
 
 import json
@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-TARGET_VERSION = "3.21.0"
-PRIOR_VERSION = "3.20.4"
+TARGET_VERSION = "3.21.1"
+PRIOR_VERSION = "3.21.0"
 
 
 # ---------- 4-file version invariants ----------
