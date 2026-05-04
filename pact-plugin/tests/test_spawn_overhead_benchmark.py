@@ -21,18 +21,18 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).parent.parent
 
 # Sentinel teammate for the regression check. backend-coder is one of the
-# larger teammate bodies post-C5; if it stays under THRESHOLD_BYTES the
-# rest do too.
+# larger teammate bodies; if it stays under THRESHOLD_BYTES the rest do
+# too.
 SENTINEL_TEAMMATE = "pact-backend-coder.md"
 
 
 class TestSpawnOverheadRegression:
     """Byte-count regression gate for v4.0.0 spawn overhead."""
 
-    # Measured v4.0.0 post-C5 baseline:
+    # Measured v4.0.0 baseline:
     #   pact-backend-coder.md (largest typical teammate body):  ~7800 bytes
     #
-    # THRESHOLD_BYTES gives ~28% headroom over the post-C5 sentinel body
+    # THRESHOLD_BYTES gives ~28% headroom over the sentinel body
     # measurement while staying well below ABSOLUTE_CEILING. Goal: catch
     # regressions that silently re-add orchestrator-scale content to a
     # teammate body, not to police normal small-scale growth.
