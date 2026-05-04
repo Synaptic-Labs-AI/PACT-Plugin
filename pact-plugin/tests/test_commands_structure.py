@@ -226,3 +226,153 @@ class TestPactRoleTeammateInConsumerCommandsByComponent:
                 f"it, every spawned teammate loses the corresponding signal."
             )
 
+
+class TestNoFirstActionFossilInConsumerCommands:
+    """Negative-invariant fossilization guard: consumer command dispatch-prompt
+    templates must not contain the v3.x FIRST-ACTION + Skill("PACT:teammate-bootstrap")
+    pattern. The skill was deleted in C9; any surviving invocation produces
+    teammates whose first tool call dead-ends. Guards the post-C5b state.
+    """
+
+    FORBIDDEN_FOSSIL_PATTERNS = (
+        "YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)",
+        'Skill(\\"PACT:teammate-bootstrap\\")',
+        'Skill("PACT:teammate-bootstrap")',
+    )
+
+    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
+    def test_no_first_action_fossil_in_dispatch_prompt(self, name):
+        path = COMMANDS_DIR / f"{name}.md"
+        text = path.read_text(encoding="utf-8")
+        offenders = [p for p in self.FORBIDDEN_FOSSIL_PATTERNS if p in text]
+        assert not offenders, (
+            f"{name}.md contains v3.x dispatch-prompt fossil(s): {offenders}. "
+            f"The bootstrap command was deleted in C9; any surviving "
+            f"invocation directs spawned teammates at a non-existent slash "
+            f"command and silently fails."
+        )
+
+
+class TestImperativeSoftPhrasingConvention:
+    """v4.0.0 lazy-load cross-reference convention guard.
+
+    Orchestrator agent body uses two phrasing templates:
+      IMPERATIVE: `Read [name](path) immediately on detecting <trigger>`
+        — for decision-blocking protocols.
+      SOFT: `For full detail, see [name](path).`
+        — for reference-only protocols.
+    """
+
+    AGENTS_DIR = Path(__file__).parent.parent / "agents"
+    ORCHESTRATOR_PATH = AGENTS_DIR / "pact-orchestrator.md"
+
+    IMPERATIVE_PROTOCOLS = [
+        "algedonic.md",
+        "pact-communication-charter.md",
+        "pact-s4-tension.md",
+        "pact-s5-policy.md",
+        "pact-state-recovery.md",
+        "pact-completion-authority.md",
+    ]
+
+    SOFT_PROTOCOLS = [
+        "pact-variety.md",
+        "pact-s4-checkpoints.md",
+        "pact-workflows.md",
+    ]
+
+    @pytest.mark.parametrize("protocol", IMPERATIVE_PROTOCOLS)
+    def test_imperative_protocol_uses_imperative_phrasing(self, protocol):
+        text = self.ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+        link = f"](../protocols/{protocol})"
+        assert link in text, (
+            f"pact-orchestrator.md missing cross-reference to {protocol} entirely."
+        )
+        idx = 0
+        found_imperative = False
+        while True:
+            i = text.find(link, idx)
+            if i == -1:
+                break
+            window_before = text[max(0, i - 60):i]
+            window_after = text[i + len(link):i + len(link) + 80]
+            if "Read " in window_before and "immediately" in window_after:
+                found_imperative = True
+                break
+            idx = i + 1
+        assert found_imperative, (
+            f"pact-orchestrator.md references {protocol} but not in imperative "
+            f"`Read [name](path) immediately on detecting <trigger>` form. "
+            f"Architect-locked convention requires imperative phrasing for "
+            f"decision-blocking protocols."
+        )
+
+    @pytest.mark.parametrize("protocol", SOFT_PROTOCOLS)
+    def test_soft_protocol_does_not_use_imperative_phrasing(self, protocol):
+        text = self.ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+        link = f"](../protocols/{protocol})"
+        if link not in text:
+            return
+        idx = 0
+        offending = []
+        while True:
+            i = text.find(link, idx)
+            if i == -1:
+                break
+            window_before = text[max(0, i - 60):i]
+            window_after = text[i + len(link):i + len(link) + 80]
+            if "Read " in window_before and "immediately" in window_after:
+                offending.append(i)
+            idx = i + 1
+        assert not offending, (
+            f"pact-orchestrator.md references {protocol} in IMPERATIVE form "
+            f"({len(offending)} occurrence(s)). Architect-locked convention "
+            f"classifies {protocol} as SOFT (reference-only)."
+        )
+
+
+class TestNoDanglingOrchestrationSkillRefs:
+    """xref-resolution guard: no plugin-source file may reference the deleted
+    `skills/orchestration/SKILL.md`. Content migrated to canonical homes per C5c.
+    """
+
+    PLUGIN_ROOT = Path(__file__).parent.parent
+    FORBIDDEN_REF = "skills/orchestration/SKILL.md"
+
+    # Test files allowed to mention the string in docstrings/historical
+    # notes describing the deletion. The actual production-code surface
+    # (commands, protocols, agents, skills, hooks) MUST be clean.
+    IGNORED_PATHS = {
+        Path("tests") / "test_commands_structure.py",       # this test class
+        Path("tests") / "test_cross_references.py",         # historical docstring
+        Path("tests") / "test_skills_structure.py",         # gate-migration docstring
+    }
+
+    SCAN_SUFFIXES = (".md", ".py", ".json")
+    SCAN_DIRS = ("agents", "commands", "protocols", "skills", "hooks", "tests")
+
+    def test_no_plugin_file_references_deleted_orchestration_skill(self):
+        offenders = []
+        for subdir in self.SCAN_DIRS:
+            root = self.PLUGIN_ROOT / subdir
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.suffix not in self.SCAN_SUFFIXES:
+                    continue
+                rel = path.relative_to(self.PLUGIN_ROOT)
+                if rel in self.IGNORED_PATHS:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if self.FORBIDDEN_REF in text:
+                    offenders.append(str(rel))
+        assert not offenders, (
+            f"Files contain dangling xref to deleted {self.FORBIDDEN_REF!r}:\n"
+            + "\n".join(f"  - {f}" for f in offenders)
+        )
+

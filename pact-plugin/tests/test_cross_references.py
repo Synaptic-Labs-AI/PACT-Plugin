@@ -263,28 +263,24 @@ class TestDeadReferencesToMovedOrchestratorCore:
 
 
 class TestLeadSideHaltFanOutSlugStability:
-    """L10: Stability of the `team-lead-side-halt-fan-out` slug.
+    """L10: Stability of the `lead-side-halt-fan-out` slug.
 
-    The canonical `#### Lead-Side HALT Fan-Out` heading lives in
-    skills/orchestration/SKILL.md and is referenced from 4 distinct
-    consumer files via the GitHub-rendered slug `team-lead-side-halt-fan-out`
-    (algedonic.md hosts 2 link occurrences, the other three each host 1,
-    for 5 link occurrences across 4 files). Renaming the heading
-    silently breaks every cross-reference (link still resolves to the
-    file, just lands at the page top instead of the section). This test
-    pins the slug by asserting:
+    The canonical `### Lead-Side HALT Fan-Out` heading lives in
+    protocols/algedonic.md (post-v4.0.0 migration) and is referenced from
+    4 consumer files via the GitHub-rendered slug `lead-side-halt-fan-out`.
+    Renaming the heading silently breaks every cross-reference (link still
+    resolves to the file, just lands at the page top instead of the
+    section). This test pins the slug by asserting:
 
-    - the canonical heading text is present at the SSOT site, and
-    - each of the 4 consumer files contains the exact slug fragment.
-
-    Counter-test-by-revert: rename the canonical heading (e.g., to
-    "Lead-Side Halt Fanout") — the SSOT assertion fails. Drop the slug
-    from any consumer file — that site's assertion fails.
+    - the canonical heading text is present at the SSOT site (algedonic.md), and
+    - each of the consumer files contains the exact slug fragment.
     """
 
-    CANONICAL_HEADING = "#### Lead-Side HALT Fan-Out"
-    SLUG = "team-lead-side-halt-fan-out"
+    CANONICAL_HEADING = "### Lead-Side HALT Fan-Out"
+    SLUG = "lead-side-halt-fan-out"
 
+    # algedonic.md hosts the canonical heading AND 2 inline self-anchors;
+    # 3 other consumer files each carry one external xref.
     CROSS_REF_FILES = [
         ("protocols/algedonic.md", ALGEDONIC_PATH),
         ("commands/orchestrate.md", ORCHESTRATE_PATH),
@@ -292,31 +288,29 @@ class TestLeadSideHaltFanOutSlugStability:
         ("protocols/pact-communication-charter.md", COMM_CHARTER_PATH),
     ]
 
-    def test_canonical_heading_present_in_orchestration_skill(self):
-        content = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
+    def test_canonical_heading_present_in_algedonic(self):
+        content = ALGEDONIC_PATH.read_text(encoding="utf-8")
         assert self.CANONICAL_HEADING in content, (
-            f"skills/orchestration/SKILL.md missing canonical heading "
+            f"protocols/algedonic.md missing canonical heading "
             f"{self.CANONICAL_HEADING!r}. Renaming this heading breaks "
             "every cross-reference to the slug "
-            f"{self.SLUG!r}; restore the exact text or update all 4 "
+            f"{self.SLUG!r}; restore the exact text or update all "
             "consumer files in lockstep."
         )
 
     def test_canonical_heading_renders_to_expected_slug(self):
-        """GitHub auto-slugs `#### Lead-Side HALT Fan-Out` to
-        `team-lead-side-halt-fan-out` (lowercased, spaces → hyphens, special
-        chars stripped). Verify the canonical site itself contains the
-        slug as a self-anchor in its consumer body — `[…](#team-lead-side-halt-fan-out)` —
-        which transitively confirms the lower-casing/hyphenation rule
-        the consumers rely on.
+        """GitHub auto-slugs `### Lead-Side HALT Fan-Out` to
+        `lead-side-halt-fan-out`. Verify the canonical site contains the
+        slug as a self-anchor (`[...](#lead-side-halt-fan-out)`) which
+        transitively confirms the lower-casing/hyphenation rule the
+        consumers rely on.
         """
-        content = ORCHESTRATION_SKILL_PATH.read_text(encoding="utf-8")
+        content = ALGEDONIC_PATH.read_text(encoding="utf-8")
         assert f"#{self.SLUG}" in content, (
-            f"skills/orchestration/SKILL.md does not contain the self-anchor "
+            f"protocols/algedonic.md does not contain the self-anchor "
             f"`#{self.SLUG}` that proves the slug-rendering rule. The "
             "canonical heading must use exactly the casing/punctuation "
-            "that GitHub auto-slugs to "
-            f"{self.SLUG!r}."
+            f"that GitHub auto-slugs to {self.SLUG!r}."
         )
 
     @pytest.mark.parametrize(
@@ -329,7 +323,7 @@ class TestLeadSideHaltFanOutSlugStability:
         assert f"#{self.SLUG}" in content, (
             f"{label} missing cross-reference to slug "
             f"{self.SLUG!r}. The HALT fan-out idiom lives at "
-            "skills/orchestration/SKILL.md and is referenced from this "
-            "file via a slug-link; if the heading was renamed, propagate "
-            "the new slug to every consumer site."
+            "protocols/algedonic.md and is referenced from this file via "
+            "a slug-link; if the heading was renamed, propagate the new "
+            "slug to every consumer site."
         )

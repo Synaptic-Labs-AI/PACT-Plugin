@@ -17,7 +17,6 @@ from helpers import parse_frontmatter
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 EXPECTED_SKILLS = {
-    "orchestration",
     "pact-agent-teams",
     "pact-architecture-patterns",
     "pact-teachback",
@@ -108,11 +107,19 @@ class TestSkillMdFiles:
 
 
 class TestPreResponseChannelCheckGate:
-    """Both pact-agent-teams and orchestration skills carry the
-    Pre-Response Channel Check gate (issue family: instruction-surface-leak)."""
+    """Both pact-agent-teams (teammate-side) and pact-orchestrator agent body
+    (lead-side) carry the Pre-Response Channel Check gate (issue family:
+    instruction-surface-leak).
+
+    Under v4.0.0 the lead-side gate is in agents/pact-orchestrator.md
+    (the orchestrator persona delivered via --agent flag); the teammate-side
+    gate is in pact-agent-teams/SKILL.md.
+    """
 
     AGENT_TEAMS_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
-    ORCHESTRATION_PATH = SKILLS_DIR / "orchestration" / "SKILL.md"
+    ORCHESTRATION_PATH = (
+        SKILLS_DIR.parent / "agents" / "pact-orchestrator.md"
+    )
 
     INVARIANT_HEADER = "Pre-Response Channel Check"
     INVARIANT_USER_ADDRESSEE = "Addressee is **user**"
@@ -123,7 +130,11 @@ class TestPreResponseChannelCheckGate:
     INVARIANT_SENDMESSAGE_REQUIRED = "SendMessage is REQUIRED"
     INVARIANT_PLAIN_TEXT_INVISIBLE = "Plain text is invisible to other agents"
     INVARIANT_CHOOSE_BOTH_FALLBACK = "If you are unsure who the addressee is, choose **both**"
-    INVARIANT_CHARTER_LINK = "../../protocols/pact-communication-charter.md#pre-send-self-check"
+    # Teammate-side (pact-agent-teams/SKILL.md) is two levels deep; lead-side
+    # (agents/pact-orchestrator.md) is one level deep — pin separate link
+    # paths per surface.
+    TEAMMATE_CHARTER_LINK = "../../protocols/pact-communication-charter.md#pre-send-self-check"
+    LEAD_CHARTER_LINK = "../protocols/pact-communication-charter.md"
     LEAD_GRAY_AREA_PHRASE = "Lead-side gray-area trap"
     TEAMMATE_GRAY_AREA_PHRASE = "Teammate-side gray-area trap"
 
@@ -139,7 +150,7 @@ class TestPreResponseChannelCheckGate:
             self.INVARIANT_SENDMESSAGE_REQUIRED,
             self.INVARIANT_PLAIN_TEXT_INVISIBLE,
             self.INVARIANT_CHOOSE_BOTH_FALLBACK,
-            self.INVARIANT_CHARTER_LINK,
+            self.TEAMMATE_CHARTER_LINK,
         ):
             assert phrase in text, f"pact-agent-teams missing gate phrase: {phrase!r}"
 
@@ -155,9 +166,9 @@ class TestPreResponseChannelCheckGate:
             self.INVARIANT_SENDMESSAGE_REQUIRED,
             self.INVARIANT_PLAIN_TEXT_INVISIBLE,
             self.INVARIANT_CHOOSE_BOTH_FALLBACK,
-            self.INVARIANT_CHARTER_LINK,
+            self.LEAD_CHARTER_LINK,
         ):
-            assert phrase in text, f"orchestration missing gate phrase: {phrase!r}"
+            assert phrase in text, f"orchestrator agent body missing gate phrase: {phrase!r}"
 
     def test_lead_side_has_gray_area_addendum(self):
         text = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
@@ -190,5 +201,9 @@ class TestPreResponseChannelCheckGate:
 
     def test_lead_gate_appears_before_communication(self):
         lead = self.ORCHESTRATION_PATH.read_text(encoding="utf-8")
-        assert lead.index("### Pre-Response Channel Check") < lead.index("### Communication"), \
-            "orchestration: gate must appear before Communication"
+        # Architect's §1-§12 numbered hierarchy: Pre-Response Channel Check
+        # is §1; Communication is §6. The pre-response gate must precede the
+        # Communication section so the agent reads the channel-check rules
+        # before reading the SendMessage discipline.
+        assert lead.index("## 1. Pre-Response Channel Check") < lead.index("## 6. Communication"), \
+            "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§6)"

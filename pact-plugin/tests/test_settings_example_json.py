@@ -7,7 +7,6 @@ ships a sample at `pact-plugin/templates/settings.example.json` for users to
 copy from. This test guards the shape so the example stays canonical
 through future changes.
 
-C2 lands xfail-strict; C10 flips.
 """
 import json
 from pathlib import Path
@@ -22,14 +21,12 @@ SETTINGS_EXAMPLE_PATH = (
 EXPECTED_AGENT_VALUE = "PACT:pact-orchestrator"
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_settings_example_file_exists():
     assert SETTINGS_EXAMPLE_PATH.exists(), (
         f"settings.example.json missing at {SETTINGS_EXAMPLE_PATH}"
     )
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_settings_example_is_valid_json():
     text = SETTINGS_EXAMPLE_PATH.read_text()
     try:
@@ -38,7 +35,6 @@ def test_settings_example_is_valid_json():
         pytest.fail(f"settings.example.json is not valid JSON: {e}")
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_settings_example_has_agent_field():
     data = json.loads(SETTINGS_EXAMPLE_PATH.read_text())
     assert "agent" in data, (
@@ -47,7 +43,6 @@ def test_settings_example_has_agent_field():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_settings_example_agent_value_is_pact_orchestrator():
     data = json.loads(SETTINGS_EXAMPLE_PATH.read_text())
     assert data.get("agent") == EXPECTED_AGENT_VALUE, (
@@ -56,7 +51,6 @@ def test_settings_example_agent_value_is_pact_orchestrator():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_settings_example_top_level_is_object():
     data = json.loads(SETTINGS_EXAMPLE_PATH.read_text())
     assert isinstance(data, dict), (

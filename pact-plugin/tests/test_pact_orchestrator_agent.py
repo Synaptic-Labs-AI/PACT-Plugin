@@ -2,8 +2,8 @@
 Structural tests for agents/pact-orchestrator.md (v4.0.0 orchestrator agent file).
 
 The orchestrator persona is delivered via `claude --agent PACT:pact-orchestrator`
-under v4.0.0; the agent body carries orchestration content inlined from the
-pre-v4.0.0 skills/orchestration/SKILL.md. Frontmatter is intentionally
+under v4.0.0; the agent body carries orchestration content inlined directly
+into the durable persona file. Frontmatter is intentionally
 minimal (name, description, memory:user, color) — model/permissionMode/tools
 are inherited defaults, and `skills:` is omitted because the preload mechanism
 does not apply to --agent main sessions.
