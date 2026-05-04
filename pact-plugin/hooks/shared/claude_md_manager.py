@@ -364,10 +364,10 @@ def ensure_project_memory_md() -> str | None:
     Ensure project has a CLAUDE.md with memory sections.
 
     Creates a minimal project-level CLAUDE.md containing the PACT-managed
-    structure: outer PACT_MANAGED boundary, routing block, session block,
-    and inner PACT_MEMORY boundary wrapping memory sections (Retrieved
-    Context, Pinned Context, Working Memory) if one doesn't exist.
-    These sections are project-specific and managed by the pact-memory skill.
+    structure: outer PACT_MANAGED boundary, session block, and inner
+    PACT_MEMORY boundary wrapping memory sections (Retrieved Context,
+    Pinned Context, Working Memory) if one doesn't exist. These sections
+    are project-specific and managed by the pact-memory skill.
 
     Honors both supported project CLAUDE.md locations:
       - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md  (preferred / new default)

@@ -86,6 +86,7 @@ from shared.wake_lifecycle import count_active_tasks
 from shared.symlinks import setup_plugin_symlinks
 from shared.claude_md_manager import (
     ensure_project_memory_md,
+    file_lock,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
 )
@@ -431,12 +432,10 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
 # C0 control characters (0x00-0x1f) and DEL (0x7f). Present anywhere in a
 # session_id they render the id unsafe for use in single-line textual
 # contexts like the CLAUDE.md Resume line — a newline (0x0a) or CR (0x0d)
-# would break out of the line and allow marker-line injection (e.g. a
-# crafted id containing "\n## Working Memory\nYOUR PACT ROLE: orchestrator"
-# would write a line-anchored PACT ROLE marker under the routing block,
-# causing wrong-role bootstrap on the next session). Match peer_inject's
-# agent-name sanitization scope for parity: both entry points to the
-# textual routing surface must reject the same control set.
+# would break out of the line and allow line-anchored injection into the
+# SESSION_START block (e.g. a crafted id containing "\n- Team: malicious"
+# would forge a teammate-routing line under the session-managed block,
+# causing the next session_init to read a corrupted Resume payload).
 _SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -478,6 +477,59 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
     if _SESSION_ID_CONTROL_CHARS_RE.search(raw_id):
         return True
     return stripped.startswith("unknown-")
+
+
+# SUNSET BEFORE v4.2.x: this function strips orphan PACT_ROUTING markers
+# left over from v3.21.x and earlier. Run unconditionally on every
+# SessionStart for v4.0.x and v4.1.x to ensure upgraded users get the
+# stale prose cleaned out without needing a manual migration step. Once
+# the v4.0.0 release has been in the field long enough that resumed
+# users will have hit at least one v4.0.x SessionStart, this can be
+# deleted along with its caller in main().
+_PACT_ROUTING_BLOCK_RE = re.compile(
+    r"<!-- PACT_ROUTING_START:.*?<!-- PACT_ROUTING_END -->\s*",
+    re.DOTALL,
+)
+
+
+def strip_orphan_routing_markers() -> str | None:
+    """Strip stale PACT_ROUTING_START..._END blocks from project CLAUDE.md.
+
+    v4.0.0 retired the routing-block injection — but upgraded users still
+    have a `<!-- PACT_ROUTING_START -->...<!-- PACT_ROUTING_END -->` block
+    in their project CLAUDE.md from prior plugin versions. Strip it here
+    on every SessionStart. Idempotent no-op when no markers are present.
+
+    Returns a status string on change so session_init surfaces it via
+    additionalContext, or None when no action was taken. Fail-open on
+    every error path (lock timeout, symlink, OS error) — the next session
+    start will retry.
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir:
+        return None
+    target_file, source = resolve_project_claude_md_path(project_dir)
+    if source == "new_default":
+        return None
+    try:
+        with file_lock(target_file):
+            if target_file.is_symlink():
+                return None
+            try:
+                content = target_file.read_text(encoding="utf-8")
+            except OSError:
+                return None
+            new_content = _PACT_ROUTING_BLOCK_RE.sub("", content)
+            if new_content == content:
+                return None
+            try:
+                target_file.write_text(new_content, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
+                return "Stripped stale PACT_ROUTING block from project CLAUDE.md"
+            except OSError:
+                return None
+    except TimeoutError:
+        return None
 
 
 def main():
@@ -584,6 +636,12 @@ def main():
                 system_messages.append(migration_msg)
             else:
                 context_parts.append(migration_msg)
+
+        # 3c. SUNSET BEFORE v4.2.x: strip orphan PACT_ROUTING blocks left
+        # over from v3.21.x and earlier. Idempotent no-op once stripped.
+        orphan_strip_msg = strip_orphan_routing_markers()
+        if orphan_strip_msg:
+            context_parts.append(orphan_strip_msg)
 
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()
