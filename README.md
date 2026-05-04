@@ -50,17 +50,33 @@ Add team directory access and PACT permission allow rules to your `~/.claude/set
 
 > See [full installation](#installation) for all options including auto-updates.
 
-### Optional: Shell aliases for auto-bootstrap
+### Loading PACT at session start
 
-PACT enforces a "bootstrap first" policy — the orchestrator must invoke `Skill("PACT:bootstrap")` before using code-editing tools (Edit, Write, Agent). You can shortcut this with a shell alias that sends a synthetic first user message:
+PACT is delivered through the `--agent` flag — `claude --agent PACT:pact-orchestrator` launches Claude Code with the orchestrator persona loaded directly. Two convenience options:
 
-```bash
-# Add to ~/.zshrc or ~/.bashrc
-alias claude-pact='claude "Invoke Skill(\"PACT:bootstrap\") now."'
-alias cldpct='claude "Invoke Skill(\"PACT:bootstrap\") now."'
+**Per-project: `.claude/settings.json` convention**
+
+Add the agent setting to your project's `.claude/settings.json` so every session in that repo opens with the orchestrator persona:
+
+```json
+{
+  "agent": "PACT:pact-orchestrator"
+}
 ```
 
-Two aliases: `claude-pact` (readable) and `cldpct` (quick-type). If you launch with plain `claude` instead, PACT's enforcement hooks will remind the orchestrator to bootstrap before any implementation work — no setup required.
+Plain `claude` in the project root then loads PACT automatically.
+
+**Global: optional `pact()` shell function**
+
+For invocations outside a configured project, add this to your `~/.zshrc` or `~/.bashrc`:
+
+```bash
+pact() { claude --agent PACT:pact-orchestrator "$@"; }
+```
+
+Then `pact` (with any flags `claude` accepts) launches a PACT-loaded session from anywhere.
+
+> **Roadmap**: A first-class `pact` CLI wrapper is planned for v4.0.x or v4.1.0; the `pact()` shell function above is the interim path.
 
 ---
 
