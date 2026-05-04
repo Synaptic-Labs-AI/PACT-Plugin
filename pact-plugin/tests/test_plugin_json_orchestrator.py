@@ -47,7 +47,6 @@ def plugin_json():
     return json.loads(PLUGIN_JSON_PATH.read_text())
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_plugin_json_version_is_4_0_0(plugin_json):
     assert plugin_json["version"] == "4.0.0", (
         f"plugin.json version should be 4.0.0 (BREAKING), got {plugin_json['version']}"
@@ -86,7 +85,6 @@ def test_plugin_json_agents_alphabetized(plugin_json):
     )
 
 
-@pytest.mark.xfail(strict=True, reason="v4.0.0 — flips in C10")
 def test_plugin_json_drops_bootstrap_commands(plugin_json):
     """C9 removes bootstrap commands — replaced by --agent flag."""
     commands = set(plugin_json.get("commands", []))

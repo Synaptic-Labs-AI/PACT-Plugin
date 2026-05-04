@@ -25,6 +25,7 @@ EXPECTED_AGENTS = {
     "pact-database-engineer",
     "pact-devops-engineer",
     "pact-frontend-coder",
+    "pact-orchestrator",
     "pact-secretary",
     "pact-n8n",
     "pact-preparer",
@@ -38,8 +39,23 @@ REQUIRED_FRONTMATTER_KEYS = {"name", "description"}
 
 @pytest.fixture
 def agent_files():
-    """Load all agent markdown files."""
+    """Load all agent markdown files (orchestrator + 12 teammates)."""
     return list(AGENTS_DIR.glob("*.md"))
+
+
+# Subset of agent files that are TEAMMATES — i.e., spawned via Task() with
+# `skills:` frontmatter preload. Excludes pact-orchestrator.md, which is
+# delivered via `claude --agent` and has minimal frontmatter (no skills:).
+TEAMMATE_AGENT_NAMES = EXPECTED_AGENTS - {"pact-orchestrator"}
+
+
+@pytest.fixture
+def teammate_agent_files():
+    """Load only teammate agent files (excludes pact-orchestrator)."""
+    return [
+        p for p in AGENTS_DIR.glob("*.md")
+        if p.stem in TEAMMATE_AGENT_NAMES
+    ]
 
 
 class TestAgentFilesExist:
@@ -107,30 +123,39 @@ class TestAgentBody:
             assert "skill" in text.lower(), f"{f.name} doesn't reference skills"
 
 
-class TestLazyLoadedAgentTeams:
+class TestNoSkillInvocationOnFirstAction:
+    """Negative-invariant fossilization guard: no agent body may instruct
+    the agent to invoke `Skill("PACT:teammate-bootstrap")` (or any other
+    bootstrap skill) as its first action.
+
+    Under v4.0.0 the team protocol, teachback rules, and algedonic content
+    arrive via the spawn-time skills: frontmatter (preload at Task() spawn).
+    A fossil `Skill("PACT:teammate-bootstrap")` directive in an agent body
+    points at a now-deleted command and would cost the agent a wasted
+    tool-call cycle if it tried to honor the directive.
+
+    The class also keeps the canonical skills-frontmatter-baseline guard
+    (every teammate carries pact-agent-teams + pact-teachback). That
+    invariant holds pre- and post-v4.0.0 — the lazy-load convention layered
+    cross-references on top of the same baseline.
     """
-    Regression guards for #366 Phase 1 (kernel elimination).
 
-    Post-#366, `pact-agent-teams` is back in agent frontmatter (eager-loaded
-    at spawn) because the AGENT TEAMS PROTOCOL pointer block was removed —
-    every agent's YOUR FIRST ACTION is `Skill("PACT:teammate-bootstrap")` which
-    delivers the team protocol via @-references in the command body.
+    FOSSIL_SKILL_INVOCATIONS = (
+        'Skill("PACT:teammate-bootstrap")',
+        "Skill('PACT:teammate-bootstrap')",
+        'Skill("PACT:bootstrap")',
+        "Skill('PACT:bootstrap')",
+    )
 
-    Per-agent skill counts vary by domain: the n8n agent carries 10 skills
-    (canonical 3 + all 7 n8n-specific skills), coders that handle multiple
-    concerns carry 5 (canonical 3 + 2 domain skills), and most other
-    specialists carry 4 (canonical 3 + 1 domain skill). Per-agent variation
-    is the intentional design — there is no uniform cap on frontmatter skill
-    count. Each agent's domain skill set is pinned individually in
-    TestAgentDomainSkillVariations below.
-
-    Note on eager-loading: as of the #366 Phase 1 empirical findings,
-    frontmatter `skills:` entries are NOT eagerly loaded at agent spawn.
-    They populate the lazy skill catalog (which materializes after the
-    first Skill() invocation), so the per-agent variation is catalog
-    metadata and discoverability, not a runtime cost. Adding skills to
-    frontmatter is therefore safe at any cardinality.
-    """
+    def test_no_bootstrap_skill_invocation_in_any_agent(self, agent_files):
+        for f in agent_files:
+            text = f.read_text(encoding="utf-8")
+            for fossil in self.FOSSIL_SKILL_INVOCATIONS:
+                assert fossil not in text, (
+                    f"{f.name}: contains v3.x fossil skill invocation "
+                    f"{fossil!r}. The bootstrap commands were deleted in C9; "
+                    f"agents must not instruct invocation of removed skills."
+                )
 
     @staticmethod
     def _extract_skill_names(text):
@@ -174,9 +199,9 @@ class TestLazyLoadedAgentTeams:
         return skills
 
     @pytest.fixture
-    def all_agents(self, agent_files):
+    def all_agents(self, teammate_agent_files):
         agents = {}
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
             fm = parse_frontmatter(text)
             if fm:
@@ -203,7 +228,7 @@ class TestLazyLoadedAgentTeams:
 class TestExtractSkillNamesParser:
     """Edge case tests for _extract_skill_names() parser.
 
-    The parser in TestLazyLoadedAgentTeams._extract_skill_names handles
+    The parser in TestNoSkillInvocationOnFirstAction._extract_skill_names handles
     YAML-like frontmatter parsing for the skills: block. These tests exercise
     edge cases that could silently break if the parser is changed.
 
@@ -213,7 +238,7 @@ class TestExtractSkillNamesParser:
 
     @staticmethod
     def _extract(text):
-        return TestLazyLoadedAgentTeams._extract_skill_names(text)
+        return TestNoSkillInvocationOnFirstAction._extract_skill_names(text)
 
     def test_empty_skills_block(self):
         """skills: with no value and no continuation lines."""
@@ -321,7 +346,7 @@ class TestRequiredSkillsCondensed:
     # Secretary uses frontmatter skills, not REQUIRED SKILLS section
     _SECRETARY = "pact-secretary.md"
 
-    def test_required_skills_section_and_table_preserved(self, agent_files):
+    def test_required_skills_section_and_table_preserved(self, teammate_agent_files):
         """Every non-secretary agent must have BOTH (1) a REQUIRED SKILLS
         section header AND (2) at least one skill lookup table row in the
         body of that section.
@@ -334,7 +359,7 @@ class TestRequiredSkillsCondensed:
         `# REQUIRED SKILLS` heading and checks for a table body inside
         the section region.
         """
-        for f in agent_files:
+        for f in teammate_agent_files:
             if f.name == self._SECRETARY:
                 continue
             text = f.read_text(encoding="utf-8")
@@ -382,9 +407,9 @@ class TestRequiredSkillsCondensed:
                 f"what to invoke."
             )
 
-    def test_secretary_uses_frontmatter_skills(self, agent_files):
+    def test_secretary_uses_frontmatter_skills(self, teammate_agent_files):
         """Secretary should use frontmatter skills instead of REQUIRED SKILLS section."""
-        for f in agent_files:
+        for f in teammate_agent_files:
             if f.name != self._SECRETARY:
                 continue
             text = f.read_text(encoding="utf-8")
@@ -484,11 +509,11 @@ class TestTeachbackMicroSkillExtraction:
                 f"protocol, not just a pointer."
             )
 
-    def test_all_agents_have_teachback_in_frontmatter(self, agent_files):
+    def test_all_agents_have_teachback_in_frontmatter(self, teammate_agent_files):
         """T4: every agent must eager-load pact-teachback via frontmatter."""
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
-            skill_names = TestLazyLoadedAgentTeams._extract_skill_names(text)
+            skill_names = TestNoSkillInvocationOnFirstAction._extract_skill_names(text)
             assert "pact-teachback" in skill_names, (
                 f"{f.stem}: pact-teachback must be in frontmatter skills "
                 f"(eager-loaded at spawn). Found skills: {skill_names!r}"
@@ -517,273 +542,43 @@ class TestTeachbackMicroSkillExtraction:
         )
 
 
-class TestBootstrapCommand:
-    """Tests for the /PACT:bootstrap slash command.
+class TestNoFirstActionPreludeFossil:
+    """Negative-invariant fossilization guard: no agent body may contain
+    the v3.x YOUR FIRST ACTION prelude.
 
-    The bootstrap command is a compact stub (~89 lines) that instructs
-    the orchestrator to Read 9 files via explicit `{plugin_root}/...`
-    Read instructions — 1 skill (orchestration) + 8 supplementary
-    protocols. The full orchestrator content lives in
-    skills/orchestration/SKILL.md (loaded via Read).
-
-    Contract:
-      - The command file exists at pact-plugin/commands/bootstrap.md
-      - It has YAML frontmatter with a `description` field
-      - It contains Read instructions for all 9 targets:
-        skills/orchestration/SKILL.md + 8 protocols under protocols/
-        (algedonic, s5-policy, variety, workflows, state-recovery,
-        s4-checkpoints, s4-tension, communication-charter)
-      - Every referenced file exists on disk
-      - The command is registered in .claude-plugin/plugin.json `commands`
+    Under v4.0.0 the orchestrator persona is delivered via `claude --agent
+    PACT:pact-orchestrator` and teammate skill content arrives via the
+    spawn-time skills: frontmatter; the per-body FIRST-ACTION dispatch
+    directive that v3.x relied on is now noise. A reintroduction would
+    fight the new lazy-load convention silently — agents would carry both
+    a stale dispatch prelude and the v4.0.0 cross-references, and human
+    readers reviewing a regression would have no signal to flag.
     """
 
-    PLUGIN_ROOT = Path(__file__).parent.parent
-    BOOTSTRAP_PATH = PLUGIN_ROOT / "commands" / "bootstrap.md"
-    PROTOCOLS_DIR = PLUGIN_ROOT / "protocols"
-    SKILLS_DIR = PLUGIN_ROOT / "skills"
-    PLUGIN_JSON_PATH = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
-
-    # The 9 mandatory Read targets that bootstrap.md instructs the
-    # orchestrator to load. Each entry is (name, relative_path_from_plugin_root).
-    # Entry 1 is the orchestration skill (under skills/); entries 2-9 are
-    # supplementary protocols (under protocols/). Adding/removing a target
-    # from this set requires a matching change to commands/bootstrap.md and
-    # is intentionally visible here.
-    MANDATORY_READ_TARGETS = (
-        ("orchestration", "skills/orchestration/SKILL.md"),
-        ("pact-s5-policy", "protocols/pact-s5-policy.md"),
-        ("pact-s4-checkpoints", "protocols/pact-s4-checkpoints.md"),
-        ("pact-s4-tension", "protocols/pact-s4-tension.md"),
-        ("pact-variety", "protocols/pact-variety.md"),
-        ("pact-workflows", "protocols/pact-workflows.md"),
-        ("pact-communication-charter", "protocols/pact-communication-charter.md"),
-        ("pact-state-recovery", "protocols/pact-state-recovery.md"),
-        ("algedonic", "protocols/algedonic.md"),
+    FOSSIL_HEADING = "# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)"
+    FOSSIL_HEADING_VARIANTS = (
+        "# YOUR FIRST ACTION",
+        "## YOUR FIRST ACTION",
+        "### YOUR FIRST ACTION",
     )
 
-    def test_bootstrap_file_exists(self):
-        """commands/bootstrap.md must exist in the plugin directory."""
-        assert self.BOOTSTRAP_PATH.exists(), (
-            f"bootstrap.md not found at {self.BOOTSTRAP_PATH}"
-        )
-        assert self.BOOTSTRAP_PATH.is_file()
-
-    def test_bootstrap_has_frontmatter_with_description(self):
-        """bootstrap.md must have YAML frontmatter with a description field.
-
-        Claude Code uses the frontmatter description to surface the command
-        in the slash command palette. A missing description would leave the
-        command undiscoverable even if registered in plugin.json.
-        """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        fm = parse_frontmatter(text)
-        assert fm is not None, (
-            "bootstrap.md is missing YAML frontmatter"
-        )
-        assert "description" in fm, (
-            "bootstrap.md frontmatter must contain a 'description' field"
-        )
-        assert fm["description"].strip(), (
-            "bootstrap.md frontmatter 'description' must be non-empty"
-        )
-
-    def test_bootstrap_references_all_mandatory_targets(self):
-        """bootstrap.md must contain `{plugin_root}/<relative_path>`
-        Read instructions for all 9 mandatory targets (1 skill + 8 protocols).
-
-        The orchestrator resolves {plugin_root} from session context and
-        issues explicit Read calls for each file. This replaced the earlier
-        @-ref eager-load mechanism for compaction durability (#414 R3).
-        In #452 the first target moved from protocols/ to skills/orchestration/.
-        """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        missing = []
-        for _name, relative_path in self.MANDATORY_READ_TARGETS:
-            expected = f"{{plugin_root}}/{relative_path}"
-            if expected not in text:
-                missing.append(expected)
-        assert not missing, (
-            f"bootstrap.md is missing Read instructions for: {missing}. "
-            f"Each of the 9 mandatory targets (1 skill + 8 protocols) "
-            f"must be referenced via {{plugin_root}}/<relative_path> so "
-            f"the orchestrator loads them at bootstrap."
-        )
-
-    def test_bootstrap_has_exactly_nine_references(self):
-        """bootstrap.md must contain EXACTLY 9 `{plugin_root}/...` Read
-        instructions — one per mandatory target, no duplicates.
-
-        The presence check above confirms each of the 9 is mentioned at least
-        once. This cardinality check catches the inverse failure mode: a
-        stray duplicate, an accidentally-added 10th reference, or a
-        copy/paste that doubles an existing reference. Counts both
-        `{plugin_root}/protocols/...` and `{plugin_root}/skills/...` forms.
-        """
-        import re
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        # Count every `{plugin_root}/(protocols|skills)/<anything>.md`
-        # occurrence in the numbered list. Uses the backtick-wrapped pattern
-        # that appears in bootstrap.md's Read instruction list.
-        pattern = re.compile(
-            r"`\{plugin_root\}/(?:protocols|skills)/[A-Za-z0-9_.\-/]+\.md`"
-        )
-        matches = pattern.findall(text)
-        assert len(matches) == len(self.MANDATORY_READ_TARGETS), (
-            f"bootstrap.md must contain exactly "
-            f"{len(self.MANDATORY_READ_TARGETS)} {{plugin_root}}/... "
-            f"Read instructions (one per mandatory target). "
-            f"Found {len(matches)}: {matches}"
-        )
-
-    def test_bootstrap_referenced_files_exist(self):
-        """Every target referenced in bootstrap.md must exist on disk.
-
-        A missing file would cause a Read failure at runtime — the
-        orchestrator would proceed without the content.
-        """
-        for _name, relative_path in self.MANDATORY_READ_TARGETS:
-            path = self.PLUGIN_ROOT / relative_path
-            assert path.exists(), (
-                f"Mandatory Read target missing on disk: {path}. "
-                f"bootstrap.md references it via "
-                f"{{plugin_root}}/{relative_path} but the file does "
-                f"not exist in the plugin directory."
-            )
-
-    def test_bootstrap_registered_in_plugin_json(self):
-        """bootstrap.md must be registered in plugin.json's commands list.
-
-        Without this registration, Claude Code will not expose the slash
-        command to the user even though the file exists on disk.
-        """
-        import json
-
-        assert self.PLUGIN_JSON_PATH.exists(), (
-            f"plugin.json not found at {self.PLUGIN_JSON_PATH}"
-        )
-        data = json.loads(self.PLUGIN_JSON_PATH.read_text(encoding="utf-8"))
-        commands = data.get("commands", [])
-        assert isinstance(commands, list), (
-            "plugin.json 'commands' must be a list"
-        )
-        # Match either "./commands/bootstrap.md" or "commands/bootstrap.md"
-        # — both are accepted relative-path forms used in this repo.
-        bootstrap_registered = any(
-            entry.endswith("commands/bootstrap.md")
-            for entry in commands
-            if isinstance(entry, str)
-        )
-        assert bootstrap_registered, (
-            f"bootstrap.md is not registered in plugin.json commands list. "
-            f"Found commands: {commands}"
-        )
-
-    def test_mandatory_read_targets_consistent_with_structure_tests(self):
-        """MANDATORY_READ_TARGETS here must encode the same set as
-        MANDATORY_READ_TARGETS in test_orchestration_skill_structure.py.
-
-        The two constants differ in format (tuples of (name, path) vs
-        flat list of paths) but must agree on the relative-path set.
-        This cross-file consistency test catches silent drift between
-        the two lists."""
-        from test_orchestration_skill_structure import (
-            MANDATORY_READ_TARGETS as STRUCTURE_READ_TARGETS,
-        )
-
-        paths_here = {path for _name, path in self.MANDATORY_READ_TARGETS}
-        paths_there = set(STRUCTURE_READ_TARGETS)
-        assert paths_here == paths_there, (
-            f"Mandatory Read target drift between test files.\n"
-            f"  test_agents_structure MANDATORY_READ_TARGETS (paths): "
-            f"{sorted(paths_here)}\n"
-            f"  test_orchestration_skill_structure MANDATORY_READ_TARGETS: "
-            f"{sorted(paths_there)}"
-        )
-
-
-class TestAgentFirstActionPrelude:
-    """Every agent must lead its body with the canonical YOUR FIRST ACTION
-    prelude that invokes `Skill("PACT:teammate-bootstrap")` before any
-    other work.
-
-    This is the load-bearing instruction that delivers the team protocol,
-    teachback standards, and algedonic reference to spawned teammates. Drift
-    here is silent — an agent without it would skip the bootstrap entirely
-    and operate without team coordination context.
-
-    Post-#366 phase 1 cycle 2: pinned byte-exact against the canonical
-    Section 6.7 fixture from docs/architecture/366-phase1-kernel-elimination.md.
-    Adding or removing any wording from the prelude requires updating
-    CANONICAL_PRELUDE in this class, which forces the change to be reviewed.
-    The previous substring-only assertions (section present, bootstrap call
-    present, recovery mention present) silently accepted prelude wording
-    drift; the byte-exact match closes that gap and implicitly covers all
-    three previous concerns plus the recovery-after-compaction language
-    that was previously checked permissively.
-    """
-
-    # Canonical YOUR FIRST ACTION prelude per spec Section 6.7. Must appear
-    # verbatim at the top of every agent body, immediately after the
-    # frontmatter closing `---`. The blank line after the prelude block is
-    # part of the canonical content (separates prelude from agent identity).
-    CANONICAL_PRELUDE = (
-        "# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)\n"
-        "\n"
-        "Before any other work — including reading files, claiming tasks, "
-        "or responding\n"
-        "to your dispatch prompt — invoke `Skill(\"PACT:teammate-bootstrap\")`. "
-        "This loads\n"
-        "the team communication protocol, teachback standards, memory "
-        "retrieval, and\n"
-        "algedonic reference. If your context is compacted mid-task and "
-        "you find yourself\n"
-        "without the bootstrap content loaded, re-invoke this skill before "
-        "continuing any\n"
-        "implementation work."
-    )
-
-    def test_first_action_prelude_byte_exact(self, agent_files):
-        """Every agent body must contain the canonical YOUR FIRST ACTION prelude
-        verbatim. Closes items 2 and 7 from cycle 1 minor item review.
-
-        This single byte-exact assertion supersedes the previous 3 tests
-        (test_first_action_section_present, test_first_action_invokes_teammate_bootstrap,
-        test_first_action_mentions_recovery_after_compaction) which
-        individually pinned only substrings of the prelude. Drift in any
-        word or punctuation is now caught.
-        """
+    def test_no_first_action_heading_in_any_agent(self, agent_files):
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
-            assert self.CANONICAL_PRELUDE in text, (
-                f"{f.name}: YOUR FIRST ACTION prelude does not match canonical "
-                f"Section 6.7 fixture verbatim. Either restore the canonical "
-                f"text in the agent body, or update CANONICAL_PRELUDE in "
-                f"TestAgentFirstActionPrelude to match the new fixture."
-            )
+            for fossil in self.FOSSIL_HEADING_VARIANTS:
+                assert fossil not in text, (
+                    f"{f.name}: contains v3.x fossil heading {fossil!r}. "
+                    f"Under v4.0.0 the FIRST-ACTION dispatch convention is "
+                    f"removed — agent bodies must not carry it. Delete the "
+                    f"section."
+                )
 
-    def test_first_action_precedes_other_headings(self, agent_files):
-        """The YOUR FIRST ACTION section must come before any other H1 in the body."""
+    def test_no_first_action_heading_canonical_form(self, agent_files):
         for f in agent_files:
             text = f.read_text(encoding="utf-8")
-            # Strip frontmatter
-            if text.startswith("---"):
-                end = text.index("---", 3) + 3
-                body = text[end:]
-            else:
-                body = text
-            first_action_idx = body.find("# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)")
-            assert first_action_idx >= 0
-            # Find first H1 in body
-            lines = body.split("\n")
-            first_h1_line = None
-            for line in lines:
-                if line.startswith("# ") and not line.startswith("## "):
-                    first_h1_line = line
-                    break
-            assert first_h1_line == "# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)", (
-                f"{f.name}: first H1 in body is {first_h1_line!r}, expected "
-                f"'# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)'. The bootstrap invocation must precede "
-                f"all other top-level sections."
+            assert self.FOSSIL_HEADING not in text, (
+                f"{f.name}: contains canonical v3.x FIRST-ACTION heading. "
+                f"Delete it."
             )
 
 
@@ -801,11 +596,11 @@ class TestAgentFrontmatterSkills:
     """
 
     @pytest.fixture
-    def agent_skills(self, agent_files):
+    def agent_skills(self, teammate_agent_files):
         out = {}
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
-            out[f.stem] = TestLazyLoadedAgentTeams._extract_skill_names(text)
+            out[f.stem] = TestNoSkillInvocationOnFirstAction._extract_skill_names(text)
         return out
 
     def test_pact_agent_teams_in_frontmatter(self, agent_skills):
@@ -927,12 +722,12 @@ class TestAgentDomainSkillVariations:
     }
 
     @pytest.fixture
-    def agent_skills(self, agent_files):
+    def agent_skills(self, teammate_agent_files):
         out = {}
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
             out[f.stem] = set(
-                TestLazyLoadedAgentTeams._extract_skill_names(text)
+                TestNoSkillInvocationOnFirstAction._extract_skill_names(text)
             )
         return out
 
@@ -985,18 +780,18 @@ class TestAgentAutonomyCharterInline:
     These tests verify the inline content is present and substantive.
     """
 
-    def test_autonomy_charter_section_present(self, agent_files):
+    def test_autonomy_charter_section_present(self, teammate_agent_files):
         """Every agent must carry an AUTONOMY CHARTER section in its body."""
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
             assert "AUTONOMY CHARTER" in text, (
                 f"{f.name}: missing 'AUTONOMY CHARTER' section. Post-#366 "
                 f"the autonomy charter is inline (not extracted)."
             )
 
-    def test_autonomy_charter_contains_authority_clause(self, agent_files):
+    def test_autonomy_charter_contains_authority_clause(self, teammate_agent_files):
         """The inline charter should grant authority and define escalation."""
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
             idx = text.find("AUTONOMY CHARTER")
             assert idx >= 0
@@ -1010,10 +805,10 @@ class TestAgentAutonomyCharterInline:
                 f"Inline charter should define when to escalate."
             )
 
-    def test_no_pact_autonomy_charter_skill_invocation(self, agent_files):
+    def test_no_pact_autonomy_charter_skill_invocation(self, teammate_agent_files):
         """The pact-autonomy-charter skill no longer exists. Verify no agent
         references it via Skill() invocation."""
-        for f in agent_files:
+        for f in teammate_agent_files:
             text = f.read_text(encoding="utf-8")
             assert 'Skill("PACT:pact-autonomy-charter")' not in text, (
                 f"{f.name}: still invokes pact-autonomy-charter skill which "
@@ -1087,370 +882,3 @@ class TestNoVestigialAgentTeamsProtocolSection:
                 f"not be lazy-invoked."
             )
 
-
-class TestTeammateBootstrapCommand:
-    """The /PACT:teammate-bootstrap slash command is the teammate analog of
-    /PACT:bootstrap. It is invoked by every spawned teammate as its FIRST
-    ACTION (see TestAgentFirstActionPrelude) and must exist on disk with
-    valid @-references to the team protocol skills and algedonic protocol.
-    """
-
-    PLUGIN_ROOT = Path(__file__).parent.parent
-    COMMAND_PATH = PLUGIN_ROOT / "commands" / "teammate-bootstrap.md"
-
-    # Required @-references — each of these must be present so the spawned
-    # teammate gets team-tools, teachback, on-demand context, algedonic
-    # content, and the communication charter loaded into context at
-    # command-invocation time. The charter is eager-loaded because every
-    # teammate turn involves SendMessage and the delivery-model discipline
-    # must be available without a follow-up Read hop.
-    REQUIRED_REFS = (
-        "skills/pact-agent-teams/SKILL.md",
-        "skills/pact-teachback/SKILL.md",
-        "skills/request-more-context/SKILL.md",
-        "protocols/algedonic.md",
-        "protocols/pact-communication-charter.md",
-    )
-
-    def test_command_file_exists(self):
-        assert self.COMMAND_PATH.exists(), (
-            f"teammate-bootstrap.md not found at {self.COMMAND_PATH}"
-        )
-        assert self.COMMAND_PATH.is_file()
-
-    def test_command_has_frontmatter_with_description(self):
-        text = self.COMMAND_PATH.read_text(encoding="utf-8")
-        fm = parse_frontmatter(text)
-        assert fm is not None, (
-            "teammate-bootstrap.md is missing YAML frontmatter"
-        )
-        assert "description" in fm and fm["description"].strip(), (
-            "teammate-bootstrap.md frontmatter must contain a non-empty "
-            "'description' field"
-        )
-
-    def test_command_contains_required_at_references(self):
-        """Each required reference must appear via @${CLAUDE_PLUGIN_ROOT}/..."""
-        text = self.COMMAND_PATH.read_text(encoding="utf-8")
-        missing = []
-        for ref in self.REQUIRED_REFS:
-            expected = f"@${{CLAUDE_PLUGIN_ROOT}}/{ref}"
-            if expected not in text:
-                missing.append(expected)
-        assert not missing, (
-            f"teammate-bootstrap.md missing eager-load references: "
-            f"{missing}. Required for the teammate to receive the team "
-            f"protocol, teachback, request-more-context, algedonic, and "
-            f"communication-charter content at command invocation."
-        )
-
-    def test_command_referenced_files_exist(self):
-        """Each @-referenced file must exist on disk."""
-        for ref in self.REQUIRED_REFS:
-            path = self.PLUGIN_ROOT / ref
-            assert path.exists(), (
-                f"teammate-bootstrap.md references {ref} but the file "
-                f"does not exist at {path}."
-            )
-
-    def test_command_contains_exactly_five_at_references(self):
-        """teammate-bootstrap.md must contain exactly 5
-        @${CLAUDE_PLUGIN_ROOT}/ references — no more, no less.
-
-        Presence-only checks (test_command_contains_required_at_references)
-        would silently accept the addition of a 6th or 7th ref, which would
-        cost every spawned teammate extra context tokens on every bootstrap
-        call. The cardinality pin locks the eager-load footprint.
-
-        The five accepted eager-loads are: pact-agent-teams (team protocol),
-        pact-teachback (verification gate), request-more-context (on-demand
-        secretary queries), algedonic (emergency bypass), and
-        pact-communication-charter (SendMessage delivery-model discipline,
-        load-bearing for every teammate turn that sends a message).
-        """
-        text = self.COMMAND_PATH.read_text(encoding="utf-8")
-        count = text.count("@${CLAUDE_PLUGIN_ROOT}/")
-        assert count == 5, (
-            f"teammate-bootstrap.md must contain exactly 5 "
-            f"@${{CLAUDE_PLUGIN_ROOT}}/ references. Found {count}. "
-            f"The eager-load footprint is load-bearing — every spawned "
-            f"teammate pays the cost of each extra ref on every invocation."
-        )
-
-
-class TestTeammateBootstrapRegisteredInPluginJson:
-    """The teammate-bootstrap command must be registered in plugin.json so
-    Claude Code exposes it as a slash command. Without registration the
-    YOUR FIRST ACTION invocation in every agent would silently fail."""
-
-    PLUGIN_JSON_PATH = (
-        Path(__file__).parent.parent / ".claude-plugin" / "plugin.json"
-    )
-
-    def test_teammate_bootstrap_in_commands_list(self):
-        import json
-
-        assert self.PLUGIN_JSON_PATH.exists()
-        data = json.loads(self.PLUGIN_JSON_PATH.read_text(encoding="utf-8"))
-        commands = data.get("commands", [])
-        assert isinstance(commands, list)
-        registered = any(
-            isinstance(entry, str)
-            and entry.endswith("commands/teammate-bootstrap.md")
-            for entry in commands
-        )
-        assert registered, (
-            f"teammate-bootstrap.md not registered in plugin.json commands. "
-            f"Found: {commands}"
-        )
-
-
-class TestBootstrapGuardRemoved:
-    """Regression tripwire: bootstrap.md and teammate-bootstrap.md must NOT
-    contain a self-attestation "Bootstrap Guard" section.
-
-    The guard was removed in the v3.17.0 polish cycle (PR #390 remediation)
-    because it was a self-attestation check that false-positives after
-    context compaction: the orchestrator retains a summary-level recollection
-    of the guard's recognition markers but not the actual protocol content,
-    so it incorrectly short-circuits the re-load and ends up operating
-    without the orchestrator instructions actually in context.
-
-    A one-Read-per-compaction cost is cheap compared to the silent-failure
-    mode. Keep this test as a tripwire against accidental re-introduction
-    of the guard pattern in either bootstrap command file.
-    """
-
-    PLUGIN_ROOT = Path(__file__).parent.parent
-    BOOTSTRAP_PATH = PLUGIN_ROOT / "commands" / "bootstrap.md"
-    TEAMMATE_BOOTSTRAP_PATH = (
-        PLUGIN_ROOT / "commands" / "teammate-bootstrap.md"
-    )
-
-    # Phrases that are characteristic of the old self-attestation guard.
-    # Matched case-insensitively to catch minor phrasing drift. Any of these
-    # appearing in either bootstrap file means the guard pattern has been
-    # re-introduced.
-    FORBIDDEN_GUARD_PHRASES = (
-        "bootstrap guard",
-        "already present in your context",
-        "already have the bootstrap loaded",
-        "short-circuit",
-    )
-
-    def test_bootstrap_md_exists(self):
-        assert self.BOOTSTRAP_PATH.exists(), (
-            f"bootstrap.md not found at {self.BOOTSTRAP_PATH}"
-        )
-
-    def test_teammate_bootstrap_md_exists(self):
-        assert self.TEAMMATE_BOOTSTRAP_PATH.exists(), (
-            f"teammate-bootstrap.md not found at "
-            f"{self.TEAMMATE_BOOTSTRAP_PATH}"
-        )
-
-    def test_bootstrap_md_has_no_guard_heading(self):
-        """`## Bootstrap Guard` heading must not appear in bootstrap.md."""
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        assert "## Bootstrap Guard" not in text, (
-            "bootstrap.md has re-introduced the `## Bootstrap Guard` "
-            "section. This was removed in PR #390 remediation because "
-            "it false-positives after context compaction — the "
-            "orchestrator retains recollection of the guard's markers "
-            "but not the protocol content, so it incorrectly skips "
-            "the re-load. One Read-per-compaction is cheap; remove the "
-            "guard section."
-        )
-
-    def test_bootstrap_md_has_no_guard_phrases(self):
-        """None of the characteristic guard phrases may appear in bootstrap.md."""
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8").lower()
-        found = [p for p in self.FORBIDDEN_GUARD_PHRASES if p in text]
-        assert not found, (
-            f"bootstrap.md contains forbidden guard phrase(s): {found}. "
-            f"The self-attestation bootstrap guard was removed in PR #390 "
-            f"remediation because it false-positives after context "
-            f"compaction. Remove the guard pattern."
-        )
-
-    def test_teammate_bootstrap_md_has_no_guard_phrases(self):
-        """None of the characteristic guard phrases may appear in
-        teammate-bootstrap.md either — the guard was removed from both
-        bootstrap command files for the same reason."""
-        text = self.TEAMMATE_BOOTSTRAP_PATH.read_text(encoding="utf-8").lower()
-        found = [p for p in self.FORBIDDEN_GUARD_PHRASES if p in text]
-        assert not found, (
-            f"teammate-bootstrap.md contains forbidden guard phrase(s): "
-            f"{found}. The self-attestation bootstrap guard was removed "
-            f"in PR #390 remediation because it false-positives after "
-            f"context compaction. Remove the guard pattern."
-        )
-
-    def test_bootstrap_md_starts_at_mission(self):
-        """After the frontmatter, bootstrap.md should jump straight to the
-        `# MISSION` heading — no intervening guard section. This pins the
-        file layout against re-introduction of the guard between frontmatter
-        and MISSION.
-        """
-        text = self.BOOTSTRAP_PATH.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        # Find the first heading (line starting with '#') after the
-        # frontmatter close. The frontmatter is the pair of `---` lines
-        # at the top. If frontmatter is absent, start from the top.
-        start_idx = 0
-        if lines and lines[0].strip() == "---":
-            for i in range(1, len(lines)):
-                if lines[i].strip() == "---":
-                    start_idx = i + 1
-                    break
-        first_heading = None
-        for line in lines[start_idx:]:
-            if line.startswith("#"):
-                first_heading = line.strip()
-                break
-        assert first_heading == "# MISSION", (
-            f"bootstrap.md: first heading after frontmatter should be "
-            f"`# MISSION`, but got: {first_heading!r}. The bootstrap guard "
-            f"is gone — nothing should sit between the frontmatter and "
-            f"the MISSION section."
-        )
-
-
-class TestDispatchTemplatePrelude:
-    """Spec Section 8 requirement: the Agent Teams Dispatch template in
-    skills/orchestration/SKILL.md must embed the teammate bootstrap prelude
-    inside the `prompt=` parameter.
-
-    This is load-bearing because the dispatch template is what the team-lead
-    reads when spawning a specialist — if the template is missing the
-    `YOUR PACT ROLE: teammate (` marker or the `Skill("PACT:teammate-bootstrap")`
-    call, spawned teammates will not self-bootstrap and will lack the
-    team-protocol / teachback / algedonic context.
-
-    Note: the dispatch template moved from bootstrap.md to the
-    orchestrator core file in #414 R3 (bootstrap restructure), and
-    then from protocols/ to skills/orchestration/SKILL.md in #452.
-    """
-
-    CORE_PATH = (
-        Path(__file__).parent.parent / "skills" / "orchestration" / "SKILL.md"
-    )
-
-    def _dispatch_region(self, text: str) -> str:
-        """Extract the region around the Agent Teams Dispatch callout.
-        Returns the chunk starting at the MANDATORY callout and extending
-        ~40 lines forward — enough to cover the dispatch pattern block.
-        """
-        marker = "MANDATORY"
-        idx = text.find(marker)
-        if idx == -1:
-            return ""
-        # Take ~80 lines of context after the marker to cover the
-        # dispatch pattern block.
-        tail = text[idx:]
-        lines = tail.splitlines()[:80]
-        return "\n".join(lines)
-
-    def test_dispatch_template_contains_pact_role_teammate(self):
-        """Spec Section 6.6 / Section 8: the dispatch template must
-        contain the literal placeholder form `YOUR PACT ROLE: teammate ({name})`
-        — not just the prefix. The `{name}` placeholder is load-bearing
-        because at dispatch time the team-lead substitutes the teammate's
-        actual name, which is what the routing block searches for and
-        what appears in the spawned teammate's context.
-        """
-        text = self.CORE_PATH.read_text(encoding="utf-8")
-        region = self._dispatch_region(text)
-        assert region, (
-            "skills/orchestration/SKILL.md missing the Agent Teams Dispatch "
-            "MANDATORY callout anchor."
-        )
-        assert "YOUR PACT ROLE: teammate ({name})" in region, (
-            "Agent Teams Dispatch template in skills/orchestration/SKILL.md "
-            "must contain literal `YOUR PACT ROLE: teammate ({name})` (with "
-            "the exact placeholder form) so the team-lead substitutes the "
-            "teammate's name at dispatch time. Spec Section 6.6."
-        )
-
-    def test_dispatch_template_contains_teammate_bootstrap_skill_call(self):
-        """The dispatch template shows Python source code, so the Skill call
-        appears with backslash-escaped quotes inside the outer prompt="..."
-        literal. Match the on-disk escaped form.
-        """
-        text = self.CORE_PATH.read_text(encoding="utf-8")
-        region = self._dispatch_region(text)
-        assert region, (
-            "skills/orchestration/SKILL.md missing the Agent Teams Dispatch "
-            "MANDATORY callout anchor."
-        )
-        assert 'Skill(\\"PACT:teammate-bootstrap\\")' in region, (
-            "Agent Teams Dispatch template in skills/orchestration/SKILL.md "
-            "must invoke `Skill(\\\"PACT:teammate-bootstrap\\\")` inside "
-            "the prompt= parameter (escaped because the call is nested "
-            "inside the outer Python prompt string literal). Spec Section 8."
-        )
-
-    def test_dispatch_template_prelude_inside_prompt_parameter(self):
-        """Both markers must co-occur inside the `prompt=` parameter — not
-        just anywhere in the file. The spec explicitly requires the
-        prelude to be embedded in the dispatch prompt so the teammate
-        sees it at spawn.
-
-        The Skill call appears with backslash-escaped quotes because
-        it is nested inside the outer Python prompt= string literal.
-        """
-        text = self.CORE_PATH.read_text(encoding="utf-8")
-        region = self._dispatch_region(text)
-        assert "prompt=" in region, (
-            "Agent Teams Dispatch template in skills/orchestration/SKILL.md "
-            "must expose a `prompt=` parameter near the MANDATORY callout."
-        )
-        # Find the prompt= substring and walk forward to locate both
-        # markers within the same prompt literal.
-        prompt_idx = region.find("prompt=")
-        prompt_tail = region[prompt_idx:]
-        assert "YOUR PACT ROLE: teammate (" in prompt_tail, (
-            "`YOUR PACT ROLE: teammate (` must appear inside the dispatch "
-            "prompt= parameter, not merely elsewhere in "
-            "skills/orchestration/SKILL.md."
-        )
-        assert 'Skill(\\"PACT:teammate-bootstrap\\")' in prompt_tail, (
-            "`Skill(\\\"PACT:teammate-bootstrap\\\")` must appear inside "
-            "the dispatch prompt= parameter (escaped form — nested inside "
-            "the outer Python prompt string literal), not merely elsewhere "
-            "in skills/orchestration/SKILL.md."
-        )
-
-    def test_dispatch_template_contains_recovery_after_compaction_language(self):
-        """Spec Section 6.6: the dispatch template must include guidance
-        telling the spawned teammate to re-invoke the teammate bootstrap
-        if its context is compacted and the bootstrap content is no
-        longer present. Without this language, teammates that get
-        compacted mid-task lose their team-protocol / teachback /
-        algedonic content and cannot recover it.
-
-        Literal fragments asserted:
-          - "compacted" — the trigger condition
-          - "re-invoke" — the recovery action
-        Both must appear inside the prompt= parameter, not just
-        elsewhere in skills/orchestration/SKILL.md.
-        """
-        text = self.CORE_PATH.read_text(encoding="utf-8")
-        region = self._dispatch_region(text)
-        prompt_idx = region.find("prompt=")
-        assert prompt_idx != -1, (
-            "Dispatch template missing prompt= parameter anchor."
-        )
-        prompt_tail = region[prompt_idx:]
-        assert "compacted" in prompt_tail, (
-            "Dispatch template in skills/orchestration/SKILL.md is missing "
-            "the compaction-trigger language ('compacted'). Spec Section "
-            "6.6 requires the template to tell spawned teammates what to "
-            "do if their context is compacted."
-        )
-        assert "re-invoke" in prompt_tail, (
-            "Dispatch template in skills/orchestration/SKILL.md is missing "
-            "the recovery action language ('re-invoke'). Spec Section 6.6 "
-            "requires the template to tell spawned teammates to re-invoke "
-            "the bootstrap skill after compaction."
-        )

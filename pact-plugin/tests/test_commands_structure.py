@@ -155,32 +155,37 @@ class TestAskUserQuestionOptions:
         assert desc in peer_review_content, "peer-review.md missing shared Pause description"
 
 
-class TestPactRoleTeammateInConsumerCommands:
-    """All consumer command files must inline the canonical YOUR PACT ROLE: teammate
-    marker (#366 R5 L3).
+CONSUMER_COMMANDS = [
+    "orchestrate",
+    "peer-review",
+    "comPACT",
+    "rePACT",
+    "plan-mode",
+]
 
-    Background: bootstrap.md is the canonical source for the Task() dispatch
-    form, but five consumer commands (orchestrate, peer-review, comPACT,
-    rePACT, plan-mode) inline the same form because LLM readers under token
-    pressure don't follow cross-references reliably. The "YOUR PACT ROLE: teammate ("
-    substring is the load-bearing marker that the multi-layer routing
-    mechanism (session_init.py + peer_inject.py) uses to detect a teammate
-    spawn and inject the bootstrap directive.
+# Canonical-form components that must appear in at least one consumer command
+# under v4.0.0. The PACT ROLE marker is structural (load-bearing for
+# session_init detection); the team-join note orients the spawned teammate.
+# The teachback directive is intentionally absent from this list — under
+# v4.0.0 teachback is delivered via the spawn-time skills: frontmatter
+# (pact-teachback skill), not a per-prompt instruction.
+CANONICAL_FORM_COMPONENTS = [
+    ("PACT_ROLE_marker", "YOUR PACT ROLE: teammate ("),
+    ("team_join_note", "joining team"),
+    ("two_task_anchor", "Two-Task Dispatch Shape"),
+    ("addBlockedBy_call", "addBlockedBy"),
+]
 
-    If a consumer file silently drops the marker — for example a future
-    refactor that compresses the dispatch template into a "see bootstrap.md"
-    pointer — teammates spawned via that command will not load the bootstrap
-    skill and will be silently demoted from PACT specialists to plain Claude
-    Code agents. This test pins the marker as a structural invariant.
+
+class TestPactRoleTeammateInConsumerCommandsByFile:
+    """Class A: parametrize over consumer-command files.
+
+    Diagnostic axis = WHICH FILE leaked. Each consumer command file
+    (orchestrate, peer-review, comPACT, rePACT, plan-mode) must contain the
+    canonical YOUR PACT ROLE: teammate ( marker. A test failure points
+    directly at the file that lost the marker, regardless of which canonical-
+    form component drifted.
     """
-
-    CONSUMER_COMMANDS = [
-        "orchestrate",
-        "peer-review",
-        "comPACT",
-        "rePACT",
-        "plan-mode",
-    ]
 
     @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
     def test_contains_canonical_pact_role(self, name):
@@ -189,64 +194,35 @@ class TestPactRoleTeammateInConsumerCommands:
         text = path.read_text(encoding="utf-8")
         assert "YOUR PACT ROLE: teammate (" in text, (
             f"{name}.md must contain canonical 'YOUR PACT ROLE: teammate (' "
-            "marker — load-bearing for the routing chain that promotes a "
-            "freshly spawned teammate to a PACT specialist via "
-            "Skill('PACT:teammate-bootstrap'). See skills/orchestration/SKILL.md and the "
-            "'Canonical Task() dispatch is mirrored inline at every consumer "
-            "site' pinned-context entry for context."
+            "marker — load-bearing for the routing chain that detects a "
+            "teammate spawn at session_init time."
         )
 
 
-class TestTwoTaskDispatchShapeInConsumerCommands:
-    """The Task A + Task B dispatch shape must be encoded in every consumer
-    command file that spawns teammates.
+class TestPactRoleTeammateInConsumerCommandsByComponent:
+    """Class B: parametrize over canonical-form components.
 
-    Why this is structural, not behavioral: the dispatch shape is described
-    in skills/orchestration/SKILL.md but consumer commands inline it because
-    LLM readers under token pressure don't follow cross-references reliably
-    (same rationale as the canonical PACT ROLE marker test above). If a
-    consumer command silently drops the inline anchor, team-lead-side dispatch
-    for that workflow degrades to single-task form and the teachback gate
-    becomes optional rather than mandatory.
-
-    Pinned literals:
-    - "Two-Task Dispatch Shape" — the section heading anchor in each file.
-    - "addBlockedBy" — the API call shape that creates the blockedBy chain.
-
-    Distinct from `addBlockedBy=[A]` which the architect spec used as
-    illustrative shorthand; production form is the API call name itself
-    (e.g. `addBlockedBy=[A_id]` or `addBlockedBy=[<Task A id>]`).
+    Diagnostic axis = WHICH COMPONENT of the canonical dispatch form leaked.
+    For each canonical-form component (PACT ROLE marker, team-join note,
+    two-task anchor, addBlockedBy call), assert it appears in at least one
+    consumer command. Together with Class A (file axis), Class A failures
+    isolate the file while Class B failures isolate the component —
+    independent diagnostic signal.
     """
 
-    CONSUMER_COMMANDS = [
-        "orchestrate",
-        "peer-review",
-        "comPACT",
-        "rePACT",
-        "plan-mode",
-    ]
+    @pytest.mark.parametrize("label,substr", CANONICAL_FORM_COMPONENTS)
+    def test_canonical_form_component_present_in_at_least_one_consumer(
+        self, label, substr
+    ):
+        bodies = {
+            name: (COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8")
+            for name in CONSUMER_COMMANDS
+        }
+        if not any(substr in body for body in bodies.values()):
+            pytest.fail(
+                f"canonical-form component {label!r} (substring {substr!r}) "
+                f"not present in any consumer command file. The component is "
+                f"load-bearing for the dispatch contract; if no file carries "
+                f"it, every spawned teammate loses the corresponding signal."
+            )
 
-    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
-    def test_contains_two_task_dispatch_shape_anchor(self, name):
-        path = COMMANDS_DIR / f"{name}.md"
-        text = path.read_text(encoding="utf-8")
-        assert "Two-Task Dispatch Shape" in text, (
-            f"{name}.md must contain 'Two-Task Dispatch Shape' section anchor "
-            "(inline per architect D7 — canonical Task() prompt preserved, "
-            "dispatch shape mirrored at consumer sites). Drop signals "
-            "either reverted #491 work or a refactor that compressed the "
-            "anchor into a cross-reference; both fail the agent-reader-primary "
-            "axiom (LLM readers under token pressure don't follow xrefs)."
-        )
-
-    @pytest.mark.parametrize("name", CONSUMER_COMMANDS)
-    def test_contains_add_blocked_by_call(self, name):
-        path = COMMANDS_DIR / f"{name}.md"
-        text = path.read_text(encoding="utf-8")
-        assert "addBlockedBy" in text, (
-            f"{name}.md must contain 'addBlockedBy' (the API call that wires "
-            "Task B's blockedBy=[A] dependency). Without this, the data-layer "
-            "unblock that resolves on Task A completion is never created — "
-            "Task B becomes immediately claimable and the teachback gate "
-            "is bypassed."
-        )

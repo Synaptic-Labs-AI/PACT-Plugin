@@ -17,7 +17,7 @@ Gate triggers only when ALL hold:
   2. Target file path resolves to the project CLAUDE.md
   3. Edit locus is within the Pinned Context section (line-bounded)
   4. Stale-pins-pending marker exists in session_dir
-  5. Not a teammate session (teammates bypass per bootstrap_gate precedent)
+  5. Not a teammate session (teammates bypass; CLAUDE.md edits are scoped to the team-lead session)
 
 SACROSANCT: every raisable path is wrapped in try/except that defaults
 to allow (exit 0 with suppressOutput). A gate bug must never block a
@@ -41,7 +41,7 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 # Marker file name written when stale-pins-pending state is detected.
 # Placed in session_dir so it is per-session scoped — clears on new
-# session, cannot persist across /clear per bootstrap_gate precedent.
+# session, cannot persist across /clear (session_dir is rebuilt per session).
 PIN_STALENESS_MARKER_NAME = "pin-staleness-pending"
 
 _DENY_REASON = (

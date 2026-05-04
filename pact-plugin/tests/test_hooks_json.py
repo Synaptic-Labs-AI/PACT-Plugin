@@ -41,11 +41,8 @@ VALID_HOOK_EVENTS = {
 MUST_BE_SYNC = {
     "team_guard.py",      # Blocks Task dispatch if no team
     "worktree_guard.py",  # Blocks edits outside worktree
-    "bootstrap_gate.py",  # Blocks implementation tools until bootstrap
-    "bootstrap_prompt_gate.py",  # Injects bootstrap instruction on prompts
     "validate_handoff.py",  # Validates agent output
     "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
-    "peer_inject.py",     # Injects peer context on agent start
     "git_commit_check.py",  # Checks git commit conventions
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
     "auditor_reminder.py",  # Injects auditor dispatch reminder into context
@@ -276,21 +273,6 @@ class TestMatcherPatterns:
             if matcher.endswith("|"):
                 errors.append(f"{event_type}: matcher ends with '|': '{matcher}'")
         assert errors == [], f"Invalid matcher patterns:\n" + "\n".join(errors)
-
-class TestBootstrapGateInvariants:
-    """Structural invariants for bootstrap gate hooks."""
-
-    def test_bootstrap_gate_has_no_matcher(self, hooks_config):
-        """bootstrap_gate.py PreToolUse entry must have NO matcher (fires for all tools)."""
-        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
-        for entry in pre_tool_entries:
-            for hook in entry.get("hooks", []):
-                if "bootstrap_gate.py" in hook.get("command", ""):
-                    assert "matcher" not in entry, (
-                        "bootstrap_gate.py must NOT have a matcher — "
-                        "it must fire for ALL hookable tools to enforce the gate"
-                    )
-
 
 class TestSessionStartCardinality:
     """Post-#444 SessionStart registration invariant.
