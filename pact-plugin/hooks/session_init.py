@@ -74,7 +74,7 @@ from pin_caps import (  # noqa: F401
     parse_pins,
 )
 
-from shared import BOOTSTRAP_MARKER_NAME, build_session_path
+from shared import build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
@@ -587,12 +587,6 @@ def main():
             else "unknown"
         )
         is_context_reset = source in ("compact", "clear")
-        # Marker deletion uses a narrower guard: only user-initiated clear
-        # triggers it. Compact is involuntary (auto-compaction under context
-        # pressure) and the orchestrator is still mid-work — wiping the marker
-        # on compact re-engages the bootstrap gate mid-task, blocking
-        # Edit/Write/Agent when the orchestrator needs them most (#414).
-        is_marker_reset = source == "clear"
 
         # Clean up stale compact-summary from previous sessions.
         # Only "compact" source needs it (just written by postcompact_archive).
@@ -601,22 +595,6 @@ def main():
                 COMPACT_SUMMARY_PATH.unlink(missing_ok=True)
             except OSError:
                 pass  # Fail-open: don't block session init for cleanup
-
-        # Clear bootstrap-complete marker on user-initiated clear only (#414).
-        #
-        # Cannot use get_session_dir() here because the context module
-        # hasn't been initialized yet (write_context() runs at step 5a
-        # below). Uses build_session_path() directly — it has its own
-        # path traversal guard (Path.parents containment check).
-        if is_marker_reset:
-            try:
-                reset_session_id = input_data.get("session_id", "")
-                if reset_session_id and project_dir:
-                    slug = Path(project_dir).name
-                    session_path = build_session_path(slug, str(reset_session_id))
-                    (session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
-            except OSError:
-                pass  # Fail-open: don't block session init for marker cleanup
 
         # 0. Check required PACT dirs are in additionalDirectories (one-time tip)
         # Only check on fresh startup — resumed/compacted sessions already had the check
