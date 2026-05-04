@@ -207,3 +207,47 @@ class TestPreResponseChannelCheckGate:
         # before reading the SendMessage discipline.
         assert lead.index("## 1. Pre-Response Channel Check") < lead.index("## 6. Communication"), \
             "pact-orchestrator agent body: Pre-Response Channel Check (§1) must appear before Communication (§6)"
+
+
+_ALL_SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
+
+
+class TestNoFirstActionFossilInSkillBodies:
+    """Negative-invariant fossilization guard: skill bodies must not contain
+    the v3.x FIRST-ACTION + Skill("PACT:teammate-bootstrap") + peer_inject
+    delivery-mechanism prose. The mechanism and the bootstrap command were
+    deleted; any surviving prose tells spawned teammates to look for content
+    delivered by absent machinery.
+
+    Symmetric to TestNoFirstActionFossilInConsumerCommands in
+    test_commands_structure.py — that guard scans `commands/`; this one
+    scans `skills/**/SKILL.md`. Skill bodies auto-load into every teammate
+    spawn via `skills:` frontmatter preload, so a stale-mechanism reference
+    here misroutes every teammate.
+    """
+
+    FORBIDDEN_FOSSIL_PATTERNS = (
+        "YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)",
+        'Skill("PACT:teammate-bootstrap")',
+        "Skill('PACT:teammate-bootstrap')",
+        "/PACT:teammate-bootstrap",
+        "/PACT:bootstrap",
+        "peer_inject",
+    )
+
+    @pytest.mark.parametrize(
+        "skill_path",
+        _ALL_SKILL_FILES,
+        ids=[p.parent.name for p in _ALL_SKILL_FILES],
+    )
+    def test_skill_body_has_no_v3x_delivery_fossil(self, skill_path):
+        text = skill_path.read_text(encoding="utf-8")
+        offenders = [p for p in self.FORBIDDEN_FOSSIL_PATTERNS if p in text]
+        assert not offenders, (
+            f"{skill_path.relative_to(SKILLS_DIR.parent)} contains v3.x "
+            f"delivery-mechanism fossil(s): {offenders}. The bootstrap "
+            f"command, peer_inject hook, and FIRST-ACTION prelude were all "
+            f"removed; surviving prose describes machinery that no longer "
+            f"exists and contradicts the current `skills:` frontmatter "
+            f"preload model. Replace with current-state instructions."
+        )
