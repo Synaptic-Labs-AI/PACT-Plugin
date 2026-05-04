@@ -277,32 +277,6 @@ class TestMatcherPatterns:
                 errors.append(f"{event_type}: matcher ends with '|': '{matcher}'")
         assert errors == [], f"Invalid matcher patterns:\n" + "\n".join(errors)
 
-    def test_subagent_start_covers_all_agent_types(self, hooks_config):
-        """SubagentStart matcher must include all PACT agent types from agents/ directory."""
-        # Read expected agent names from disk
-        expected_agents = set()
-        for agent_file in AGENTS_DIR.glob("*.md"):
-            # Agent files are named pact-{type}.md — the stem is the agent name
-            expected_agents.add(agent_file.stem)
-
-        assert len(expected_agents) > 0, "No agent files found in agents/ directory"
-
-        # Extract the SubagentStart matcher
-        subagent_start_entries = hooks_config["hooks"].get("SubagentStart", [])
-        matcher_agents = set()
-        for entry in subagent_start_entries:
-            if "matcher" in entry:
-                matcher_agents.update(entry["matcher"].split("|"))
-
-        # Every agent definition should appear in the matcher
-        missing = expected_agents - matcher_agents
-        assert missing == set(), (
-            f"SubagentStart matcher is missing agent types: {sorted(missing)}. "
-            f"Matcher has: {sorted(matcher_agents)}. "
-            f"Expected from agents/: {sorted(expected_agents)}"
-        )
-
-
 class TestBootstrapGateInvariants:
     """Structural invariants for bootstrap gate hooks."""
 

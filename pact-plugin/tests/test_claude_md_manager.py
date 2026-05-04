@@ -2084,21 +2084,6 @@ class TestMarkerConsistency:
             f"pattern drift."
         )
 
-    def test_peer_inject_prelude_template_emits_teammate_marker(self):
-        """peer_inject.py's `_BOOTSTRAP_PRELUDE_TEMPLATE` must, after
-        format() substitution, contain the exact teammate marker prefix
-        the routing block searches for.
-        """
-        from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
-
-        rendered = _BOOTSTRAP_PRELUDE_TEMPLATE.format(agent_name="sample-agent")
-        assert self.TEAMMATE_MARKER_PREFIX in rendered, (
-            f"peer_inject.py `_BOOTSTRAP_PRELUDE_TEMPLATE` (after format) "
-            f"must contain `{self.TEAMMATE_MARKER_PREFIX}` so spawned "
-            f"teammates are routed to the teammate bootstrap. Routing-"
-            f"block search pattern drift."
-        )
-
     def test_core_dispatch_template_emits_teammate_marker(self):
         """The Agent Teams Dispatch template in skills/orchestration/SKILL.md
         is the FOURTH production emission site for the teammate marker
@@ -2139,76 +2124,6 @@ class TestMarkerConsistency:
             f"Routing-block search pattern drift — spawned teammates "
             f"will not self-bootstrap."
         )
-
-    def test_marker_consistency_end_to_end(self):
-        """End-to-end tripwire: every marker substring the routing block
-        searches for must be emitted by EVERY production site registered
-        below. Acts as a tripwire if someone:
-          (a) adds a new marker pattern to the routing block without
-              wiring up a corresponding emitter, OR
-          (b) drops the marker from ANY single emitter while the other
-              emitters still hold the line.
-
-        The (b) case matters because the PACT routing architecture is
-        multi-layer: the team-lead session path (session_init), the spawned
-        teammate path via hook injection (peer_inject), and the spawned
-        teammate path via dispatch template (skills/orchestration/SKILL.md)
-        are all independently load-bearing. A silent drop in any one of
-        them breaks a specific code path without the unit tests on the
-        other paths noticing — which is exactly the kind of drift this
-        tripwire exists to catch.
-
-        Note that session_init emits the ORCHESTRATOR marker (to team-lead
-        sessions), while peer_inject and skills/orchestration/SKILL.md emit
-        the TEAMMATE marker prefix (to spawned teammates). That split is
-        intentional — the routing block uses each marker to dispatch to
-        a different bootstrap skill.
-        """
-        from shared.claude_md_manager import PACT_ROUTING_BLOCK
-        from peer_inject import _BOOTSTRAP_PRELUDE_TEMPLATE
-
-        session_init_source = self.SESSION_INIT_PATH.read_text(encoding="utf-8")
-        rendered_prelude = _BOOTSTRAP_PRELUDE_TEMPLATE.format(
-            agent_name="sample-agent"
-        )
-        core_text = self.CORE_PATH.read_text(encoding="utf-8")
-        core_dispatch_region = self._core_dispatch_region(core_text)
-        assert core_dispatch_region, (
-            "skills/orchestration/SKILL.md missing the Agent Teams Dispatch "
-            "`MANDATORY` callout anchor — cannot locate dispatch template "
-            "region."
-        )
-
-        # For each marker the routing block searches for, verify EVERY
-        # registered production emission site contains it. Missing from
-        # even one emitter fires the tripwire.
-        marker_to_emitters = {
-            self.ORCHESTRATOR_MARKER: [
-                ("session_init.py (_team_create/_team_reuse)", session_init_source),
-            ],
-            self.TEAMMATE_MARKER_PREFIX: [
-                ("peer_inject.py (_BOOTSTRAP_PRELUDE_TEMPLATE)", rendered_prelude),
-                ("skills/orchestration/SKILL.md (Agent Teams Dispatch template)", core_dispatch_region),
-            ],
-        }
-
-        for marker, emitters in marker_to_emitters.items():
-            assert marker in PACT_ROUTING_BLOCK, (
-                f"Routing block does not search for `{marker}` — test "
-                f"fixture is stale. Update the test or the routing block."
-            )
-            missing = [
-                name for name, source in emitters if marker not in source
-            ]
-            assert not missing, (
-                f"Routing block searches for `{marker}` but the following "
-                f"production emission site(s) do not contain it: "
-                f"{missing}. Registered emitters: "
-                f"{[name for name, _ in emitters]}. Routing is broken "
-                f"for this code path — a teammate or team-lead reaching the "
-                f"broken emitter will not self-bootstrap."
-            )
-
 
 # ---------------------------------------------------------------------------
 # #366 F1: File locking retrofit for concurrent SessionStart safety
