@@ -2,7 +2,7 @@
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See the [orchestration skill](../skills/orchestration/SKILL.md) > Temporal Horizons for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See the [pact-orchestrator agent body](../agents/pact-orchestrator.md) §S3/S4 Operational Modes for the full horizon model.
 
 ### Trigger Points
 

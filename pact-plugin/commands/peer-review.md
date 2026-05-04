@@ -149,7 +149,7 @@ Each reviewer dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{reviewer-type}: TEACHBACK for review of {feature}"`, owner = reviewer. Description: state which review angle the reviewer is taking (consistency check vs adversarial vs design coherence) before reading the diff.
 - **Task B** — primary review work. `subject = "{reviewer-type}: review {feature}"`, owner = reviewer, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
+Both are created BEFORE the `Task(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
 
 ```
 A_id = TaskCreate(

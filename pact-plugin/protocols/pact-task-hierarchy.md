@@ -21,7 +21,7 @@ Feature Task (created by orchestrator)
 | Phase | Orchestrator | Orchestrator | Active during phase |
 | Agent | Orchestrator | Specialist (claim-only); Orchestrator (completion authority) | Specialist claims via `TaskUpdate(status="in_progress")`; orchestrator completes via `TaskUpdate(status="completed")` paired with a wake-signal SendMessage |
 
-Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority).
+Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [Completion Authority](pact-completion-authority.md#completion-authority).
 
 ### Task States
 

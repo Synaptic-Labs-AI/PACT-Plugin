@@ -18,7 +18,7 @@ The rules below govern how messages delivered via this tool actually behave.
 - Agents read queued messages in FIFO order on reaching idle.
 - No cancellation primitive exists — a follow-up message cannot supersede a queued earlier one.
 - The only mid-turn interrupt mechanism is user-side (Escape). Agent-to-agent SendMessage has no equivalent.
-- `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) for the canonical pattern).
+- `SendMessage` requires a specific `to=` recipient name. There is no broadcast addressing mode; reaching multiple teammates means iterating and sending one message per recipient (see [Lead-Side HALT Fan-Out](algedonic.md#lead-side-halt-fan-out) for the canonical pattern).
 
 ### Wake Mechanism
 
@@ -80,7 +80,7 @@ Before every SendMessage, run through:
 4. **Could this be a peer-to-peer message**, avoiding a routing hop through me?
 5. **Have I verified my framing against the final phase output** (the doc, the HANDOFF, the diagnostic file), or am I working from an interim progress signal? Progress signals are pre-revision snapshots; post-progress information the agent absorbed before completion may have superseded them. *(Failure shape: a teammate's mid-task progress signal flags concern X; their final HANDOFF resolves X; a course-correction dispatched off the progress signal lands as obsolete instruction.)*
 
-*Pre-decision sibling: see [Pre-Response Channel Check](../skills/pact-agent-teams/SKILL.md#pre-response-channel-check) (also in [orchestration/SKILL.md](../skills/orchestration/SKILL.md#pre-response-channel-check)) for the response-START gate that runs before this check.*
+*Pre-decision sibling: see [Pre-Response Channel Check](../skills/pact-agent-teams/SKILL.md#pre-response-channel-check) for the response-START gate that runs before this check.*
 
 #### Forwarding-Chain Hygiene
 

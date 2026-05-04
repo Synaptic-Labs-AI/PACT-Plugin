@@ -194,7 +194,7 @@ Each consultant dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for plan consultation on {feature}"`, owner = consultant. Description: lightweight understanding-confirm of the consultation scope.
 - **Task B** — primary consultation. `subject = "{specialist}: plan consultation for {feature}"`, owner = consultant, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
+Both are created BEFORE the `Task(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
 
 ```
 A_id = TaskCreate(

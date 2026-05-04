@@ -220,7 +220,7 @@ Each specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{scope-prefixed-name}: TEACHBACK for {sub-task}"`, owner = specialist.
 - **Task B** — primary work. `subject = "{scope-prefixed-name}: implement {sub-task}"`, owner = specialist, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the specialist wakes to claim B.
+Both are created BEFORE the `Task(...)` spawn call. The specialist claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the specialist wakes to claim B.
 
 Nested PACT cycles' inner-cycle dispatches follow the same A+B shape recursively. The `Task()` `prompt` does NOT change shape.
 
