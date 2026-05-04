@@ -229,7 +229,7 @@ Task(
   name="{specialist-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
-  prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -267,11 +267,11 @@ Task(
   name="{specialist-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
-  prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
-> ⚠️ **`{specialist-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({specialist-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing. The `peer_inject.py` hook also sanitizes defensively by stripping `\n`, `\r`, and `)` as a second layer of defense.
+> ⚠️ **`{specialist-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({specialist-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
 
 ---
 

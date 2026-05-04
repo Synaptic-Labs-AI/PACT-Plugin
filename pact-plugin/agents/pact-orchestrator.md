@@ -335,7 +335,7 @@ For full detail, see [pact-variety.md](../protocols/pact-variety.md). Use the ag
 
 1. `TaskCreate(subject, description)` — create the tracking task with full mission
 2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
+3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
 
 > ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Task()` is interpolated verbatim into the `YOUR PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
 
