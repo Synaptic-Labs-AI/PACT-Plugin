@@ -459,11 +459,11 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
             with file_lock(claude_md_path):
                 # Symlink guard INSIDE the lock (TOCTOU defense). is_symlink
                 # uses lstat so it does not follow the link. Status string is
-                # deliberately opaque — see remove_stale_kernel_block.
+                # deliberately opaque to avoid revealing the internal guard.
                 if claude_md_path.is_symlink():
                     return "Pinned staleness skipped: path precondition not met."
-                # Re-read inside the lock — a concurrent update_pact_routing
-                # or update_session_info may have landed between our outer
+                # Re-read inside the lock — a concurrent update_session_info
+                # may have landed between our outer
                 # read at L348 and the lock acquisition. If content changed,
                 # skip this pass: the staleness markers are idempotent and
                 # the next session will re-detect any stale entries. This

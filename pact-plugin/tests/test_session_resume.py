@@ -97,9 +97,6 @@ class TestUpdateSessionInfo:
         assert "## Retrieved Context" in content
         assert "## Pinned Context" in content
         assert "## Working Memory" in content
-        # Routing block embedded
-        assert "<!-- PACT_ROUTING_START" in content
-        assert "<!-- PACT_ROUTING_END -->" in content
         # Session block written with provided values
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content

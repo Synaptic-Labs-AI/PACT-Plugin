@@ -85,8 +85,6 @@ from shared.wake_lifecycle import count_active_tasks
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import setup_plugin_symlinks
 from shared.claude_md_manager import (
-    remove_stale_kernel_block,
-    update_pact_routing,
     ensure_project_memory_md,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
@@ -612,30 +610,6 @@ def main():
             elif symlink_result:
                 context_parts.append(symlink_result)
 
-        # 2. One-time migration: strip the obsolete PACT kernel block from
-        # ~/.claude/CLAUDE.md if a previous plugin version installed one.
-        #
-        # Invocation policy: runs unconditionally on every SessionStart,
-        # regardless of session source (startup/resume/clear/compact). The
-        # unconditional invocation is intentional — we cannot assume the
-        # migration has already run on a given install.
-        #
-        # Behavior on absent markers: idempotent no-op. The function
-        # returns None when neither PACT_START nor PACT_END is found in
-        # the home CLAUDE.md, so re-running on an already-migrated install
-        # has zero cost.
-        kernel_msg = remove_stale_kernel_block()
-        if kernel_msg:
-            # Symmetric contract: functions return "failed" for errors and
-            # "skipped" for defensive path-precondition no-ops (symlink
-            # refusal, lock contention, missing file). Both must surface
-            # to system_messages so the user can see the signal, rather
-            # than being buried in additionalContext. Round-4 Item 2.
-            if "failed" in kernel_msg.lower() or "skipped" in kernel_msg.lower():
-                system_messages.append(kernel_msg)
-            else:
-                context_parts.append(kernel_msg)
-
         # 3. Ensure project has CLAUDE.md with memory sections
         project_md_msg = ensure_project_memory_md()
         if project_md_msg:
@@ -1041,16 +1015,6 @@ def main():
                     system_messages.append(session_msg)
                 else:
                     context_parts.append(session_msg)
-
-        # 5c. Ensure the PACT_ROUTING block in the project CLAUDE.md is canonical.
-        # Runs after update_session_info() so the SESSION_START block is written
-        # first; the two managed blocks use different markers and don't conflict.
-        routing_msg = update_pact_routing()
-        if routing_msg:
-            if "failed" in routing_msg.lower() or "skipped" in routing_msg.lower():
-                system_messages.append(routing_msg)
-            else:
-                context_parts.append(routing_msg)
 
         # 6. Check for in_progress Tasks (resumption context via Task
         # integration). Consumes the hoisted `tasks` variable (single

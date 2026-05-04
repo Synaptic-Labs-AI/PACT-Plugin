@@ -197,8 +197,6 @@ class TestTeamResumeDetection:
             stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -253,8 +251,6 @@ class TestTeamResumeDetection:
         from session_init import main
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -301,7 +297,7 @@ class TestSourceAwareness:
     ):
         """Helper: run main() with given source and team state.
 
-        Returns (additionalContext, mock_symlinks_called, mock_kernel_called).
+        Returns (additionalContext, mock_symlinks_called, _legacy_kernel_called=False).
         """
         from session_init import main
 
@@ -319,8 +315,6 @@ class TestSourceAwareness:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None) as mock_symlinks, \
-             patch("session_init.remove_stale_kernel_block", return_value=None) as mock_kernel, \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -335,7 +329,7 @@ class TestSourceAwareness:
         assert exc_info.value.code == 0
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
-        return additional, mock_symlinks.called, mock_kernel.called
+        return additional, mock_symlinks.called, False
 
     # --- Path 1: startup + no team (fresh session) ---
 
@@ -349,14 +343,13 @@ class TestSourceAwareness:
         assert "Do not call TeamCreate" not in additional
         assert "WARNING" not in additional
 
-    def test_startup_calls_symlinks_and_kernel(self, monkeypatch, tmp_path):
-        """startup should run full init (symlinks + remove_stale_kernel_block)."""
-        _, symlinks_called, kernel_called = self._run_main_with_source(
+    def test_startup_calls_symlinks(self, monkeypatch, tmp_path):
+        """startup should run symlink setup."""
+        _, symlinks_called, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="startup", team_exists=False
         )
 
         assert symlinks_called
-        assert kernel_called
 
     # --- Path 2: resume + team exists (normal resume) ---
 
@@ -375,14 +368,13 @@ class TestSourceAwareness:
         assert "CONTEXT CLEARED" not in additional
         assert "POST-COMPACTION" not in additional
 
-    def test_resume_calls_symlinks_and_kernel(self, monkeypatch, tmp_path):
-        """resume should run full init (symlinks + remove_stale_kernel_block)."""
-        _, symlinks_called, kernel_called = self._run_main_with_source(
+    def test_resume_calls_symlinks(self, monkeypatch, tmp_path):
+        """resume should run symlink setup."""
+        _, symlinks_called, _ = self._run_main_with_source(
             monkeypatch, tmp_path, source="resume", team_exists=True
         )
 
         assert symlinks_called
-        assert kernel_called
 
     # --- Path 3: compact + team exists (post-compaction recovery) ---
 
@@ -419,19 +411,6 @@ class TestSourceAwareness:
 
         assert not symlinks_called
 
-    def test_compact_runs_kernel_migration(self, monkeypatch, tmp_path):
-        """compact must STILL run remove_stale_kernel_block (idempotent migration).
-
-        Post #366 Phase 1: the legacy-block migration is unconditional on every
-        SessionStart — including compact/clear — because it is a cheap no-op
-        when the markers are absent and a critical fix when they are present.
-        """
-        _, _, kernel_called = self._run_main_with_source(
-            monkeypatch, tmp_path, source="compact", team_exists=True
-        )
-
-        assert kernel_called
-
     # --- Path 4: clear + team exists (context intentionally cleared) ---
 
     def test_clear_team_exists_context_cleared(self, monkeypatch, tmp_path):
@@ -455,19 +434,6 @@ class TestSourceAwareness:
         )
 
         assert not symlinks_called
-
-    def test_clear_runs_kernel_migration(self, monkeypatch, tmp_path):
-        """clear must STILL run remove_stale_kernel_block (idempotent migration).
-
-        Post #366 Phase 1: the legacy-block migration is unconditional on every
-        SessionStart — including compact/clear — because it is a cheap no-op
-        when the markers are absent and a critical fix when they are present.
-        """
-        _, _, kernel_called = self._run_main_with_source(
-            monkeypatch, tmp_path, source="clear", team_exists=True
-        )
-
-        assert kernel_called
 
     # --- Path 5: anomalous combinations ---
 
@@ -557,8 +523,6 @@ class TestSourceAwareness:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None) as mock_symlinks, \
-             patch("session_init.remove_stale_kernel_block", return_value=None) as mock_kernel, \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -573,7 +537,6 @@ class TestSourceAwareness:
         assert exc_info.value.code == 0
         # Should behave like startup: full init, TeamCreate
         assert mock_symlinks.called
-        assert mock_kernel.called
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert 'TeamCreate(team_name="pact-aabb1122")' in additional
@@ -637,8 +600,6 @@ class TestMainPausedStateIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -666,8 +627,6 @@ class TestMainPausedStateIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -787,8 +746,6 @@ class TestMainPrevSessionDirOrdering:
         #   - _check_pr_state: shells out to `gh pr view`; patch to OPEN so the
         #     paused_msg path is exercised instead of being suppressed.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
@@ -865,8 +822,6 @@ class TestCompactSummaryCleanup:
 
         with patch("session_init.COMPACT_SUMMARY_PATH", patched_path), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1146,8 +1101,6 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1186,8 +1139,6 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1232,8 +1183,6 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1359,8 +1308,6 @@ class TestWriteContextIntegration:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1404,8 +1351,6 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({})  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1470,8 +1415,6 @@ class TestWriteContextIntegration:
         captured_stdout = io.StringIO()
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1533,8 +1476,6 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({})  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1584,8 +1525,6 @@ class TestWriteContextIntegration:
         # Intentionally do NOT patch write_context or append_event — we
         # want to verify the real call sites are gated, not mocked.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1654,8 +1593,6 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({})  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info") as mock_update_info, \
@@ -1693,8 +1630,6 @@ class TestWriteContextIntegration:
         stdin_data = json.dumps({"session_id": real_session_id})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None) as mock_update_info, \
@@ -1728,8 +1663,6 @@ class TestWriteContextIntegration:
             raise OSError("Simulated write failure")
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1791,8 +1724,6 @@ class TestFailureLogIntegration:
         stdin_data = "{ not valid json at all"
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1840,8 +1771,6 @@ class TestFailureLogIntegration:
         stdin_data = json.dumps({})  # valid JSON, no session_id
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1880,8 +1809,6 @@ class TestFailureLogIntegration:
         stdin_data = json.dumps({"session_id": 12345})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1921,8 +1848,6 @@ class TestFailureLogIntegration:
         stdin_data = json.dumps({"session_id": "   "})  # whitespace only
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -1962,8 +1887,6 @@ class TestFailureLogIntegration:
         stdin_data = json.dumps({"session_id": "unknown-deadbeef"})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -2008,8 +1931,6 @@ class TestFailureLogIntegration:
 
         captured_stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -2085,8 +2006,6 @@ class TestFailureLogIntegration:
         stdin_data = json.dumps({"session_id": tainted_id})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info") as mock_update_session_info, \
@@ -2150,8 +2069,6 @@ class TestFailureLogIntegration:
         stdin_data = json.dumps({"session_id": valid_uuid})
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -2763,8 +2680,6 @@ class TestPluginRootEnvWiring:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -2815,8 +2730,6 @@ class TestPluginRootEnvWiring:
         # for real against the tmp_path project dir. Everything else that
         # touches ~/.claude or the plugin root is mocked.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
@@ -2876,8 +2789,6 @@ class TestPluginRootEnvWiring:
         # needed here.
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -2947,8 +2858,6 @@ def _run_session_init_for_path(
     })
 
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
-         patch("session_init.remove_stale_kernel_block", return_value=None) as mock_kernel, \
-         patch("session_init.update_pact_routing", return_value=None) as mock_routing, \
          patch("session_init.ensure_project_memory_md", return_value=None), \
          patch("session_init.check_pinned_staleness", return_value=None), \
          patch("session_init.update_session_info", return_value=None), \
@@ -2963,7 +2872,7 @@ def _run_session_init_for_path(
     assert exc_info.value.code == 0
     output = json.loads(mock_stdout.getvalue())
     additional = output["hookSpecificOutput"]["additionalContext"]
-    return additional, mock_kernel.call_count, mock_routing.call_count
+    return additional, 0, 0
 
 
 class TestTeamCreateStringFreshSession:
@@ -3056,62 +2965,6 @@ class TestTeamReuseStringResumedSession:
         assert 'TeamCreate(team_name="pact-aabb1122")' not in additional
 
 
-class TestRemoveStaleKernelBlockIsCalled:
-    """remove_stale_kernel_block() is called on EVERY SessionStart source."""
-
-    def test_called_on_startup(self, monkeypatch, tmp_path):
-        _, kernel_calls, _ = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="startup", team_exists=False
-        )
-        assert kernel_calls == 1
-
-    def test_called_on_resume(self, monkeypatch, tmp_path):
-        _, kernel_calls, _ = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="resume", team_exists=True
-        )
-        assert kernel_calls == 1
-
-    def test_called_on_compact(self, monkeypatch, tmp_path):
-        _, kernel_calls, _ = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="compact", team_exists=True
-        )
-        assert kernel_calls == 1
-
-    def test_called_on_clear(self, monkeypatch, tmp_path):
-        _, kernel_calls, _ = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="clear", team_exists=True
-        )
-        assert kernel_calls == 1
-
-
-class TestUpdatePactRoutingIsCalled:
-    """update_pact_routing() is called on EVERY SessionStart source."""
-
-    def test_called_on_startup(self, monkeypatch, tmp_path):
-        _, _, routing_calls = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="startup", team_exists=False
-        )
-        assert routing_calls == 1
-
-    def test_called_on_resume(self, monkeypatch, tmp_path):
-        _, _, routing_calls = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="resume", team_exists=True
-        )
-        assert routing_calls == 1
-
-    def test_called_on_compact(self, monkeypatch, tmp_path):
-        _, _, routing_calls = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="compact", team_exists=True
-        )
-        assert routing_calls == 1
-
-    def test_called_on_clear(self, monkeypatch, tmp_path):
-        _, _, routing_calls = _run_session_init_for_path(
-            monkeypatch, tmp_path, source="clear", team_exists=True
-        )
-        assert routing_calls == 1
-
-
 class TestUpdateClaudeMdNotCalled:
     """The legacy update_claude_md symbol is gone from session_init."""
 
@@ -3163,8 +3016,6 @@ class TestHappyPathOutputInvariant:
         })
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -3481,11 +3332,9 @@ class TestMainExceptionSafetyNet:
         # Let the earlier steps no-op so main() progresses to the point where
         # team_name is captured, then trip the exception at update_session_info.
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", side_effect=raise_late), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_paused_state", return_value=None), \
@@ -3581,8 +3430,6 @@ class TestSessionStartSourceField:
         stdin_data = json.dumps(stdin_payload)
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -3770,8 +3617,6 @@ def _run_session_init_compact(
     # but with get_task_list REAL (reads from _compact_tasks_dir).
     patches = [
         patch("session_init.setup_plugin_symlinks", return_value=None),
-        patch("session_init.remove_stale_kernel_block", return_value=None),
-        patch("session_init.update_pact_routing", return_value=None),
         patch("session_init.ensure_project_memory_md", return_value=None),
         patch("session_init.check_pinned_staleness", return_value=None),
         patch("session_init.update_session_info", return_value=None),
@@ -4048,8 +3893,6 @@ class TestSessionInitCompactPhantomWorkflow:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4111,8 +3954,6 @@ class TestSessionInitCompactPhantomWorkflow:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4169,8 +4010,6 @@ class TestSessionInitCompactBranchExceptions:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4203,8 +4042,6 @@ class TestSessionInitCompactBranchExceptions:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4275,8 +4112,6 @@ class TestSessionInitCompactBranchExceptions:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4342,8 +4177,6 @@ class TestSessionInitCompactBranchExceptions:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4391,8 +4224,6 @@ class TestSessionInitDirectiveAcrossAllSources:
 
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4480,20 +4311,8 @@ class TestSessionInitDirectiveAcrossAllSources:
             "source": "compact",
         })
 
-        # remove_stale_kernel_block fires BEFORE the compact branch
-        # (line ~532 vs line ~775) and context_parts.append()s its
-        # return value on success (line 542). Making it return a sentinel
-        # means context_parts has one element at compact-branch entry.
-        # A correct insert(0, _team_reuse) then pushes the sentinel to
-        # index 1, so directive precedes sentinel in the joined string.
-        # A demoted .append(_team_reuse) leaves sentinel at index 0 and
-        # the directive lands at index 1 — assertion catches the flip.
-        pre_branch_sentinel = "ORDER_SENTINEL_FROM_PRE_BRANCH_STEP"
         stdout = io.StringIO()
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block",
-                   return_value=pre_branch_sentinel), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4508,7 +4327,7 @@ class TestSessionInitDirectiveAcrossAllSources:
         output = json.loads(stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
 
-        # Invariant (b): checkpoint does not jump ahead of directive.
+        # Invariant: checkpoint does not jump ahead of directive.
         directive_idx = additional.find(
             'Invoke Skill("PACT:bootstrap") immediately'
         )
@@ -4518,23 +4337,6 @@ class TestSessionInitDirectiveAcrossAllSources:
         assert directive_idx < checkpoint_idx, (
             f"directive (idx={directive_idx}) must precede checkpoint "
             f"(idx={checkpoint_idx}) in additionalContext"
-        )
-
-        # Invariant (a): directive precedes the pre-branch sentinel.
-        # remove_stale_kernel_block puts the sentinel into context_parts
-        # via .append() at line ~542, BEFORE the compact branch's
-        # insert(0). A correct insert(0) moves directive to index 0 and
-        # the sentinel stays at index 1, so directive appears first in
-        # the joined string. A demoted .append() leaves sentinel at
-        # index 0 and the directive lands at a later index.
-        sentinel_idx = additional.find(pre_branch_sentinel)
-        assert sentinel_idx != -1, (
-            "test setup broken: pre-branch sentinel must appear"
-        )
-        assert directive_idx < sentinel_idx, (
-            f"directive (idx={directive_idx}) must precede pre-branch "
-            f"sentinel (idx={sentinel_idx}) — if this fails, the compact "
-            f"branch's insert(0) was likely demoted to .append()"
         )
 
 
@@ -4590,8 +4392,6 @@ class TestSessionInitSlotAIntegration:
         )
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
@@ -4711,8 +4511,6 @@ class TestCounterTestBySlotARevert:
         )
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.update_session_info", return_value=None), \
