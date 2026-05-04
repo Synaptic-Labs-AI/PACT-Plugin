@@ -42,18 +42,19 @@
     "./commands/prune-memory.md"
   ],
   "agents": [
-    "./agents/pact-preparer.md",
     "./agents/pact-architect.md",
+    "./agents/pact-auditor.md",
     "./agents/pact-backend-coder.md",
-    "./agents/pact-frontend-coder.md",
     "./agents/pact-database-engineer.md",
     "./agents/pact-devops-engineer.md",
+    "./agents/pact-frontend-coder.md",
     "./agents/pact-n8n.md",
-    "./agents/pact-test-engineer.md",
-    "./agents/pact-security-engineer.md",
+    "./agents/pact-orchestrator.md",
+    "./agents/pact-preparer.md",
     "./agents/pact-qa-engineer.md",
-    "./agents/pact-auditor.md",
-    "./agents/pact-secretary.md"
+    "./agents/pact-secretary.md",
+    "./agents/pact-security-engineer.md",
+    "./agents/pact-test-engineer.md"
   ],
   "skills": "./skills/"
 }
