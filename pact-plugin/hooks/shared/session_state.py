@@ -76,10 +76,11 @@ _SAFE_PATH_COMPONENT_RE = SAFE_PATH_COMPONENT_RE
 #     `str.splitlines()` and by LLM tokenizers; crafted names
 #     containing these survive a naive C0-only filter and can inject
 #     new lines into the rendered output.
-# Mirrors the regex used by sibling `peer_inject._sanitize_agent_name`
-# for symmetric defense (see security-engineer memory
+# Symmetric with the render-strip regex applied at every other
+# interpolation sink (`session_init._SESSION_ID_CONTROL_CHARS_RE`,
+# `plugin_manifest._RENDER_STRIP_RE`). See security-engineer memory
 # patterns_symmetric_sanitization.md — asymmetric strip sets across
-# interpolation sinks become the attacker's entry point).
+# interpolation sinks become the attacker's entry point.
 _RENDER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
 
@@ -108,7 +109,7 @@ def _sanitize_member_name(name: str) -> str:
       be garbage display — consumers format these with spaces, not
       tabs.
     - Strip DEL (0x7F) and Unicode line terminators NEL / U+2028 /
-      U+2029 — aligns with `peer_inject._sanitize_agent_name`.
+      U+2029.
     - Cap length at _NAME_MAX_CHARS.
     - Return empty string if nothing survives or input isn't a string;
       caller treats empty as "skip this value" (e.g., drop from list).

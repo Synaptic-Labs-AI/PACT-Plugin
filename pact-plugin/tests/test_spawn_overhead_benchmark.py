@@ -1,13 +1,13 @@
 """
 Location: pact-plugin/tests/test_spawn_overhead_benchmark.py
-Summary: Byte-count regression gate for v4.0.0 spawn overhead.
+Summary: Byte-count regression gate for per-teammate spawn overhead.
 Used by: pytest CI / local test runs.
 
-Under v4.0.0, the per-teammate spawn path delivers ONLY the teammate's
-agent body plus the spawn-time skills: frontmatter preload — there is no
-peer_inject prelude. This test pins the per-teammate body as a byte-level
-regression gate: any change that bleeds orchestrator-scale content into a
-teammate body will blow past the ceiling.
+The per-teammate spawn path delivers ONLY the teammate's agent body plus
+the spawn-time skills: frontmatter preload. This test pins the per-
+teammate body as a byte-level regression gate: any change that bleeds
+orchestrator-scale content into a teammate body will blow past the
+ceiling.
 
 Companion guard: orchestrator persona content must NOT be referenced from
 any teammate spawn-path artifact. `agents/pact-orchestrator.md` is delivered
@@ -71,8 +71,8 @@ class TestSpawnOverheadRegression:
     def test_sentinel_teammate_body_under_threshold(self):
         """The sentinel teammate body must stay under THRESHOLD_BYTES.
 
-        Direct measurement of the per-teammate spawn cost under v4.0.0:
-        the agent body IS the spawn-time delivery (no peer_inject prelude).
+        Direct measurement of the per-teammate spawn cost: the agent
+        body IS the spawn-time delivery.
         """
         body_path = _REPO_ROOT / "agents" / SENTINEL_TEAMMATE
         body_bytes = len(body_path.read_bytes())

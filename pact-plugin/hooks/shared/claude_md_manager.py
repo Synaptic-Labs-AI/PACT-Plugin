@@ -536,14 +536,10 @@ def _build_migrated_content(content: str) -> str:
     Idempotency guard: if the content already contains MANAGED_START_MARKER,
     return it unchanged.
 
-    Design decision (PR #404): user content that appears ABOVE the first
-    PACT-managed section heading in the original file is classified as
-    user_parts and lands BELOW PACT_MANAGED_END after migration. This is a
-    one-time event on upgrade. A previous iteration preserved top-of-file
-    notes above MANAGED_START via a preamble-cutoff mechanism, but that
-    required fence-awareness in every downstream parser. Removing preamble
-    handling eliminates the fence-awareness bug class at the cost of this
-    one-time content relocation.
+    User content that appears ABOVE the first PACT-managed section heading
+    in the original file is classified as user_parts and lands BELOW
+    PACT_MANAGED_END after migration. The single-region layout keeps every
+    downstream parser fence-unaware.
 
     Args:
         content: The existing CLAUDE.md file content.

@@ -74,7 +74,6 @@ from pin_caps import (  # noqa: F401
     parse_pins,
 )
 
-from shared import build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
@@ -429,14 +428,18 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
-# C0 control characters (0x00-0x1f) and DEL (0x7f). Present anywhere in a
-# session_id they render the id unsafe for use in single-line textual
-# contexts like the CLAUDE.md Resume line — a newline (0x0a) or CR (0x0d)
-# would break out of the line and allow line-anchored injection into the
-# SESSION_START block (e.g. a crafted id containing "\n- Team: malicious"
-# would forge a teammate-routing line under the session-managed block,
-# causing the next session_init to read a corrupted Resume payload).
-_SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Render-hostile characters that, present anywhere in a session_id, render
+# the id unsafe for use in single-line textual contexts like the CLAUDE.md
+# Resume line. Covers C0 controls (0x00-0x1f, includes \n 0x0a, \r 0x0d),
+# DEL (0x7f), NEL (U+0085), LINE SEPARATOR (U+2028), and PARAGRAPH
+# SEPARATOR (U+2029) — every character `str.splitlines()` or an LLM
+# tokenizer may treat as a line break. A crafted id containing any of
+# these (e.g. "\n- Team: malicious") would break out of the Resume line
+# and forge a teammate-routing line under the session-managed block,
+# causing the next session_init to read a corrupted Resume payload.
+# Symmetric with `shared.session_state._RENDER_STRIP_RE` — asymmetric
+# strip sets across interpolation sinks become the attacker's entry point.
+_SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
 
 def _is_unknown_or_missing_session(raw_id: object) -> bool:

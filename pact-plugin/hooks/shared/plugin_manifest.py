@@ -3,12 +3,11 @@ Location: pact-plugin/hooks/shared/plugin_manifest.py
 Summary: Read plugin manifest (plugin.json) for diagnostic surfacing of the
          running plugin's name, version, and resolved root path. Fail-open:
          the public API never raises and always returns a non-empty banner
-         string. Used by SessionStart (session_init.py) and SubagentStart
-         (peer_inject.py) to surface a single-line `additionalContext`
-         diagnostic so readers can cross-reference worktree edits against
-         the installed-cache root at a glance (#500).
-Used by: session_init.py (Slot A, context_parts), peer_inject.py (between
-         peer_context and _TEACHBACK_REMINDER in get_peer_context return).
+         string. Used by SessionStart (session_init.py) to surface a
+         single-line `additionalContext` diagnostic so readers can cross-
+         reference worktree edits against the installed-cache root at a
+         glance.
+Used by: session_init.py (Slot A, context_parts).
 
 No file locking — read-only access to a Claude-Code-managed file that is
 never mutated after plugin install.
@@ -27,14 +26,13 @@ _UNKNOWN_META = "unknown"
 _PREFIX = "PACT plugin: "
 
 # Symmetric with project-wide render-bound string handling: matches
-# `session_state._RENDER_STRIP_RE` (hooks/shared/session_state.py:83) and
-# `peer_inject._sanitize_agent_name` (hooks/peer_inject.py:83). Covers C0
-# controls (0x00-0x1f, incl. \n, \r, VT, FF, ESC), DEL (0x7f), NEL
-# (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029) — every
-# character `str.splitlines()` or an LLM tokenizer may treat as a line
-# break, plus render-hostile control bytes. Asymmetric strip sets across
-# interpolation sinks become the attacker's entry point (see security-
-# engineer patterns_symmetric_sanitization.md).
+# `session_state._RENDER_STRIP_RE`. Covers C0 controls (0x00-0x1f, incl.
+# \n, \r, VT, FF, ESC), DEL (0x7f), NEL (U+0085), LINE SEPARATOR (U+2028),
+# PARAGRAPH SEPARATOR (U+2029) — every character `str.splitlines()` or an
+# LLM tokenizer may treat as a line break, plus render-hostile control
+# bytes. Asymmetric strip sets across interpolation sinks become the
+# attacker's entry point (see security-engineer
+# patterns_symmetric_sanitization.md).
 _RENDER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f  ]")
 
 
@@ -94,9 +92,9 @@ def format_plugin_banner() -> str:
         "PACT plugin: unknown (root: {plugin_root_or_<unset>})"
 
     The outer blanket try/except guarantees totality against any future
-    regression in the helpers — SessionStart and SubagentStart are hot
-    paths, and an uncaught exception here would break additionalContext
-    delivery for every session.
+    regression in the helpers — SessionStart is a hot path, and an
+    uncaught exception here would break additionalContext delivery for
+    every session.
     """
     try:
         plugin_root = _resolve_plugin_root()

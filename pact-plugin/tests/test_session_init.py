@@ -2395,15 +2395,14 @@ class TestUpdateClaudeMdNotCalled:
 # F2 exception safety net
 # ---------------------------------------------------------------------------
 #
-# PR #390 replaces the persistent ~/.claude/CLAUDE.md kernel with a lazy-loaded
-# bootstrap skill. The session_init hook is now the PRIMARY delivery channel
-# for the PACT ROLE marker + Skill("PACT:bootstrap") YOUR FIRST ACTION directive.
-#
-# If session_init.main() throws BEFORE it has built the team_create/team_reuse
-# block, the team-lead would previously get only {"systemMessage": "..."} back and
-# the governance delivery chain would be broken for that one session. The F2
-# safety net in the outer except block rebuilds a minimal PACT ROLE block so
-# the team-lead still knows how to bootstrap even on the failure path.
+# session_init is the PRIMARY delivery channel for the PACT ROLE marker
+# and the orchestrator's bootstrap directive. If session_init.main()
+# throws BEFORE it has built the team_create/team_reuse block, the team-
+# lead would otherwise get only {"systemMessage": "..."} back and the
+# governance delivery chain would be broken for that session. The F2
+# safety net in the outer except block rebuilds a minimal PACT ROLE
+# block so the team-lead still knows how to bootstrap even on the
+# failure path.
 # ---------------------------------------------------------------------------
 
 
