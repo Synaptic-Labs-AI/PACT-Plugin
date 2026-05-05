@@ -677,6 +677,49 @@ def test_emitter_documents_payload_size_cap_constant():
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "wake_lifecycle"
 
+_REQUIRED_META_FIELDS = {
+    "capture_session_id",
+    "capture_date",
+    "capture_method",
+    "issue_ref",
+}
+
+
+def test_all_wake_lifecycle_fixtures_carry_meta_provenance():
+    """Convention enforcement for `tests/fixtures/wake_lifecycle/`: every
+    JSON fixture MUST have a top-level `_meta` dict carrying the four
+    required provenance fields. The README in that directory documents
+    the convention; this test enforces it so a future contributor cannot
+    silently add an un-provenanced fixture and weaken the structural
+    defense against the #612-class shape-divergence regression.
+
+    To extend this enforcement to a sibling fixture subdirectory (e.g.,
+    a future `tests/fixtures/peer_inject/`), add a new test function
+    that points at the new dir, or refactor this function to parametrize
+    over a list of provenance-required fixture roots.
+    """
+    fixture_paths = sorted(FIXTURES_DIR.glob("*.json"))
+    assert fixture_paths, (
+        f"No JSON fixtures found in {FIXTURES_DIR}; convention is moot "
+        f"if the directory is empty — verify the test is pointed at the "
+        f"right path."
+    )
+    for fixture_path in fixture_paths:
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+        assert "_meta" in data, (
+            f"{fixture_path.name}: missing top-level `_meta` sibling key. "
+            f"See {FIXTURES_DIR.name}/README.md for the convention."
+        )
+        meta = data["_meta"]
+        assert isinstance(meta, dict), (
+            f"{fixture_path.name}: `_meta` must be a dict, got {type(meta).__name__}"
+        )
+        missing = _REQUIRED_META_FIELDS - set(meta.keys())
+        assert not missing, (
+            f"{fixture_path.name}: `_meta` missing required fields: {missing}. "
+            f"Required: {_REQUIRED_META_FIELDS}."
+        )
+
 
 class TestExtractTaskIdShapeResilience:
     """Pin _extract_task_id behavior across every shape it must handle.
@@ -760,11 +803,28 @@ class TestExtractTaskIdShapeResilience:
         # Flat path
         assert self._extract({"tool_response": {"id": bad_id}}) is None
 
-    def test_none_input_data_returns_none(self):
-        """Defensive against malformed stdin: `_extract_task_id(None)`
-        returns None rather than raising. The caller relies on this
-        fail-soft behavior to keep `_decide_directive` exit-clean."""
-        assert self._extract(None) is None
+    @pytest.mark.parametrize(
+        "whitespace_id",
+        ["   ", "\t", "\n", " \t\n ", " "],
+        ids=["spaces", "tab", "newline", "mixed-whitespace", "nbsp"],
+    )
+    def test_whitespace_only_id_returns_none(self, whitespace_id):
+        """Adversarial: a whitespace-only id is a string and truthy
+        (passes `isinstance(tid, str) and tid`), but downstream
+        `count_active_tasks` would silently fail to find a task by
+        whitespace id — masking the real failure mode. The hook's
+        `.strip()` handling rejects whitespace-only ids upfront so the
+        function returns None and `_decide_directive` exits cleanly.
+
+        Counter-test-by-revert: removing the `.strip()` handling makes
+        this test fail (the function returns the whitespace string).
+        Probes both the nested and the flat path so the discipline
+        applies symmetrically.
+        """
+        # Nested path
+        assert self._extract({"tool_response": {"task": {"id": whitespace_id}}}) is None
+        # Flat path
+        assert self._extract({"tool_response": {"id": whitespace_id}}) is None
 
 
 def test_arm_emitted_on_captured_production_taskcreate_payload(tmp_path):

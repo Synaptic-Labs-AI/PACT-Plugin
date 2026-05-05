@@ -142,7 +142,7 @@ def _is_lead_session(input_data: dict[str, Any], team_name: str) -> bool:
     return raw_session_id == lead_session_id
 
 
-def _extract_task_id(input_data: dict[str, Any] | None) -> str | None:
+def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     """
     Pull the task_id out of the PostToolUse payload.
 
@@ -151,7 +151,8 @@ def _extract_task_id(input_data: dict[str, Any] | None) -> str | None:
     TaskCreate's tool_response is nested — the created task is wrapped
     under a "task" key (`tool_response.task.id`) — while TaskUpdate's
     tool_response is flat (`tool_response.id`). Probe in precedence
-    order, returning the first non-empty string match:
+    order, returning the first match whose value is a string that is
+    non-empty after `.strip()`:
 
       1. tool_input.taskId
       2. tool_input.task_id
@@ -170,18 +171,16 @@ def _extract_task_id(input_data: dict[str, Any] | None) -> str | None:
     flat probes remain as fallback for TaskUpdate and for legacy/test
     fixture shapes.
 
-    Returns None if no probe matches a non-empty string. Defensive
-    against `input_data is None`, non-dict sub-payloads, and
-    non-string ids — the caller (`_decide_directive`) exits cleanly
-    when this returns None.
+    Returned values are guaranteed non-empty after strip — a
+    whitespace-only id (e.g. `"   "`) would propagate to a TaskStop
+    call with a syntactically-valid-but-semantically-empty id and
+    fail downstream; rejecting at the source is cheaper. Returns
+    None if no probe matches.
     """
-    if not isinstance(input_data, dict):
-        return None
-
     tool_input = input_data.get("tool_input") or {}
     if isinstance(tool_input, dict):
         tid = tool_input.get("taskId") or tool_input.get("task_id")
-        if isinstance(tid, str) and tid:
+        if isinstance(tid, str) and tid.strip():
             return tid
 
     tool_response = input_data.get("tool_response") or {}
@@ -193,7 +192,7 @@ def _extract_task_id(input_data: dict[str, Any] | None) -> str | None:
                 or nested_task.get("taskId")
                 or nested_task.get("task_id")
             )
-            if isinstance(tid, str) and tid:
+            if isinstance(tid, str) and tid.strip():
                 return tid
 
         tid = (
@@ -201,7 +200,7 @@ def _extract_task_id(input_data: dict[str, Any] | None) -> str | None:
             or tool_response.get("taskId")
             or tool_response.get("task_id")
         )
-        if isinstance(tid, str) and tid:
+        if isinstance(tid, str) and tid.strip():
             return tid
 
     return None
