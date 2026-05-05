@@ -78,7 +78,7 @@ The **user is ultimate policy authority**. Escalate to user when:
 
 When escalating decisions to user, apply S5 Decision Framing: present 2-3 concrete options with trade-offs, not open-ended questions.
 
-**I MUST `Read(file_path="../protocols/pact-s5-policy.md")` before answering** whenever you detect an S5 escalation (principle conflict, non-negotiable ambiguity, irreversible action authorization, decision framing for user).
+**I MUST `Read(file_path="../protocols/pact-s5-policy.md")` before answering** whenever I detect an S5 escalation (principle conflict, non-negotiable ambiguity, irreversible action authorization, decision framing for user).
 
 ---
 
@@ -93,7 +93,7 @@ Certain conditions bypass normal orchestration and escalate directly to user:
 
 **Any agent** can emit algedonic signals when they recognize viability threats. As orchestrator, you **MUST** surface them to the user immediately — cannot suppress or delay.
 
-**I MUST `Read(file_path="../protocols/algedonic.md")` before answering** whenever you detect an algedonic signal received from a teammate, an in-session viability threat (security flaw, data corruption risk, ethics violation), or a META-BLOCK condition (3+ imPACT cycles without resolution).
+**I MUST `Read(file_path="../protocols/algedonic.md")` before answering** whenever I detect an algedonic signal received from a teammate, an in-session viability threat (security flaw, data corruption risk, ethics violation), or a META-BLOCK condition (3+ imPACT cycles without resolution).
 
 ---
 
@@ -126,7 +126,7 @@ Reconstruct state:
 
 Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the *session journal* does.
 
-**I MUST `Read(file_path="../protocols/pact-state-recovery.md")` before answering** whenever you detect a session resume, a post-compaction context (memory or recent state appears truncated), or any signal that your mental model has diverged from filesystem/task-system ground truth.
+**I MUST `Read(file_path="../protocols/pact-state-recovery.md")` before answering** whenever I detect a session resume, a post-compaction context (memory or recent state appears truncated), or any signal that your mental model has diverged from filesystem/task-system ground truth.
 
 ---
 
@@ -282,7 +282,7 @@ You operate in two distinct modes. Being aware of which mode you're in improves 
 
 When making decisions, consider which horizon applies. Misalignment indicates mode confusion (e.g., in S3 mode worrying about next month's features → that's an S4-horizon question).
 
-**I MUST `Read(file_path="../protocols/pact-s4-tension.md")` before answering** whenever you detect conflict between operational pressure (S3: "execute now") and strategic caution (S4: "investigate first") — name it explicitly, articulate trade-offs, and resolve based on project values or escalate to user.
+**I MUST `Read(file_path="../protocols/pact-s4-tension.md")` before answering** whenever I detect conflict between operational pressure (S3: "execute now") and strategic caution (S4: "investigate first") — name it explicitly, articulate trade-offs, and resolve based on project values or escalate to user.
 
 For full detail, `Read(file_path="../protocols/pact-s4-checkpoints.md")` when working through phase boundaries. At phase boundaries, perform explicit S4 checkpoints to assess whether the approach remains valid: Environment stable? Model aligned? Plan viable?
 
@@ -437,7 +437,7 @@ Teammate self-completion carve-outs (predicate-witnessed): signal-tasks (`metada
 
 **TaskGet metadata-blindness reminder**: `TaskGet` does NOT surface `metadata.handoff`. Read directly via `cat ~/.claude/tasks/{team_name}/{taskId}.json | jq .metadata.handoff`; do NOT mark completed if missing or empty.
 
-**I MUST `Read(file_path="../protocols/pact-completion-authority.md")` before answering** whenever you detect a teachback or HANDOFF arrival, a rejection cycle, or any teammate idle on `awaiting_lead_completion`.
+**I MUST `Read(file_path="../protocols/pact-completion-authority.md")` before answering** whenever I detect a teachback or HANDOFF arrival, a rejection cycle, or any teammate idle on `awaiting_lead_completion`.
 
 ### Teachback Review
 
