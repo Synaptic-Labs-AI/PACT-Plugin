@@ -16,9 +16,12 @@ points teammate frontmatter or body at orchestrator content would re-
 introduce the per-teammate-spawn cost the v4.0.0 cutover eliminated.
 """
 
+import json
+import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "hooks"))
 
 # Sentinel teammate for the regression check. backend-coder is one of the
 # larger teammate bodies; if it stays under THRESHOLD_BYTES the rest do
@@ -115,4 +118,87 @@ class TestSpawnOverheadRegression:
             "teammate agents must not reference orchestrator content in a "
             "spawn-path-loaded surface (frontmatter or body):\n"
             + "\n".join(offenders)
+        )
+
+    def test_peer_inject_prelude_plus_agent_body_under_threshold(self, tmp_path):
+        """The full per-teammate spawn-time delivery (peer_inject prelude +
+        agent body) must remain under THRESHOLD_BYTES.
+
+        Measured:
+          - peer_inject.get_peer_context() output (additionalContext
+            injected at SubagentStart — the routing prelude + peer list +
+            plugin banner + teachback reminder + completion-authority
+            note + charter cross-ref)
+          - The agent body file (sentinel teammate as representative)
+
+        Not measured (by design): lazy-loaded content reachable only via
+        Skill() invocations (bootstrap.md, protocol files), and the
+        project CLAUDE.md routing block (separately size-gated).
+        """
+        teams_dir = tmp_path / "teams"
+        team = "pact-bench"
+        (teams_dir / team).mkdir(parents=True)
+        (teams_dir / team / "config.json").write_text(json.dumps({
+            "members": [
+                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+                {"name": "frontend-coder-1", "agentType": "pact-frontend-coder"},
+                {"name": "test-engineer-1", "agentType": "pact-test-engineer"},
+            ]
+        }))
+
+        from peer_inject import get_peer_context  # type: ignore
+
+        peer_ctx = get_peer_context(
+            agent_type="pact-backend-coder",
+            team_name=team,
+            agent_name="backend-coder-1",
+            teams_dir=str(teams_dir),
+        )
+        assert peer_ctx is not None, (
+            "peer_inject returned None for a valid team+member configuration"
+        )
+
+        agent_body = (
+            _REPO_ROOT / "agents" / SENTINEL_TEAMMATE
+        ).read_text(encoding="utf-8")
+
+        peer_bytes = len(peer_ctx.encode("utf-8"))
+        agent_bytes = len(agent_body.encode("utf-8"))
+        total = peer_bytes + agent_bytes
+
+        assert total < self.THRESHOLD_BYTES, (
+            f"Spawn overhead regression: total static spawn-path content is "
+            f"{total} bytes (peer_inject: {peer_bytes}, agent body: "
+            f"{agent_bytes}), exceeds THRESHOLD_BYTES "
+            f"({self.THRESHOLD_BYTES}). Investigate what grew and whether "
+            f"it should live in a lazy-loaded skill instead of the always-"
+            f"on spawn path."
+        )
+
+    def test_bootstrap_md_not_in_spawn_path(self):
+        """session_init.py and peer_inject.py are the two hooks whose
+        output lands in additionalContext at session/teammate spawn. Neither
+        may directly reference bootstrap.md content — bootstrap.md must
+        only be reachable via the Skill("PACT:bootstrap") invocation.
+
+        A direct reference (Read or string-embed) would deliver
+        bootstrap.md content on every teammate spawn, defeating the
+        lazy-load contract.
+        """
+        session_init_src = (
+            _REPO_ROOT / "hooks" / "session_init.py"
+        ).read_text(encoding="utf-8")
+        peer_inject_src = (
+            _REPO_ROOT / "hooks" / "peer_inject.py"
+        ).read_text(encoding="utf-8")
+
+        assert "bootstrap.md" not in session_init_src, (
+            "session_init.py references bootstrap.md directly — this is a "
+            "spawn-path regression. bootstrap.md must only be loaded "
+            "lazily via the Skill(\"PACT:bootstrap\") invocation."
+        )
+        assert "bootstrap.md" not in peer_inject_src, (
+            "peer_inject.py references bootstrap.md directly — this is a "
+            "spawn-path regression. bootstrap.md must only be loaded "
+            "lazily via the Skill(\"PACT:bootstrap\") invocation."
         )
