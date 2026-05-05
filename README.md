@@ -79,6 +79,10 @@ ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pa
 
 Then `pact` (with any flags `claude` accepts) launches a PACT-loaded session from anywhere. The script is a thin wrapper around `claude --agent PACT:pact-orchestrator "$@"`.
 
+**Upgrade and trust-model notes for the symlink pattern**:
+- The symlink target is **version-pinned** — after a plugin upgrade, the old version directory is removed and the symlink dangles. Re-create the symlink after each minor/major upgrade by re-running the `ln -s` above with the new `<version>`. (For automatic upgrade-resilience, wait for the first-class CLI wrapper roadmapped below, or use the shell-function alternative.)
+- The symlink **follows plugin updates atomically** — whatever `bin/pact` ships in the next plugin version becomes your `pact` command on next invocation. This is convenient (auto-patching ergonomic improvements) but it means a compromised plugin distribution would auto-execute on next `pact` invocation. Trade-off: symlink follows updates / shell function (or manual copy) is one-shot tamper-evident. Symlink is reasonable as default for the same reason the rest of the plugin tree is — the entire plugin cache is user-trust-bounded — but it's a documented choice, not unstated default.
+
 **Global: alternative `pact()` shell function**
 
 If you prefer not to symlink, add this to your `~/.zshrc` or `~/.bashrc`:
