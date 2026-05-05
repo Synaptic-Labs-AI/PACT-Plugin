@@ -1,11 +1,11 @@
 """
 plugin.json structural invariants for the PACT plugin.
 
-Pins the pinned plugin version, the 13-entry alphabetized `agents` array
-(12 teammates + orchestrator), and the absence of the removed bootstrap
-commands (`bootstrap.md` and `teammate-bootstrap.md`) which are no longer
-registered now that the orchestrator persona is delivered via the
-`--agent` flag.
+Pins the 13-entry alphabetized `agents` array (12 teammates + orchestrator)
+and the absence of the removed bootstrap commands (`bootstrap.md` and
+`teammate-bootstrap.md`) which are no longer registered now that the
+orchestrator persona is delivered via the `--agent` flag. Cross-file
+version-consistency is owned by sibling test_plugin_version_bump.py.
 """
 import json
 from pathlib import Path
@@ -16,8 +16,6 @@ import pytest
 PLUGIN_JSON_PATH = (
     Path(__file__).parent.parent / ".claude-plugin" / "plugin.json"
 )
-
-EXPECTED_VERSION = json.loads(PLUGIN_JSON_PATH.read_text(encoding="utf-8"))["version"]
 
 EXPECTED_AGENTS = {
     "./agents/pact-architect.md",
@@ -44,18 +42,6 @@ REMOVED_COMMANDS = {
 @pytest.fixture
 def plugin_json():
     return json.loads(PLUGIN_JSON_PATH.read_text())
-
-
-def test_plugin_json_version_is_pinned_to_current_release(plugin_json):
-    """Structural existence-check that plugin.json carries a version string.
-
-    EXPECTED_VERSION is sourced dynamically from plugin.json at module
-    load, so this assertion is structurally tautological and serves as a
-    schema-level guard ("the `version` key exists and equals itself").
-    Cross-file version drift across plugin.json/marketplace.json/READMEs
-    is caught by sibling test_plugin_version_bump.py.
-    """
-    assert plugin_json["version"] == EXPECTED_VERSION
 
 
 def test_plugin_json_has_13_agents(plugin_json):
