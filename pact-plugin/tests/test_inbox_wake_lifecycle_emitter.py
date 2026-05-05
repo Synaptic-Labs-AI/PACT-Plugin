@@ -43,7 +43,7 @@ def _run_emitter(stdin_payload: str | bytes, env_extra: dict | None = None) -> t
     return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
 
 
-def _pact_session_env(tmp_path: Path, team_name: str) -> dict:
+def _pact_session_env(tmp_path: Path) -> dict:
     """
     Build env vars + on-disk pact-session-context so the emitter's
     pact_context.init() resolves the team_name from the synthesized
@@ -114,13 +114,13 @@ def test_hooks_json_registers_emitter_under_post_tool_use():
 # ---------- Fail-open paths ----------
 
 def test_malformed_stdin_exits_zero_with_suppress(tmp_path):
-    rc, out, _ = _run_emitter(b"\x00not-json\xff", env_extra=_pact_session_env(tmp_path, "t"))
+    rc, out, _ = _run_emitter(b"\x00not-json\xff", env_extra=_pact_session_env(tmp_path))
     assert rc == 0
     assert json.loads(out) == {"suppressOutput": True}
 
 
 def test_non_dict_stdin_exits_zero_with_suppress(tmp_path):
-    rc, out, _ = _run_emitter("[]", env_extra=_pact_session_env(tmp_path, "t"))
+    rc, out, _ = _run_emitter("[]", env_extra=_pact_session_env(tmp_path))
     assert rc == 0
     assert json.loads(out) == {"suppressOutput": True}
 
@@ -134,7 +134,7 @@ def test_missing_team_name_exits_zero_with_suppress(tmp_path):
         "tool_input": {"taskId": "1"},
         "tool_response": {"task": {"id": "1"}},
     })
-    rc, out, _ = _run_emitter(payload, env_extra=_pact_session_env(tmp_path, "t"))
+    rc, out, _ = _run_emitter(payload, env_extra=_pact_session_env(tmp_path))
     assert rc == 0
     assert json.loads(out) == {"suppressOutput": True}
 
@@ -433,7 +433,7 @@ def test_teardown_emitted_on_status_deleted_at_post_zero(tmp_path):
     assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 
 
-def test_is_terminal_status_update_matches_completed_and_deleted(tmp_path):
+def test_is_terminal_status_update_matches_completed_and_deleted():
     """Direct unit test on the terminal-status predicate. The behavioral
     contract is "task transitioned to a terminal status" — both
     `completed` and `deleted` are terminal."""
@@ -579,7 +579,7 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
     from unittest.mock import patch
     with patch.object(emitter, "_is_lead_session", return_value=True), \
          patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
-        result = emitter._decide_directive({
+        emitter._decide_directive({
             "tool_name": "TaskUpdate",
             "session_id": "sid", "cwd": "/tmp/p",
             "tool_input": {"taskId": "1", "status": "completed"},
@@ -600,7 +600,7 @@ def test_count_active_tasks_called_on_taskcreate():
     with patch.object(emitter, "_is_lead_session", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
-        result = emitter._decide_directive({
+        emitter._decide_directive({
             "tool_name": "TaskCreate",
             "session_id": "sid", "cwd": "/tmp/p",
             "tool_input": {"taskId": "1"},

@@ -15,8 +15,6 @@ import json
 import re
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PLUGIN_JSON_PATH = (
     REPO_ROOT / "pact-plugin" / ".claude-plugin" / "plugin.json"
