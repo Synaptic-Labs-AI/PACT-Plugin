@@ -306,7 +306,7 @@ class TestImperativeSoftPhrasingConvention:
                 break
             window_before = text[max(0, i - 30):i]
             window_after = text[i + len(tool_call):i + len(tool_call) + 60]
-            if "I MUST" in window_before and "before answering" in window_after:
+            if "You MUST" in window_before and "before answering" in window_after:
                 found_imperative = True
                 break
             idx = i + 1
@@ -330,7 +330,7 @@ class TestImperativeSoftPhrasingConvention:
                 break
             window_before = text[max(0, i - 30):i]
             window_after = text[i + len(tool_call):i + len(tool_call) + 60]
-            if "I MUST" in window_before and "before answering" in window_after:
+            if "You MUST" in window_before and "before answering" in window_after:
                 offending.append(i)
             idx = i + 1
         assert not offending, (
@@ -351,7 +351,7 @@ class TestImperativeSoftPhrasingConvention:
         # variation outside the anchor set.
         anchors = [
             'Pre-commitment',
-            '"I MUST"',
+            '"You MUST"',
             'literally and unconditionally',
             'rationalization this pre-commitment is designed to defeat',
         ]
