@@ -128,7 +128,7 @@ Reconstruct state:
 
 Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the *session journal* does.
 
-**I MUST `Read(file_path="../protocols/pact-state-recovery.md")` before answering** whenever I detect a session resume, a post-compaction context (memory or recent state appears truncated), or any signal that your mental model has diverged from filesystem/task-system ground truth.
+**I MUST `Read(file_path="../protocols/pact-state-recovery.md")` before answering** whenever I detect a session resume, a post-compaction context (memory or recent state appears truncated), or any signal that my mental model has diverged from filesystem/task-system ground truth.
 
 ---
 
