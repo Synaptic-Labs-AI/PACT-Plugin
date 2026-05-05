@@ -502,6 +502,17 @@ Ask these three questions to decide where to save the memory:
 - **Queryable knowledge for on-demand retrieval by any agent?** (architectural decisions, recurring patterns, calibration data) → Delegate to the secretary — query via `SendMessage` for reads; delegate saves via harvest triggers or ad-hoc save requests.
 - **Agent-specific expertise?** → Skip — specialists manage their own accumulated domain knowledge.
 
+#### Pin to CLAUDE.md mid-session
+
+Pin to `CLAUDE.md` immediately when an insight surfaces mid-session that meets any of these triggers — do not defer to wrap-up:
+
+- A SACROSANCT non-negotiable was clarified, refined, or newly discovered.
+- A load-bearing architectural decision was made (interface contract, hook coupling, dispatch convention).
+- The user corrected a recurring failure mode and the correction is durable across future sessions.
+- A subtle invariant was uncovered that future agents would otherwise re-discover at cost.
+
+Invoke `/PACT:pin-memory` with the insight as the command argument. Distinct from the post-review pin-memory invocation in **PR Review Workflow** below — that trigger fires after review synthesis; this trigger fires mid-session at the moment of insight.
+
 #### Querying the Secretary
 
 The secretary answers queries about prior project knowledge from pact-memory — decisions, patterns, user preferences, recurring blockers.
