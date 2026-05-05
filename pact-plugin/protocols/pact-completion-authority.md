@@ -68,7 +68,7 @@ Read `metadata.teachback_submit` directly:
 cat ~/.claude/tasks/{team_name}/{A_id}.json | jq .metadata.teachback_submit
 ```
 
-Compare against the dispatched task description. Apply the validation discipline from [orchestration §Validating Incoming Teachbacks](../skills/orchestration/SKILL.md#validating-incoming-teachbacks) — check for both misstatements AND omissions.
+Compare against the dispatched task description. Apply the validation discipline from [Validating Incoming Teachbacks](#validating-incoming-teachbacks) — check for both misstatements AND omissions.
 
 **Optional audit step** — write a `teachback_resolution` record before flipping status:
 
@@ -100,6 +100,10 @@ The status flip is the load-bearing approval action; the SendMessage is the load
 **Rejecting the teachback** — see [Rejection Flow](#rejection-flow) below.
 
 > ⚠️ DO NOT mark Task B `completed` and DO NOT mark Task B `pending`. Task B stays `pending` (its initial state) until the teammate claims it (`status=in_progress`) after wake. Your acceptance affects Task A only; Task B's lifecycle is the teammate's to drive (claim → work → submit HANDOFF → idle for your HANDOFF acceptance).
+
+### Validating Incoming Teachbacks
+
+When an agent sends a teachback, **compare it against the task as you dispatched it — check for both misstatements AND omissions of the objective, constraints, or success criteria**. If you spot a misunderstanding, reply with a correction via `SendMessage` before any other action — the agent is already working, so the correction window is short. Prevents **misunderstanding disguised as agreement** from going undetected until TEST phase. Once decided, follow the [Acceptance or Rejection two-call atomic pair](#completion-authority).
 
 ---
 

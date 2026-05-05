@@ -149,7 +149,7 @@ Each reviewer dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{reviewer-type}: TEACHBACK for review of {feature}"`, owner = reviewer. Description: state which review angle the reviewer is taking (consistency check vs adversarial vs design coherence) before reading the diff.
 - **Task B** — primary review work. `subject = "{reviewer-type}: review {feature}"`, owner = reviewer, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
+Both are created BEFORE the `Task(...)` spawn call. The reviewer claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback (does it state the review angle clearly?), accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the reviewer wakes to claim B and read the diff.
 
 ```
 A_id = TaskCreate(
@@ -175,18 +175,18 @@ The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded
 For each reviewer:
 1. `TaskCreate(subject="{reviewer-type}: review {feature}", description="Review this PR. Focus: [domain-specific review criteria]...")`
 2. `TaskUpdate(taskId, owner="{reviewer-name}")`
-3. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line and include the `Skill("PACT:teammate-bootstrap")` YOUR FIRST ACTION directive so routing defense-in-depth delivers the teammate bootstrap at spawn:
+3. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter, not a per-prompt directive):
 
 ```
 Task(
   name="{reviewer-name}",
   team_name="{team_name}",
   subagent_type="pact-{reviewer-type}",
-  prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
-> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing. The `peer_inject.py` hook also sanitizes defensively by stripping `\n`, `\r`, and `)` as a second layer of defense.
+> ⚠️ **`{reviewer-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({reviewer-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing.
 
 Spawn all reviewers in parallel (multiple `Task` calls in one response).
 

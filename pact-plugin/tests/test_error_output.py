@@ -947,35 +947,6 @@ class TestValidateHandoffSuppressOutput:
         assert "suppressOutput" not in parsed
 
 
-class TestPeerInjectSuppressOutput:
-    """peer_inject.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
-
-    def test_invalid_json_suppress(self, capsys):
-        """JSONDecodeError path outputs suppressOutput."""
-        from peer_inject import main
-
-        with patch("sys.stdin", io.StringIO("bad json")):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-    def test_no_context_suppress(self, capsys):
-        """No peer context outputs suppressOutput."""
-        from peer_inject import main
-
-        input_data = json.dumps({"agent_type": "pact-test"})
-        with patch("sys.stdin", io.StringIO(input_data)):
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        _assert_suppress_output(captured.out)
-
-
 class TestAuditorReminderSuppressOutput:
     """auditor_reminder.py bare exit paths output _SUPPRESS_OUTPUT (#316)."""
 
@@ -1033,8 +1004,6 @@ class TestSessionInitSuppressOutput:
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("session_init.check_additional_directories", return_value=None), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.remove_stale_kernel_block", return_value=None), \
-             patch("session_init.update_pact_routing", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
              patch("session_init.generate_team_name", return_value="pact-test123"), \

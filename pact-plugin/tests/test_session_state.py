@@ -1338,9 +1338,9 @@ class TestReadHelpersRejectTraversal:
 
 
 # ---------------------------------------------------------------------------
-# TestSanitizeMemberName — cycle-2 cosmetic alignment: sanitizer must
-# strip DEL (0x7F) matching sibling peer_inject._sanitize_agent_name's
-# coverage of `[\x00-\x1f\x7f]`.
+# TestSanitizeMemberName — sanitizer must strip every C0 control char
+# (0x00-0x1F), DEL (0x7F), and the Unicode line terminators NEL / U+2028 /
+# U+2029, matching `_RENDER_STRIP_RE`.
 # ---------------------------------------------------------------------------
 
 
@@ -1359,7 +1359,6 @@ class TestSanitizeMemberName:
         assert _sanitize_member_name("a\x00b") == "ab"
 
     def test_strips_del(self):
-        # Cycle-2 alignment with peer_inject._sanitize_agent_name:
         # DEL (0x7F) is an invisible control and belongs in the strip
         # set alongside C0 controls.
         assert _sanitize_member_name("a\x7fb") == "ab"

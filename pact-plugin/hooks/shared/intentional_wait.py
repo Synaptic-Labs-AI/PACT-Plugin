@@ -9,7 +9,7 @@ Used by: teammate-authored metadata on Task records, team-lead inspection, and
          audit tooling. The exemption predicate (is_self_complete_exempt)
          is NOT a hook — it is a pure function consumed by team-lead instructions
          and future audit consumers. See skills/pact-agent-teams/SKILL.md
-         and skills/orchestration/SKILL.md for the contract.
+         and agents/pact-orchestrator.md for the contract.
 
 Contract: pure functions; never raise. Malformed flags fail loud — e.g.
 `wait_stale` returns True on any parse error so a broken flag cannot

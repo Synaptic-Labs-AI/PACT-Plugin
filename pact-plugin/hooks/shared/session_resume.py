@@ -24,7 +24,6 @@ from shared.claude_md_manager import (
     MANAGED_TITLE,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
-    PACT_ROUTING_BLOCK,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -120,18 +119,16 @@ def update_session_info(
     # the directory wins with 0o700, others see `parent.exists()` and no-op.
     ensure_dot_claude_parent(target_file)
 
-    # Concurrency guard (#366 F1): serialize read-mutate-write so two
-    # concurrent session_init hooks on the same project CLAUDE.md cannot
-    # interleave 5b (update_session_info) with 5c (update_pact_routing) in
-    # another session and clobber each other's managed blocks. Fail-open
-    # on timeout — next session start will retry.
+    # Concurrency guard: serialize read-mutate-write so two concurrent
+    # session_init hooks on the same project CLAUDE.md cannot interleave
+    # update_session_info writes and clobber each other's managed blocks.
+    # Fail-open on timeout — next session start will retry.
     try:
         with file_lock(target_file):
-            # Symlink guard INSIDE the lock (#366 R5 M1, TOCTOU defense):
-            # same defensive check as remove_stale_kernel_block and
-            # update_pact_routing. is_symlink uses lstat (does not follow
-            # the link). Inside the lock so an attacker cannot swap the
-            # target between an outside-lock check and the write.
+            # Symlink guard INSIDE the lock (TOCTOU defense): is_symlink
+            # uses lstat (does not follow the link). Inside the lock so an
+            # attacker cannot swap the target between an outside-lock
+            # check and the write.
             if target_file.is_symlink():
                 return "Session info skipped: path precondition not met."
 
@@ -143,15 +140,13 @@ def update_session_info(
                 # (before the lock) with mode 0o700.
                 #
                 # Structure mirrors `ensure_project_memory_md`'s template — single
-                # H1 ("# PACT Framework and Managed Project Memory"), routing block,
-                # session block, PACT_MEMORY with three default section headings,
-                # all wrapped by the PACT_MANAGED outer boundary.
+                # H1 ("# PACT Framework and Managed Project Memory"), session
+                # block, PACT_MEMORY with three default section headings, all
+                # wrapped by the PACT_MANAGED outer boundary.
                 if not target_file.exists():
                     new_content = (
                         f"{MANAGED_START_MARKER}\n"
                         f"{MANAGED_TITLE}\n"
-                        "\n"
-                        f"{PACT_ROUTING_BLOCK}\n"
                         "\n"
                         f"{session_block}\n"
                         "\n"

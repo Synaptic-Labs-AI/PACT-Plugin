@@ -65,20 +65,15 @@ If `TaskGet` returns no metadata or the referenced task doesn't exist, proceed w
 ## Teachback (Conversation Verification)
 
 The teachback protocol lives in the separate `pact-teachback` skill. It is
-loaded into your context via the `/PACT:teammate-bootstrap` command's
-`@`-ref (which you invoke via your agent body's `# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)` prelude
-on spawn), not via frontmatter auto-loading. Frontmatter `skills:`
-entries populate the lazy skill catalog for discoverability but are not
-eagerly loaded at spawn (empirically verified).
+preloaded into your context via the `skills:` frontmatter on your agent
+file at `Task()` subagent spawn. See [pact-teachback/SKILL.md](../pact-teachback/SKILL.md)
+for format, rules, and ordering requirements.
 
-See `pact-teachback/SKILL.md` for format, rules, and ordering requirements.
-
-Teachback is a **gate**: send it BEFORE any implementation work. The
-structural enforcement comes from the three-layer delivery architecture:
-`peer_inject.py` injects a `YOUR FIRST ACTION` reminder via `additionalContext`,
-your agent body has a `# YOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY)` section, and the
-`/PACT:teammate-bootstrap` command eagerly loads the pact-teachback skill
-content via `@`-ref.
+Teachback is a **gate**: send it BEFORE any implementation work. Store
+your teachback in `metadata.teachback_submit` and SET
+`intentional_wait{reason=awaiting_lead_completion}` per the pact-teachback
+skill. Do NOT call `Edit`, `Write`, or `Bash` for implementation work
+before teachback storage.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 

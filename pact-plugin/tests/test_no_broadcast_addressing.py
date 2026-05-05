@@ -4,7 +4,7 @@ Regression: no SendMessage broadcast addressing in plugin source.
 The Claude Code Agent Teams runtime does not support broadcast addressing.
 This test asserts no plugin-source file references the prior broadcast form
 in any of three shapes: `to="*"`, `to: "*"`, or JSON-key `"to": "*"`.
-See skills/orchestration/SKILL.md::Lead-Side HALT Fan-Out for the
+See protocols/algedonic.md#lead-side-halt-fan-out for the
 iterate-and-send replacement.
 
 Failure-message format note: the assertion message uses backtick-wrapped
@@ -99,7 +99,7 @@ class TestNoBroadcastAddressing:
                 f"{formatted}\n"
                 "The runtime does not support broadcast addressing. Replace "
                 "with iterate-and-send;\n"
-                "see skills/orchestration/SKILL.md::Lead-Side HALT Fan-Out."
+                "see protocols/algedonic.md#lead-side-halt-fan-out."
             )
 
     def test_allowlist_only_contains_test_file(self):

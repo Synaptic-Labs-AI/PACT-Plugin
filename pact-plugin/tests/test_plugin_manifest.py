@@ -456,8 +456,8 @@ class TestBannerContractInvariants:
     parametrize: prefix, single-line, non-empty, no CRLF of any form.
 
     These tests exist to make the public contract load-bearing — a
-    future caller (session_init, peer_inject, or a new hook) that
-    tokenizes or splits on banner output can rely on these guarantees."""
+    future caller (session_init or a new hook) that tokenizes or splits
+    on banner output can rely on these guarantees."""
 
     @pytest.mark.parametrize(
         "env_state,manifest_text",
@@ -531,9 +531,9 @@ class TestBannerContractInvariants:
         assert b1 == b2
 
     # --- Project-wide sanitization regex contract (mirrors session_state._RENDER_STRIP_RE) ---
-    # Concurrent task #14 adds `_sanitize()` to plugin_manifest.py with the same
+    # plugin_manifest.py exposes `_sanitize()` with the same
     # regex `[\x00-\x1f\x7f\u0085\u2028\u2029]` used by session_state.py:83
-    # and peer_inject._sanitize_agent_name. Replacement is space (not empty).
+    # Replacement is space (not empty).
     # Tests below assert the output-level contract (characters absent from banner,
     # banner remains single-line) — robust to whether the fix ships as an
     # `_sanitize()` helper or an inline regex call.
@@ -793,10 +793,9 @@ class TestBannerContractInvariants:
         )
 
 
-# Integration tests (TestSessionInitSlotAIntegration, TestPeerInjectIntegration)
-# and revert guards (TestCounterTestBySlotARevert, TestCounterTestByPeerInjectRevert)
-# have moved to tests/test_session_init.py and tests/test_peer_inject.py
-# respectively — they exercise the hooks, so they live alongside them.
+# Integration tests (TestSessionInitSlotAIntegration) and revert guards
+# (TestCounterTestBySlotARevert) live in tests/test_session_init.py
+# alongside the hook they exercise.
 
 
 class TestDogfoodPathWorktreeVsInstalledCache:

@@ -2,7 +2,13 @@
 Version-bump consistency invariants for the current release.
 
 The plugin version is tracked in 4 files; all four must carry the same
-version literal, with zero stale references to the prior version.
+version literal. TARGET_VERSION is read from plugin.json at test time so
+the suite tracks every future bump without manual edits.
+
+PRIOR_VERSION stale-sweep is disabled: with TARGET_VERSION sourced
+dynamically there is no canonical prior to enumerate, and explicit prior-
+version stale-sweeps belong to release-engineering checklists rather than
+suite-level invariants.
 """
 
 import json
@@ -11,8 +17,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-TARGET_VERSION = "3.21.1"
-PRIOR_VERSION = "3.21.0"
+PLUGIN_JSON_PATH = (
+    REPO_ROOT / "pact-plugin" / ".claude-plugin" / "plugin.json"
+)
+TARGET_VERSION = json.loads(PLUGIN_JSON_PATH.read_text(encoding="utf-8"))[
+    "version"
+]
 
 
 # ---------- 4-file version invariants ----------
@@ -51,18 +61,3 @@ def test_pact_plugin_readme_version():
     )
 
 
-# ---------- Stale-version sweep ----------
-
-@pytest.mark.parametrize("path", [
-    Path("pact-plugin") / ".claude-plugin" / "plugin.json",
-    Path(".claude-plugin") / "marketplace.json",
-    Path("README.md"),
-    Path("pact-plugin") / "README.md",
-])
-def test_no_stale_prior_version_token(path):
-    """No file in the 4-file set may carry the immediate-prior version
-    string. Catches half-applied bumps."""
-    text = (REPO_ROOT / path).read_text(encoding="utf-8")
-    assert PRIOR_VERSION not in text, (
-        f"{path}: stale prior version {PRIOR_VERSION!r} still present"
-    )

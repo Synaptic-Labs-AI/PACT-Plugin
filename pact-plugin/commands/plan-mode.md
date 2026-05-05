@@ -194,7 +194,7 @@ Each consultant dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{specialist}: TEACHBACK for plan consultation on {feature}"`, owner = consultant. Description: lightweight understanding-confirm of the consultation scope.
 - **Task B** — primary consultation. `subject = "{specialist}: plan consultation for {feature}"`, owner = consultant, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)). On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
+Both are created BEFORE the `Task(...)` spawn call. The consultant claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review and accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)). On accept, the consultant wakes to claim B and produce the consultation HANDOFF.
 
 ```
 A_id = TaskCreate(
@@ -227,7 +227,7 @@ Task(
   name="{specialist-name}",
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
-  prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 

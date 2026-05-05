@@ -152,14 +152,14 @@ Work resumes (or stops) based on user decision
 On receiving an algedonic signal:
 
 1. **IMMEDIATELY** present signal to user (do not continue other work first)
-2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see team-lead-side fan-out idiom in [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)). Then await user acknowledgment.
+2. For **HALT**: Stop all in-progress teammates by sending HALT individually to each (see team-lead-side fan-out idiom in [Lead-Side HALT Fan-Out](#lead-side-halt-fan-out)). Then await user acknowledgment.
 3. For **ALERT**: Pause current work, present options to user
 4. **Log** the signal in session record
 
 **Handling parallel agents on HALT**:
 
 When multiple agents are running and HALT is triggered:
-1. **Stop in-progress teammates by name** — for each teammate with `status="in_progress"`, send the HALT individually (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)). Each message lands at that teammate's next idle boundary; for immediate halt of in-flight work, user-side manual interrupt is required (see [Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat)).
+1. **Stop in-progress teammates by name** — for each teammate with `status="in_progress"`, send the HALT individually (see [Lead-Side HALT Fan-Out](#lead-side-halt-fan-out)). Each message lands at that teammate's next idle boundary; for immediate halt of in-flight work, user-side manual interrupt is required (see [Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat)).
 2. **Preserve work-in-progress** — do NOT discard uncommitted changes
 3. **Do NOT commit partial work** — leave changes staged/unstaged as-is
 4. **Document agent states** — note which agents were interrupted and their progress
@@ -168,6 +168,22 @@ After HALT is resolved:
 - Review interrupted agents' work before resuming
 - Decide whether to continue from checkpoint or restart affected work
 - The HALT fix may invalidate some parallel work (especially for SECURITY issues)
+
+### Lead-Side HALT Fan-Out
+
+To stop all in-progress teammates (HALT, shutdown, or any other team-lead-to-many signal), iterate `TaskList` for tasks with `status="in_progress"` and send the signal individually to each owner:
+
+    in_progress = [t for t in TaskList() if t["status"] == "in_progress" and t["owner"]]
+    for task in in_progress:
+        SendMessage(
+            to=task["owner"],
+            message=f"[team-lead→{task['owner']}] ⚠️ HALT: {category}. Stop all work immediately. Preserve current state and await further instructions.",
+            summary=f"HALT: {category}",
+        )
+
+Each message lands at the teammate's next idle boundary (see [Algedonic-Signal Latency Caveat](pact-communication-charter.md#algedonic-signal-latency-caveat)). For immediate halt of in-flight teammate work, escalate to user for manual interrupt — `SendMessage` cannot interrupt a mid-turn teammate.
+
+Use the same iterate-by-name pattern for any other team-lead-to-many signal (graceful shutdown via `shutdown_request`, `plan_approval_request`, plain-text announcements). There is no broadcast addressing mode.
 
 ### User Response Options
 

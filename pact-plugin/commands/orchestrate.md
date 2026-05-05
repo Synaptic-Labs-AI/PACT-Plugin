@@ -51,11 +51,11 @@ Task(
   name="{teammate-name}",
   team_name="{team_name}",
   subagent_type="pact-{teammate-type}",
-  prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
-> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing via injected newlines or close-parens. The `peer_inject.py` hook also sanitizes defensively as a second layer of defense, but the orchestrator should produce conforming names directly. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
+> ⚠️ **`{teammate-name}` constraint (SECURITY)**: the `name=` value is interpolated verbatim into the `YOUR PACT ROLE: teammate ({teammate-name}).` marker line. `name` MUST match `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses — to prevent marker spoofing via injected newlines or close-parens. Examples: `backend-coder-1`, `review-test-engineer-7`, `secretary`.
 
 > **Why store agent_id?** Enables `resume` for blocker recovery — see [Blocker Recovery](#blocker-recovery-resume-vs-fresh-spawn).
 
@@ -66,7 +66,7 @@ Every specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{role}: TEACHBACK for {feature}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{role}: {mission}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [orchestration §Teachback Review](../skills/orchestration/SKILL.md#teachback-review)), and the teammate wakes to claim B.
+Both are created BEFORE the `Task(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)), and the teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -467,7 +467,7 @@ Task(
   name="preparer",
   team_name="{team_name}",
   subagent_type="pact-preparer",
-  prompt="YOUR PACT ROLE: teammate (preparer).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (preparer).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -477,7 +477,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
 - [ ] Outputs exist in `docs/preparation/`
 - [ ] Specialist handoff received
 - [ ] If blocker reported → `/PACT:imPACT`
-- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [orchestration skill](../skills/orchestration/SKILL.md) Memory Management.
+- [ ] **S4 Checkpoint** (see [pact-s4-checkpoints.md](../protocols/pact-s4-checkpoints.md)): Environment stable? Model aligned? Plan viable? Optionally query secretary for S4 pattern check (variety 7+). See [pact-orchestrator §Memory Management](../agents/pact-orchestrator.md#memory-management).
 
 **Concurrent dispatch within PREPARE**: If research spans multiple independent areas (e.g., "research auth options AND caching strategies"), invoke multiple preparers together with clear scope boundaries.
 
@@ -559,7 +559,7 @@ Task(
   name="architect",
   team_name="{team_name}",
   subagent_type="pact-architect",
-  prompt="YOUR PACT ROLE: teammate (architect).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (architect).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -682,7 +682,7 @@ Task(
   name="{coder-name}",
   team_name="{team_name}",
   subagent_type="pact-{coder-type}",
-  prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -710,7 +710,7 @@ Task(
   name="auditor",
   team_name="{team_name}",
   subagent_type="pact-auditor",
-  prompt="YOUR PACT ROLE: teammate (auditor).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (auditor).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -809,7 +809,7 @@ Task(
   name="test-engineer",
   team_name="{team_name}",
   subagent_type="pact-test-engineer",
-  prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYOUR FIRST ACTION (YOU MUST DO THIS IMMEDIATELY): invoke Skill(\"PACT:teammate-bootstrap\"). This loads the team communication protocol, teachback standards, memory retrieval, and algedonic reference. If your context is later compacted and you find yourself without this content loaded, re-invoke the skill before continuing implementation.\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
+  prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -851,7 +851,7 @@ When an agent reports a blocker or algedonic signal via `SendMessage`:
 
 **Progress signal assessment**: When progress monitoring was requested, assess incoming progress signals against the agent state model (converging/exploring/stuck) in [pact-variety.md](../protocols/pact-variety.md#agent-state-model). Intervene if an agent appears stuck or shifts from converging to exploring.
 
-**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
+**HALT handling**: On HALT signal, immediately stop all running teammates using the [Lead-Side HALT Fan-Out](../protocols/algedonic.md#lead-side-halt-fan-out) idiom (one `SendMessage` per in-progress teammate by name) before presenting to user.
 
 ### Blocker Recovery: Resume vs. Fresh Spawn
 

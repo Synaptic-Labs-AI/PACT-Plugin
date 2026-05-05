@@ -159,7 +159,7 @@ C) Other (specify)
 
 At phase boundaries, the orchestrator performs an S4 checkpoint to assess whether the current approach remains valid.
 
-> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See the [orchestration skill](../skills/orchestration/SKILL.md) > Temporal Horizons for the full horizon model.
+> **Temporal Horizon**: S4 operates at a **days** horizon—asking questions about the current milestone or sprint, not minute-level implementation details. See the [pact-orchestrator agent body](../agents/pact-orchestrator.md) §S3/S4 Operational Modes for the full horizon model.
 
 ### Trigger Points
 
@@ -340,7 +340,7 @@ When you find yourself thinking:
    > "S4 path: [action] — gains: [X], risks: [Y]"
 
 3. **Assess against project values**:
-   - Does the [orchestration skill](../skills/orchestration/SKILL.md) favor speed or quality for this project?
+   - Does the [pact-orchestrator agent body](../agents/pact-orchestrator.md) favor speed or quality for this project?
    - Is this a high-risk area requiring caution?
    - What has the user expressed preference for?
 
@@ -750,7 +750,7 @@ For full protocol details, see [algedonic.md](algedonic.md).
 - **Any agent** can emit algedonic signals when they recognize trigger conditions
 - Orchestrator **MUST** surface signals to user immediately—cannot suppress or delay
 - HALT requires user acknowledgment before ANY work resumes
-- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](../skills/orchestration/SKILL.md#team-lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
+- For **HALT** with parallel agents: send stop individually to each in-progress teammate (see [Lead-Side HALT Fan-Out](algedonic.md#lead-side-halt-fan-out)), preserve work-in-progress, do NOT commit partial work
 - ALERT allows user to choose: Investigate / Continue / Stop
 
 ### Relationship to imPACT
@@ -909,7 +909,7 @@ CalibrationRecord:
 | `/PACT:plan-mode` | None (consultant writes consultation HANDOFF, idles) | All consultant tasks; the plan-mode parent task |
 | `/PACT:imPACT` | None (triage agent writes triage HANDOFF, idles) | All triage tasks; the imPACT parent task |
 
-Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority) holds the slim team-lead-side summary.
+Carve-outs apply across all workflows: signal-tasks (auditor), memory-save (secretary), force-termination (imPACT). See [pact-completion-authority.md](pact-completion-authority.md) for the full acceptance + rejection recipes and carve-out rationale; [Completion Authority](pact-completion-authority.md#completion-authority) holds the slim team-lead-side summary.
 
 ---
 
@@ -1117,7 +1117,7 @@ Feature Task (created by orchestrator)
 | Phase | Orchestrator | Orchestrator | Active during phase |
 | Agent | Orchestrator | Specialist (claim-only); Orchestrator (completion authority) | Specialist claims via `TaskUpdate(status="in_progress")`; orchestrator completes via `TaskUpdate(status="completed")` paired with a wake-signal SendMessage |
 
-Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [orchestration §Completion Authority](../skills/orchestration/SKILL.md#completion-authority).
+Under Agent Teams, specialists claim agent tasks (`pending → in_progress`) and store HANDOFFs in `metadata.handoff`, but the orchestrator transitions agent tasks to `completed` after inspecting the HANDOFF. Two narrow carve-outs (signal-tasks; secretary memory-save) self-complete; see [Completion Authority](pact-completion-authority.md#completion-authority).
 
 ### Task States
 
@@ -2056,7 +2056,7 @@ Claude Code compaction has three durability mechanisms for orchestrator content:
 | **Inline skill body text** | Content written directly in the skill `.md` file | **Partial** — truncated at a cut boundary (~halfway for large files). Late sections silently dropped. |
 | **CLAUDE.md / additionalContext** | Routing block, session info, pinned context | **Structural** — re-injected on every turn; highest durability. |
 
-**Why bootstrap.md uses explicit Reads**: The orchestrator's full instructions (~525 lines in `skills/orchestration/SKILL.md` + 8 supplementary protocols) are loaded via explicit Read calls positioned in the first 25 lines of the skill body. This ensures all content survives compaction via the Read tracker, avoiding the position-dependent truncation that affects inline skill body content.
+
 
 **Verification**: After compaction, all 9 Read targets should appear in `Skills restored` system-reminder events. If any file is missing, the orchestrator still has the SACROSANCT fail-safe summary inline in bootstrap.md.
 

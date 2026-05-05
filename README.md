@@ -50,17 +50,50 @@ Add team directory access and PACT permission allow rules to your `~/.claude/set
 
 > See [full installation](#installation) for all options including auto-updates.
 
-### Optional: Shell aliases for auto-bootstrap
+### Loading PACT at session start
 
-PACT enforces a "bootstrap first" policy — the orchestrator must invoke `Skill("PACT:bootstrap")` before using code-editing tools (Edit, Write, Agent). You can shortcut this with a shell alias that sends a synthetic first user message:
+PACT is delivered through the `--agent` flag — `claude --agent PACT:pact-orchestrator` launches Claude Code with the orchestrator persona loaded directly. Two convenience options:
 
-```bash
-# Add to ~/.zshrc or ~/.bashrc
-alias claude-pact='claude "Invoke Skill(\"PACT:bootstrap\") now."'
-alias cldpct='claude "Invoke Skill(\"PACT:bootstrap\") now."'
+**Per-project: `.claude/settings.json` convention**
+
+Add the agent setting to your project's `.claude/settings.json` so every session in that repo opens with the orchestrator persona:
+
+```json
+{
+  "agent": "PACT:pact-orchestrator"
+}
 ```
 
-Two aliases: `claude-pact` (readable) and `cldpct` (quick-type). If you launch with plain `claude` instead, PACT's enforcement hooks will remind the orchestrator to bootstrap before any implementation work — no setup required.
+Plain `claude` in the project root then loads PACT automatically.
+
+**Global: bundled `pact` shell script (recommended for global use)**
+
+The plugin ships a ready-to-use launcher script at `pact-plugin/bin/pact`. Symlink it onto a directory on your `PATH`:
+
+```bash
+ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+      "$HOME/.local/bin/pact"
+```
+
+(Replace `<version>` with the installed version — check via `ls ~/.claude/plugins/cache/pact-plugin/PACT/`.)
+
+Then `pact` (with any flags `claude` accepts) launches a PACT-loaded session from anywhere. The script is a thin wrapper around `claude --agent PACT:pact-orchestrator "$@"`.
+
+**Upgrade and trust-model notes for the symlink pattern**:
+- The symlink target is **version-pinned** — after a plugin upgrade, the old version directory is removed and the symlink dangles. Re-create the symlink after each minor/major upgrade by re-running the `ln -s` above with the new `<version>`. (For automatic upgrade-resilience, wait for the first-class CLI wrapper roadmapped below, or use the shell-function alternative.)
+- The symlink **follows plugin updates atomically** — whatever `bin/pact` ships in the next plugin version becomes your `pact` command on next invocation. This is convenient (auto-patching ergonomic improvements) but it means a compromised plugin distribution would auto-execute on next `pact` invocation. Trade-off: symlink follows updates / shell function (or manual copy) is one-shot tamper-evident. Symlink is reasonable as default for the same reason the rest of the plugin tree is — the entire plugin cache is user-trust-bounded — but it's a documented choice, not unstated default.
+
+**Global: alternative `pact()` shell function**
+
+If you prefer not to symlink, add this to your `~/.zshrc` or `~/.bashrc`:
+
+```bash
+pact() { claude --agent PACT:pact-orchestrator "$@"; }
+```
+
+Same effect as the symlinked script.
+
+> **Roadmap**: A first-class `pact` CLI wrapper with install automation, manpage, and packaging-manager integration is planned for v4.0.x or v4.1.0; the symlink + shell function patterns above are the interim paths.
 
 ---
 
@@ -471,7 +504,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 3.21.1/    # Plugin version
+│               └── 4.0.0/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/
@@ -546,6 +579,50 @@ Act as PACT Orchestrator...
 2. **Create project-local skills** in your project's `.claude/skills/` (Claude Code feature)
 3. **Create global skills** in `~/.claude/skills/` for use across all projects
 4. **Fork the plugin** if you need to modify agents or hooks for your domain
+
+---
+
+## Upgrading from v3.x to v4.0
+
+PACT v4.0 is a **breaking change**. The orchestrator persona delivery model migrated from CLAUDE.md routing → `--agent` flag. Sessions launched without the new flag (or one of the convenience patterns that sets it) will run as default Claude Code, not as the PACT Orchestrator.
+
+### What changed
+
+| Aspect | v3.x (CLAUDE.md routing) | v4.0 (`--agent` flag) |
+|--------|---------------------------|------------------------|
+| **Persona delivery** | `Skill("PACT:bootstrap")` invoked from CLAUDE.md `PACT_ROUTING` block | Agent body delivered directly via `--agent PACT:pact-orchestrator` |
+| **Invocation** | Plain `claude` in a PACT project (CLAUDE.md routing did the work) | `claude --agent PACT:pact-orchestrator` (or settings.json / `pact` script convention) |
+| **Bootstrap mechanics** | Multi-step skill chain loaded protocol files at runtime | Persona body inline at session start; protocols loaded lazily on demand |
+| **CLAUDE.md routing block** | Required (`PACT_ROUTING` block injected by `session_init`) | Removed — block is stripped on session start during the v4.0.x and v4.1.x deprecation window |
+
+### What you need to do
+
+1. **Restore plain-`claude` ergonomics via one of three paths**:
+   - **Per-project (recommended for your PACT projects)** — add to your project's `.claude/settings.json`:
+     ```json
+     {
+       "agent": "PACT:pact-orchestrator"
+     }
+     ```
+     Plain `claude` in the project root then auto-loads PACT.
+   - **Global (recommended for cross-project use)** — symlink the bundled `pact` script onto your `PATH`:
+     ```bash
+     ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+           "$HOME/.local/bin/pact"
+     ```
+     Then `pact` invokes a PACT-loaded session from anywhere. Replace `<version>` with the installed version (`ls ~/.claude/plugins/cache/pact-plugin/PACT/`).
+   - **Manual flag (no setup)** — invoke `claude --agent PACT:pact-orchestrator` every time.
+2. **Don't be confused by the silent muscle-memory failure**: if you type `claude` in your PACT project from v3.x muscle memory and your `.claude/settings.json` doesn't have the `agent` key set, you'll get default Claude Code without the orchestrator persona. The session will work, just without PACT. Add the settings.json entry once and the muscle memory works again.
+3. **Your CLAUDE.md migration is automatic** — no manual cleanup required. Specifically:
+   - **Project CLAUDE.md `PACT_ROUTING` block is auto-stripped**: v4.0.x ships an orphan-stripper that removes the now-stale routing block from your project CLAUDE.md on each session start. The stripper sunsets before v4.2.x. (This is the only deletion the upgrade performs.)
+   - **Other PACT-managed sections continue unchanged**: `## Current Session` (auto-managed by session_init), `## Retrieved Context`, `## Pinned Context`, and `## Working Memory` (all auto-managed by the pact-memory skill) keep working as in v3.x. Your saved memories, pinned context, and working memory are not touched by the upgrade.
+   - **Structural migration is idempotent**: if your project CLAUDE.md uses the v3.x layout (no `PACT_MANAGED_START`/`PACT_MANAGED_END` outer boundary), v4.0.x wraps PACT-managed content in the new boundary structure on first session start. Runs once; subsequent sessions detect the structure is current and skip the migration.
+   - **Your global `~/.claude/CLAUDE.md` is user-owned**: PACT does NOT auto-modify the global file. Any custom content you added there manually persists untouched.
+4. **Restart Claude Code** after upgrading the plugin.
+
+### Why the change
+
+Empirical investigation (documented in plugin memory chain `4fa2311 → 27aa95e`) found the v3.x bootstrap-via-CLAUDE.md model fragile under context compaction — protocol files loaded by the bootstrap skill weren't reliably restored when the session was compacted, leading to silent governance loss. The `--agent` flag delivers persona content via a different durability tier (system prompt) that survives compaction architecturally rather than relying on lazy reload. Lazy-load fidelity for protocol detail (the orchestrator's pre-commitment + imperative cross-references) was empirically validated in the manual launch-and-isolation runbook before the v4.0.0 release tag.
 
 ---
 

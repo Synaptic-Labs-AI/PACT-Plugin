@@ -41,11 +41,8 @@ VALID_HOOK_EVENTS = {
 MUST_BE_SYNC = {
     "team_guard.py",      # Blocks Task dispatch if no team
     "worktree_guard.py",  # Blocks edits outside worktree
-    "bootstrap_gate.py",  # Blocks implementation tools until bootstrap
-    "bootstrap_prompt_gate.py",  # Injects bootstrap instruction on prompts
     "validate_handoff.py",  # Validates agent output
     "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
-    "peer_inject.py",     # Injects peer context on agent start
     "git_commit_check.py",  # Checks git commit conventions
     "track_files.py",     # Tracks file edits (PostToolUse, non-async)
     "auditor_reminder.py",  # Injects auditor dispatch reminder into context
@@ -276,47 +273,6 @@ class TestMatcherPatterns:
             if matcher.endswith("|"):
                 errors.append(f"{event_type}: matcher ends with '|': '{matcher}'")
         assert errors == [], f"Invalid matcher patterns:\n" + "\n".join(errors)
-
-    def test_subagent_start_covers_all_agent_types(self, hooks_config):
-        """SubagentStart matcher must include all PACT agent types from agents/ directory."""
-        # Read expected agent names from disk
-        expected_agents = set()
-        for agent_file in AGENTS_DIR.glob("*.md"):
-            # Agent files are named pact-{type}.md — the stem is the agent name
-            expected_agents.add(agent_file.stem)
-
-        assert len(expected_agents) > 0, "No agent files found in agents/ directory"
-
-        # Extract the SubagentStart matcher
-        subagent_start_entries = hooks_config["hooks"].get("SubagentStart", [])
-        matcher_agents = set()
-        for entry in subagent_start_entries:
-            if "matcher" in entry:
-                matcher_agents.update(entry["matcher"].split("|"))
-
-        # Every agent definition should appear in the matcher
-        missing = expected_agents - matcher_agents
-        assert missing == set(), (
-            f"SubagentStart matcher is missing agent types: {sorted(missing)}. "
-            f"Matcher has: {sorted(matcher_agents)}. "
-            f"Expected from agents/: {sorted(expected_agents)}"
-        )
-
-
-class TestBootstrapGateInvariants:
-    """Structural invariants for bootstrap gate hooks."""
-
-    def test_bootstrap_gate_has_no_matcher(self, hooks_config):
-        """bootstrap_gate.py PreToolUse entry must have NO matcher (fires for all tools)."""
-        pre_tool_entries = hooks_config["hooks"].get("PreToolUse", [])
-        for entry in pre_tool_entries:
-            for hook in entry.get("hooks", []):
-                if "bootstrap_gate.py" in hook.get("command", ""):
-                    assert "matcher" not in entry, (
-                        "bootstrap_gate.py must NOT have a matcher — "
-                        "it must fire for ALL hookable tools to enforce the gate"
-                    )
-
 
 class TestSessionStartCardinality:
     """Post-#444 SessionStart registration invariant.

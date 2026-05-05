@@ -1,6 +1,6 @@
 {
   "name": "PACT",
-  "version": "3.21.1",
+  "version": "4.0.0",
   "description": "Orchestration harness that turns Claude Code into a coordinated team of specialist AI agents",
   "author": {
     "name": "Synaptic-Labs-AI",
@@ -25,8 +25,6 @@
     "conversation-theory"
   ],
   "commands": [
-    "./commands/bootstrap.md",
-    "./commands/teammate-bootstrap.md",
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
     "./commands/rePACT.md",
@@ -42,18 +40,19 @@
     "./commands/prune-memory.md"
   ],
   "agents": [
-    "./agents/pact-preparer.md",
     "./agents/pact-architect.md",
+    "./agents/pact-auditor.md",
     "./agents/pact-backend-coder.md",
-    "./agents/pact-frontend-coder.md",
     "./agents/pact-database-engineer.md",
     "./agents/pact-devops-engineer.md",
+    "./agents/pact-frontend-coder.md",
     "./agents/pact-n8n.md",
-    "./agents/pact-test-engineer.md",
-    "./agents/pact-security-engineer.md",
+    "./agents/pact-orchestrator.md",
+    "./agents/pact-preparer.md",
     "./agents/pact-qa-engineer.md",
-    "./agents/pact-auditor.md",
-    "./agents/pact-secretary.md"
+    "./agents/pact-secretary.md",
+    "./agents/pact-security-engineer.md",
+    "./agents/pact-test-engineer.md"
   ],
   "skills": "./skills/"
 }

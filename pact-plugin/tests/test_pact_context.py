@@ -1588,7 +1588,6 @@ class TestInitBeforeReaderOrdering:
     HOOKS_WITH_READERS = [
         ("agent_handoff_emitter.py", {"get_team_name"}),
         ("teachback_check.py", {"get_team_name", "resolve_agent_name"}),
-        ("peer_inject.py", {"get_team_name"}),
         ("file_tracker.py", {"get_team_name", "resolve_agent_name"}),
         ("track_files.py", {"get_session_id"}),
         ("merge_guard_pre.py", {"get_session_id"}),
