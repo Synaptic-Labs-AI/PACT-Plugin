@@ -66,17 +66,30 @@ Add the agent setting to your project's `.claude/settings.json` so every session
 
 Plain `claude` in the project root then loads PACT automatically.
 
-**Global: optional `pact()` shell function**
+**Global: bundled `pact` shell script (recommended for global use)**
 
-For invocations outside a configured project, add this to your `~/.zshrc` or `~/.bashrc`:
+The plugin ships a ready-to-use launcher script at `pact-plugin/bin/pact`. Symlink it onto a directory on your `PATH`:
+
+```bash
+ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+      "$HOME/.local/bin/pact"
+```
+
+(Replace `<version>` with the installed version — check via `ls ~/.claude/plugins/cache/pact-plugin/PACT/`.)
+
+Then `pact` (with any flags `claude` accepts) launches a PACT-loaded session from anywhere. The script is a thin wrapper around `claude --agent PACT:pact-orchestrator "$@"`.
+
+**Global: alternative `pact()` shell function**
+
+If you prefer not to symlink, add this to your `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 pact() { claude --agent PACT:pact-orchestrator "$@"; }
 ```
 
-Then `pact` (with any flags `claude` accepts) launches a PACT-loaded session from anywhere.
+Same effect as the symlinked script.
 
-> **Roadmap**: A first-class `pact` CLI wrapper is planned for v4.0.x or v4.1.0; the `pact()` shell function above is the interim path.
+> **Roadmap**: A first-class `pact` CLI wrapper with install automation, manpage, and packaging-manager integration is planned for v4.0.x or v4.1.0; the symlink + shell function patterns above are the interim paths.
 
 ---
 
@@ -562,6 +575,46 @@ Act as PACT Orchestrator...
 2. **Create project-local skills** in your project's `.claude/skills/` (Claude Code feature)
 3. **Create global skills** in `~/.claude/skills/` for use across all projects
 4. **Fork the plugin** if you need to modify agents or hooks for your domain
+
+---
+
+## Upgrading from v3.x to v4.0
+
+PACT v4.0 is a **breaking change**. The orchestrator persona delivery model migrated from CLAUDE.md routing → `--agent` flag. Sessions launched without the new flag (or one of the convenience patterns that sets it) will run as default Claude Code, not as the PACT Orchestrator.
+
+### What changed
+
+| Aspect | v3.x (CLAUDE.md routing) | v4.0 (`--agent` flag) |
+|--------|---------------------------|------------------------|
+| **Persona delivery** | `Skill("PACT:bootstrap")` invoked from CLAUDE.md `PACT_ROUTING` block | Agent body delivered directly via `--agent PACT:pact-orchestrator` |
+| **Invocation** | Plain `claude` in a PACT project (CLAUDE.md routing did the work) | `claude --agent PACT:pact-orchestrator` (or settings.json / `pact` script convention) |
+| **Bootstrap mechanics** | Multi-step skill chain loaded protocol files at runtime | Persona body inline at session start; protocols loaded lazily on demand |
+| **CLAUDE.md routing block** | Required (`PACT_ROUTING` block injected by `session_init`) | Removed — block is stripped on session start during the v4.0.x and v4.1.x deprecation window |
+
+### What you need to do
+
+1. **Restore plain-`claude` ergonomics via one of three paths**:
+   - **Per-project (recommended for your PACT projects)** — add to your project's `.claude/settings.json`:
+     ```json
+     {
+       "agent": "PACT:pact-orchestrator"
+     }
+     ```
+     Plain `claude` in the project root then auto-loads PACT.
+   - **Global (recommended for cross-project use)** — symlink the bundled `pact` script onto your `PATH`:
+     ```bash
+     ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+           "$HOME/.local/bin/pact"
+     ```
+     Then `pact` invokes a PACT-loaded session from anywhere. Replace `<version>` with the installed version (`ls ~/.claude/plugins/cache/pact-plugin/PACT/`).
+   - **Manual flag (no setup)** — invoke `claude --agent PACT:pact-orchestrator` every time.
+2. **Don't be confused by the silent muscle-memory failure**: if you type `claude` in your PACT project from v3.x muscle memory and your `.claude/settings.json` doesn't have the `agent` key set, you'll get default Claude Code without the orchestrator persona. The session will work, just without PACT. Add the settings.json entry once and the muscle memory works again.
+3. **Existing CLAUDE.md `PACT_ROUTING` blocks are auto-cleaned**: v4.0.x ships an orphan-stripper that removes the now-stale routing block from your CLAUDE.md on each session start. No manual cleanup required during the v4.0.x and v4.1.x window. The stripper sunsets before v4.2.x.
+4. **Restart Claude Code** after upgrading the plugin.
+
+### Why the change
+
+Empirical investigation (documented in plugin memory chain `4fa2311 → 27aa95e`) found the v3.x bootstrap-via-CLAUDE.md model fragile under context compaction — protocol files loaded by the bootstrap skill weren't reliably restored when the session was compacted, leading to silent governance loss. The `--agent` flag delivers persona content via a different durability tier (system prompt) that survives compaction architecturally rather than relying on lazy reload. Lazy-load fidelity for protocol detail (the orchestrator's pre-commitment + imperative cross-references) was empirically validated in the manual launch-and-isolation runbook before the v4.0.0 release tag.
 
 ---
 

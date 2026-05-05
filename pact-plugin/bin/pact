@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# pact — PACT-loaded Claude Code session launcher.
+#
+# Wraps `claude --agent PACT:pact-orchestrator "$@"` so that PACT's
+# orchestrator persona is loaded automatically. Pass through any
+# additional flags claude accepts (e.g., --resume, --plugin-dir,
+# --print, --debug) and they are forwarded unchanged.
+#
+# Installation (manual symlink — no install automation in v4.0.0):
+#   ln -s "$HOME/.claude/plugins/cache/pact-plugin/PACT/<version>/pact-plugin/bin/pact" \
+#         "$HOME/.local/bin/pact"
+#
+# Or any other directory on your PATH (~/bin, /usr/local/bin, etc.).
+# After symlinking, `pact` invokes a PACT-loaded session from anywhere.
+#
+# A first-class CLI wrapper (with install automation, manpage, etc.)
+# is planned for v4.0.x or v4.1.0; this script is the polished interim
+# path between hand-rolling a shell function and full distribution.
+
+set -e
+exec claude --agent PACT:pact-orchestrator "$@"
