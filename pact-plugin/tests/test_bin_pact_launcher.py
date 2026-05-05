@@ -3,8 +3,10 @@ Structural guard for the bundled bin/pact launcher script.
 
 v4.0.0 ships a ready-to-symlink shell script at pact-plugin/bin/pact that
 wraps `claude --agent PACT:pact-orchestrator "$@"`. The script is the
-recommended global-use installation pattern documented in README §"How to
-use" (alongside the per-project .claude/settings.json convention).
+recommended global-use installation pattern documented in README
+§"Loading PACT at session start" (alongside the per-project
+.claude/settings.json convention) and README §"Upgrading from v3.x to
+v4.0" (migration guidance for v3.x users).
 
 Without these structural guards, accidental deletion or modification could
 silently break the documented installation pattern. Each test pins a
@@ -21,7 +23,7 @@ BIN_PACT = Path(__file__).parent.parent / "bin" / "pact"
 def test_bin_pact_script_exists():
     """Script file must exist at the documented path."""
     assert BIN_PACT.is_file(), (
-        f"pact-plugin/bin/pact missing — README §'How to use' documents "
+        f"pact-plugin/bin/pact missing — README §'Loading PACT at session start' documents "
         f"this path as the symlink target for global installation."
     )
 

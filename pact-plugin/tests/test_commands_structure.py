@@ -270,9 +270,7 @@ class TestImperativeSoftPhrasingConvention:
 
     The IMPERATIVE form is reinforced by a top-of-body pre-commitment
     paragraph (file-anchored, with scope-boundary defensive clause) that
-    compels compliance with each "You MUST" instruction below. Voice was
-    second-person validated empirically pre-merge — see commit 936b4dbb
-    for the A/B comparison record.
+    compels compliance with each "You MUST" instruction below.
     """
 
     AGENTS_DIR = Path(__file__).parent.parent / "agents"
