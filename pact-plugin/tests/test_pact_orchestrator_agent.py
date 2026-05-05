@@ -99,11 +99,10 @@ def test_pact_orchestrator_body_has_pre_response_channel_check():
 
 
 def test_pact_orchestrator_body_references_imperative_protocols():
-    """6 imperative protocols must appear as cross-references in the body."""
+    """5 imperative protocols must appear as cross-references in the body."""
     text = ORCHESTRATOR_PATH.read_text()
     expected_imperative = [
         "algedonic.md",
-        "pact-communication-charter.md",
         "pact-s4-tension.md",
         "pact-s5-policy.md",
         "pact-state-recovery.md",
@@ -116,12 +115,13 @@ def test_pact_orchestrator_body_references_imperative_protocols():
 
 
 def test_pact_orchestrator_body_references_soft_protocols():
-    """3 soft (reference-only) protocols must appear as cross-references in the body."""
+    """4 soft (reference-only) protocols must appear as cross-references in the body."""
     text = ORCHESTRATOR_PATH.read_text()
     expected_soft = [
         "pact-variety.md",
         "pact-s4-checkpoints.md",
         "pact-workflows.md",
+        "pact-communication-charter.md",
     ]
     missing = [p for p in expected_soft if p not in text]
     assert not missing, (

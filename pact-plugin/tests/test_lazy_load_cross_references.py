@@ -103,10 +103,9 @@ def test_skill_cross_references_resolve():
 
 
 def test_imperative_protocols_referenced_by_at_least_one_agent():
-    """Each of the 6 imperative protocols must appear in at least one agent body."""
+    """Each of the 5 imperative protocols must appear in at least one agent body."""
     imperative = [
         "algedonic.md",
-        "pact-communication-charter.md",
         "pact-s4-tension.md",
         "pact-s5-policy.md",
         "pact-state-recovery.md",
