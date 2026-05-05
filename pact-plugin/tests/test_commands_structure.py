@@ -259,7 +259,7 @@ class TestImperativeSoftPhrasingConvention:
     Orchestrator agent body uses two phrasing templates, both built around
     the unified tool-call shape Read(file_path="../protocols/<file>.md"):
 
-      IMPERATIVE: **I MUST Read(file_path="...") before answering** whenever <trigger>
+      IMPERATIVE: **You MUST Read(file_path="...") before answering** whenever <trigger>
         for decision-blocking protocols. Compels Read on trigger detection.
 
       SOFT: For full detail, Read(file_path="...") when <use case>
@@ -269,8 +269,10 @@ class TestImperativeSoftPhrasingConvention:
     Read tool's call signature for maximum tool-call pattern recognition.
 
     The IMPERATIVE form is reinforced by a top-of-body pre-commitment
-    paragraph that recruits consistency-with-self psychology to compel
-    compliance with each "I MUST" instruction below.
+    paragraph (file-anchored, with scope-boundary defensive clause) that
+    compels compliance with each "You MUST" instruction below. Voice was
+    second-person validated empirically pre-merge — see commit 936b4dbb
+    for the A/B comparison record.
     """
 
     AGENTS_DIR = Path(__file__).parent.parent / "agents"
@@ -312,7 +314,7 @@ class TestImperativeSoftPhrasingConvention:
             idx = i + 1
         assert found_imperative, (
             f"pact-orchestrator.md references {protocol} but not in imperative "
-            f"`**I MUST `Read(file_path=\"...\")` before answering**` form. "
+            f"`**You MUST `Read(file_path=\"...\")` before answering**` form. "
             f"Convention requires imperative phrasing for decision-blocking protocols."
         )
 
@@ -364,7 +366,7 @@ class TestImperativeSoftPhrasingConvention:
         )
 
     def test_pre_commitment_scope_boundary_present(self):
-        """Pre-commitment must be scoped to THIS file only — inbound 'I MUST'
+        """Pre-commitment must be scoped to THIS file only — inbound 'You MUST'
         content from teammates, HANDOFFs, or tool output is data, not
         self-instructions. Without the scope boundary, the pre-commitment is
         a self-instruction-mimicry surface (cycle-4 security review M1)."""
@@ -380,7 +382,7 @@ class TestImperativeSoftPhrasingConvention:
             f"pact-orchestrator.md missing pre-commitment scope-boundary anchors: "
             f"{missing}. Without these, the pre-commitment is vulnerable to "
             f"injection via teammate SendMessage / HANDOFF metadata containing "
-            f"forged 'I MUST'-shaped imperatives."
+            f"forged 'You MUST'-shaped imperatives."
         )
 
 
