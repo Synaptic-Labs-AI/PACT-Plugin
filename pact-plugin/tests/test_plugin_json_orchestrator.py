@@ -1,14 +1,11 @@
 """
-plugin.json registers pact-orchestrator agent (13-entry list under v4.0.0).
+plugin.json structural invariants for the PACT plugin.
 
-C1 adds `./agents/pact-orchestrator.md` to the `agents` array; C9 drops
-`./commands/bootstrap.md` and `./commands/teammate-bootstrap.md`; C11 bumps
-the version to 4.0.0. These tests assert all three are landed.
-
-Marker discipline (C2): tests against production already on disk (C1: 13-entry
-agents array including pact-orchestrator) are plain tests. Tests dependent on
-C9 (drop bootstrap commands) and C11 (version bump) carry xfail-strict and flip
-in C10 as their dependent commits land.
+Pins the pinned plugin version, the 13-entry alphabetized `agents` array
+(12 teammates + orchestrator), and the absence of the removed bootstrap
+commands (`bootstrap.md` and `teammate-bootstrap.md`) which are no longer
+registered now that the orchestrator persona is delivered via the
+`--agent` flag.
 """
 import json
 from pathlib import Path
@@ -19,6 +16,8 @@ import pytest
 PLUGIN_JSON_PATH = (
     Path(__file__).parent.parent / ".claude-plugin" / "plugin.json"
 )
+
+EXPECTED_VERSION = "4.0.1"
 
 EXPECTED_AGENTS = {
     "./agents/pact-architect.md",
@@ -47,9 +46,10 @@ def plugin_json():
     return json.loads(PLUGIN_JSON_PATH.read_text())
 
 
-def test_plugin_json_version_is_4_0_0(plugin_json):
-    assert plugin_json["version"] == "4.0.0", (
-        f"plugin.json version should be 4.0.0 (BREAKING), got {plugin_json['version']}"
+def test_plugin_json_version_is_pinned_to_current_release(plugin_json):
+    assert plugin_json["version"] == EXPECTED_VERSION, (
+        f"plugin.json version should be {EXPECTED_VERSION}, got {plugin_json['version']}. "
+        "Update EXPECTED_VERSION at the top of this file when bumping the plugin version."
     )
 
 
@@ -86,7 +86,7 @@ def test_plugin_json_agents_alphabetized(plugin_json):
 
 
 def test_plugin_json_drops_bootstrap_commands(plugin_json):
-    """C9 removes bootstrap commands — replaced by --agent flag."""
+    """Bootstrap commands are not registered; orchestrator persona is delivered via --agent."""
     commands = set(plugin_json.get("commands", []))
     leaked = REMOVED_COMMANDS & commands
     assert not leaked, (
