@@ -609,7 +609,11 @@ PACT v4.0 is a **breaking change**. The orchestrator persona delivery model migr
      Then `pact` invokes a PACT-loaded session from anywhere. Replace `<version>` with the installed version (`ls ~/.claude/plugins/cache/pact-plugin/PACT/`).
    - **Manual flag (no setup)** — invoke `claude --agent PACT:pact-orchestrator` every time.
 2. **Don't be confused by the silent muscle-memory failure**: if you type `claude` in your PACT project from v3.x muscle memory and your `.claude/settings.json` doesn't have the `agent` key set, you'll get default Claude Code without the orchestrator persona. The session will work, just without PACT. Add the settings.json entry once and the muscle memory works again.
-3. **Existing CLAUDE.md `PACT_ROUTING` blocks are auto-cleaned**: v4.0.x ships an orphan-stripper that removes the now-stale routing block from your CLAUDE.md on each session start. No manual cleanup required during the v4.0.x and v4.1.x window. The stripper sunsets before v4.2.x.
+3. **Your CLAUDE.md migration is automatic** — no manual cleanup required. Specifically:
+   - **Project CLAUDE.md `PACT_ROUTING` block is auto-stripped**: v4.0.x ships an orphan-stripper that removes the now-stale routing block from your project CLAUDE.md on each session start. The stripper sunsets before v4.2.x. (This is the only deletion the upgrade performs.)
+   - **Other PACT-managed sections continue unchanged**: `## Current Session` (auto-managed by session_init), `## Retrieved Context`, `## Pinned Context`, and `## Working Memory` (all auto-managed by the pact-memory skill) keep working as in v3.x. Your saved memories, pinned context, and working memory are not touched by the upgrade.
+   - **Structural migration is idempotent**: if your project CLAUDE.md uses the v3.x layout (no `PACT_MANAGED_START`/`PACT_MANAGED_END` outer boundary), v4.0.x wraps PACT-managed content in the new boundary structure on first session start. Runs once; subsequent sessions detect the structure is current and skip the migration.
+   - **Your global `~/.claude/CLAUDE.md` is user-owned**: PACT does NOT auto-modify the global file. Any custom content you added there manually persists untouched.
 4. **Restart Claude Code** after upgrading the plugin.
 
 ### Why the change
