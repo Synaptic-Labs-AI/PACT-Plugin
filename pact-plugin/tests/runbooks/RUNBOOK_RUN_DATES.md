@@ -12,7 +12,7 @@ data is the substitute).
 
 | Run date (UTC) | Operator | Plugin version | Sections passed | Notes / fallback-ladder signals |
 | -------------- | -------- | -------------- | --------------- | -------------------------------- |
-| _(not yet run)_ | _-_ | _-_ | _-_ | Initial run pending v4.0.0 release tag |
+| 2026-05-04 | michael-wojcik | 4.0.0 | 8/8 | Section 4: 80% (4/5) — S3/S4, algedonic, state-recovery, completion-authority all YES; communication-charter NO on body-overlap prompt. Required two intervention commits to clear (`0b08df87` strengthened phrasing, `11145446` top-of-body pre-commitment + first-person voice). Charter NO mechanism (body §1 Pre-Response Channel Check overlap) confirmed by Session 6 diagnostic; charter cross-reference demoted to soft post-test in `2e53b6b0`. No Section 5 algedonic failures. Section 6 teammate teachback skill preload validated (4-field structured teachback: understanding/most_likely_wrong/least_confident_item/first_action). No fallback-ladder escalation; staying on Option F. Follow-up: [#624](https://github.com/Synaptic-Labs-AI/PACT-Plugin/issues/624) (systematic imperative-cross-reference audit for body-content overlap). |
 
 ### How to record a run
 
