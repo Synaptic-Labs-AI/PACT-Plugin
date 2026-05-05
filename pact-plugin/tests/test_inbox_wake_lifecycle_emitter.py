@@ -43,7 +43,7 @@ def _run_emitter(stdin_payload: str | bytes, env_extra: dict | None = None) -> t
     return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
 
 
-def _pact_session_env(tmp_path: Path, team_name: str) -> dict:
+def _pact_session_env(tmp_path: Path) -> dict:
     """
     Build env vars + on-disk pact-session-context so the emitter's
     pact_context.init() resolves the team_name from the synthesized
@@ -114,13 +114,13 @@ def test_hooks_json_registers_emitter_under_post_tool_use():
 # ---------- Fail-open paths ----------
 
 def test_malformed_stdin_exits_zero_with_suppress(tmp_path):
-    rc, out, _ = _run_emitter(b"\x00not-json\xff", env_extra=_pact_session_env(tmp_path, "t"))
+    rc, out, _ = _run_emitter(b"\x00not-json\xff", env_extra=_pact_session_env(tmp_path))
     assert rc == 0
     assert json.loads(out) == {"suppressOutput": True}
 
 
 def test_non_dict_stdin_exits_zero_with_suppress(tmp_path):
-    rc, out, _ = _run_emitter("[]", env_extra=_pact_session_env(tmp_path, "t"))
+    rc, out, _ = _run_emitter("[]", env_extra=_pact_session_env(tmp_path))
     assert rc == 0
     assert json.loads(out) == {"suppressOutput": True}
 
@@ -132,9 +132,9 @@ def test_missing_team_name_exits_zero_with_suppress(tmp_path):
         "session_id": "abc",
         "cwd": "/tmp/x",
         "tool_input": {"taskId": "1"},
-        "tool_response": {"id": "1"},
+        "tool_response": {"task": {"id": "1"}},
     })
-    rc, out, _ = _run_emitter(payload, env_extra=_pact_session_env(tmp_path, "t"))
+    rc, out, _ = _run_emitter(payload, env_extra=_pact_session_env(tmp_path))
     assert rc == 0
     assert json.loads(out) == {"suppressOutput": True}
 
@@ -198,7 +198,7 @@ def test_arm_emitted_on_first_task_create(tmp_path):
         "session_id": sid,
         "cwd": pdir,
         "tool_input": {"taskId": "task-1"},
-        "tool_response": {"id": "task-1"},
+        "tool_response": {"task": {"id": "task-1"}},
     }
     out = _emit_output(payload, home)
     hso = out["hookSpecificOutput"]
@@ -213,7 +213,7 @@ def test_arm_includes_idempotency_clause(tmp_path):
     _write_task(home, team, "1", status="pending", owner="x")
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "1"}, "tool_response": {"id": "1"},
+        "tool_input": {"taskId": "1"}, "tool_response": {"task": {"id": "1"}},
     }, home)
     additional = out["hookSpecificOutput"]["additionalContext"]
     # Case-insensitive — directive prose capitalizes 'Idempotent' but
@@ -251,7 +251,7 @@ def test_arm_directive_contains_precondition_phrase(tmp_path):
     _write_task(home, team, "1", status="pending", owner="x")
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "1"}, "tool_response": {"id": "1"},
+        "tool_input": {"taskId": "1"}, "tool_response": {"task": {"id": "1"}},
     }, home)
     assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
 
@@ -279,7 +279,7 @@ def test_no_op_on_second_active_task_create(tmp_path):
     _write_task(home, team, "new", status="in_progress", owner="y")
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "new"}, "tool_response": {"id": "new"},
+        "tool_input": {"taskId": "new"}, "tool_response": {"task": {"id": "new"}},
     }, home)
     assert out == {"suppressOutput": True}
 
@@ -297,7 +297,7 @@ def test_no_op_on_create_of_signal_task(tmp_path):
     )
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "sig-1"}, "tool_response": {"id": "sig-1"},
+        "tool_input": {"taskId": "sig-1"}, "tool_response": {"task": {"id": "sig-1"}},
     }, home)
     assert out == {"suppressOutput": True}
 
@@ -309,7 +309,7 @@ def test_no_op_on_create_owned_by_exempt_agent(tmp_path):
     _write_task(home, team, "sec-1", status="in_progress", owner="secretary")
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "sec-1"}, "tool_response": {"id": "sec-1"},
+        "tool_input": {"taskId": "sec-1"}, "tool_response": {"task": {"id": "sec-1"}},
     }, home)
     assert out == {"suppressOutput": True}
 
@@ -433,7 +433,7 @@ def test_teardown_emitted_on_status_deleted_at_post_zero(tmp_path):
     assert "Skill(\"PACT:unwatch-inbox\")" in hso["additionalContext"]
 
 
-def test_is_terminal_status_update_matches_completed_and_deleted(tmp_path):
+def test_is_terminal_status_update_matches_completed_and_deleted():
     """Direct unit test on the terminal-status predicate. The behavioral
     contract is "task transitioned to a terminal status" — both
     `completed` and `deleted` are terminal."""
@@ -487,7 +487,7 @@ def test_no_emit_when_session_id_does_not_match_lead(tmp_path):
         "session_id": teammate_sid,
         "cwd": pdir,
         "tool_input": {"taskId": "task-x"},
-        "tool_response": {"id": "task-x"},
+        "tool_response": {"task": {"id": "task-x"}},
     }
     out = _emit_output(payload, home)
     assert out == {"suppressOutput": True}, (
@@ -514,7 +514,7 @@ def test_no_emit_when_team_config_missing(tmp_path):
     _write_task(home, team, "task-x", status="in_progress", owner="x")
     payload = {
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
-        "tool_input": {"taskId": "task-x"}, "tool_response": {"id": "task-x"},
+        "tool_input": {"taskId": "task-x"}, "tool_response": {"task": {"id": "task-x"}},
     }
     out = _emit_output(payload, home)
     assert out == {"suppressOutput": True}
@@ -579,7 +579,7 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
     from unittest.mock import patch
     with patch.object(emitter, "_is_lead_session", return_value=True), \
          patch.object(emitter, "count_active_tasks", return_value=0) as mock_count:
-        result = emitter._decide_directive({
+        emitter._decide_directive({
             "tool_name": "TaskUpdate",
             "session_id": "sid", "cwd": "/tmp/p",
             "tool_input": {"taskId": "1", "status": "completed"},
@@ -600,11 +600,11 @@ def test_count_active_tasks_called_on_taskcreate():
     with patch.object(emitter, "_is_lead_session", return_value=True), \
          patch.object(emitter, "_extract_task_id", return_value="1"), \
          patch.object(emitter, "count_active_tasks", return_value=1) as mock_count:
-        result = emitter._decide_directive({
+        emitter._decide_directive({
             "tool_name": "TaskCreate",
             "session_id": "sid", "cwd": "/tmp/p",
             "tool_input": {"taskId": "1"},
-            "tool_response": {"id": "1"},
+            "tool_response": {"task": {"id": "1"}},
         }, "team-x")
         assert mock_count.call_count >= 1
 
@@ -640,7 +640,7 @@ def test_oversized_stdin_payload_fails_open_with_suppress(tmp_path):
         "session_id": sid,
         "cwd": pdir,
         "tool_input": {"taskId": "task-cap", "filler": filler},
-        "tool_response": {"id": "task-cap"},
+        "tool_response": {"task": {"id": "task-cap"}},
     }
     payload_bytes = json.dumps(payload_dict).encode("utf-8")
     assert len(payload_bytes) > 1024 * 1024, (
@@ -671,3 +671,197 @@ def test_emitter_documents_payload_size_cap_constant():
     import wake_lifecycle_emitter as emitter
     assert isinstance(emitter._MAX_PAYLOAD_BYTES, int)
     assert 64 * 1024 <= emitter._MAX_PAYLOAD_BYTES <= 16 * 1024 * 1024
+
+
+# ---------- Shape-resilience for _extract_task_id (#620) ----------
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "wake_lifecycle"
+
+_REQUIRED_META_FIELDS = {
+    "capture_session_id",
+    "capture_date",
+    "capture_method",
+    "issue_ref",
+}
+
+
+def test_all_wake_lifecycle_fixtures_carry_meta_provenance():
+    """Convention enforcement for `tests/fixtures/wake_lifecycle/`: every
+    JSON fixture MUST have a top-level `_meta` dict carrying the four
+    required provenance fields. The README in that directory documents
+    the convention; this test enforces it so a future contributor cannot
+    silently add an un-provenanced fixture and weaken the structural
+    defense against the #612-class shape-divergence regression.
+
+    To extend this enforcement to a sibling fixture subdirectory (e.g.,
+    a future `tests/fixtures/peer_inject/`), add a new test function
+    that points at the new dir, or refactor this function to parametrize
+    over a list of provenance-required fixture roots.
+    """
+    fixture_paths = sorted(FIXTURES_DIR.glob("*.json"))
+    assert fixture_paths, (
+        f"No JSON fixtures found in {FIXTURES_DIR}; convention is moot "
+        f"if the directory is empty — verify the test is pointed at the "
+        f"right path."
+    )
+    for fixture_path in fixture_paths:
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+        assert "_meta" in data, (
+            f"{fixture_path.name}: missing top-level `_meta` sibling key. "
+            f"See {FIXTURES_DIR.name}/README.md for the convention."
+        )
+        meta = data["_meta"]
+        assert isinstance(meta, dict), (
+            f"{fixture_path.name}: `_meta` must be a dict, got {type(meta).__name__}"
+        )
+        missing = _REQUIRED_META_FIELDS - set(meta.keys())
+        assert not missing, (
+            f"{fixture_path.name}: `_meta` missing required fields: {missing}. "
+            f"Required: {_REQUIRED_META_FIELDS}."
+        )
+
+
+class TestExtractTaskIdShapeResilience:
+    """Pin _extract_task_id behavior across every shape it must handle.
+
+    Production `TaskCreate` `tool_response` is **nested**
+    (`tool_response.task.id`) per #612's logging-shim capture; production
+    `TaskUpdate` `tool_response` is **flat** (`tool_response.id`). The
+    regression in #620 was that the function only probed the flat shape,
+    so every TaskCreate returned None and the auto-Arm path was dead.
+
+    This class fossilizes the precedence + shape-resilience contract.
+    Test #1 is the counter-test-by-revert for the #620 fix: reverting
+    the nested-task probe makes it fail.
+    """
+
+    @staticmethod
+    def _extract(input_data):
+        sys.path.insert(0, str(HOOK_DIR))
+        import wake_lifecycle_emitter as emitter
+        return emitter._extract_task_id(input_data)
+
+    def test_taskcreate_production_nested_task_shape(self):
+        """The #620 regression test. Pipes the production TaskCreate
+        shape (`tool_response.task.id`) and asserts the id is extracted.
+        Counter-test-by-revert: revert the nested-task probe and this
+        fails — the function returns None, replicating the bug."""
+        result = self._extract({"tool_response": {"task": {"id": "5"}}})
+        assert result == "5"
+
+    def test_taskupdate_production_flat_shape(self):
+        """Fossilizes the working TaskUpdate shape. The flat fallback
+        must keep working alongside the new nested probe."""
+        result = self._extract({"tool_response": {"id": "5"}})
+        assert result == "5"
+
+    def test_tool_input_taskid_priority(self):
+        """When both `tool_input.taskId` and a tool_response id are
+        present, `tool_input` wins. Pins the precedence so a future
+        reorder breaks this test rather than silently inverting."""
+        result = self._extract({
+            "tool_input": {"taskId": "from-input"},
+            "tool_response": {"task": {"id": "from-response"}},
+        })
+        assert result == "from-input"
+
+    def test_unknown_shape_returns_none(self):
+        """Fail-open on unknown shape: an unrecognized `tool_response`
+        sub-key returns None, allowing the caller to suppressOutput
+        cleanly without crashing."""
+        result = self._extract(
+            {"tool_response": {"unexpected_key": {"id": "lost"}}}
+        )
+        assert result is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"tool_input": {}, "tool_response": {}},
+            {},
+        ],
+        ids=["both-empty-dicts", "fully-empty-input"],
+    )
+    def test_empty_dicts_return_none(self, payload):
+        """No id anywhere → None. Covers both the empty-sub-dicts and
+        the fully-empty-input shapes."""
+        assert self._extract(payload) is None
+
+    @pytest.mark.parametrize(
+        "bad_id",
+        [5, None, ["x"], {"nested": "value"}, True],
+        ids=["int", "none", "list", "dict", "bool"],
+    )
+    def test_non_string_id_returns_none(self, bad_id):
+        """Only string ids are accepted. Pins the type discipline so
+        a future relaxation (e.g., `str(tid)` coercion) breaks loudly.
+
+        Probes both the nested and the flat path so a non-string id
+        in either position is rejected."""
+        # Nested path
+        assert self._extract({"tool_response": {"task": {"id": bad_id}}}) is None
+        # Flat path
+        assert self._extract({"tool_response": {"id": bad_id}}) is None
+
+    @pytest.mark.parametrize(
+        "whitespace_id",
+        ["   ", "\t", "\n", " \t\n ", " "],
+        ids=["spaces", "tab", "newline", "mixed-whitespace", "nbsp"],
+    )
+    def test_whitespace_only_id_returns_none(self, whitespace_id):
+        """Adversarial: a whitespace-only id is a string and truthy
+        (passes `isinstance(tid, str) and tid`), but downstream
+        `count_active_tasks` would silently fail to find a task by
+        whitespace id — masking the real failure mode. The hook's
+        `.strip()` handling rejects whitespace-only ids upfront so the
+        function returns None and `_decide_directive` exits cleanly.
+
+        Counter-test-by-revert: removing the `.strip()` handling makes
+        this test fail (the function returns the whitespace string).
+        Probes both the nested and the flat path so the discipline
+        applies symmetrically.
+        """
+        # Nested path
+        assert self._extract({"tool_response": {"task": {"id": whitespace_id}}}) is None
+        # Flat path
+        assert self._extract({"tool_response": {"id": whitespace_id}}) is None
+
+
+def test_arm_emitted_on_captured_production_taskcreate_payload(tmp_path):
+    """End-to-end #620 regression: pipe the captured production
+    TaskCreate stdin (from `fixtures/wake_lifecycle/task_create_production_shape.json`)
+    through the full hook entry-point and assert an Arm directive is
+    emitted. Counter-test-by-revert: revert the nested-task probe and
+    `_extract_task_id` returns None on this payload → the
+    `if not _extract_task_id(...)` guard exits → no Arm emit → this
+    test fails. The hand-crafted unit test
+    `test_taskcreate_production_nested_task_shape` covers the same
+    failure mode at the function level; this test additionally
+    exercises the full subprocess pipe so a regression in the hook's
+    main() wiring (e.g., re-introducing a flat-only probe somewhere
+    downstream) is also caught."""
+    fixture = json.loads(
+        (FIXTURES_DIR / "task_create_production_shape.json").read_text(encoding="utf-8")
+    )
+    # Strip the diagnostic _meta sibling; the hook would tolerate it,
+    # but pipe a clean payload to mirror what the platform actually
+    # sends.
+    fixture.pop("_meta", None)
+
+    home = tmp_path / "home"; home.mkdir()
+    sid = fixture["session_id"]
+    pdir = fixture["cwd"]
+    team = "team-prod"
+    _write_session_context(home, sid, pdir, team)
+    task_id = fixture["tool_response"]["task"]["id"]
+    _write_task(home, team, task_id, status="pending", owner="backend-coder")
+
+    out = _emit_output(fixture, home)
+    hso = out.get("hookSpecificOutput")
+    assert hso is not None, (
+        f"Expected Arm directive on captured production TaskCreate; "
+        f"got {out!r}. If `out == {{'suppressOutput': True}}`, the "
+        f"nested-task probe in _extract_task_id is missing — see #620."
+    )
+    assert hso["hookEventName"] == "PostToolUse"
+    assert "Skill(\"PACT:watch-inbox\")" in hso["additionalContext"]

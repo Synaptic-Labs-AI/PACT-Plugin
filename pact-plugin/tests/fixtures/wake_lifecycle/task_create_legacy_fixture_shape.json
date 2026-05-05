@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "capture_session_id": "n/a",
+    "capture_date": "pre-2026-05-02",
+    "capture_method": "legacy",
+    "issue_ref": "#620",
+    "notes": "Legacy hand-constructed TaskCreate fixture preserved for regression backstop. This is the FLAT tool_response.id shape that test fixtures used between PR #603 and #620; it does NOT match production. Kept here so a test can assert the function still extracts a task_id from this shape (the fix is additive — flat fallback remains, nested probe is added ahead of it). DO NOT use this shape for new tests; new tests MUST use task_create_production_shape.json."
+  },
+  "tool_name": "TaskCreate",
+  "session_id": "synthetic-legacy",
+  "cwd": "/tmp/proj",
+  "tool_input": {
+    "taskId": "5"
+  },
+  "tool_response": {
+    "id": "5"
+  }
+}

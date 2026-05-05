@@ -147,21 +147,60 @@ def _extract_task_id(input_data: dict[str, Any]) -> str | None:
     Pull the task_id out of the PostToolUse payload.
 
     PostToolUse stdin shape carries the original tool_input under
-    "tool_input" and the tool's response under "tool_response". Both
-    TaskCreate and TaskUpdate accept/return a task with an `id` field.
-    Defensively probe both paths; return None if neither yields a
-    string id.
+    "tool_input" and the tool's response under "tool_response".
+    TaskCreate's tool_response is nested — the created task is wrapped
+    under a "task" key (`tool_response.task.id`) — while TaskUpdate's
+    tool_response is flat (`tool_response.id`). Probe in precedence
+    order, returning the first match whose value is a string that is
+    non-empty after `.strip()`:
+
+      1. tool_input.taskId
+      2. tool_input.task_id
+      3. tool_response.task.id
+      4. tool_response.task.taskId
+      5. tool_response.task.task_id
+      6. tool_response.id
+      7. tool_response.taskId
+      8. tool_response.task_id
+
+    WHY the nested `tool_response.task.*` probes precede the flat
+    `tool_response.*` probes: production-typical TaskCreate payloads
+    are nested (per #612 logging-shim capture from session
+    pact-56ce3a2a on 2026-05-02). Placing nested probes first means
+    the production-common case hits the first matching probe; the
+    flat probes remain as fallback for TaskUpdate and for legacy/test
+    fixture shapes.
+
+    Returned values are guaranteed non-empty after strip — a
+    whitespace-only id (e.g. `"   "`) would propagate to a TaskStop
+    call with a syntactically-valid-but-semantically-empty id and
+    fail downstream; rejecting at the source is cheaper. Returns
+    None if no probe matches.
     """
     tool_input = input_data.get("tool_input") or {}
     if isinstance(tool_input, dict):
         tid = tool_input.get("taskId") or tool_input.get("task_id")
-        if isinstance(tid, str) and tid:
+        if isinstance(tid, str) and tid.strip():
             return tid
 
     tool_response = input_data.get("tool_response") or {}
     if isinstance(tool_response, dict):
-        tid = tool_response.get("id") or tool_response.get("taskId") or tool_response.get("task_id")
-        if isinstance(tid, str) and tid:
+        nested_task = tool_response.get("task") or {}
+        if isinstance(nested_task, dict):
+            tid = (
+                nested_task.get("id")
+                or nested_task.get("taskId")
+                or nested_task.get("task_id")
+            )
+            if isinstance(tid, str) and tid.strip():
+                return tid
+
+        tid = (
+            tool_response.get("id")
+            or tool_response.get("taskId")
+            or tool_response.get("task_id")
+        )
+        if isinstance(tid, str) and tid.strip():
             return tid
 
     return None

@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "capture_session_id": "pact-56ce3a2a",
+    "capture_date": "2026-05-02",
+    "capture_method": "logging-shim",
+    "issue_ref": "#612",
+    "notes": "Captured TaskCreate PostToolUse stdin showing the nested tool_response.task.id production shape. This is the shape every TaskCreate has carried since PR #603, but tests prior to #620 used the legacy flat shape (see task_create_legacy_fixture_shape.json) and the divergence stayed undetected because _extract_task_id silently returned None."
+  },
+  "tool_name": "TaskCreate",
+  "session_id": "pact-56ce3a2a",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "subject": "First active teammate task",
+    "description": "Initial work item dispatched to a teammate.",
+    "activeForm": "Working on first item"
+  },
+  "tool_response": {
+    "task": {
+      "id": "5",
+      "subject": "First active teammate task",
+      "status": "pending",
+      "owner": "backend-coder",
+      "blockedBy": [],
+      "blocks": []
+    }
+  }
+}
