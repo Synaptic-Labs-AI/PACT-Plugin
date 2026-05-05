@@ -256,11 +256,21 @@ class TestNoFirstActionFossilInConsumerCommands:
 class TestImperativeSoftPhrasingConvention:
     """v4.0.0 lazy-load cross-reference convention guard.
 
-    Orchestrator agent body uses two phrasing templates:
-      IMPERATIVE: `Read [name](path) immediately on detecting <trigger>`
-        — for decision-blocking protocols.
-      SOFT: `For full detail, see [name](path).`
-        — for reference-only protocols.
+    Orchestrator agent body uses two phrasing templates, both built around
+    the unified tool-call shape Read(file_path="../protocols/<file>.md"):
+
+      IMPERATIVE: **I MUST Read(file_path="...") before answering** whenever <trigger>
+        for decision-blocking protocols. Compels Read on trigger detection.
+
+      SOFT: For full detail, Read(file_path="...") when <use case>
+        for reference-only protocols. Read fires on operator demand.
+
+    Both forms include the explicit file_path= kwarg to match the actual
+    Read tool's call signature for maximum tool-call pattern recognition.
+
+    The IMPERATIVE form is reinforced by a top-of-body pre-commitment
+    paragraph that recruits consistency-with-self psychology to compel
+    compliance with each "I MUST" instruction below.
     """
 
     AGENTS_DIR = Path(__file__).parent.parent / "agents"
@@ -268,7 +278,6 @@ class TestImperativeSoftPhrasingConvention:
 
     IMPERATIVE_PROTOCOLS = [
         "algedonic.md",
-        "pact-communication-charter.md",
         "pact-s4-tension.md",
         "pact-s5-policy.md",
         "pact-state-recovery.md",
@@ -279,55 +288,66 @@ class TestImperativeSoftPhrasingConvention:
         "pact-variety.md",
         "pact-s4-checkpoints.md",
         "pact-workflows.md",
+        "pact-communication-charter.md",
     ]
 
     @pytest.mark.parametrize("protocol", IMPERATIVE_PROTOCOLS)
     def test_imperative_protocol_uses_imperative_phrasing(self, protocol):
         text = self.ORCHESTRATOR_PATH.read_text(encoding="utf-8")
-        link = f"](../protocols/{protocol})"
-        assert link in text, (
-            f"pact-orchestrator.md missing cross-reference to {protocol} entirely."
+        tool_call = f'Read(file_path="../protocols/{protocol}")'
+        assert tool_call in text, (
+            f"pact-orchestrator.md missing tool-call cross-reference to {protocol}."
         )
         idx = 0
         found_imperative = False
         while True:
-            i = text.find(link, idx)
+            i = text.find(tool_call, idx)
             if i == -1:
                 break
-            window_before = text[max(0, i - 60):i]
-            window_after = text[i + len(link):i + len(link) + 80]
-            if "Read " in window_before and "immediately" in window_after:
+            window_before = text[max(0, i - 30):i]
+            window_after = text[i + len(tool_call):i + len(tool_call) + 60]
+            if "I MUST" in window_before and "before answering" in window_after:
                 found_imperative = True
                 break
             idx = i + 1
         assert found_imperative, (
             f"pact-orchestrator.md references {protocol} but not in imperative "
-            f"`Read [name](path) immediately on detecting <trigger>` form. "
-            f"Architect-locked convention requires imperative phrasing for "
-            f"decision-blocking protocols."
+            f"`**I MUST `Read(file_path=\"...\")` before answering**` form. "
+            f"Convention requires imperative phrasing for decision-blocking protocols."
         )
 
     @pytest.mark.parametrize("protocol", SOFT_PROTOCOLS)
     def test_soft_protocol_does_not_use_imperative_phrasing(self, protocol):
         text = self.ORCHESTRATOR_PATH.read_text(encoding="utf-8")
-        link = f"](../protocols/{protocol})"
-        if link not in text:
+        tool_call = f'Read(file_path="../protocols/{protocol}")'
+        if tool_call not in text:
             return
         idx = 0
         offending = []
         while True:
-            i = text.find(link, idx)
+            i = text.find(tool_call, idx)
             if i == -1:
                 break
-            window_before = text[max(0, i - 60):i]
-            window_after = text[i + len(link):i + len(link) + 80]
-            if "Read " in window_before and "immediately" in window_after:
+            window_before = text[max(0, i - 30):i]
+            window_after = text[i + len(tool_call):i + len(tool_call) + 60]
+            if "I MUST" in window_before and "before answering" in window_after:
                 offending.append(i)
             idx = i + 1
         assert not offending, (
             f"pact-orchestrator.md references {protocol} in IMPERATIVE form "
-            f"({len(offending)} occurrence(s)). Architect-locked convention "
-            f"classifies {protocol} as SOFT (reference-only)."
+            f"({len(offending)} occurrence(s)). Convention classifies {protocol} as SOFT."
+        )
+
+    def test_pre_commitment_paragraph_present(self):
+        """Top-of-body pre-commitment paragraph is load-bearing infrastructure
+        for the imperative-class compliance mechanism. Without it, individual
+        imperative cross-references degrade to advisory under autopilot pressure
+        (the failure mode documented during runbook execution)."""
+        text = self.ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+        assert 'Pre-commitment: I follow every "I MUST" instruction' in text, (
+            "pact-orchestrator.md missing top-of-body pre-commitment paragraph. "
+            "Imperative cross-references rely on the pre-commitment to compel "
+            "compliance with the unified `**I MUST `Read(...)` before answering**` form."
         )
 
 
