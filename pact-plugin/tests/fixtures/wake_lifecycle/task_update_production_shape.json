@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "capture_session_id": "pact-56ce3a2a",
+    "capture_date": "2026-05-02",
+    "capture_method": "logging-shim",
+    "issue_ref": "#612",
+    "notes": "Captured TaskUpdate PostToolUse stdin showing the FLAT tool_response.id shape. TaskUpdate is currently flat in production (unlike TaskCreate which is nested). Fossilized here so a future platform shape change is caught by the parametrized shape-resilience test rather than silently regressing. The hook's flat-shape probe MUST keep working for this payload."
+  },
+  "tool_name": "TaskUpdate",
+  "session_id": "pact-56ce3a2a",
+  "cwd": "/Users/mj/Sites/collab/PACT-prompt",
+  "tool_input": {
+    "taskId": "5",
+    "status": "completed"
+  },
+  "tool_response": {
+    "id": "5",
+    "subject": "First active teammate task",
+    "status": "completed",
+    "owner": "backend-coder"
+  }
+}
