@@ -25,6 +25,7 @@
     "conversation-theory"
   ],
   "commands": [
+    "./commands/bootstrap.md",
     "./commands/orchestrate.md",
     "./commands/comPACT.md",
     "./commands/rePACT.md",
