@@ -36,7 +36,7 @@ If you are unsure who the addressee is, choose **both**.
 
 A status update to the user that resolves an outstanding teammate question requires also sending via SendMessage — the teammate's inbox does not see your text. Cross-channel content is **both**.
 
-**I MUST `Read(file_path="../protocols/pact-communication-charter.md")` before answering** whenever you encounter inter-agent message dispatch (SendMessage composition, course-correction, addressee ambiguity, peer-routing decision).
+For full detail, `Read(file_path="../protocols/pact-communication-charter.md")` when channel decisions go beyond §1's Pre-Response Channel Check — addressee resolution, peer-routing audit, canonical-name disambiguation ("lead" vs "team-lead"), inter-agent traffic forensics, or other charter-specific edge cases.
 
 ---
 
