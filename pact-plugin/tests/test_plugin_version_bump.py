@@ -12,6 +12,7 @@ suite-level invariants.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,12 @@ PLUGIN_JSON_PATH = (
 TARGET_VERSION = json.loads(PLUGIN_JSON_PATH.read_text(encoding="utf-8"))[
     "version"
 ]
+# Word-boundary pattern so e.g. "4.0.1" does NOT match "4.0.10" as a
+# substring. The negative-lookbehind/lookahead exclude digits and dots
+# on either side, so the version must appear as a self-contained token.
+_TARGET_VERSION_PATTERN = re.compile(
+    r"(?<![\d.])" + re.escape(TARGET_VERSION) + r"(?![\d.])"
+)
 
 
 # ---------- 4-file version invariants ----------
@@ -48,16 +55,18 @@ def test_marketplace_json_version():
 def test_root_readme_version():
     p = REPO_ROOT / "README.md"
     text = p.read_text(encoding="utf-8")
-    assert TARGET_VERSION in text, (
-        f"root README.md missing target version literal {TARGET_VERSION}"
+    assert _TARGET_VERSION_PATTERN.search(text), (
+        f"root README.md missing target version literal {TARGET_VERSION} "
+        f"as a word-bounded token (not a digit/dot-adjacent substring)"
     )
 
 
 def test_pact_plugin_readme_version():
     p = REPO_ROOT / "pact-plugin" / "README.md"
     text = p.read_text(encoding="utf-8")
-    assert TARGET_VERSION in text, (
-        f"pact-plugin/README.md missing version literal {TARGET_VERSION}"
+    assert _TARGET_VERSION_PATTERN.search(text), (
+        f"pact-plugin/README.md missing version literal {TARGET_VERSION} "
+        f"as a word-bounded token (not a digit/dot-adjacent substring)"
     )
 
 
