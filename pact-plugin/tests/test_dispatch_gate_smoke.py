@@ -104,14 +104,20 @@ def _seed_plugin(plugin_root: Path, agents=("pact-architect",)):
 
 
 def _seed_team(home: Path, team_name=_TEAM, members=(), tasks=()):
-    """Write a fake team config + tasks store under HOME/.claude/teams/."""
+    """Write fake team config + canonical tasks store.
+
+    config.json under ``HOME/.claude/teams/{team_name}/`` (read by
+    ``_team_member_names``); tasks under ``HOME/.claude/tasks/{team_name}/``
+    (the canonical store per ``shared/task_utils.py``, read by
+    ``has_task_assigned`` after the #663 B1 path-alignment fix).
+    """
     team_dir = home / ".claude" / "teams" / team_name
     team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(json.dumps({
         "team_name": team_name,
         "members": [{"name": m} for m in members],
     }), encoding="utf-8")
-    tasks_dir = team_dir / "tasks"
+    tasks_dir = home / ".claude" / "tasks" / team_name
     tasks_dir.mkdir(parents=True, exist_ok=True)
     for i, (owner, status) in enumerate(tasks):
         (tasks_dir / f"task_{i}.json").write_text(json.dumps({

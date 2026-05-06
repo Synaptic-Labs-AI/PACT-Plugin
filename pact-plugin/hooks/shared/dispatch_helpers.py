@@ -114,18 +114,20 @@ def has_task_assigned(team_name: str, name: str) -> bool:
     """True iff at least one task in ``team_name``'s task store has
     ``owner==name`` AND ``status in {"pending", "in_progress"}``.
 
-    Reads ``~/.claude/teams/{team_name}/tasks/*.json`` directly. TaskList
-    is a harness tool unavailable in subprocess context — direct FS read
-    is the only viable channel. Tolerant parsing: malformed JSON or
-    missing fields → skip that file (False contribution). Path traversal
-    is defended upstream (F3 regex on name; F5 session-equality on
-    team_name) — by the time this runs, both have passed validation.
+    Reads ``~/.claude/tasks/{team_name}/*.json`` directly — the canonical
+    task store per ``shared/task_utils.py`` (read_task_json,
+    iter_team_tasks). TaskList is a harness tool unavailable in subprocess
+    context — direct FS read is the only viable channel. Tolerant parsing:
+    malformed JSON or missing fields → skip that file (False contribution).
+    Path traversal is defended upstream (F3 regex on name; F5
+    session-equality on team_name) — by the time this runs, both have
+    passed validation.
     """
     if not isinstance(team_name, str) or not team_name:
         return False
     if not isinstance(name, str) or not name:
         return False
-    tasks_dir = Path.home() / ".claude" / "teams" / team_name / "tasks"
+    tasks_dir = Path.home() / ".claude" / "tasks" / team_name
     try:
         task_files = list(tasks_dir.glob("*.json"))
     except OSError:

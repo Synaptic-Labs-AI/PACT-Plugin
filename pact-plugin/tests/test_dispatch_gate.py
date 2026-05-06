@@ -123,7 +123,14 @@ def _seed_plugin(plugin_root: Path, agents=("pact-architect",)):
 
 
 def _seed_team(home: Path, team_name=_TEAM, members=(), tasks=()):
-    """Write a fake team config + tasks store under HOME/.claude/teams/."""
+    """Write fake team config + canonical tasks store.
+
+    config.json lives under ``HOME/.claude/teams/{team_name}/`` (the
+    ``_team_member_names`` read path). Task files live under
+    ``HOME/.claude/tasks/{team_name}/`` (the canonical task store per
+    ``shared/task_utils.py``, which is what ``has_task_assigned`` reads
+    after the #663 B1 path-alignment fix).
+    """
     team_dir = home / ".claude" / "teams" / team_name
     team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
@@ -135,7 +142,7 @@ def _seed_team(home: Path, team_name=_TEAM, members=(), tasks=()):
         ),
         encoding="utf-8",
     )
-    tasks_dir = team_dir / "tasks"
+    tasks_dir = home / ".claude" / "tasks" / team_name
     tasks_dir.mkdir(parents=True, exist_ok=True)
     for i, (owner, status) in enumerate(tasks):
         (tasks_dir / f"task_{i}.json").write_text(
@@ -752,3 +759,75 @@ def test_non_agent_tool_no_op(tmp_path, monkeypatch, capsys):
     code, out = _run_main(payload, capsys)
     assert code == 0
     assert out == _SUPPRESS_EXPECTED
+
+
+# =============================================================================
+# B1 path-alignment regression — has_task_assigned reads the canonical
+# task store at ~/.claude/tasks/{team_name}/, NOT the legacy
+# ~/.claude/teams/{team_name}/tasks/. Counter-test discipline (#638):
+# reverting the L128 path in shared/dispatch_helpers.py back to the legacy
+# layout makes test_b1_canonical_only flip from PASS to FAIL.
+# =============================================================================
+
+
+def test_b1_canonical_only_satisfies_f6(tmp_path, monkeypatch):
+    """has_task_assigned MUST read ~/.claude/tasks/{team_name}/.
+
+    Seed a task ONLY at the canonical path; leave the legacy path empty.
+    The fixed implementation returns True. The buggy pre-fix implementation
+    (which read the legacy path) would return False — that's the
+    counter-test cardinality.
+    """
+    from shared.dispatch_helpers import has_task_assigned
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    canonical = tmp_path / ".claude" / "tasks" / _TEAM
+    canonical.mkdir(parents=True)
+    (canonical / "1.json").write_text(
+        json.dumps({"id": "1", "owner": _NAME, "status": "pending"}),
+        encoding="utf-8",
+    )
+    legacy = tmp_path / ".claude" / "teams" / _TEAM / "tasks"
+    assert not legacy.exists()
+
+    assert has_task_assigned(_TEAM, _NAME) is True
+
+
+def test_b1_legacy_path_alone_does_not_satisfy_f6(tmp_path, monkeypatch):
+    """A task at ONLY the legacy ~/.claude/teams/{team}/tasks/ path must NOT
+    satisfy has_task_assigned. This pins the path the implementation reads
+    so a future regression to the legacy layout flips this assertion.
+    """
+    from shared.dispatch_helpers import has_task_assigned
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    legacy = tmp_path / ".claude" / "teams" / _TEAM / "tasks"
+    legacy.mkdir(parents=True)
+    (legacy / "1.json").write_text(
+        json.dumps({"id": "1", "owner": _NAME, "status": "pending"}),
+        encoding="utf-8",
+    )
+    canonical = tmp_path / ".claude" / "tasks" / _TEAM
+    assert not canonical.exists()
+
+    assert has_task_assigned(_TEAM, _NAME) is False
+
+
+def test_b1_canonical_path_aligns_with_task_utils(tmp_path, monkeypatch):
+    """The path has_task_assigned reads must be the same root that
+    task_utils.read_task_json uses. If task_utils ever moves, this test
+    surfaces the divergence at the dispatch-gate layer.
+    """
+    from shared.dispatch_helpers import has_task_assigned
+    from shared.task_utils import read_task_json
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    canonical = tmp_path / ".claude" / "tasks" / _TEAM
+    canonical.mkdir(parents=True)
+    (canonical / "1.json").write_text(
+        json.dumps({"id": "1", "owner": _NAME, "status": "pending"}),
+        encoding="utf-8",
+    )
+
+    assert has_task_assigned(_TEAM, _NAME) is True
+    assert read_task_json("1", _TEAM).get("owner") == _NAME
