@@ -23,14 +23,16 @@ Transition detection (post-only):
   effect is on disk. count_active_tasks already filters out signal-
   tasks and self-complete-exempt agents, so post is the lifecycle-
   relevant count.
-- TaskCreate + post == 1 → emit Arm (a TaskCreate that lifts the count
-  to 1 must have been the first lifecycle-relevant task; carve-out
-  creations leave post unchanged at 0).
+- TaskCreate + post >= 1 → emit Arm. PACT:watch-inbox is idempotent
+  (no-op when a valid STATE_FILE is on disk), so emitting on every
+  TaskCreate while count is positive is benign and race-immune to
+  parallel TaskCreate batches that land multiple task files before
+  any PostToolUse hook reads the filesystem.
 - TaskUpdate(status in {completed, deleted}) + post == 0 → emit
   Teardown. Skill's Teardown is idempotent (no-op if STATE_FILE absent),
   so over-eager emission on edge cases (terminal-status update of a
   never-counted signal-task while post==0) is benign.
-- Any other tool fire (non-status TaskUpdate, TaskCreate at post != 1,
+- Any other tool fire (non-status TaskUpdate, TaskCreate at post == 0,
   terminal-status TaskUpdate at post > 0): no-op.
 
 Output schema (load-bearing):
@@ -256,16 +258,21 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     Return the directive prose to emit, or None for no-op.
 
     Post-only transition detection:
-    - TaskCreate + post == 1 → Arm.
+    - TaskCreate + post >= 1 → Arm.
     - TaskUpdate(status in {completed, deleted}) + post == 0 → Teardown.
 
     count_active_tasks already filters carve-outs (signal-tasks,
-    self-complete-exempt owners), so post == 1 after a TaskCreate
-    means the create added the first lifecycle-relevant task, and
+    self-complete-exempt owners), so post >= 1 after a TaskCreate
+    means at least one lifecycle-relevant task is active, and
     post == 0 after a terminal-status TaskUpdate means the team
-    has no remaining lifecycle-relevant work. The skill's Arm and
-    Teardown are both idempotent, so any over-eager emit on edge
-    cases is benign.
+    has no remaining lifecycle-relevant work. The Arm threshold is
+    positive-bound (not strict-equality) so a parallel TaskCreate
+    batch that lands N >= 2 task files before any PostToolUse hook
+    reads the filesystem still emits Arm; the skill's idempotency
+    absorbs the redundant emits on subsequent TaskCreates within
+    the same active window. Both Arm and Teardown are idempotent
+    in the skill layer, so any over-eager emit on edge cases is
+    benign.
     """
     if not _is_lead_session(input_data, team_name):
         return None
@@ -284,7 +291,7 @@ def _decide_directive(input_data: dict[str, Any], team_name: str) -> str | None:
     # transitions on a typical task lifecycle; gating the I/O on the
     # terminal-status check eliminates ~9k wasted reads/session.
     if tool_name == "TaskCreate":
-        if count_active_tasks(team_name) == 1:
+        if count_active_tasks(team_name) >= 1:
             return _ARM_DIRECTIVE
         return None
 

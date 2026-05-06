@@ -5,9 +5,11 @@ Pipes synthesized stdin payloads through the emitter via subprocess and
 asserts:
 - hookEventName="PostToolUse" present on all directive emits (REQUIRED;
   silent platform rejection without it).
-- 0->1 active-task transition emits Arm; 1->0 emits Teardown.
-- Non-status TaskUpdate, Task/Agent spawn, and TaskCreate at non-zero
-  pre-state are no-ops.
+- TaskCreate with post-count >= 1 emits Arm; 1->0 TaskUpdate emits
+  Teardown. PACT:watch-inbox idempotency absorbs redundant Arm emits
+  on subsequent TaskCreates within the same active window.
+- Non-status TaskUpdate, Task/Agent spawn, and TaskCreate at zero
+  post-count are no-ops.
 - Fail-open exit-0 + suppressOutput sentinel on malformed stdin /
   missing team_name / unexpected exception.
 - hooks.json registers the emitter under PostToolUse with matcher
@@ -270,18 +272,20 @@ def test_teardown_directive_contains_precondition_phrase(tmp_path):
     assert "Last active teammate task completed" in out["hookSpecificOutput"]["additionalContext"]
 
 
-def test_no_op_on_second_active_task_create(tmp_path):
+def test_arm_emits_on_second_active_task_create(tmp_path):
     home = tmp_path / "home"; home.mkdir()
     sid = "s"; pdir = "/tmp/p"; team = "t"
     _write_session_context(home, sid, pdir, team)
-    # Pre-existing active task + just-created task → 1->2 transition.
+    # Pre-existing active task + just-created task → post-count >= 1.
+    # Positive-bound predicate emits Arm; PACT:watch-inbox idempotency
+    # absorbs the redundant emit when STATE_FILE is already on disk.
     _write_task(home, team, "existing", status="in_progress", owner="x")
     _write_task(home, team, "new", status="in_progress", owner="y")
     out = _emit_output({
         "tool_name": "TaskCreate", "session_id": sid, "cwd": pdir,
         "tool_input": {"taskId": "new"}, "tool_response": {"task": {"id": "new"}},
     }, home)
-    assert out == {"suppressOutput": True}
+    assert "First active teammate task created" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_no_op_on_create_of_signal_task(tmp_path):
@@ -591,8 +595,8 @@ def test_count_active_tasks_called_on_terminal_status_taskupdate():
 
 
 def test_count_active_tasks_called_on_taskcreate():
-    """TaskCreate path also requires the count (to detect 0->1
-    transition). Mirror of the terminal-status sanity test."""
+    """TaskCreate path also requires the count (positive-bound Arm
+    predicate). Mirror of the terminal-status sanity test."""
     sys.path.insert(0, str(HOOK_DIR))
     import wake_lifecycle_emitter as emitter
 
