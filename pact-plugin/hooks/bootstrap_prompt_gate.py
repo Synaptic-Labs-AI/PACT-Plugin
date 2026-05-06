@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 import shared.pact_context as pact_context
+from bootstrap_gate import is_marker_set
 from shared import BOOTSTRAP_MARKER_NAME
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -58,8 +59,15 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         # No session dir → non-PACT session or uninitialized context → no-op
         return None
 
-    marker_path = Path(session_dir) / BOOTSTRAP_MARKER_NAME
-    if marker_path.exists():
+    # R2-B1 / R2-M1 / R2-S-A2 (3-reviewer convergence): use the same
+    # safe-marker-check helper as the sibling bootstrap_gate.py to close
+    # the defense-asymmetry. The helper enforces S2 (planted-symlink-at-
+    # marker rejection via os.lstat + S_ISREG) + S4 (ancestor-symlink
+    # rejection via Path.resolve containment). A bare `Path.exists()`
+    # check here would have admitted a planted symlink that the sibling
+    # gate would correctly reject, leaving prompt-gate as the weaker
+    # surface. Single safe-check contract across both enforcement points.
+    if is_marker_set(Path(session_dir)):
         # Bootstrap already done → suppress (zero tokens)
         return None
 
