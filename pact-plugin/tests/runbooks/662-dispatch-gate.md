@@ -12,7 +12,7 @@ The runbook validates four enforcement surfaces:
 - **F18 Bash-marker-bypass** — `bootstrap_gate.is_marker_set` rejects an
   empty/forged `bootstrap-complete` file.
 - **F7 advisory injection** — does PreToolUse `additionalContext` reach
-  the dispatching agent's next turn? (Empirical; informs `PACT_DISPATCH_F7_MODE`
+  the dispatching agent's next turn? (Empirical; informs `PACT_DISPATCH_INLINE_MISSION_MODE`
   flip from `warn` → `deny`.)
 - **F25 sabotaged-import** — runtime gate-logic exception fail-closes
   with `hookEventName="PreToolUse"`.
@@ -164,11 +164,11 @@ shape and `v == F24_MARKER_VERSION`.
 
 **Goal**: observe whether PreToolUse `additionalContext` actually
 reaches the dispatcher's next turn. This is the calibration input for
-flipping `PACT_DISPATCH_F7_MODE` from `warn` (default) to `deny`.
+flipping `PACT_DISPATCH_INLINE_MISSION_MODE` from `warn` (default) to `deny`.
 
 **Steps**:
 
-1. With `PACT_DISPATCH_F7_MODE` unset (default `warn`), provoke an F7
+1. With `PACT_DISPATCH_INLINE_MISSION_MODE` unset (default `warn`), provoke an F7
    trip — dispatch a properly-named teammate but with a long inline
    prompt (≥ 800 chars) AND no `TaskList` / `task list` /
    `tasks assigned` / `check your tasks` phrase in the prompt.
@@ -190,12 +190,12 @@ flipping `PACT_DISPATCH_F7_MODE` from `warn` (default) to `deny`.
 
 - Spawn succeeds, journal records the WARN, but dispatcher proceeds as
   if no advisory landed. This is the calibration trigger to flip
-  `export PACT_DISPATCH_F7_MODE=deny` in the operator's shell rc.
+  `export PACT_DISPATCH_INLINE_MISSION_MODE=deny` in the operator's shell rc.
 
-### 3.1 Variant — `PACT_DISPATCH_F7_MODE=shadow`
+### 3.1 Variant — `PACT_DISPATCH_INLINE_MISSION_MODE=shadow`
 
 ```
-export PACT_DISPATCH_F7_MODE=shadow
+export PACT_DISPATCH_INLINE_MISSION_MODE=shadow
 ```
 
 Restart session. Repeat the F7-trip dispatch.
@@ -208,10 +208,10 @@ Restart session. Repeat the F7-trip dispatch.
       treats it as a normal allow; the journal entry is the calibration
       data).
 
-### 3.2 Variant — `PACT_DISPATCH_F7_MODE=deny`
+### 3.2 Variant — `PACT_DISPATCH_INLINE_MISSION_MODE=deny`
 
 ```
-export PACT_DISPATCH_F7_MODE=deny
+export PACT_DISPATCH_INLINE_MISSION_MODE=deny
 ```
 
 Restart session. Repeat the F7-trip dispatch.
@@ -222,7 +222,7 @@ Restart session. Repeat the F7-trip dispatch.
 - [ ] `permissionDecisionReason` references F7 message.
 - [ ] Journal records `decision="DENY"`, `f_row="F7"`.
 
-**Revert**: `unset PACT_DISPATCH_F7_MODE` for subsequent sections.
+**Revert**: `unset PACT_DISPATCH_INLINE_MISSION_MODE` for subsequent sections.
 
 ---
 
@@ -265,7 +265,7 @@ A successful run hits Sections 1, 1.1, 2, 2.1, 3 (mode-default), 3.1,
 `RUNBOOK_RUN_DATES.md` per the section header below.
 
 If F7 §3 fails (advisory silently dropped), the mitigation is a config
-change, not a code regression: set `PACT_DISPATCH_F7_MODE=deny` in the
+change, not a code regression: set `PACT_DISPATCH_INLINE_MISSION_MODE=deny` in the
 project / user shell environment until the platform behavior changes.
 File a tracking issue against the platform repo (not the plugin).
 

@@ -74,7 +74,7 @@ Environment variables that tune hook behavior:
 
 | Variable | Default | Allowed values | Effect |
 |---|---|---|---|
-| `PACT_DISPATCH_F7_MODE` | `warn` | `warn` / `deny` / `shadow` | Dispatch-gate F7 prompt-heuristic disposition. `warn` emits an advisory `additionalContext`; `deny` blocks the spawn (flip after the F22 counter-test in `tests/runbooks/662-dispatch-gate.md` confirms `additionalContext` is silently dropped under PreToolUse); `shadow` journals only — F7 trigger is observable but neither WARNs nor DENYs (calibration / first-session safety net). F1-F6, F14, F15 are unaffected. Unknown values fall back to `warn`. |
+| `PACT_DISPATCH_INLINE_MISSION_MODE` | `warn` | `warn` / `deny` / `shadow` | Disposition of the dispatch-gate inline-mission heuristic (flags dispatchers inlining mission text into `prompt=` instead of using the canonical "check TaskList" form; F7 in the #662 failure-mode index). `warn` emits an advisory `additionalContext`; `deny` blocks the spawn (flip after the F22 counter-test in `tests/runbooks/662-dispatch-gate.md` confirms `additionalContext` is silently dropped under PreToolUse); `shadow` journals only — the trigger is observable but neither WARNs nor DENYs (calibration / first-session safety net). F1-F6, F14, F15 are unaffected. Unknown values fall back to `warn`. |
 
 ## Full Documentation
 
