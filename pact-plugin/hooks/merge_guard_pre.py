@@ -29,17 +29,46 @@ import sys
 import time
 from pathlib import Path
 
-import shared.pact_context as pact_context
-from shared.pact_context import get_session_id
+# Issue #658 / PR #660 Future #5: fail-closed wrapper around all module-level
+# risky work (cross-package imports + regex compilations). If ANY of this load
+# fails (broken Python install, missing shared.pact_context, syntax error in
+# merge_guard_common, malformed regex), the harness sees a `permissionDecision:
+# deny` output with the required `hookEventName` BEFORE the process exits —
+# instead of an empty stdout that would fail open.
+#
+# The handler depends ONLY on stdlib modules already imported above this block
+# (json, sys), so it remains functional even if every cross-package import below
+# fails. Audit anchor: hookEventName must be present in any deny output.
+try:
+    import shared.pact_context as pact_context
+    from shared.pact_context import get_session_id
 
-# Shared constants and cleanup — single source of truth for both hooks
-sys.path.insert(0, str(Path(__file__).parent))
-from shared.merge_guard_common import (
-    TOKEN_TTL,
-    TOKEN_DIR,
-    TOKEN_PREFIX,
-    cleanup_consumed_tokens as _cleanup_consumed_tokens,
-)
+    # Shared constants and cleanup — single source of truth for both hooks
+    sys.path.insert(0, str(Path(__file__).parent))
+    from shared.merge_guard_common import (
+        TOKEN_TTL,
+        TOKEN_DIR,
+        TOKEN_PREFIX,
+        cleanup_consumed_tokens as _cleanup_consumed_tokens,
+    )
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
+    # Hand-built deny output using only stdlib (json, sys). Cannot rely on any
+    # constants or helpers from the failed imports.
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Merge guard failed to load — blocking for safety. "
+                "Check hook installation and shared module availability."
+            ),
+        }
+    }))
+    print(
+        f"Hook load error (merge_guard_pre): {_module_load_error}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # Optional global flags between CLI tool and subcommand.
 # (?:\S+\s+)* matches zero or more flag+value tokens (e.g., --repo owner/repo).
@@ -55,8 +84,35 @@ _GH_API_PREFIX = _GH_PREFIX + r"api\b"
 # the hook display instead of showing "hook error (No output)".
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
+
+def _emit_load_failure_deny(stage: str, error: BaseException) -> None:
+    """Emit fail-closed deny output for a module-load-time failure.
+
+    Issue #658 / PR #660 Future #5: any module-level work that can fail
+    (cross-package imports, regex compilations) must produce a structured
+    deny — not an empty stdout that the harness treats as fail-open.
+
+    Uses ONLY stdlib (json, sys) so it remains functional even when every
+    cross-package import has failed. Audit anchor: hookEventName must be
+    present in any deny output.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Merge guard failed to load — blocking for safety. "
+                "Check hook installation and shared module availability."
+            ),
+        }
+    }))
+    print(f"Hook load error (merge_guard_pre, {stage}): {error}", file=sys.stderr)
+    sys.exit(2)
+
+
 # Patterns for dangerous commands
-DANGEROUS_PATTERNS = [
+try:
+    DANGEROUS_PATTERNS = [
     # PR merge via gh CLI
     re.compile(_GH_PREFIX + r"pr\s+merge\b"),
     # PR close with --delete-branch via gh CLI (bare close is reversible)
@@ -115,12 +171,14 @@ DANGEROUS_PATTERNS = [
     re.compile(_GIT_PREFIX + r"push\s+(?:-\S+\s+)*\S+\s+master(?!:)\b"),
 ]
 
-# Pre-compiled patterns for helper functions (consistent with DANGEROUS_PATTERNS style).
-_GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
-_GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
-# PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
-# between merge/close and the PR number.
-_GH_PR_NUMBER_RE = re.compile(_GH_PREFIX + r"pr\s+(?:merge|close)\s+" + _GH_GLOBAL_FLAGS + r"(\d+)")
+    # Pre-compiled patterns for helper functions (consistent with DANGEROUS_PATTERNS style).
+    _GH_PR_MERGE_RE = re.compile(_GH_PREFIX + r"pr\s+merge\b")
+    _GH_PR_CLOSE_RE = re.compile(_GH_PREFIX + r"pr\s+close\b")
+    # PR number extraction: allows optional subcommand flags (e.g., --admin, --squash)
+    # between merge/close and the PR number.
+    _GH_PR_NUMBER_RE = re.compile(_GH_PREFIX + r"pr\s+(?:merge|close)\s+" + _GH_GLOBAL_FLAGS + r"(\d+)")
+except BaseException as _pattern_compile_error:  # noqa: BLE001 — fail-closed catch-all
+    _emit_load_failure_deny("pattern compilation", _pattern_compile_error)
 
 
 def _has_pipe_to_shell(command: str) -> bool:
