@@ -565,6 +565,25 @@ class TestMarkerNameConsistencyEncodingTolerant:
                 rf'touch\s+\\\s*\n\s*"[^"]*/'
                 rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
             ),
+            (
+                "printf-create",
+                rf'printf\s+"[^"]*"\s*>\s*"[^"]*/'
+                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            ),
+            (
+                "no-op redirect-create",
+                rf':\s*>\s*"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            ),
+            (
+                "echo-no-output redirect-create",
+                rf'echo\s+-n[^>]*>\s*"[^"]*/'
+                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            ),
+            (
+                "bare redirect-create",
+                rf'(?:^|[\s;&])>\s*"[^"]*/'
+                rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            ),
         ],
     )
     def test_at_least_one_marker_write_encoding_matches(
@@ -607,18 +626,24 @@ class TestMarkerNameConsistencyEncodingTolerant:
             rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
             rf'touch\s+\\\s*\n\s*"[^"]*/'
             rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            rf'printf\s+"[^"]*"\s*>\s*"[^"]*/'
+            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            rf':\s*>\s*"[^"]*/{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            rf'echo\s+-n[^>]*>\s*"[^"]*/'
+            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
+            rf'(?:^|[\s;&])>\s*"[^"]*/'
+            rf'{re.escape(BOOTSTRAP_MARKER_NAME)}"',
         ]
         matched = [
             p for p in encodings
             if re.search(p, bootstrap_text, re.MULTILINE)
         ]
         assert matched, (
-            "commands/bootstrap.md does not contain the marker-write "
-            "invocation in any supported shell encoding. The marker "
-            "name appears in the file (per "
-            "test_marker_name_appears_in_bootstrap_md) but not in a "
-            "shape that semantically writes the marker — verify the "
-            "step that creates ${{session_dir}}/{name} is intact, or "
-            "extend the encoding list above if the author chose a new "
-            "supported shape.".format(name=BOOTSTRAP_MARKER_NAME)
+            f"commands/bootstrap.md does not contain a marker-write "
+            f"invocation in any supported shell encoding. The marker "
+            f"name {BOOTSTRAP_MARKER_NAME!r} appears in the file (per "
+            f"test_marker_name_appears_in_bootstrap_md) but not in a "
+            f"shape that semantically writes the marker. Either restore "
+            f"the marker-write step OR add the new encoding to the "
+            f"`encodings` list above + the parametrize list."
         )
