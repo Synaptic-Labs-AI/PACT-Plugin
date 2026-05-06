@@ -90,8 +90,8 @@ def is_marker_set(session_dir: Path | None) -> bool:
         symlink at e.g. ~/.claude redirecting to attacker-controlled
         directory would otherwise allow attacker to plant a regular-file
         marker satisfying the leaf-only check)
-      - any OSError on stat (treated as marker-absent → fail-closed for
-        the gate-bypass class; gate stays armed)
+      - any OSError on stat (treated as marker-absent so the gate stays
+        armed)
 
     The plan §High-Risk-TDD-Specs Q4 names this as a 7-method TDD target;
     extracting it as a public callable closes the plan-vs-implementation

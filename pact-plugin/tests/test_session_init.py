@@ -4541,30 +4541,6 @@ class TestSessionInitDirectiveAcrossAllSources:
         )
 
 
-# ---------------------------------------------------------------------------
-# #500 plugin-version banner integration + counter-test-by-revert (moved
-# from test_plugin_manifest.py per reviewer feedback — integration tests
-# belong alongside the hook they exercise).
-# ---------------------------------------------------------------------------
-
-
-def _make_banner_plugin_root(tmp_path, manifest=None):
-    """Build a plugin-root tree with optional manifest content.
-
-    Returns (plugin_root, manifest_path_or_none).
-    """
-    plugin_root = tmp_path / "installed-cache"
-    claude_plugin = plugin_root / ".claude-plugin"
-    if manifest is None:
-        return plugin_root, None
-    claude_plugin.mkdir(parents=True)
-    manifest_path = claude_plugin / "plugin.json"
-    manifest_path.write_text(manifest)
-    return plugin_root, manifest_path
-
-
-
-
 class TestStripOrphanRoutingMarkers:
     """SUNSET-BEFORE-v4.x.y migration helper: strips stale PACT_ROUTING
     markers from the project CLAUDE.md.

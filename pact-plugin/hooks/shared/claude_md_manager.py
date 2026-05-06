@@ -279,7 +279,7 @@ def _strip_legacy_lines(content: str) -> str:
 
 def strip_orphan_kernel_block() -> str | None:
     """
-    SUNSET BEFORE v4.x.y: one-version-window migration helper.
+    SUNSET BEFORE v5.0.0: one-version-window migration helper.
 
     Strips the obsolete `<!-- PACT_START:... -->...<!-- PACT_END -->` kernel
     block from `~/.claude/CLAUDE.md` if present. The block was injected by
