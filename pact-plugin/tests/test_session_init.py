@@ -4432,3 +4432,114 @@ def _make_banner_plugin_root(tmp_path, manifest=None):
     return plugin_root, manifest_path
 
 
+
+
+class TestStripOrphanRoutingMarkers:
+    """SUNSET-BEFORE-v4.x.y migration helper: strips stale PACT_ROUTING
+    markers from the project CLAUDE.md.
+
+    Tests the proper-pair, orphan-single, reversed-pair, and every-session
+    legacy-lines paths. Adapts the _StripOrphanBlockTestBase shape for the
+    project-dir variant (target file resolved via CLAUDE_PROJECT_DIR
+    rather than Path.home()).
+    """
+
+    START_MARKER = "<!-- PACT_ROUTING_START:v3.21 -->"
+    END_MARKER = "<!-- PACT_ROUTING_END -->"
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        self.project_dir = project_dir
+        self.target_file = project_dir / "CLAUDE.md"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+
+    def _write_target(self, content: str) -> None:
+        self.target_file.write_text(content, encoding="utf-8")
+
+    def _call_stripper(self):
+        from session_init import strip_orphan_routing_markers
+        return strip_orphan_routing_markers()
+
+    def test_proper_pair_strips_block_and_returns_status(self):
+        self._write_target(
+            f"# user\n{self.START_MARKER}\nstale routing\n{self.END_MARKER}\n# post\n"
+        )
+        result = self._call_stripper()
+        assert result is not None
+        assert "Stripped stale PACT_ROUTING block" in result
+        new_content = self.target_file.read_text(encoding="utf-8")
+        assert self.START_MARKER not in new_content
+        assert self.END_MARKER not in new_content
+        assert "stale routing" not in new_content
+        assert "user" in new_content
+        assert "post" in new_content
+
+    def test_no_markers_returns_none_when_no_legacy_lines(self):
+        self._write_target("# user content only\nno markers no legacy\n")
+        # No-op: no markers AND no legacy orchestrator-loader prose.
+        assert self._call_stripper() is None
+
+    def test_orphan_start_only_is_stripped(self):
+        # Single-marker survivor cleanup: regex sweeps the lone START line
+        # and leaves the rest intact.
+        self._write_target(f"# pre\n{self.START_MARKER}\n# post\n")
+        result = self._call_stripper()
+        assert result is not None
+        new_content = self.target_file.read_text(encoding="utf-8")
+        assert self.START_MARKER not in new_content
+        assert "pre" in new_content
+        assert "post" in new_content
+
+    def test_orphan_end_only_is_stripped(self):
+        self._write_target(f"# pre\n{self.END_MARKER}\n# post\n")
+        result = self._call_stripper()
+        assert result is not None
+        new_content = self.target_file.read_text(encoding="utf-8")
+        assert self.END_MARKER not in new_content
+        assert "pre" in new_content
+        assert "post" in new_content
+
+    def test_reversed_pair_is_stripped(self):
+        # END before START — proper-pair regex misses; orphan-single sweep
+        # removes both lone markers but preserves the body between them.
+        self._write_target(
+            f"# pre\n{self.END_MARKER}\nbody\n{self.START_MARKER}\n# post\n"
+        )
+        result = self._call_stripper()
+        assert result is not None
+        new_content = self.target_file.read_text(encoding="utf-8")
+        assert self.START_MARKER not in new_content
+        assert self.END_MARKER not in new_content
+        assert "body" in new_content
+
+    def test_symlink_is_no_op(self, tmp_path):
+        # Replace target_file with a symlink. Stripper must defensively skip.
+        real_target = tmp_path / "real_claude.md"
+        real_target.write_text(
+            f"# user\n{self.START_MARKER}\nstale\n{self.END_MARKER}\n",
+            encoding="utf-8",
+        )
+        if self.target_file.exists():
+            self.target_file.unlink()
+        self.target_file.symlink_to(real_target)
+        # Returns None on symlink (defensive no-op).
+        assert self._call_stripper() is None
+        # Real target must not have been rewritten.
+        assert self.START_MARKER in real_target.read_text(encoding="utf-8")
+
+    def test_legacy_lines_stripped_every_session(self):
+        # Symmetry restoration: legacy orchestrator-loader prose must be
+        # stripped on every session start, not only on first migration.
+        legacy_line = (
+            "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`."
+        )
+        self._write_target(
+            f"# user content\n{legacy_line}\nmore user content\n"
+        )
+        result = self._call_stripper()
+        assert result is not None
+        new_content = self.target_file.read_text(encoding="utf-8")
+        assert legacy_line not in new_content
+        assert "user content" in new_content

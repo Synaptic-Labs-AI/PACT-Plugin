@@ -261,6 +261,140 @@ def _strip_legacy_lines(content: str) -> str:
 
 
 
+def strip_orphan_kernel_block() -> str | None:
+    """
+    SUNSET BEFORE v4.x.y: one-version-window migration helper.
+
+    Strips the obsolete `<!-- PACT_START:... -->...<!-- PACT_END -->` kernel
+    block from `~/.claude/CLAUDE.md` if present. The block was injected by
+    pre-v4.0 plugin versions that delivered the orchestrator persona via
+    home-dir CLAUDE.md routing; v4.0+ delivers the persona via the
+    `claude --agent` flag instead, so the block is now stale.
+
+    Called from session_init.py on every SessionStart. Idempotent no-op
+    when the markers are absent (i.e., for fresh installs or after first
+    cleanup). Once the v4.0.0 release has been in the field long enough
+    that resumed users will have hit at least one v4.x SessionStart, this
+    function and its caller can be deleted.
+
+    Renamed from the v3.x `remove_stale_kernel_block` to mirror the
+    `strip_orphan_*` naming used by the sibling project-CLAUDE.md cleanup
+    in session_init.py.
+
+    Hardening:
+    - Symlink guard inside the lock (TOCTOU defense): refuses to operate
+      if `~/.claude/CLAUDE.md` is a symlink. Practical exploitability is
+      low (requires pre-existing local write access) but the defensive
+      guard is cheap.
+    - Malformed-pair feedback: when the migration skips due to a malformed
+      marker state (orphan marker or END-before-START), returns the warning
+      as a status string so session_init.py surfaces it via systemMessage.
+      Hook stderr is NOT shown to users by Claude Code, so a returned
+      string is the only way to deliver the warning.
+
+    Returns:
+        Status message on successful removal, None on no-op (clean,
+        absent markers) or error, or a "Migration skipped: ..." string
+        on defensive no-op (malformed marker state; session_init.py
+        routes these to systemMessages via the "failed"/"skipped" check).
+    """
+    target_file = Path.home() / ".claude" / "CLAUDE.md"
+    if not target_file.exists():
+        return None
+
+    # Concurrency guard: serialize read-mutate-write so two concurrent
+    # session_init hooks on the same home file cannot clobber each other.
+    # Fail-open on timeout — next session start will retry.
+    try:
+        with file_lock(target_file):
+            # Symlink guard INSIDE the lock (TOCTOU defense): is_symlink
+            # uses lstat under the hood which does NOT follow the link, so
+            # this is safe even if the link target is itself a malicious
+            # file. Inside the lock so an attacker cannot swap the target
+            # between an outside-lock check and the write.
+            if target_file.is_symlink():
+                return (
+                    "Migration skipped: ~/.claude/CLAUDE.md path "
+                    "precondition not met."
+                )
+
+            try:
+                content = target_file.read_text(encoding="utf-8")
+            except OSError:
+                return None
+
+            START_MARKER = "<!-- PACT_START:"
+            END_MARKER = "<!-- PACT_END -->"
+
+            has_start = START_MARKER in content
+            has_end = END_MARKER in content
+
+            if not has_start and not has_end:
+                # Normal idempotent no-op for already-migrated installs.
+                return None
+
+            if has_start != has_end:
+                # Only one of the two markers is present. Defensive no-op
+                # to avoid data loss; surface a status string so
+                # session_init.py routes it via systemMessage. This case
+                # can occur if a prior plugin write crashed mid-file or
+                # the user manually deleted one marker.
+                which = "PACT_START" if has_start else "PACT_END"
+                missing = "PACT_END" if has_start else "PACT_START"
+                return (
+                    f"Migration skipped: ~/.claude/CLAUDE.md contains "
+                    f"{which} but no matching {missing}. To avoid data "
+                    f"loss, inspect the file and either remove the "
+                    f"orphan {which} marker or restore the matching "
+                    f"{missing} marker."
+                )
+
+            pre_marker, rest = content.split(START_MARKER, 1)
+            if END_MARKER not in rest:
+                # END marker exists in content but appears textually
+                # before START. Same defensive handling.
+                return (
+                    "Migration skipped: ~/.claude/CLAUDE.md contains "
+                    "both PACT_START and PACT_END markers but PACT_END "
+                    "appears before PACT_START. Inspect the file and "
+                    "reorder or remove the orphan markers."
+                )
+
+            _, post_marker = rest.split(END_MARKER, 1)
+
+            # Preserve one blank line at the removal boundary so the
+            # user's spacing around the obsolete block survives the strip.
+            pre_clean = pre_marker.rstrip("\r\n")
+            post_clean = post_marker.lstrip("\r\n")
+            if pre_clean and post_clean:
+                new_content = pre_clean + "\n\n" + post_clean
+            elif pre_clean:
+                new_content = pre_clean + "\n"
+            elif post_clean:
+                new_content = post_clean
+            else:
+                new_content = ""
+
+            try:
+                target_file.write_text(new_content, encoding="utf-8")
+                os.chmod(str(target_file), 0o600)
+                return (
+                    "Removed obsolete PACT kernel block from "
+                    "~/.claude/CLAUDE.md"
+                )
+            except OSError as e:
+                return (
+                    f"Failed to remove stale kernel block: {str(e)[:50]}"
+                )
+    except TimeoutError:
+        return (
+            "Failed to acquire lock on ~/.claude/CLAUDE.md within 5s "
+            "(another session_init hook may be running concurrently). "
+            "Kernel-block migration skipped; will retry on next session "
+            "start."
+        )
+
+
 def extract_managed_region(content: str) -> tuple[str, int] | None:
     """
     Extract the PACT-managed region from a CLAUDE.md file.

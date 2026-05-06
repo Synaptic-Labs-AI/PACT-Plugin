@@ -89,6 +89,8 @@ from shared.claude_md_manager import (
     file_lock,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
+    strip_orphan_kernel_block,
+    _strip_legacy_lines,
 )
 from shared.session_resume import (
     update_session_info,
@@ -538,15 +540,35 @@ _PACT_ROUTING_BLOCK_RE = re.compile(
     r"<!-- PACT_ROUTING_START:.*?<!-- PACT_ROUTING_END -->\s*",
     re.DOTALL,
 )
+# Single-marker patterns for orphan-marker handling (extension): match a
+# lone PACT_ROUTING_START or PACT_ROUTING_END line that survives without
+# its pair. The proper-pair regex above runs first and consumes both
+# markers when ordered correctly; these run after to clean up the
+# remaining cases — orphan-single AND reversed-pair (END before START)
+# both reduce to "lone markers remain" after the proper-pair pass.
+_PACT_ROUTING_START_LINE_RE = re.compile(
+    r"<!-- PACT_ROUTING_START:[^>]*-->\s*",
+)
+_PACT_ROUTING_END_LINE_RE = re.compile(
+    r"<!-- PACT_ROUTING_END -->\s*",
+)
 
 
 def strip_orphan_routing_markers() -> str | None:
-    """Strip stale PACT_ROUTING_START..._END blocks from project CLAUDE.md.
+    """Strip stale PACT_ROUTING markers from project CLAUDE.md and apply
+    the every-session legacy-lines pass.
 
     v4.0.0 retired the routing-block injection — but upgraded users still
     have a `<!-- PACT_ROUTING_START -->...<!-- PACT_ROUTING_END -->` block
     in their project CLAUDE.md from prior plugin versions. Strip it here
-    on every SessionStart. Idempotent no-op when no markers are present.
+    on every SessionStart. The cleanup also handles orphan single markers
+    (just one of START/END present) and reversed pairs (END before START)
+    by treating any leftover marker after the proper-pair pass as an
+    orphan to remove. Idempotent no-op when no markers are present.
+
+    Also runs `_strip_legacy_lines` every session — restores the v3.x
+    symmetry where stale orchestrator-loader prose was scrubbed every
+    SessionStart, not only on the one-time PACT_MANAGED migration.
 
     Returns a status string on change so session_init surfaces it via
     additionalContext, or None when no action was taken. Fail-open on
@@ -567,7 +589,18 @@ def strip_orphan_routing_markers() -> str | None:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
+            # Step 1: strip proper-pair routing blocks (the common case).
             new_content = _PACT_ROUTING_BLOCK_RE.sub("", content)
+            # Step 2: any START or END markers remaining are orphans
+            # (single-marker survivors, or reversed pairs that step 1
+            # could not match because END appeared before START). Strip
+            # them line-by-line so the surrounding user prose is preserved.
+            new_content = _PACT_ROUTING_START_LINE_RE.sub("", new_content)
+            new_content = _PACT_ROUTING_END_LINE_RE.sub("", new_content)
+            # Step 3: apply legacy-lines pass every session (symmetry
+            # restoration). Strips stale orchestrator-loader prose that
+            # accumulates from older plugin versions.
+            new_content = _strip_legacy_lines(new_content)
             if new_content == content:
                 return None
             try:
@@ -713,6 +746,18 @@ def main():
         orphan_strip_msg = strip_orphan_routing_markers()
         if orphan_strip_msg:
             context_parts.append(orphan_strip_msg)
+
+        # 3d. SUNSET BEFORE v4.x.y: strip the obsolete PACT_START/PACT_END
+        # kernel block from ~/.claude/CLAUDE.md (v3.x kernel-in-home-dir
+        # architecture; replaced by --agent flag in v4.0). Idempotent no-op
+        # once stripped. "Migration skipped: ..." status routes to
+        # systemMessages so the user sees malformed-marker warnings.
+        kernel_strip_msg = strip_orphan_kernel_block()
+        if kernel_strip_msg:
+            if "failed" in kernel_strip_msg.lower() or "skipped" in kernel_strip_msg.lower():
+                system_messages.append(kernel_strip_msg)
+            else:
+                context_parts.append(kernel_strip_msg)
 
         # 4. Check for stale pinned context
         staleness_msg = check_pinned_staleness()

@@ -60,7 +60,7 @@ _SESSION_END = "<!-- SESSION_END -->"
 def mock_home(tmp_path, monkeypatch):
     """Patch Path.home() to return a tempdir-backed ~/.claude.
 
-    Required for any test that exercises remove_stale_kernel_block() or
+    Required for any test that exercises strip_orphan_kernel_block() or
     other functions that read/write under Path.home() / ".claude".
     """
     fake_home = tmp_path / "home"
@@ -216,12 +216,10 @@ class TestEnsureProjectMemoryMdErrorPaths:
         """C: when file_lock raises TimeoutError, ensure_project_memory_md
         must return the human-readable skip message and NOT create the file.
 
-        Coverage gap closed: the existing TestUpdatePactRoutingLockContention
-        suite exercises the analogous TimeoutError fail-open in
-        update_pact_routing, but no test exercises the equivalent path inside
-        ensure_project_memory_md. A regression here would mean a stuck lock
-        (concurrent session_init hooks) crashes session start instead of
-        skipping the project CLAUDE.md creation gracefully.
+        Coverage gap closed: ensure_project_memory_md must fail-open on
+        a stuck lock (concurrent session_init hooks) so session start
+        skips the project CLAUDE.md creation gracefully instead of
+        crashing.
 
         We monkeypatch the file_lock symbol on the claude_md_manager module
         directly to raise TimeoutError on entry — simpler than spinning up a
@@ -1996,7 +1994,7 @@ class TestManagedMarkerConstants:
 
     def test_managed_marker_names_avoid_pact_start_collision(self):
         """Marker names use PACT_MANAGED, NOT PACT_START, to avoid collision
-        with old kernel block markers that remove_stale_kernel_block() searches for.
+        with old kernel block markers that strip_orphan_kernel_block() searches for.
         """
         from shared.claude_md_manager import MANAGED_START_MARKER
         assert "PACT_MANAGED_START" in MANAGED_START_MARKER
@@ -2169,12 +2167,10 @@ class TestSessionInitMigrationIntegration:
 class TestStripLegacyLines:
     """Direct unit tests for `_strip_legacy_lines`.
 
-    Round-4 Item 7: the existing coverage is through two indirect paths
-    (`update_pact_routing` and `_build_migrated_content`), both of which
-    mask signal if `_strip_legacy_lines` itself regresses — downstream
-    assertions are dominated by the routing-block text. These tests
-    exercise the helper directly so a regression in the legacy-stripping
-    logic produces a targeted failure.
+    Direct coverage so a regression in the legacy-stripping logic
+    produces a targeted failure rather than masked signal from the
+    indirect call sites in `_build_migrated_content` and the every-
+    session pass inside `strip_orphan_routing_markers`.
     """
 
     # The exact stale line the v3.16.2 template carried. Pinned here as a
@@ -2245,9 +2241,9 @@ class TestStripLegacyLines:
     def test_idempotent_across_two_invocations(self):
         """Applying `_strip_legacy_lines` twice is the same as applying it
         once — the function is pure and deterministic. This matches the
-        expectation of shared helper usage (both `update_pact_routing` and
-        `_build_migrated_content` call it; running both consecutively must
-        not corrupt content).
+        expectation of shared helper usage (`_build_migrated_content` and
+        the every-session pass inside `strip_orphan_routing_markers` both
+        call it; running both consecutively must not corrupt content).
         """
         from shared.claude_md_manager import _strip_legacy_lines
 
@@ -2702,3 +2698,128 @@ class TestExtractManagedRegion:
         full_idx = local_idx + offset
         assert content[full_idx:full_idx + len("pin content")] == "pin content"
 
+
+
+class _StripOrphanBlockTestBase:
+    """Shared mixin for SUNSET-BEFORE-v4.x.y orphan-block strippers.
+
+    Subclasses configure:
+      - START_MARKER, END_MARKER (the marker pair the stripper hunts)
+      - target_file fixture (Path to the file the stripper operates on)
+      - call_stripper(self) -> str | None (invokes the stripper)
+
+    Each subclass exercises the same behavior matrix:
+      - both markers present + properly ordered → strip + return success status
+      - neither marker present → no-op (None)
+      - only START present → defensive no-op + skip status
+      - only END present → defensive no-op + skip status
+      - END before START → defensive no-op + skip status
+      - symlink → defensive no-op + skip status
+      - read OSError → fail-open (None)
+
+    Concrete classes follow at module bottom: TestStripOrphanKernelBlock
+    (home-dir kernel block) and TestStripOrphanRoutingMarkers
+    (project-dir routing block).
+    """
+
+    START_MARKER: str
+    END_MARKER: str
+
+    def _write_target(self, target_file: Path, content: str) -> None:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text(content, encoding="utf-8")
+
+    def call_stripper(self) -> str | None:
+        raise NotImplementedError
+
+    def get_target_file(self) -> Path:
+        raise NotImplementedError
+
+
+class TestStripOrphanKernelBlock(_StripOrphanBlockTestBase):
+    """SUNSET-BEFORE-v4.x.y migration helper: strips the obsolete v3.x
+    PACT_START/PACT_END block from ~/.claude/CLAUDE.md.
+
+    Uses the _StripOrphanBlockTestBase mixin to share the behavior matrix
+    with TestStripOrphanRoutingMarkers (project-dir variant).
+    """
+
+    START_MARKER = "<!-- PACT_START:v3.16 -->"
+    END_MARKER = "<!-- PACT_END -->"
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_home):
+        self.target_file = mock_home / ".claude" / "CLAUDE.md"
+
+    def call_stripper(self) -> str | None:
+        from shared.claude_md_manager import strip_orphan_kernel_block
+        return strip_orphan_kernel_block()
+
+    def test_proper_pair_strips_block_and_returns_success(self):
+        self._write_target(
+            self.target_file,
+            f"# user content\n{self.START_MARKER}\nstale prose\n{self.END_MARKER}\nmore user content\n",
+        )
+        result = self.call_stripper()
+        assert result is not None
+        assert "Removed obsolete PACT kernel block" in result
+        new_content = self.target_file.read_text(encoding="utf-8")
+        assert self.START_MARKER not in new_content
+        assert self.END_MARKER not in new_content
+        assert "user content" in new_content
+        assert "more user content" in new_content
+        assert "stale prose" not in new_content
+
+    def test_no_markers_returns_none(self):
+        self._write_target(self.target_file, "# user content only\n")
+        assert self.call_stripper() is None
+
+    def test_orphan_start_only_returns_skip_status(self):
+        self._write_target(self.target_file, f"# pre\n{self.START_MARKER}\n# post\n")
+        result = self.call_stripper()
+        assert result is not None
+        assert "skipped" in result.lower()
+        assert "PACT_END" in result
+        # File must NOT be rewritten when defensive-skipping
+        assert self.START_MARKER in self.target_file.read_text(encoding="utf-8")
+
+    def test_orphan_end_only_returns_skip_status(self):
+        self._write_target(self.target_file, f"# pre\n{self.END_MARKER}\n# post\n")
+        result = self.call_stripper()
+        assert result is not None
+        assert "skipped" in result.lower()
+        assert "PACT_START" in result
+        assert self.END_MARKER in self.target_file.read_text(encoding="utf-8")
+
+    def test_reversed_pair_returns_skip_status(self):
+        self._write_target(
+            self.target_file,
+            f"# pre\n{self.END_MARKER}\nbody\n{self.START_MARKER}\n# post\n",
+        )
+        result = self.call_stripper()
+        assert result is not None
+        assert "skipped" in result.lower()
+        assert "PACT_END appears before PACT_START" in result
+
+    def test_symlink_returns_skip_status(self, tmp_path):
+        # Replace target_file with a symlink to a real file under tmp_path
+        real_target = tmp_path / "real_claude.md"
+        real_target.write_text(
+            f"# user\n{self.START_MARKER}\nstale\n{self.END_MARKER}\n",
+            encoding="utf-8",
+        )
+        self.target_file.parent.mkdir(parents=True, exist_ok=True)
+        if self.target_file.exists():
+            self.target_file.unlink()
+        self.target_file.symlink_to(real_target)
+        result = self.call_stripper()
+        assert result is not None
+        assert "skipped" in result.lower()
+        # Real target must not have been rewritten
+        assert self.START_MARKER in real_target.read_text(encoding="utf-8")
+
+    def test_missing_target_file_returns_none(self):
+        # File doesn't exist — stripper short-circuits to None.
+        if self.target_file.exists():
+            self.target_file.unlink()
+        assert self.call_stripper() is None
