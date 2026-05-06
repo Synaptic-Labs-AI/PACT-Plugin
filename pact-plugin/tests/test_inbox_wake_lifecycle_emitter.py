@@ -1031,7 +1031,7 @@ class TestArmDirectiveOnParallelTaskCreateRace:
         returns 0 and `>= 1` rejects. Pins the rule that zero must
         remain a no-op even after the threshold relaxation."""
         fixture = self._load_fixture("task_create_parallel_burst_first.json")
-        home, _team = self._setup_session(tmp_path, fixture)
+        home, _ = self._setup_session(tmp_path, fixture)
         # Deliberately do NOT write task 10's file. The hook's
         # _extract_task_id will still parse the id from tool_response,
         # but count_active_tasks reads the tasks dir and returns 0.
