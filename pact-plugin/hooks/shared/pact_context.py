@@ -147,18 +147,22 @@ def init(input_data: dict) -> None:
     session_id = ""
     raw_id = input_data.get("session_id")
     if raw_id:
-        # S9 defense (security-engineer-review): strip control chars
-        # (C0 0x00-0x1F + DEL 0x7F + Unicode line terminators U+0085 /
-        # U+2028 / U+2029) from raw_id before it flows into the marker
-        # path. A crafted session_id like "valid\nFAKE_SEGMENT" would
-        # otherwise pollute the session_dir tree with a fake segment
-        # that escapes the expected single directory level.
-        # Sanitize-substitute (NOT reject): hooks proceed with the
-        # cleaned value so a malformed stdin doesn't crash the hook.
-        # Symmetric with session_init's classification ladder which
-        # uses the same SESSION_ID_CONTROL_CHARS_RE for failure-log
-        # dispatch.
-        session_id = SESSION_ID_CONTROL_CHARS_RE.sub("", str(raw_id))
+        # R2-S-r2-1 (security-engineer-review-r2): apply the SAME
+        # allowlist-substitute regex as the slug producer (one site
+        # below) so session_id and slug share one safe-path-component
+        # contract. The Cycle-2 fix used the narrower control-chars-
+        # only strip (SESSION_ID_CONTROL_CHARS_RE), which left shell
+        # metacharacters (`$`, backtick, `;`, `(`, `)`, etc.) admissible
+        # in session_id — they would survive the strip and reach the
+        # disclosed PACT_SESSION_DIR= path interpolated into
+        # bootstrap.md's shell command body. Symmetric defense per
+        # memory patterns_symmetric_sanitization.md: every interpolation
+        # sink shares the same allowlist regex `[^A-Za-z0-9_-]`, so
+        # asymmetric strip sets across sinks cannot become an
+        # attacker entry point.
+        # Sanitize-substitute (NOT reject) so malformed stdin doesn't
+        # crash the hook; cleaned id forms a single segment.
+        session_id = _UNSAFE_SLUG_CHARS_RE.sub("_", str(raw_id))
 
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
 

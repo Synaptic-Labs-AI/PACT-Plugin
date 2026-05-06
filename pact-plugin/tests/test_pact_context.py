@@ -1902,19 +1902,19 @@ class TestGetSessionDirAdversarial:
         # Slug ended up safe — `proj` + run-of-underscores + `bar`.
         assert "proj" in result and "bar" in result
 
-    def test_session_id_with_control_chars_stripped_at_init(
+    def test_session_id_with_control_chars_substituted_at_init(
         self, tmp_path, monkeypatch
     ):
-        """S9 attack chain: session_id containing control chars
-        (NL, NUL, NEL, U+2028, U+2029) would otherwise pollute the
-        marker path tree with fake segments. After S9 fix, the
-        producer-side strip in pact_context.init() removes them at
-        the entry point; the cleaned id forms a single segment under
-        the expected slug.
+        """R2-S-r2-1: session_id containing control chars (NL, NUL, NEL,
+        U+2028, U+2029) flows through the same allowlist-substitute
+        regex as the slug producer. Cycle-2 used a narrower strip-only
+        regex; Cycle-3 widened to the symmetric `_UNSAFE_SLUG_CHARS_RE`
+        (`[^A-Za-z0-9_-]`) so every interpolation sink shares the same
+        allowlist contract. Control chars now become `_`, not removed.
 
-        Tests init() directly — the pact_context fixture short-
-        circuits init by pre-setting _context_path, so this test
-        exercises the actual producer-side strip path."""
+        Tests init() directly — the pact_context fixture short-circuits
+        init by pre-setting _context_path, so this test exercises the
+        actual producer-side substitute path."""
         import shared.pact_context as ctx_module
 
         # Reset module state.
@@ -1928,13 +1928,55 @@ class TestGetSessionDirAdversarial:
         attack_id = "valid\nFAKE\x00SEG\x85more"
         ctx_module.init({"session_id": attack_id})
 
-        # Resulting context_path should have control chars stripped.
+        # Resulting context_path should have control chars substituted.
         path_str = str(ctx_module._context_path)
         assert "\n" not in path_str
         assert "\x00" not in path_str
         assert "\x85" not in path_str
-        # Cleaned id is a single segment.
-        assert "validFAKESEGmore" in path_str
+        # Cleaned id is a single path segment with each control char
+        # replaced by `_`. Allowlist-substitute = `[^A-Za-z0-9_-]+ → _`.
+        assert "valid_FAKE_SEG_more" in path_str
+
+    @pytest.mark.parametrize(
+        "attack_id",
+        [
+            'val"id',           # double-quote (shell-quoted command body)
+            'val$(whoami)id',   # command substitution
+            'val`whoami`id',    # backtick command substitution
+            'val;ls /id',       # command separator
+            'val|catid',        # pipe
+            'val&&rmid',        # logical AND chain
+            'val\nFAKE',        # newline injection
+            'val\x00null',      # null byte
+        ],
+    )
+    def test_session_id_shell_metacharacters_substituted(
+        self, attack_id, tmp_path, monkeypatch
+    ):
+        """R2-S-r2-1 attack chain: session_id containing shell
+        metacharacters (`"`, `$`, backtick, `;`, `|`, `&&`, NL, NUL)
+        flows into the disclosed PACT_SESSION_DIR= path which is
+        interpolated into bootstrap.md's shell command body. Without
+        the symmetric allowlist-substitute regex, these would survive
+        the narrower control-chars-only strip used pre-Cycle-3 and
+        could shell-inject. After R2-S-r2-1, every non-`[A-Za-z0-9_-]`
+        char is collapsed to `_` — same defense applied uniformly to
+        slug AND session_id (memory patterns_symmetric_sanitization)."""
+        import shared.pact_context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/dev/proj")
+
+        ctx_module.init({"session_id": attack_id})
+
+        path_str = str(ctx_module._context_path)
+        # No shell-active or control char survived in the path.
+        for ch in '"$`;|&\n\x00':
+            assert ch not in path_str, (
+                f"shell-active char {ch!r} survived in path: {path_str!r}"
+            )
 
 
     def test_deeply_nested_project_dir(self, pact_context):

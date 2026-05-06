@@ -298,20 +298,40 @@ class TestFailOpen:
         captured = capsys.readouterr()
         assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
 
-    def test_oserror_in_marker_check(self, monkeypatch, tmp_path, capsys):
-        """OSError when checking marker path → fail-open via outer except."""
+    def test_oserror_in_marker_check_treats_marker_absent(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """OSError on the marker check is now caught INSIDE
+        `is_marker_set` (post R2-B1 / commit 5b12f805) and treated as
+        marker-absent → bootstrap directive injected, gate stays armed.
+        Pre-R2-B1: `Path.exists()` raise propagated to the outer except
+        and produced suppressOutput. Post-R2-B1: bootstrap_prompt_gate
+        delegates to bootstrap_gate.is_marker_set, which has the same
+        conservative-fail-closed semantics as the sibling gate (the
+        Cycle-2 S2 fix established this contract for the gate; R2-B1
+        propagates the same contract to the prompt-gate).
+
+        The OUTER fail-open contract still holds for genuine programmer
+        errors above the marker-check layer; this test pins the marker-
+        layer-specific OSError → marker-absent classification."""
         from bootstrap_prompt_gate import main
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        with patch("bootstrap_prompt_gate.Path.exists", side_effect=OSError("disk error")):
+        # Patch os.lstat (used inside is_marker_set) to raise OSError.
+        with patch("os.lstat", side_effect=OSError("disk error")):
             with patch("sys.stdin", io.StringIO(json.dumps(_make_input()))):
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
+        # Marker absent + lead session → bootstrap directive injected.
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
+        output = json.loads(captured.out.strip())
+        assert "hookSpecificOutput" in output
+        assert output["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+        assert "additionalContext" in output["hookSpecificOutput"]
+        assert "Skill(\"PACT:bootstrap\")" in output["hookSpecificOutput"]["additionalContext"]
 
 
 # =============================================================================
