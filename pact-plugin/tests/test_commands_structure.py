@@ -19,6 +19,7 @@ from helpers import parse_frontmatter
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
 
 EXPECTED_COMMANDS = {
+    "bootstrap",
     "comPACT",
     "imPACT",
     "orchestrate",
