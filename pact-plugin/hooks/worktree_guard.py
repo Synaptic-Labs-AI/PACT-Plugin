@@ -212,6 +212,7 @@ def main():
     error = check_worktree_boundary(file_path, worktree_path)
 
     if error:
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

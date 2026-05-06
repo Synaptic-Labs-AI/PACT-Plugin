@@ -95,6 +95,7 @@ def main():
         sys.exit(0)
 
     if instruction:
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",

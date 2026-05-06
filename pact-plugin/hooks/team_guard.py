@@ -59,6 +59,7 @@ def main():
     error = check_team_exists(tool_input)
 
     if error:
+        # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
