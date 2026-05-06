@@ -664,7 +664,7 @@ class TestSanitizeAgentName:
     block's substring check, that injected line would cause the teammate
     to self-identify as the orchestrator. The exploit requires upstream
     orchestrator compromise (the orchestrator must pass hostile input
-    via Task(name=...)), so practical exploitability is low — but the
+    via Agent(name=...)), so practical exploitability is low — but the
     fix is cheap and security-engineer verified the spoofing
     mechanism with a Python PoC during cycle 1 review.
 

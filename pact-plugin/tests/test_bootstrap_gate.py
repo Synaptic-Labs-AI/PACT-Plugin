@@ -5,19 +5,14 @@ agent-dispatch tools until the bootstrap-complete marker exists.
 Tests cover:
 
 _check_tool_allowed() unit tests:
-1. Marker exists → None for any tool (fast path)
+1. Marker exists (properly F24-stamped) → None for any tool (fast path)
 2. No marker + blocked tool (Edit) → deny reason string
 3. No marker + blocked tool (Write) → deny reason string
-4. No marker + blocked tool (Task) → deny reason string
+4. No marker + blocked tool (Agent) → deny reason string
 5. No marker + blocked tool (NotebookEdit) → deny reason string
 6. No marker + allowed tool (Read) → None
-7. No marker + allowed tool (Glob) → None
-8. No marker + allowed tool (Grep) → None
-9. No marker + allowed tool (Bash) → None (critical: bootstrap needs Bash)
-10. No marker + allowed tool (WebFetch) → None
-11. No marker + allowed tool (WebSearch) → None
-12. No marker + allowed tool (AskUserQuestion) → None
-13. No marker + allowed tool (ExitPlanMode) → None
+7-13. No marker + allowed tools (Glob, Grep, Bash, WebFetch, WebSearch,
+       AskUserQuestion, ExitPlanMode) → None
 14. No marker + MCP tool → None (mcp__ prefix match)
 15. Non-PACT session (no session dir) → None
 16. Teammate → None (passthrough)
@@ -31,25 +26,45 @@ main() integration tests:
 22. Non-PACT → exit 0, suppressOutput
 23. Teammate → exit 0, suppressOutput
 
-Fail-open (P0):
+Fail-OPEN preserved for input-side failures (P0):
 24. Malformed stdin → exit 0, suppressOutput
 25. Empty stdin → exit 0, suppressOutput
-26. Exception in _check_tool_allowed → exit 0, suppressOutput
+
+Fail-CLOSED for gate-logic exceptions (F25, P0):
+26. Exception in _check_tool_allowed → exit 2, deny JSON with hookEventName
 
 Error/suppress mutual exclusivity (P0):
-27. Error paths never emit systemMessage
-28. Deny path emits permissionDecision, not suppressOutput
+27. Input-side fail-open paths emit suppressOutput, never systemMessage
+28. Deny path (block + F25 fail-closed) emits permissionDecision, not suppressOutput
 29. Allow paths emit suppressOutput, not hookSpecificOutput
 
-Blocked tool set completeness (P2):
+Blocked tool set completeness (P2 — post-#662):
 30. Exactly 4 blocked tools in the set
-31. Bash is NOT in blocked set (circular dependency guard)
+31. Members are exactly {Edit, Write, Agent, NotebookEdit}
+32. Bash is NOT in blocked set (circular dependency guard)
+33. Read is NOT in blocked set (exploration tool)
 
 Deny reason content (P2):
-32. Deny reason mentions Skill("PACT:bootstrap")
-33. Deny reason mentions available tools (Bash, Read, Glob, Grep)
+34. Deny reason mentions Skill("PACT:bootstrap")
+35. Deny reason mentions available tools (Bash, Read, Glob, Grep)
+
+is_marker_set() — public helper:
+36. None / empty session_dir → False
+37. Marker absent → False
+38. Marker symlink (S2) → False
+39. Marker is a directory (S2 corollary) → False
+40. Ancestor symlink (S4) → False
+41. F24 properly-stamped marker → True
+42. F24 empty file (legacy `touch` form) → False
+43. F24 wrong sid → False
+44. F24 wrong version → False
+45. F24 malformed JSON → False
+46. F24 wrong signature → False
+47. F24 oversized content → False
+48. F24 missing plugin context → False
 """
 
+import hashlib
 import io
 import json
 import sys
@@ -97,11 +112,44 @@ def _run_main(input_data, capsys):
     return exc_info.value.code, json.loads(captured.out.strip())
 
 
-def _setup_pact_session(monkeypatch, tmp_path, with_marker=False):
+def _write_f24_marker(session_dir: Path, plugin_root: Path,
+                      plugin_version: str = "9.9.9",
+                      marker_version: int = 1,
+                      sid: str | None = None,
+                      sig: str | None = None) -> Path:
+    """Write a properly-stamped F24 marker. Override fields to forge invalid
+    variants for negative tests.
+    """
+    from bootstrap_gate import F24_MARKER_VERSION
+
+    real_sid = sid if sid is not None else session_dir.name
+    real_sig_input = (
+        f"{real_sid}|{str(plugin_root).rstrip('/')}|{plugin_version}|{marker_version}"
+    )
+    real_sig = sig if sig is not None else hashlib.sha256(
+        real_sig_input.encode("utf-8")
+    ).hexdigest()
+    payload = {"v": marker_version, "sid": real_sid, "sig": real_sig}
+    marker = session_dir / BOOTSTRAP_MARKER_NAME
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+    # Sanity: caller using default args should produce a valid stamp
+    # for the current F24_MARKER_VERSION constant.
+    if marker_version == 1:
+        assert F24_MARKER_VERSION == 1
+    return marker
+
+
+def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
+                        plugin_version="9.9.9"):
     """Set up a PACT session context with session dir under tmp_path.
 
     Monkeypatches Path.home to tmp_path so get_session_dir() returns a
     path under tmp_path. Returns the session_dir path.
+
+    When ``with_marker=True`` writes a properly-stamped F24 marker (post-#662);
+    callers that want to test legacy or invalid markers should pass
+    ``with_marker=False`` and use ``_write_f24_marker`` directly with override
+    fields.
     """
     import shared.pact_context as ctx_module
 
@@ -110,12 +158,18 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False):
     session_dir = tmp_path / ".claude" / "pact-sessions" / _SLUG / _SESSION_ID
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    plugin_root = tmp_path / "plugin"
+    (plugin_root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"version": plugin_version}), encoding="utf-8"
+    )
+
     context_file = session_dir / "pact-session-context.json"
     context_file.write_text(json.dumps({
         "team_name": "",
         "session_id": _SESSION_ID,
         "project_dir": _PROJECT_DIR,
-        "plugin_root": "",
+        "plugin_root": str(plugin_root),
         "started_at": "2026-01-01T00:00:00Z",
     }), encoding="utf-8")
 
@@ -123,7 +177,7 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False):
     monkeypatch.setattr(ctx_module, "_cache", None)
 
     if with_marker:
-        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
+        _write_f24_marker(session_dir, plugin_root, plugin_version=plugin_version)
 
     return session_dir
 
@@ -138,7 +192,7 @@ class TestCheckToolAllowed:
 
     # --- Marker exists: fast path ---
 
-    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Task", "NotebookEdit", "Read", "Bash"])
+    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Agent", "NotebookEdit", "Read", "Bash"])
     def test_marker_exists_allows_any_tool(self, monkeypatch, tmp_path, tool_name):
         """Marker exists → None for any tool (including normally-blocked ones)."""
         from bootstrap_gate import _check_tool_allowed
@@ -150,7 +204,7 @@ class TestCheckToolAllowed:
 
     # --- No marker: blocked tools ---
 
-    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Task", "NotebookEdit"])
+    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Agent", "NotebookEdit"])
     def test_blocked_tools_return_deny_reason(self, monkeypatch, tmp_path, tool_name):
         """No marker + blocked tool → deny reason string."""
         from bootstrap_gate import _check_tool_allowed
@@ -237,12 +291,13 @@ class TestCheckToolAllowed:
         session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
         # Override context to have a team_name
+        plugin_root = tmp_path / "plugin"
         context_file = session_dir / "pact-session-context.json"
         context_file.write_text(json.dumps({
             "team_name": "pact-test1234",
             "session_id": _SESSION_ID,
             "project_dir": _PROJECT_DIR,
-            "plugin_root": "",
+            "plugin_root": str(plugin_root),
             "started_at": "2026-01-01T00:00:00Z",
         }), encoding="utf-8")
         ctx_module._cache = None
@@ -320,7 +375,7 @@ class TestMainEntryPoint:
         assert output == _SUPPRESS_EXPECTED
 
     def test_marker_exists_exits_0(self, monkeypatch, tmp_path, capsys):
-        """Marker exists → exit 0 (fast path)."""
+        """Marker exists (F24-stamped) → exit 0 (fast path)."""
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
 
         exit_code, output = _run_main(_make_input("Edit"), capsys)
@@ -350,12 +405,14 @@ class TestMainEntryPoint:
 
 
 # =============================================================================
-# Fail-open — P0 priority
+# Fail-open (input-side) — P0 priority
 # =============================================================================
 
 
-class TestFailOpen:
-    """P0: Every exception path must fail-open (exit 0, suppressOutput)."""
+class TestInputSideFailOpen:
+    """P0: Malformed/empty stdin remains fail-OPEN — input-side failures
+    are the harness's domain (cannot evaluate without input).
+    """
 
     def test_malformed_stdin_json(self, capsys):
         """Invalid JSON on stdin → fail-open."""
@@ -381,8 +438,20 @@ class TestFailOpen:
         captured = capsys.readouterr()
         assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
 
-    def test_exception_in_check_tool_allowed(self, capsys):
-        """RuntimeError in _check_tool_allowed → fail-open."""
+
+# =============================================================================
+# Fail-closed (gate-logic exception) — F25, P0 priority
+# =============================================================================
+
+
+class TestFailClosedGateLogic:
+    """F25 (#662, post-#658 defect class): runtime exception in
+    ``_check_tool_allowed`` must DENY (not fail-OPEN). Pre-#662 this path
+    was fail-OPEN — that was the same defect class as #658.
+    """
+
+    def test_exception_in_check_tool_allowed_emits_deny(self, capsys):
+        """RuntimeError in _check_tool_allowed → exit 2 with structured deny."""
         from bootstrap_gate import main
 
         with patch(
@@ -393,34 +462,13 @@ class TestFailOpen:
                 with pytest.raises(SystemExit) as exc_info:
                     main()
 
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        assert json.loads(captured.out.strip()) == _SUPPRESS_EXPECTED
-
-    def test_oserror_in_marker_check_treats_marker_absent(self, monkeypatch, tmp_path, capsys):
-        """OSError when checking marker → marker treated as absent → blocked
-        tool denied (gate stays armed). Behavior change from pre-S2 fix:
-        previously `Path.exists()` raises propagated to the outer except
-        and fell open with suppressOutput. Now `is_marker_set` catches
-        OSError internally and returns False — the conservative choice
-        per S2 trust-boundary rationale ('don't claim the marker is set
-        when we can't verify it'). The OUTER fail-open contract (any
-        raisable path → suppressOutput) still holds for genuine
-        programmer errors above the marker-check layer."""
-        from bootstrap_gate import main
-
-        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
-
-        with patch("os.lstat", side_effect=OSError("disk error")):
-            with patch("sys.stdin", io.StringIO(json.dumps(_make_input("Edit")))):
-                with pytest.raises(SystemExit) as exc_info:
-                    main()
-
-        # Edit is a blocked tool + marker absent → exit 2 (deny).
         assert exc_info.value.code == 2
         captured = capsys.readouterr()
-        output = json.loads(captured.out.strip())
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        parsed = json.loads(captured.out.strip())
+        hso = parsed["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "RuntimeError" in hso["permissionDecisionReason"]
 
 
 # =============================================================================
@@ -429,8 +477,9 @@ class TestFailOpen:
 
 
 class TestErrorSuppressMutualExclusivity:
-    """P0: These hooks use suppressOutput for fail-open, never systemMessage.
-    Deny path uses hookSpecificOutput, never suppressOutput."""
+    """P0: input-side fail-open uses suppressOutput; deny path (block + F25
+    fail-closed) uses hookSpecificOutput. systemMessage is never emitted.
+    """
 
     def test_malformed_stdin_no_system_message(self, capsys):
         """Malformed stdin → suppressOutput, not systemMessage."""
@@ -445,8 +494,8 @@ class TestErrorSuppressMutualExclusivity:
         assert "suppressOutput" in parsed
         assert "systemMessage" not in parsed
 
-    def test_exception_no_system_message(self, capsys):
-        """Exception → suppressOutput, not systemMessage."""
+    def test_gate_logic_exception_no_system_message(self, capsys):
+        """F25 fail-closed → hookSpecificOutput, not systemMessage."""
         from bootstrap_gate import main
 
         with patch(
@@ -459,7 +508,7 @@ class TestErrorSuppressMutualExclusivity:
 
         captured = capsys.readouterr()
         parsed = json.loads(captured.out.strip())
-        assert "suppressOutput" in parsed
+        assert "hookSpecificOutput" in parsed
         assert "systemMessage" not in parsed
 
     def test_deny_path_no_suppress_output(self, monkeypatch, tmp_path, capsys):
@@ -480,12 +529,12 @@ class TestErrorSuppressMutualExclusivity:
 
 
 # =============================================================================
-# Blocked tool set completeness — P2 priority
+# Blocked tool set completeness — P2 priority (post-#662)
 # =============================================================================
 
 
 class TestBlockedToolSet:
-    """P2: Verify the blocked tool set is correct and complete."""
+    """P2: Verify the blocked tool set is correct and complete (post-#662)."""
 
     def test_blocked_set_exact_cardinality(self):
         """Exactly 4 tools in the blocked set."""
@@ -494,16 +543,26 @@ class TestBlockedToolSet:
         assert len(_BLOCKED_TOOLS) == 4
 
     def test_blocked_set_exact_members(self):
-        """Blocked set contains exactly Edit, Write, Task, NotebookEdit.
+        """Blocked set contains exactly Edit, Write, Agent, NotebookEdit (#662).
 
-        The agent-dispatch tool name is `Task` (the canonical platform
-        tool). Cross-evidence: hooks.json PreToolUse team_guard +
-        PostToolUse auditor_reminder both use matcher='Task' and fire
-        correctly in production.
+        The agent-dispatch tool name is `Agent` — the canonical Claude Code
+        platform name (verified against code.claude.com docs as of 2026-05-06).
+        Earlier `Task` literal (commit 4c286c1f) was the wrong rename
+        direction; #662 reverts it.
         """
         from bootstrap_gate import _BLOCKED_TOOLS
 
-        assert _BLOCKED_TOOLS == frozenset({"Edit", "Write", "Task", "NotebookEdit"})
+        assert _BLOCKED_TOOLS == frozenset({"Edit", "Write", "Agent", "NotebookEdit"})
+
+    def test_blocked_set_does_not_contain_task(self):
+        """Regression-prevention: Task is NOT in the blocked set (#662).
+
+        Pre-#662, commit 4c286c1f wrongly renamed Agent→Task here.
+        This test fails-closed if anyone reverses the rename direction.
+        """
+        from bootstrap_gate import _BLOCKED_TOOLS
+
+        assert "Task" not in _BLOCKED_TOOLS
 
     def test_bash_not_blocked(self):
         """Bash must NOT be in blocked set (circular dependency)."""
@@ -556,21 +615,22 @@ class TestDenyReasonContent:
 
 
 class TestMarkerLifecycle:
-    """P3: Gate transitions based on marker presence."""
+    """P3: Gate transitions based on F24 marker presence."""
 
     def test_gate_transitions_deny_to_allow(self, monkeypatch, tmp_path, capsys):
-        """Before marker: deny Edit. After marker: allow Edit."""
+        """Before marker: deny Edit. After F24 marker stamp: allow Edit."""
         import shared.pact_context as ctx_module
 
         session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
 
         # Before marker — Edit denied
         exit_code_before, output_before = _run_main(_make_input("Edit"), capsys)
         assert exit_code_before == 2
         assert "permissionDecision" in output_before.get("hookSpecificOutput", {})
 
-        # Create marker
-        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
+        # Write a properly-stamped F24 marker
+        _write_f24_marker(session_dir, plugin_root, plugin_version="9.9.9")
 
         # Reset cache for second call
         ctx_module._cache = None
@@ -586,7 +646,7 @@ class TestMarkerLifecycle:
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
 
-        for tool in ["Edit", "Write", "Task"]:
+        for tool in ["Edit", "Write", "Agent"]:
             ctx_module._cache = None
 
             exit_code, output = _run_main(_make_input(tool), capsys)
@@ -607,23 +667,25 @@ class TestMarkerNameConsistency:
         assert BOOTSTRAP_MARKER_NAME == "bootstrap-complete"
 
     def test_bootstrap_md_references_same_marker(self):
-        """bootstrap.md touch command must reference the shared marker name."""
+        """bootstrap.md F24 producer must reference the shared marker name."""
         bootstrap_md = (
             Path(__file__).parent.parent / "commands" / "bootstrap.md"
         )
         content = bootstrap_md.read_text(encoding="utf-8")
-        assert f"touch \"<path>/{BOOTSTRAP_MARKER_NAME}\"" in content
+        # The F24 producer (#662) writes the marker via python3, but the
+        # marker file path still embeds BOOTSTRAP_MARKER_NAME literally.
+        assert BOOTSTRAP_MARKER_NAME in content
 
 
 # =============================================================================
-# is_marker_set — public helper (Arch-M1 + S2 + S4 defense)
+# is_marker_set — public helper (S2 + S4 + F24 defense)
 # =============================================================================
 
 
 class TestIsMarkerSet:
-    """Public predicate `is_marker_set(session_dir)` — does a real marker
-    exist? Defends S2 (symlink-planted bypass) + S4 (ancestor symlink).
-    Plan §High-Risk-TDD-Specs Q4 names this as a 7-method TDD target.
+    """Public predicate `is_marker_set(session_dir)` — does a properly-stamped
+    F24 marker exist? Defends S2 (symlink-planted bypass), S4 (ancestor
+    symlink), and F18/F24 (Bash-touch bypass via SHA256 content provenance).
     """
 
     def test_returns_false_when_session_dir_none(self):
@@ -641,73 +703,155 @@ class TestIsMarkerSet:
 
         assert is_marker_set(tmp_path) is False
 
-    def test_returns_true_when_marker_present_as_regular_file(self, tmp_path):
+    def test_returns_true_when_marker_properly_stamped(
+        self, monkeypatch, tmp_path
+    ):
+        """F24: only properly-stamped markers satisfy the gate."""
         from bootstrap_gate import is_marker_set
 
-        (tmp_path / BOOTSTRAP_MARKER_NAME).touch()
-        assert is_marker_set(tmp_path) is True
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
+        assert is_marker_set(session_dir) is True
 
-    def test_returns_false_when_marker_is_symlink(self, tmp_path):
-        """S2 attack chain: planted symlink at the marker path pointing
-        at ANY existing file falsely satisfies `Path.exists()` (which
-        follows symlinks). The defense uses `os.lstat() + S_ISREG`
-        which checks the leaf without following the link.
-
-        Reproducer for the bypass-without-defense:
-            ln -s /etc/hostname <session_dir>/bootstrap-complete
-            → Path.exists() returns True → gate would allow → BYPASS
-
-        With defense:
-            os.lstat() returns the symlink's own stat → S_ISLNK, not
-            S_ISREG → returns False → gate stays armed.
+    def test_returns_false_when_marker_is_empty_file_legacy_touch(
+        self, monkeypatch, tmp_path
+    ):
+        """F24 (#662): legacy `touch bootstrap-complete` (empty file) MUST NOT
+        satisfy the gate. Closes the F18 Bash-touch bypass.
         """
         from bootstrap_gate import is_marker_set
 
-        # Plant a real file outside the session dir.
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        (session_dir / BOOTSTRAP_MARKER_NAME).touch()
+        assert is_marker_set(session_dir) is False
+
+    def test_returns_false_when_marker_is_symlink(self, monkeypatch, tmp_path):
+        """S2 attack chain — symlink at the marker path is rejected."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
         target = tmp_path / "decoy_target"
         target.touch()
-        # Plant the marker as a symlink to the decoy.
-        marker = tmp_path / BOOTSTRAP_MARKER_NAME
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
         marker.symlink_to(target)
         assert marker.exists() is True  # Path.exists follows symlinks
-        assert is_marker_set(tmp_path) is False  # but is_marker_set rejects
+        assert is_marker_set(session_dir) is False  # but is_marker_set rejects
 
-    def test_returns_false_when_marker_is_directory(self, tmp_path):
-        """S2 corollary: a directory at the marker path is also rejected
-        (S_ISREG False)."""
+    def test_returns_false_when_marker_is_directory(
+        self, monkeypatch, tmp_path
+    ):
+        """S2 corollary: a directory at the marker path is rejected."""
         from bootstrap_gate import is_marker_set
 
-        (tmp_path / BOOTSTRAP_MARKER_NAME).mkdir()
-        assert is_marker_set(tmp_path) is False
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        (session_dir / BOOTSTRAP_MARKER_NAME).mkdir()
+        assert is_marker_set(session_dir) is False
 
     def test_returns_false_when_ancestor_is_symlink(self, tmp_path):
-        """S4 attack chain: planted symlink at any ancestor of the
-        session_dir (e.g., ~/.claude itself being a symlink to attacker-
-        controlled /tmp/evil/.claude) lets the attacker plant a regular
-        file marker satisfying the leaf-only check.
-
-        Reproducer:
-            ln -s /tmp/evil ~/.claude
-            mkdir -p /tmp/evil/pact-sessions/{slug}/{session_id}
-            touch /tmp/evil/pact-sessions/{slug}/{session_id}/bootstrap-complete
-            → leaf is_symlink() returns False → leaf-only gate would allow
-
-        Defense: Path.resolve(strict=False) follows ALL ancestor symlinks
-        in the path; if the resolved path differs from the absolute input
-        path, an ancestor was a symlink → reject.
-        """
+        """S4 attack chain: symlinked ancestor is rejected."""
         from bootstrap_gate import is_marker_set
 
-        # Real session_dir target.
         real_dir = tmp_path / "real_session_dir"
         real_dir.mkdir()
         (real_dir / BOOTSTRAP_MARKER_NAME).touch()
-        # Symlink the parent directory to the real one.
         link_dir = tmp_path / "linked_session_dir"
         link_dir.symlink_to(real_dir)
-        # The marker IS a real file (via the symlink path) but the path
-        # has a symlink ancestor → defense rejects.
         assert (link_dir / BOOTSTRAP_MARKER_NAME).exists() is True
+        # Both paths fail F24 (empty content is not a valid stamp), but
+        # the ancestor-symlink check fires FIRST and ensures the bypass
+        # would be rejected even if F24 were satisfied.
         assert is_marker_set(link_dir) is False
-        # Sanity: the real path (no ancestor symlink) IS accepted.
-        assert is_marker_set(real_dir) is True
+        assert is_marker_set(real_dir) is False  # F24 fails on empty file
+
+    def test_f24_rejects_wrong_sid(self, monkeypatch, tmp_path):
+        """F24: marker with mismatched sid (not session_dir.name) rejected."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
+        _write_f24_marker(
+            session_dir, plugin_root, plugin_version="9.9.9", sid="wrong-session"
+        )
+        assert is_marker_set(session_dir) is False
+
+    def test_f24_rejects_wrong_version(self, monkeypatch, tmp_path):
+        """F24: marker with v != F24_MARKER_VERSION rejected."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
+        _write_f24_marker(
+            session_dir, plugin_root, plugin_version="9.9.9", marker_version=99
+        )
+        assert is_marker_set(session_dir) is False
+
+    def test_f24_rejects_malformed_json(self, monkeypatch, tmp_path):
+        """F24: non-JSON marker content rejected."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        (session_dir / BOOTSTRAP_MARKER_NAME).write_text(
+            "not json at all", encoding="utf-8"
+        )
+        assert is_marker_set(session_dir) is False
+
+    def test_f24_rejects_extra_keys(self, monkeypatch, tmp_path):
+        """F24: marker with keys beyond {v, sid, sig} rejected."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        marker.write_text(
+            json.dumps({
+                "v": 1, "sid": session_dir.name, "sig": "deadbeef",
+                "extra": "snuck in",
+            }),
+            encoding="utf-8",
+        )
+        assert is_marker_set(session_dir) is False
+
+    def test_f24_rejects_wrong_signature(self, monkeypatch, tmp_path):
+        """F24: marker with a non-matching SHA256 signature rejected."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
+        _write_f24_marker(
+            session_dir, plugin_root, plugin_version="9.9.9", sig="0" * 64
+        )
+        assert is_marker_set(session_dir) is False
+
+    def test_f24_rejects_oversized_content(self, monkeypatch, tmp_path):
+        """F24: marker file > 256 bytes rejected (pathological-read defense)."""
+        from bootstrap_gate import is_marker_set
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        # Write a JSON object that's syntactically correct but huge.
+        marker = session_dir / BOOTSTRAP_MARKER_NAME
+        big_payload = {"v": 1, "sid": session_dir.name,
+                       "sig": "x" * 1024}
+        marker.write_text(json.dumps(big_payload), encoding="utf-8")
+        assert is_marker_set(session_dir) is False
+
+    def test_f24_rejects_when_plugin_root_missing(self, monkeypatch, tmp_path):
+        """F24: cannot compute expected signature without plugin context."""
+        from bootstrap_gate import is_marker_set
+        import shared.pact_context as ctx_module
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        plugin_root = tmp_path / "plugin"
+        # Stamp the marker with what WOULD be a valid sig, then break the
+        # plugin context.
+        _write_f24_marker(session_dir, plugin_root, plugin_version="9.9.9")
+        # Remove plugin_root from context (simulate older session_init or
+        # a corrupted context file).
+        context_file = session_dir / "pact-session-context.json"
+        context_file.write_text(json.dumps({
+            "team_name": "",
+            "session_id": _SESSION_ID,
+            "project_dir": _PROJECT_DIR,
+            "plugin_root": "",
+            "started_at": "2026-01-01T00:00:00Z",
+        }), encoding="utf-8")
+        ctx_module._cache = None
+        assert is_marker_set(session_dir) is False

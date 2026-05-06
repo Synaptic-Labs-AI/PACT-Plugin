@@ -30,7 +30,7 @@ from refresh.patterns import (
     REVIEW_PROMPT_INSTRUCTION_MAX_LENGTH,
     TASK_SUMMARY_MAX_LENGTH,
     PACT_AGENT_PATTERN,
-    TASK_TOOL_PATTERN,
+    SPAWN_TOOL_PATTERN,
     SUBAGENT_TYPE_PATTERN,
     WorkflowPattern,
     compile_workflow_patterns,
@@ -444,9 +444,9 @@ class TestRegexPatternEdgeCases:
 
     def test_task_tool_pattern(self):
         """Test Task tool pattern matching."""
-        assert TASK_TOOL_PATTERN.search('"name": "Task"') is not None
-        assert TASK_TOOL_PATTERN.search('"name":"Task"') is not None
-        assert TASK_TOOL_PATTERN.search('"name": "task"') is not None  # Case insensitive
+        assert SPAWN_TOOL_PATTERN.search('"name": "Task"') is not None
+        assert SPAWN_TOOL_PATTERN.search('"name":"Task"') is not None
+        assert SPAWN_TOOL_PATTERN.search('"name": "task"') is not None  # Case insensitive
 
     def test_subagent_type_pattern(self):
         """Test subagent type extraction pattern."""

@@ -43,7 +43,7 @@ def agent_files():
     return list(AGENTS_DIR.glob("*.md"))
 
 
-# Subset of agent files that are TEAMMATES — i.e., spawned via Task() with
+# Subset of agent files that are TEAMMATES — i.e., spawned via Agent() with
 # `skills:` frontmatter preload. Excludes pact-orchestrator.md, which is
 # delivered via `claude --agent` and has minimal frontmatter (no skills:).
 TEAMMATE_AGENT_NAMES = EXPECTED_AGENTS - {"pact-orchestrator"}
@@ -129,7 +129,7 @@ class TestNoSkillInvocationOnFirstAction:
     skill) or `Skill("PACT:bootstrap")` (orchestrator-only ritual command).
 
     The team protocol, teachback rules, and algedonic content arrive via the
-    spawn-time skills: frontmatter (preload at Task() spawn). A fossil
+    spawn-time skills: frontmatter (preload at Agent() spawn). A fossil
     `Skill("PACT:teammate-bootstrap")` directive in any agent body points at
     a permanently removed command. A `Skill("PACT:bootstrap")` directive in a
     teammate body points at the orchestrator-only session-start ritual; only

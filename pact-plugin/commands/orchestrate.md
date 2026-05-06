@@ -44,10 +44,10 @@ h. Monitor via `SendMessage` (completion summaries) and `TaskList` until agents 
 i. `TaskUpdate`: phase status = "completed" (agents self-manage their task status)
 ```
 
-The canonical `Task()` dispatch form, referenced by every phase below:
+The canonical `Agent()` dispatch form, referenced by every phase below:
 
 ```
-Task(
+Agent(
   name="{teammate-name}",
   team_name="{team_name}",
   subagent_type="pact-{teammate-type}",
@@ -66,7 +66,7 @@ Every specialist dispatch creates **two tasks**, not one:
 - **Task A** — TEACHBACK gate. `subject = "{role}: TEACHBACK for {feature}"`, owner = teammate. Description: teachback expectations + dispatch context.
 - **Task B** — primary work. `subject = "{role}: {mission}"`, owner = teammate, `blockedBy = [<Task A id>]`.
 
-Both are created BEFORE the `Task(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)), and the teammate wakes to claim B.
+Both are created BEFORE the `Agent(...)` spawn call so the teammate sees them on first `TaskList`. The teammate claims A, submits teachback metadata, idles on `awaiting_lead_completion`. You review the teachback, accept via the two-call atomic pair (`TaskUpdate(A, status="completed")` + paired wake-signal SendMessage — see [Teachback Review](../protocols/pact-completion-authority.md#teachback-review)), and the teammate wakes to claim B.
 
 **Dispatch sequence (replaces single-task dispatch)**:
 
@@ -98,10 +98,10 @@ B_id = TaskCreate(
 TaskUpdate(B_id, owner="{teammate-name}", addBlockedBy=[A_id])
 TaskUpdate(A_id, addBlocks=[B_id])
 
-# 3. Spawn the teammate via the canonical Task() form above.
+# 3. Spawn the teammate via the canonical Agent() form above.
 ```
 
-The `Task()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Task()` call. The teammate discovers Task A + Task B via `TaskList` and follows pact-agent-teams §On Start.
+The `Agent()` `prompt` does NOT change shape — the two-task dispatch is encoded in the surrounding TaskCreate sequence, not in the `Agent()` call. The teammate discovers Task A + Task B via `TaskList` and follows pact-agent-teams §On Start.
 
 **Carve-outs** — single-task dispatch still applies for:
 
@@ -463,7 +463,7 @@ JSON
 4. Spawn the preparer with the canonical dispatch form:
 
 ```
-Task(
+Agent(
   name="preparer",
   team_name="{team_name}",
   subagent_type="pact-preparer",
@@ -555,7 +555,7 @@ JSON
 4. Spawn the architect with the canonical dispatch form:
 
 ```
-Task(
+Agent(
   name="architect",
   team_name="{team_name}",
   subagent_type="pact-architect",
@@ -678,7 +678,7 @@ JSON
 4. Spawn each coder with the canonical dispatch form:
 
 ```
-Task(
+Agent(
   name="{coder-name}",
   team_name="{team_name}",
   subagent_type="pact-{coder-type}",
@@ -706,7 +706,7 @@ Valid skip reasons: single coder on familiar pattern, variety reassessed below 7
 3. Spawn the auditor with the canonical dispatch form:
 
 ```
-Task(
+Agent(
   name="auditor",
   team_name="{team_name}",
   subagent_type="pact-auditor",
@@ -805,7 +805,7 @@ JSON
 4. Spawn the test engineer with the canonical dispatch form:
 
 ```
-Task(
+Agent(
   name="test-engineer",
   team_name="{team_name}",
   subagent_type="pact-test-engineer",
@@ -868,9 +868,9 @@ When a blocker is resolved, prefer resuming the original agent over spawning fre
 
 **Resume pattern**:
 1. Read agent ID from task metadata: `TaskGet(taskId).metadata.agent_id`
-2. Resume with blocker context: `Task(resume="{agent_id}", prompt="Blocker resolved: {details}. Continue your task.")`
+2. Resume with blocker context: `Agent(resume="{agent_id}", prompt="Blocker resolved: {details}. Continue your task.")`
 
-**Fresh spawn pattern** (when resume is inappropriate): Follow the standard dispatch pattern (`TaskCreate` + `TaskUpdate` + Task with name/team_name/subagent_type).
+**Fresh spawn pattern** (when resume is inappropriate): Follow the standard dispatch pattern (`TaskCreate` + `TaskUpdate` + Agent with name/team_name/subagent_type).
 
 ---
 

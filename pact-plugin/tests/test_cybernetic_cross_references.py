@@ -253,7 +253,7 @@ class TestStructuralVerificationDisciplineConsistency:
 
     # Rule-carrying surfaces only. The agent body, the protocol anchor, and
     # its SSOT carry the full rule; orchestrate.md carries the dispatch-primer
-    # pointer (it is the sole Task() dispatch site for the auditor, per
+    # pointer (it is the sole Agent() dispatch site for the auditor, per
     # preparer §a). comPACT.md + pact-workflows.md are `see-X-for-details`
     # cross-refs, not dispatch primers, so they do NOT carry the discipline
     # phrase — the cascade invariant does not apply to them.
@@ -329,7 +329,7 @@ class TestStructuralVerificationDisciplineConsistency:
         )
 
     # Dispatch-primer consumer files only. orchestrate.md is the sole auditor
-    # Task() spawn site (preparer §a); its bullet-list dispatch payload is
+    # Agent() spawn site (preparer §a); its bullet-list dispatch payload is
     # read at spawn time by the auditor and carries a brief discipline primer
     # next to the 'Auditor skipped' anchor. comPACT.md + pact-workflows.md
     # contain `Auditor skipped` in cross-ref documentation blocks that are

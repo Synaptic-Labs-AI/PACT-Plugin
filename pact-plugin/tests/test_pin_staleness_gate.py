@@ -93,7 +93,7 @@ class TestPinStalenessGate_ToolMatch:
     """Only Edit and Write are gated — other tools always pass."""
 
     @pytest.mark.parametrize("tool_name", ["Read", "Bash", "Glob", "Grep",
-                                           "Task", "NotebookEdit", ""])
+                                           "Agent", "NotebookEdit", ""])
     def test_non_gated_tools_pass(self, tool_name, gate_env):
         gate_env(marker_present=True)
         result = _call_gate({

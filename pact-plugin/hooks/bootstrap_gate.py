@@ -2,29 +2,37 @@
 """
 Location: pact-plugin/hooks/bootstrap_gate.py
 Summary: PreToolUse hook that blocks code-editing and agent-dispatch tools
-         (Edit, Write, Task, NotebookEdit) until the bootstrap-complete
+         (Edit, Write, Agent, NotebookEdit) until the bootstrap-complete
          marker exists.
 Used by: hooks.json PreToolUse hook (no matcher — fires for all hookable tools)
 
 Layer 3 of the four-layer bootstrap gate enforcement (#401). On each tool
 call, checks the session-scoped bootstrap-complete marker:
-  - Marker exists → suppressOutput (sub-ms fast path)
+  - Marker exists AND is properly stamped (F24) → suppressOutput (sub-ms fast path)
   - Non-PACT session → suppressOutput (no-op)
   - Teammate → suppressOutput (no-op)
-  - Code-editing/agent-dispatch tool (Edit, Write, Task, NotebookEdit) → deny
+  - Code-editing/agent-dispatch tool (Edit, Write, Agent, NotebookEdit) → deny
   - Operational/exploration tool (Read, Glob, Grep, Bash, WebFetch,
     WebSearch, AskUserQuestion, ExitPlanMode, any MCP tool) → allow
 
 Tool classification rationale:
   - Blocked tools are structured code modification (Edit, Write) and agent
-    dispatch (Task, NotebookEdit) actions that shouldn't run before
-    governance is loaded. The agent-dispatch tool name is `Task` — the
-    canonical platform name for sub-agent spawning, confirmed by the
-    matcher='Task' entries in hooks.json (PreToolUse team_guard +
-    PostToolUse auditor_reminder).
+    dispatch (Agent, NotebookEdit) actions that shouldn't run before
+    governance is loaded. The agent-dispatch tool name is `Agent` — the
+    canonical Claude Code platform name (verified against
+    code.claude.com/docs/en/agent-teams.md and sub-agents.md as of
+    2026-05-06; #662). hooks.json matcher='Agent' entries (PreToolUse
+    team_guard + PostToolUse auditor_reminder) fire on Agent invocations.
+    Earlier `Task` literal in this file (commit 4c286c1f, 2026-05-05)
+    was based on a misread of production matchers — those matchers were
+    silently NOT firing on spawn events, mistaken for "production
+    evidence". Resolved in #662.
   - Bash is ALLOWED because the bootstrap marker-write mechanism itself is
     a Bash command in bootstrap.md — blocking Bash would create a circular
-    dependency where the gate can never self-disable.
+    dependency where the gate can never self-disable. To prevent F18
+    Bash-marker-bypass exploitation, is_marker_set verifies marker CONTENT
+    (F24 SHA256 sentinel), not just file presence — `touch bootstrap-complete`
+    no longer satisfies the gate.
   - Exploration tools are read-only and needed for state recovery after
     compaction.
   - MCP tools are always allowed — they're external integrations that may
@@ -32,94 +40,161 @@ Tool classification rationale:
   - Non-hookable tools (Skill, ToolSearch, TaskList/TaskGet/TaskUpdate,
     SendMessage) never reach this hook because they don't fire PreToolUse
     events. Note: TaskList/TaskGet/TaskUpdate are PACT plugin task-system
-    tools, distinct from the agent-dispatch `Task` tool that IS blocked.
+    tools, distinct from the agent-dispatch `Agent` tool that IS blocked.
 
-SACROSANCT: every raisable path is wrapped in try/except that defaults to
-allow (exit 0 with suppressOutput). A gate bug must never block a tool call.
+SACROSANCT (post-#662): module-load failures and runtime gate-logic
+exceptions are fail-CLOSED (deny) per #658 defect class. Only malformed
+stdin remains fail-OPEN (input-side failure → harness's domain).
 
 Input: JSON from stdin with tool_name, tool_input, session_id, etc.
 Output: JSON with hookSpecificOutput.permissionDecision (deny case)
         or {"suppressOutput": true} (allow / passthrough)
 """
 
+# ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ───
 import json
 import os
-import stat
 import sys
-from pathlib import Path
+from typing import NoReturn
 
-import shared.pact_context as pact_context
-from shared import BOOTSTRAP_MARKER_NAME
+
+def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
+    """Emit fail-closed deny for module-load or runtime gate-logic failure.
+
+    Mirrors PR #660 ``merge_guard_pre._emit_load_failure_deny``. Uses ONLY
+    stdlib (json, sys) so it remains functional even when every wrapped
+    import below fails. Audit anchor: hookEventName must be present in any
+    deny output.
+    """
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"PACT bootstrap_gate {stage} failure — blocking for safety. "
+                f"{type(error).__name__}: {error}. Check hook installation "
+                "and shared module availability."
+            ),
+        }
+    }))
+    print(
+        f"Hook load error (bootstrap_gate / {stage}): {error}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+# ─── F25: fail-closed wrapper around cross-package imports + risky module work ─
+try:
+    import hashlib
+    import hmac
+    import stat
+    from pathlib import Path
+
+    import shared.pact_context as pact_context
+    from shared import BOOTSTRAP_MARKER_NAME
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
+    _emit_load_failure_deny("module imports", _module_load_error)
+
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 # Code-editing and agent-dispatch tools blocked until bootstrap completes.
 # Bash is intentionally NOT blocked — the marker-write mechanism in
 # bootstrap.md is a Bash command, so blocking Bash would prevent the gate
-# from ever self-disabling (circular dependency). The agent-dispatch tool
-# is `Task` (the canonical platform tool name); cross-evidence in
-# hooks.json: PreToolUse team_guard + PostToolUse auditor_reminder both
-# use matcher='Task' and fire correctly in production.
+# from ever self-disabling (circular dependency). To prevent F18
+# Bash-marker-bypass exploitation, is_marker_set verifies marker CONTENT
+# (F24 SHA256 sentinel), not just file presence. The agent-dispatch tool
+# is `Agent` — the canonical Claude Code platform name (#662 corrects
+# 4c286c1f's incorrect rename direction). hooks.json matcher='Agent'
+# entries fire on Agent invocations.
 _BLOCKED_TOOLS = frozenset({
     "Edit",
     "Write",
-    "Task",
+    "Agent",
     "NotebookEdit",
 })
 
+# F24 marker schema version. Bump if marker JSON shape changes; verifier
+# rejects unknown versions. Producer (commands/bootstrap.md) must emit a
+# matching `v` field.
+F24_MARKER_VERSION = 1
+
+# F24 marker file size cap (bytes). The marker JSON is a small fixed schema
+# ({v, sid, sig}); a content larger than this is rejected to defend against
+# pathological reads.
+_F24_MARKER_MAX_BYTES = 256
+
 _DENY_REASON = (
     "PACT bootstrap required. Invoke Skill(\"PACT:bootstrap\") first. "
-    "Code-editing tools (Edit, Write) and agent dispatch (Task) are blocked "
+    "Code-editing tools (Edit, Write) and agent dispatch (Agent) are blocked "
     "until bootstrap completes. Bash, Read, Glob, Grep are available."
 )
 
 
-def is_marker_set(session_dir: Path | None) -> bool:
-    """Public predicate: does a real bootstrap-complete marker exist?
+def _expected_marker_signature(session_id: str, plugin_root: str,
+                                plugin_version: str, marker_version: int) -> str:
+    """Compute the expected SHA256 marker signature (F24).
+
+    Inputs are joined with `|` separators in a fixed order so the producer
+    in commands/bootstrap.md and this verifier compute the same digest:
+
+        sha256(f"{session_id}|{plugin_root}|{plugin_version}|{marker_version}")
+
+    The `marker_version` is part of the digest so a format-version bump
+    invalidates pre-bump markers automatically.
+    """
+    payload = f"{session_id}|{plugin_root}|{plugin_version}|{marker_version}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def is_marker_set(session_dir: "Path | None") -> bool:
+    """Public predicate: does a properly-stamped bootstrap-complete marker exist?
 
     Returns True iff `<session_dir>/<BOOTSTRAP_MARKER_NAME>` exists as a
     REGULAR FILE (not a symlink, not a directory) AND no ancestor of the
-    session_dir is a symlink. False on any of:
+    session_dir is a symlink AND its content is a valid F24 stamp:
+      - file size ≤ ``_F24_MARKER_MAX_BYTES``
+      - parses as JSON object with EXACTLY keys {"v", "sid", "sig"}
+      - ``v`` is integer == ``F24_MARKER_VERSION``
+      - ``sid`` equals ``session_dir.name`` (binds marker to its session)
+      - ``sig`` matches ``_expected_marker_signature`` via
+        ``hmac.compare_digest`` (constant-time compare)
+
+    Returns False on any of:
       - session_dir is None or falsy
-      - marker path is a symlink (S2 defense: planted symlink at the
-        marker would otherwise satisfy `Path.exists()` since exists()
-        follows symlinks)
-      - marker path is a directory or other non-regular file
-      - marker path does not exist
-      - any ancestor of session_dir is a symlink (S4 defense: a planted
-        symlink at e.g. ~/.claude redirecting to attacker-controlled
-        directory would otherwise allow attacker to plant a regular-file
-        marker satisfying the leaf-only check)
-      - any OSError on stat (treated as marker-absent so the gate stays
-        armed)
+      - marker path is a symlink (S2 defense)
+      - marker path is a directory or other non-regular file (S2 corollary)
+      - any ancestor of session_dir is a symlink (S4 defense)
+      - any OSError on stat (treated as marker-absent)
+      - F24 content fails any of size cap / JSON parse / key set / version /
+        sid match / signature match
+      - missing plugin context (cannot compute expected signature)
 
-    The plan §High-Risk-TDD-Specs Q4 names this as a 7-method TDD target;
-    extracting it as a public callable closes the plan-vs-implementation
-    gap (architect-review Findings #1 + #14). Callers (current:
-    `_check_tool_allowed`; future: any session-end audit, sibling hooks)
-    use this single entry point for the safe-marker-check contract.
-
-    Security rationale:
+    Security rationale (S2 + S4 unchanged from pre-#662; F24 added):
       - S2 (security-engineer-review): `marker_path.exists()` follows
-        symlinks → attacker with same-user write access plants a symlink
-        at <session_dir>/bootstrap-complete pointing to any existing
-        file (e.g., /etc/hostname) → gate falsely satisfied → tool
-        block bypassed. Replaced with `os.lstat()` + `stat.S_ISREG()`
-        which checks the leaf without following symlinks.
+        symlinks → attacker plants a symlink at the marker path → gate
+        falsely satisfied → tool block bypassed. Defense: `os.lstat()` +
+        `stat.S_ISREG()` checks the leaf without following symlinks.
       - S4: leaf-only is_symlink() does not detect ancestor symlinks
-        (e.g., ~/.claude itself being a symlink to attacker-controlled
-        /tmp/evil/.claude). `Path.resolve(strict=False)` walks every
-        ancestor; comparing to the unresolved path detects any
+        (e.g., ~/.claude itself being a symlink). `Path.resolve(strict=False)`
+        walks every ancestor; comparing to the unresolved path detects any
         ancestor-link rewrite.
+      - F18/F24 (#662): `Bash("touch <path>/bootstrap-complete")` previously
+        defeated the gate because file PRESENCE was the only check.
+        F24 verifies marker CONTENT bound to (session_id, plugin_root,
+        plugin_version) so an attacker without those would-be secrets
+        (plugin_root specifically is harness-set in pact-session-context.json,
+        write-once at SessionStart, 0o600) cannot forge a valid stamp.
     """
     if not session_dir:
         return False
     session_dir = Path(session_dir)
 
-    # S4: ancestor-symlink defense. Path.resolve() follows ALL symlinks
-    # in the path; if the resolved path differs from the input path
-    # (modulo absolute-form), some ancestor was a symlink. strict=False
-    # so we don't raise if the marker file itself doesn't exist yet.
+    # S4: ancestor-symlink defense. Path.resolve() follows ALL symlinks in
+    # the path; if the resolved path differs from the absolute input path,
+    # some ancestor was a symlink. strict=False so we don't raise if the
+    # marker file itself doesn't exist yet.
     try:
         resolved = session_dir.resolve(strict=False)
     except OSError:
@@ -130,15 +205,49 @@ def is_marker_set(session_dir: Path | None) -> bool:
     marker_path = session_dir / BOOTSTRAP_MARKER_NAME
 
     # S2: lstat (does NOT follow symlinks) + S_ISREG (regular file only).
-    # The marker is a sentinel file whose CONTENT is not consumed; the
-    # contract is "regular file at this exact path". A symlink at the
-    # marker path is rejected even if it points to a regular file
-    # elsewhere (the link-target is attacker-chosen).
     try:
         st = os.lstat(str(marker_path))
     except OSError:
         return False
-    return stat.S_ISREG(st.st_mode)
+    if not stat.S_ISREG(st.st_mode):
+        return False
+
+    # F24: verify marker CONTENT (#662 — closes F18 Bash-touch bypass).
+    try:
+        if st.st_size <= 0 or st.st_size > _F24_MARKER_MAX_BYTES:
+            return False
+        content = marker_path.read_text(encoding="utf-8").strip()
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return False
+        if set(parsed.keys()) != {"v", "sid", "sig"}:
+            return False
+        if not isinstance(parsed["v"], int) or parsed["v"] != F24_MARKER_VERSION:
+            return False
+        if not isinstance(parsed["sid"], str) or parsed["sid"] != session_dir.name:
+            return False
+        if not isinstance(parsed["sig"], str):
+            return False
+        plugin_root = pact_context.get_plugin_root()
+        if not plugin_root:
+            return False
+        plugin_json_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"
+        try:
+            plugin_version = json.loads(
+                plugin_json_path.read_text(encoding="utf-8")
+            ).get("version", "")
+        except (OSError, ValueError):
+            return False
+        if not plugin_version:
+            return False
+        expected = _expected_marker_signature(
+            parsed["sid"], plugin_root, plugin_version, parsed["v"]
+        )
+        if not hmac.compare_digest(parsed["sig"], expected):
+            return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _check_tool_allowed(input_data: dict) -> str | None:
@@ -149,8 +258,8 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     """
     pact_context.init(input_data)
 
-    # Fast path: marker exists (as a regular non-symlink file) → allow
-    # everything. See `is_marker_set` for S2/S4 defense rationale.
+    # Fast path: marker exists (as a properly-stamped F24 regular file) →
+    # allow everything. See `is_marker_set` for S2/S4/F24 defense rationale.
     session_dir = pact_context.get_session_dir()
     if not session_dir:
         return None
@@ -184,15 +293,17 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        # Malformed stdin → fail-OPEN (input-side failure is harness's domain).
+        # Cannot evaluate without input; cannot DENY meaningfully.
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
     try:
         deny_reason = _check_tool_allowed(input_data)
-    except Exception:
-        # Any exception in gate logic → fail-open
-        print(_SUPPRESS_OUTPUT)
-        sys.exit(0)
+    except Exception as e:
+        # F25: fail-CLOSED — runtime gate-logic failure must DENY (#658
+        # sibling defect class). Pre-#662 this path was fail-OPEN.
+        _emit_load_failure_deny("runtime", e)
 
     if deny_reason:
         # hookEventName is required by the harness; missing it silently fails open

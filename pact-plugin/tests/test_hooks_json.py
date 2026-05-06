@@ -39,7 +39,7 @@ VALID_HOOK_EVENTS = {
 
 # Hooks that MUST be synchronous (blocking) — they affect tool decisions
 MUST_BE_SYNC = {
-    "team_guard.py",      # Blocks Task dispatch if no team
+    "team_guard.py",      # Blocks Agent dispatch if no team (#662)
     "worktree_guard.py",  # Blocks edits outside worktree
     "validate_handoff.py",  # Validates agent output
     "agent_handoff_emitter.py",  # Writes agent_handoff journal event on TaskCompleted
@@ -393,4 +393,126 @@ class TestSessionStartCardinality:
         )
         assert "session_init.py" in session_start[0]["hooks"][0]["command"], (
             "SessionStart's sole hook must be session_init.py."
+        )
+
+
+class TestSpawnToolMatchersPost662:
+    """#662: matcher='Agent' on team_guard + auditor_reminder; matcher
+    'TaskCreate|TaskUpdate' on wake_lifecycle_emitter PRESERVED. The earlier
+    matcher='Task' was wrong — the canonical Claude Code platform tool
+    name for sub-agent spawning is `Agent`. Cat-2 task-management tools
+    (TaskCreate/TaskUpdate/TaskList/...) are unrelated and MUST stay.
+    """
+
+    def _all_matcher_pairs(self, hooks_config):
+        pairs = []
+        for event_type, entries in hooks_config["hooks"].items():
+            for entry in entries:
+                if "matcher" not in entry:
+                    continue
+                commands = [
+                    h.get("command", "")
+                    for h in entry.get("hooks", [])
+                ]
+                pairs.append((event_type, entry["matcher"], commands))
+        return pairs
+
+    def test_team_guard_matcher_is_agent(self, hooks_config):
+        """PreToolUse team_guard matcher MUST be 'Agent' (#662 Cat-1)."""
+        for event_type, matcher, commands in self._all_matcher_pairs(
+            hooks_config
+        ):
+            if any("team_guard.py" in c for c in commands):
+                assert matcher == "Agent", (
+                    f"team_guard.py matcher must be 'Agent' (#662); got "
+                    f"{matcher!r} on {event_type}"
+                )
+                return
+        pytest.fail("team_guard.py entry not found in hooks.json")
+
+    def test_auditor_reminder_matcher_is_agent(self, hooks_config):
+        """PostToolUse auditor_reminder matcher MUST be 'Agent' (#662 Cat-1)."""
+        for event_type, matcher, commands in self._all_matcher_pairs(
+            hooks_config
+        ):
+            if any("auditor_reminder.py" in c for c in commands):
+                assert matcher == "Agent", (
+                    f"auditor_reminder.py matcher must be 'Agent' (#662); "
+                    f"got {matcher!r} on {event_type}"
+                )
+                return
+        pytest.fail("auditor_reminder.py entry not found in hooks.json")
+
+    def test_wake_lifecycle_emitter_matcher_unchanged(self, hooks_config):
+        """Cat-2 preservation regression-prevention (#662): the
+        wake_lifecycle_emitter matcher 'TaskCreate|TaskUpdate' MUST NOT be
+        renamed. These are PACT plugin task-system tools, distinct from
+        the spawn-tool `Agent`. Renaming them would break lifecycle hooks.
+        """
+        for event_type, matcher, commands in self._all_matcher_pairs(
+            hooks_config
+        ):
+            if any("wake_lifecycle_emitter.py" in c for c in commands):
+                assert matcher == "TaskCreate|TaskUpdate", (
+                    f"wake_lifecycle_emitter.py matcher MUST remain "
+                    f"'TaskCreate|TaskUpdate' (Cat-2 preservation, #662); "
+                    f"got {matcher!r} on {event_type}"
+                )
+                return
+        pytest.fail(
+            "wake_lifecycle_emitter.py entry not found in hooks.json"
+        )
+
+    def test_no_matcher_is_bare_task_string(self, hooks_config):
+        """Regression-prevention: NO matcher should be the bare 'Task'
+        string after #662. The valid uses are matcher='Agent' (spawn tool)
+        or matcher='TaskCreate|TaskUpdate' (Cat-2 task-management tools).
+        """
+        offenders = []
+        for event_type, matcher, _ in self._all_matcher_pairs(hooks_config):
+            if matcher == "Task":
+                offenders.append((event_type, matcher))
+        assert not offenders, (
+            f"No matcher may be the bare 'Task' literal post-#662 — that "
+            f"was the wrong rename direction. Offenders: {offenders}"
+        )
+
+
+class TestCat2PreservationBaseline:
+    """#662 PREPARE §2 baseline: Cat-2 task-management names
+    (TaskCreate/TaskUpdate/TaskList/TaskGet/TaskStop/TaskOutput) appear
+    ≥551 times across pact-plugin/. The Cat-1 rename Task→Agent MUST NOT
+    have decreased this count. Counts may grow as new gates land.
+    """
+
+    _CAT2_NAMES = (
+        "TaskCreate", "TaskUpdate", "TaskList",
+        "TaskGet", "TaskStop", "TaskOutput",
+    )
+    _BASELINE = 551
+
+    def test_cat2_total_at_or_above_baseline(self):
+        import re
+        plugin_dir = Path(__file__).parent.parent
+        pattern = re.compile(
+            r"\b(?:TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput)\b"
+        )
+        total = 0
+        for path in plugin_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            # Skip binary-ish / vendored paths.
+            if any(part.startswith(".") for part in path.relative_to(plugin_dir).parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            total += sum(1 for _ in pattern.finditer(text))
+        assert total >= self._BASELINE, (
+            f"Cat-2 preservation regression (#662): grep total {total} < "
+            f"baseline {self._BASELINE}. The Cat-1 rename Task→Agent MUST "
+            f"NOT decrease the Cat-2 count. Investigate which file lost "
+            f"a TaskCreate/TaskUpdate/TaskList/TaskGet/TaskStop/TaskOutput "
+            f"reference."
         )

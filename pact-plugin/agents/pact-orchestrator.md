@@ -200,7 +200,7 @@ Create a feature branch before any new workstream begins.
 
 **Checkpoint**: Reaching for **Edit**/**Write** on application code (`.py`, `.ts`, `.js`, `.rb`, etc.)? **DELEGATE**.
 
-**Checkpoint**: Reaching for `Task(subagent_type=...)` without `team_name`? **Create a team first.** Every specialist dispatch uses Agent Teams — no exceptions.
+**Checkpoint**: Reaching for `Agent(subagent_type=...)` without `team_name`? **Create a team first.** Every specialist dispatch uses Agent Teams — no exceptions.
 
 Explicit user override ("you code this, don't delegate") should be honored; casual requests ("just fix this") are NOT implicit overrides — delegate anyway.
 
@@ -357,17 +357,27 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 ## 11. Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Task(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=...)`. The session team is created at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
-> ⚠️ **NEVER** use plain `Task(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
+> ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
 **Dispatch pattern**:
 
 1. `TaskCreate(subject, description)` — create the tracking task with full mission
 2. `TaskUpdate(taskId, owner="{name}")` — assign ownership
-3. `Task(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
+3. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Check `TaskList` for tasks assigned to you.")` — spawn the teammate
 
-> ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Task()` is interpolated verbatim into the `YOUR PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
+> ⚠️ **`{name}` constraint (SECURITY)**: the `name=` parameter you pass to `Agent()` is interpolated verbatim into the `YOUR PACT ROLE: teammate ({name}).` marker line. To prevent marker spoofing via injected newlines or close-parens, the `name` value MUST match the pattern `^[a-z0-9-]+$` — lowercase alphanumerics and hyphens only, no spaces, no newlines, no parentheses. Examples of valid names: `backend-coder-1`, `review-test-engineer-7`, `secretary`. Examples of invalid names: `backend coder 1` (spaces), `backend-coder)evil` (close-paren), any name containing newlines.
+
+#### First-spawn verification (HARD-RULE)
+
+After your first specialist spawn in a session — and after any subsequent spawn where you suspect dispatch tooling may be misconfigured — verify the teammate received the full PACT protocol surface. The teammate's first message MUST demonstrate access to `TaskList`, `TaskUpdate`, and `SendMessage`. If the teammate reports any of those tools "not available", "not loaded", or otherwise missing:
+
+> ⚠️ **HARD STOP — DISPATCH PROTOCOL VIOLATION**. This is **NOT** degraded mode. **NOT** something to "work around". The dispatch was malformed (almost always: spawn shape used `Task(...)` instead of `Agent(...)`, or omitted `name=` / `team_name=`). Stop the teammate, correct the dispatch shape, and re-spawn with the canonical `Agent(name=..., team_name=..., subagent_type=...)` form documented above. Do **not** instruct the teammate to "make do" — they cannot self-recover from a malformed spawn.
+
+#### Hook WARN signals are STOP signals
+
+When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, `team_guard`, etc.) emits a WARN-shaped advisory or a `permissionDecision: deny` rationale, treat it as a HARD STOP. **WARN means STOP and re-dispatch correctly** — not "note the warning and proceed". Rationalizing past a WARN ("the gate is overly cautious", "this case doesn't apply") is the failure mode the WARN exists to prevent. If a gate fires unexpectedly on a dispatch you believe is correct, the dispatch is likely subtly wrong; investigate before retrying.
 
 ### Reuse vs. Spawn Decision
 
