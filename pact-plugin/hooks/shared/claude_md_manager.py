@@ -23,6 +23,7 @@ default path so creators land at the preferred location.
 import fcntl  # Unix-only; PACT supports macOS/Linux. No Windows compat shim.
 import os
 import re
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -92,6 +93,21 @@ def file_lock(target_file: Path):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
+                    # S8 (security-engineer-review): emit a stderr
+                    # warning before raising. Callers fail-open on
+                    # TimeoutError (skip the cleanup pass), so without
+                    # this warning a stuck holder would silently defer
+                    # kernel-block / managed-block cleanup forever.
+                    # Stderr from hooks does not surface in the user
+                    # transcript, but it does land in Claude Code's
+                    # debug logs — repeated warnings make the
+                    # contention-vs-bug class observable.
+                    print(
+                        f"PACT file_lock timeout: failed to acquire "
+                        f"lock on {lock_path} within "
+                        f"{_LOCK_TIMEOUT_SECONDS}s; falling open",
+                        file=sys.stderr,
+                    )
                     raise TimeoutError(
                         f"Failed to acquire lock on {lock_path} within "
                         f"{_LOCK_TIMEOUT_SECONDS}s"

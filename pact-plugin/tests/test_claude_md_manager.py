@@ -564,6 +564,52 @@ class TestFileLockContextManager:
         with file_lock(target):
             pass
 
+    def test_timeout_emits_stderr_warning(self, tmp_path, monkeypatch, capsys):
+        """S8 (security-engineer-review): when the 5s acquire deadline
+        expires, file_lock must emit a stderr warning before raising
+        TimeoutError. Callers fail-open on TimeoutError (skip cleanup),
+        so without the warning a stuck holder silently defers cleanup
+        forever. The warning is observable in Claude Code's debug logs
+        even though it doesn't surface in the user transcript.
+
+        Forces the timeout path by monkeypatching fcntl.flock to always
+        raise BlockingIOError + setting the timeout to 0 so the
+        deadline trips on the first iteration.
+        """
+        import fcntl as fcntl_mod
+        import shared.claude_md_manager as cmm
+        from shared.claude_md_manager import file_lock
+
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("x", encoding="utf-8")
+
+        # Force the timeout deadline to trip immediately.
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 0)
+
+        # Only fail the EXCLUSIVE acquire. The UNLOCK in the finally
+        # clause must succeed so the TimeoutError surfaces cleanly
+        # (otherwise BlockingIOError from LOCK_UN shadows it).
+        original_flock = fcntl_mod.flock
+
+        def fail_only_exclusive(fd, op):
+            if op & fcntl_mod.LOCK_EX:
+                raise BlockingIOError("simulated contention")
+            return original_flock(fd, op)
+
+        monkeypatch.setattr(fcntl_mod, "flock", fail_only_exclusive)
+
+        with pytest.raises(TimeoutError):
+            with file_lock(target):
+                pass  # never reached
+
+        captured = capsys.readouterr()
+        # Stderr must mention the contract: "PACT file_lock timeout"
+        # + the lock-target path so debug-log readers can attribute
+        # the warning to a specific managed file.
+        assert "PACT file_lock timeout" in captured.err
+        assert str(target.parent / f".{target.name}.lock") in captured.err
+        assert "falling open" in captured.err
+
 
 class TestBuildMigratedContentCurrentFormat:
     """_build_migrated_content() with the standard pre-#404 CLAUDE.md layout.
