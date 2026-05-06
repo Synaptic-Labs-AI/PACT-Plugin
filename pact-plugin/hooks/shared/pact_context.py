@@ -12,10 +12,24 @@ See: docs/architecture/pact-context-module.md for full design rationale.
 
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .session_state import SESSION_ID_CONTROL_CHARS_RE
+
+# Slug sanitizer: collapse any character outside the safe-path-component
+# allowlist into "_". The slug derives from CLAUDE_PROJECT_DIR's basename
+# and flows into shell-quoted command bodies (bootstrap.md's `mkdir -p
+# "<path>" && touch "<path>/bootstrap-complete"` interpolation), so a
+# project-dir basename containing shell metacharacters (`"`, `$`, backtick,
+# `;`, `&&`, `|`) would shell-inject without producer-side sanitization.
+# S3 (security-engineer-review) defense: producer-side sanitize-substitute
+# before the slug ever reaches the path tree. Sibling defense for session_id
+# is the SESSION_ID_CONTROL_CHARS_RE strip applied below in init().
+_UNSAFE_SLUG_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 # Session-scoped context file path, set by init().
 # When None, get_pact_context() returns _EMPTY_CONTEXT (no file to read).
@@ -54,9 +68,18 @@ def _build_session_path(slug: str, session_id: str) -> Path:
     like "../../etc" would resolve outside the expected tree — fall back
     to a sanitized basename. Fail-closed: if the validation itself
     raises, return a slug-only path (no session_id component).
+
+    S3 defense (security-engineer-review): the slug derives from
+    CLAUDE_PROJECT_DIR's basename and ends up interpolated into a
+    shell-quoted command body in commands/bootstrap.md. Sanitize at the
+    producer (here) so any non-allowlist character (shell metachars,
+    control chars, whitespace) is collapsed to "_" before the slug
+    reaches any downstream consumer. Sanitize-substitute (NOT reject)
+    so sessions with unusual project-dir names still proceed.
     """
+    safe_slug = _UNSAFE_SLUG_CHARS_RE.sub("_", slug) if slug else slug
     sessions_root = Path.home() / ".claude" / "pact-sessions"
-    candidate = sessions_root / slug / session_id
+    candidate = sessions_root / safe_slug / session_id
     try:
         sessions_root_resolved = sessions_root.resolve()
         resolved = candidate.resolve(strict=False)
@@ -64,11 +87,11 @@ def _build_session_path(slug: str, session_id: str) -> Path:
             return candidate
         basename = Path(session_id).name
         if basename in ("", ".", "..") or "/" in basename:
-            candidate = sessions_root / slug
+            candidate = sessions_root / safe_slug
         else:
-            candidate = sessions_root / slug / basename
+            candidate = sessions_root / safe_slug / basename
     except (OSError, ValueError):
-        candidate = sessions_root / slug
+        candidate = sessions_root / safe_slug
     return candidate
 
 
@@ -124,7 +147,18 @@ def init(input_data: dict) -> None:
     session_id = ""
     raw_id = input_data.get("session_id")
     if raw_id:
-        session_id = str(raw_id)
+        # S9 defense (security-engineer-review): strip control chars
+        # (C0 0x00-0x1F + DEL 0x7F + Unicode line terminators U+0085 /
+        # U+2028 / U+2029) from raw_id before it flows into the marker
+        # path. A crafted session_id like "valid\nFAKE_SEGMENT" would
+        # otherwise pollute the session_dir tree with a fake segment
+        # that escapes the expected single directory level.
+        # Sanitize-substitute (NOT reject): hooks proceed with the
+        # cleaned value so a malformed stdin doesn't crash the hook.
+        # Symmetric with session_init's classification ladder which
+        # uses the same SESSION_ID_CONTROL_CHARS_RE for failure-log
+        # dispatch.
+        session_id = SESSION_ID_CONTROL_CHARS_RE.sub("", str(raw_id))
 
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
 

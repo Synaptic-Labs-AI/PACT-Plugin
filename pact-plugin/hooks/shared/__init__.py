@@ -68,6 +68,7 @@ from .constants import PACT_AGENTS, SYSTEM_TASK_PREFIXES
 from .intentional_wait import wait_stale
 from .session_state import (
     SAFE_PATH_COMPONENT_RE,
+    SESSION_ID_CONTROL_CHARS_RE,
     is_safe_path_component,
 )
 
@@ -142,6 +143,7 @@ __all__ = [
     "SYSTEM_TASK_PREFIXES",
     "wait_stale",
     "SAFE_PATH_COMPONENT_RE",
+    "SESSION_ID_CONTROL_CHARS_RE",
     "is_safe_path_component",
     "PIN_COUNT_CAP",
     "PIN_SIZE_CAP",

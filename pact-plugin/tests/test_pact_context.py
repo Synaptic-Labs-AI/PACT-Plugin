@@ -1842,34 +1842,100 @@ class TestGetSessionDirAdversarial:
     inputs without crashing or producing incorrect paths.
     """
 
-    def test_slug_with_dots(self, pact_context):
-        """Project dirs with dots in the name (e.g., 'my.app') should work."""
+    def test_slug_with_dots_sanitized(self, pact_context):
+        """S3 defense: dots in project-dir basename are NOT in the
+        safe-path-component allowlist (`[A-Za-z0-9_-]`) and are
+        sanitize-substituted to '_'. Sessions still proceed (sanitize,
+        don't reject)."""
         from shared.pact_context import get_session_dir
 
         pact_context(session_id="abc-123", project_dir="/Users/dev/my.app.v2")
 
         result = get_session_dir()
-        assert "my.app.v2" in result
-        assert result.endswith("pact-sessions/my.app.v2/abc-123")
+        assert result.endswith("pact-sessions/my_app_v2/abc-123")
 
-    def test_slug_with_spaces(self, pact_context):
-        """Project dirs with spaces should produce valid paths."""
+    def test_slug_with_spaces_sanitized(self, pact_context):
+        """S3 defense: spaces in project-dir basename are sanitize-
+        substituted to '_'. Without this, the slug interpolated into
+        bootstrap.md's shell command body could shell-inject when the
+        basename contained shell metacharacters; collapsing whitespace
+        is the same allowlist-driven defense applied uniformly."""
         from shared.pact_context import get_session_dir
 
         pact_context(session_id="abc-123", project_dir="/Users/dev/My Project")
 
         result = get_session_dir()
-        assert "My Project" in result
-        assert result.endswith("pact-sessions/My Project/abc-123")
+        assert result.endswith("pact-sessions/My_Project/abc-123")
 
-    def test_slug_with_unicode(self, pact_context):
-        """Unicode characters in project name should pass through."""
+    def test_slug_with_unicode_sanitized(self, pact_context):
+        """S3 defense: unicode characters outside the ASCII safe-path-
+        component allowlist are sanitize-substituted to '_'. Sessions
+        proceed; the slug just collapses to a single '_' token."""
         from shared.pact_context import get_session_dir
 
         pact_context(session_id="abc-123", project_dir="/Users/dev/プロジェクト")
 
         result = get_session_dir()
-        assert "プロジェクト" in result
+        assert result.endswith("pact-sessions/_/abc-123")
+
+    def test_slug_with_shell_metacharacters_sanitized(self, pact_context):
+        """S3 attack chain: project-dir basename containing shell
+        metacharacters (`"`, `$`, backtick, `;`) flows into bootstrap.md's
+        `mkdir -p \"<path>\" && touch \"<path>/bootstrap-complete\"` command
+        body. Without producer-side sanitization, a slug like
+        `proj\"$(rm -rf ~)bar` would shell-inject. After S3 fix, the slug
+        is sanitize-substituted to `proj______bar` (each metachar → '_')."""
+        from shared.pact_context import get_session_dir
+
+        pact_context(
+            session_id="abc-123",
+            project_dir='/Users/dev/proj"$(rm -rf ~)bar',
+        )
+
+        result = get_session_dir()
+        # Every shell metachar collapsed to a single underscore run.
+        assert '"' not in result
+        assert "$" not in result
+        assert "(" not in result
+        assert ")" not in result
+        assert " " not in result
+        # Slug ended up safe — `proj` + run-of-underscores + `bar`.
+        assert "proj" in result and "bar" in result
+
+    def test_session_id_with_control_chars_stripped_at_init(
+        self, tmp_path, monkeypatch
+    ):
+        """S9 attack chain: session_id containing control chars
+        (NL, NUL, NEL, U+2028, U+2029) would otherwise pollute the
+        marker path tree with fake segments. After S9 fix, the
+        producer-side strip in pact_context.init() removes them at
+        the entry point; the cleaned id forms a single segment under
+        the expected slug.
+
+        Tests init() directly — the pact_context fixture short-
+        circuits init by pre-setting _context_path, so this test
+        exercises the actual producer-side strip path."""
+        import shared.pact_context as ctx_module
+
+        # Reset module state.
+        monkeypatch.setattr(ctx_module, "_context_path", None)
+        monkeypatch.setattr(ctx_module, "_cache", None)
+        # Point Path.home at tmp_path + set CLAUDE_PROJECT_DIR.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/dev/proj")
+
+        # Embedded NL + null byte + NEL (U+0085).
+        attack_id = "valid\nFAKE\x00SEG\x85more"
+        ctx_module.init({"session_id": attack_id})
+
+        # Resulting context_path should have control chars stripped.
+        path_str = str(ctx_module._context_path)
+        assert "\n" not in path_str
+        assert "\x00" not in path_str
+        assert "\x85" not in path_str
+        # Cleaned id is a single segment.
+        assert "validFAKESEGmore" in path_str
+
 
     def test_deeply_nested_project_dir(self, pact_context):
         """Deeply nested project paths should use only the basename as slug."""

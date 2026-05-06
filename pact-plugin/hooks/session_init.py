@@ -74,7 +74,7 @@ from pin_caps import (  # noqa: F401
     parse_pins,
 )
 
-from shared import BOOTSTRAP_MARKER_NAME, build_session_path
+from shared import BOOTSTRAP_MARKER_NAME, SESSION_ID_CONTROL_CHARS_RE, build_session_path
 from shared.constants import COMPACT_SUMMARY_PATH
 from shared.pact_context import get_session_dir, write_context
 from shared.session_journal import append_event, make_event
@@ -442,7 +442,7 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
 # causing the next session_init to read a corrupted Resume payload.
 # Symmetric with `shared.session_state._RENDER_STRIP_RE` — asymmetric
 # strip sets across interpolation sinks become the attacker's entry point.
-_SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+_SESSION_ID_CONTROL_CHARS_RE = SESSION_ID_CONTROL_CHARS_RE
 
 
 def _is_unknown_or_missing_session(raw_id: object) -> bool:

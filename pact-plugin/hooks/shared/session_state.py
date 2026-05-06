@@ -76,12 +76,18 @@ _SAFE_PATH_COMPONENT_RE = SAFE_PATH_COMPONENT_RE
 #     `str.splitlines()` and by LLM tokenizers; crafted names
 #     containing these survive a naive C0-only filter and can inject
 #     new lines into the rendered output.
-# Symmetric with the render-strip regex applied at every other
-# interpolation sink (`session_init._SESSION_ID_CONTROL_CHARS_RE`,
-# `plugin_manifest._RENDER_STRIP_RE`). See security-engineer memory
-# patterns_symmetric_sanitization.md — asymmetric strip sets across
-# interpolation sinks become the attacker's entry point.
-_RENDER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+# Single SSOT for the strip set: this regex IS the canonical
+# SESSION_ID_CONTROL_CHARS_RE. Producer-side sanitizers in
+# pact_context.init() (S9 defense) and session_init.py's
+# classification ladder share one regex; previously each module
+# defined its own copy and asymmetric strip sets across interpolation
+# sinks could become the attacker's entry point. See security-engineer
+# memory patterns_symmetric_sanitization.md.
+SESSION_ID_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
+# Module-private alias (back-compat for existing call sites that import
+# `_RENDER_STRIP_RE`). New code should import the public name via
+# `shared.session_state` (or the shared package re-export).
+_RENDER_STRIP_RE = SESSION_ID_CONTROL_CHARS_RE
 
 
 def _sanitize_member_name(name: str) -> str:
